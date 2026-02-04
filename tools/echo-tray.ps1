@@ -110,6 +110,28 @@ function Test-ServerListening {
   }
 }
 
+function Stop-ServerByPort([int]$port) {
+  try {
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($conn -and $conn.OwningProcess) {
+      Write-Log "Stopping process on port $port (pid=$($conn.OwningProcess))"
+      try { Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue } catch {}
+      return $true
+    }
+  } catch {}
+  return $false
+}
+
+function Wait-ForPortClosed([int]$port, [int]$timeoutMs = 3000) {
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($stopwatch.ElapsedMilliseconds -lt $timeoutMs) {
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $conn) { return $true }
+    Start-Sleep -Milliseconds 150
+  }
+  return $false
+}
+
 function Get-EnvValue($key, $default = "") {
   $files = Get-EnvFileCandidates
   foreach ($file in $files) {
@@ -265,6 +287,11 @@ function Start-Server {
     Write-Log "Server build missing. Run npm.cmd run build -w @echo/server"
     return
   }
+  $port = Get-ServerPort
+  if (Test-ServerListening) {
+    Write-Log "Port $port already in use; start aborted"
+    return
+  }
   $envFile = $null
   $candidate = Join-Path $repoRoot (".env." + $script:activeEnv)
   if (Test-Path $candidate) { $envFile = $candidate }
@@ -298,6 +325,10 @@ function Stop-Server {
   if ($proc) {
     try { Stop-Process -Id $proc.Id -Force } catch {}
   }
+  if (Test-ServerListening) {
+    $port = Get-ServerPort
+    Stop-ServerByPort $port | Out-Null
+  }
   Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
 }
 
@@ -305,8 +336,10 @@ function Restart-Server {
   param(
     [string]$Mode = $script:activeEnv
   )
+  $port = Get-ServerPort
   Stop-Server
-  Start-Sleep -Milliseconds 500
+  Wait-ForPortClosed $port 3000 | Out-Null
+  Start-Sleep -Milliseconds 200
   Start-Server -Mode $Mode
 }
 
