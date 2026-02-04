@@ -1,0 +1,17 @@
+node_modules/
+dist/
+apps/**/dist/
+apps/**/node_modules/
+apps/**/out/
+apps/**/build/
+*.log
+logs/
+Releases/
+.tmp-appasar/
+apps/desktop/release/
+tools/turn/bin/
+certs/
+.env
+.env.*
+!.env.example
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "name": "echo-chamber",
+  "private": true,
+  "workspaces": [
+    "apps/server",
+    "apps/desktop"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @echo/server",
+    "start": "npm run start -w @echo/server",
+    "build": "npm run build -w @echo/server && npm run build -w @echo/desktop",
+    "pack:win": "npm run pack:win -w @echo/desktop"
+  }
+}
