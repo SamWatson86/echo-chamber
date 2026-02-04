@@ -202,10 +202,10 @@ function Get-LogDir {
 
 function Get-ServerProcess {
   if (!(Test-Path $pidFile)) { return $null }
-  $pid = Get-Content -Path $pidFile -ErrorAction SilentlyContinue
-  if (!$pid) { return $null }
+  $serverPid = Get-Content -Path $pidFile -ErrorAction SilentlyContinue
+  if (!$serverPid) { return $null }
   try {
-    return Get-Process -Id $pid -ErrorAction Stop
+    return Get-Process -Id $serverPid -ErrorAction Stop
   } catch {
     Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
     return $null
@@ -220,10 +220,10 @@ function Write-Pid($pid) {
 
 function Get-TurnProcess {
   if (!(Test-Path $turnPidFile)) { return $null }
-  $pid = Get-Content -Path $turnPidFile -ErrorAction SilentlyContinue
-  if (!$pid) { return $null }
+  $turnPid = Get-Content -Path $turnPidFile -ErrorAction SilentlyContinue
+  if (!$turnPid) { return $null }
   try {
-    return Get-Process -Id $pid -ErrorAction Stop
+    return Get-Process -Id $turnPid -ErrorAction Stop
   } catch {
     Remove-Item -Path $turnPidFile -Force -ErrorAction SilentlyContinue
     return $null
