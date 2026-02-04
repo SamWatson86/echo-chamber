@@ -5261,6 +5261,9 @@ if (closeSoundboardButton) {
 if (toggleSoundboardVolumeButton && soundboardVolumePanel) {
   toggleSoundboardVolumeButton.addEventListener("click", () => {
     soundboardVolumePanel.classList.toggle("hidden");
+    const isOpen = !soundboardVolumePanel.classList.contains("hidden");
+    toggleSoundboardVolumeButton.setAttribute("aria-expanded", String(isOpen));
+    soundboardVolumePanel.setAttribute("aria-hidden", String(!isOpen));
   });
 }
 
