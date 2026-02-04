@@ -1,4 +1,10 @@
 $ErrorActionPreference = "SilentlyContinue"
+trap {
+  try {
+    Write-Log ("Tray error: {0}" -f $_.Exception.Message)
+  } catch {}
+  continue
+}
 
 param(
   [switch]$AutoStart
@@ -280,6 +286,7 @@ function Start-Server {
   )
   $modeValue = Normalize-Env $Mode
   Set-ActiveEnv $modeValue
+  Write-Log "Start requested (env=$script:activeEnv)"
   $running = Get-ServerProcess
   if ($running) { return }
   $cli = Join-Path $repoRoot "apps\\server\\dist\\cli.js"
@@ -302,8 +309,10 @@ function Start-Server {
   $env:ECHO_ENV = $script:activeEnv
   if ($envFile) {
     $env:ECHO_ENV_FILE = $envFile
+    Write-Log "Using env file: $envFile"
   } else {
     Remove-Item Env:ECHO_ENV_FILE -ErrorAction SilentlyContinue
+    Write-Log "No env file override found"
   }
   $nodeCmd = Get-Command node -ErrorAction SilentlyContinue | Select-Object -First 1
   $node = if ($nodeCmd) { $nodeCmd.Path } else { $null }
@@ -321,6 +330,7 @@ function Start-Server {
 }
 
 function Stop-Server {
+  Write-Log "Stop requested (env=$script:activeEnv)"
   $proc = Get-ServerProcess
   if ($proc) {
     try { Stop-Process -Id $proc.Id -Force } catch {}
@@ -336,6 +346,7 @@ function Restart-Server {
   param(
     [string]$Mode = $script:activeEnv
   )
+  Write-Log "Restart requested (env=$Mode)"
   $port = Get-ServerPort
   Stop-Server
   Wait-ForPortClosed $port 3000 | Out-Null
@@ -451,6 +462,7 @@ $tray.ContextMenuStrip = $menu
 $tray.add_Click({ Open-Admin })
 
 function Update-Status {
+  if (-not $tray.Visible) { $tray.Visible = $true }
   $running = Get-ServerProcess
   $turnRunning = Get-TurnProcess
   $envLabel = $script:activeEnv.ToUpper()
