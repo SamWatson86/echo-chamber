@@ -19,9 +19,12 @@ This is separate from the existing web build (Echo Chamber Web). Do not mix file
 2) Health check:
    - `http://127.0.0.1:9090/health`
 
-Logs:
-- `core/logs/core-control.out.log`
-- `core/logs/core-control.err.log`
+## Logs
+- Control plane:
+  - `core/logs/core-control.out.log`
+  - `core/logs/core-control.err.log`
+- SFU (Docker):
+  - `docker compose logs --tail 200` (run in `core/sfu`)
 
 ## Status
 Scaffolding + SFU + control plane are in place. Native client work is next.
