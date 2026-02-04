@@ -1,27 +1,49 @@
 use eframe::egui;
+use livekit::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::{self, Receiver};
 
 #[derive(Default)]
 struct CoreApp {
-    server_url: String,
+    control_url: String,
+    sfu_url: String,
     room: String,
     identity: String,
     name: String,
     admin_password: String,
     status: String,
     token_preview: String,
+    token: String,
+    status_rx: Option<Receiver<String>>,
+    connecting: bool,
+}
+
+impl CoreApp {
+    fn drain_status(&mut self) {
+        if let Some(rx) = &self.status_rx {
+            while let Ok(msg) = rx.try_recv() {
+                self.status = msg;
+            }
+        }
+    }
 }
 
 impl eframe::App for CoreApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_status();
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Echo Chamber Core");
-            ui.label("Native client scaffold (token flow test)");
+            ui.label("Native client scaffold (token + LiveKit connect)");
             ui.add_space(12.0);
 
             ui.horizontal(|ui| {
                 ui.label("Control URL");
-                ui.text_edit_singleline(&mut self.server_url);
+                ui.text_edit_singleline(&mut self.control_url);
+            });
+            ui.horizontal(|ui| {
+                ui.label("SFU URL");
+                ui.text_edit_singleline(&mut self.sfu_url);
             });
             ui.horizontal(|ui| {
                 ui.label("Room");
@@ -44,8 +66,9 @@ impl eframe::App for CoreApp {
             if ui.button("Fetch Token (Admin)").clicked() {
                 self.status = "Requesting token...".to_string();
                 self.token_preview.clear();
-                match fetch_token(&self.server_url, &self.admin_password, &self.room, &self.identity, &self.name) {
+                match fetch_token(&self.control_url, &self.admin_password, &self.room, &self.identity, &self.name) {
                     Ok(token) => {
+                        self.token = token.clone();
                         let preview = if token.len() > 24 { format!("{}...", &token[..24]) } else { token.clone() };
                         self.token_preview = preview;
                         self.status = "Token received.".to_string();
@@ -53,6 +76,38 @@ impl eframe::App for CoreApp {
                     Err(err) => {
                         self.status = format!("Token error: {}", err);
                     }
+                }
+            }
+
+            if ui.button("Connect to SFU").clicked() {
+                if self.token.is_empty() {
+                    self.status = "Fetch token first.".to_string();
+                } else if self.connecting {
+                    self.status = "Already connecting/connected.".to_string();
+                } else {
+                    let (tx, rx) = mpsc::channel();
+                    self.status_rx = Some(rx);
+                    self.connecting = true;
+                    let sfu_url = self.sfu_url.clone();
+                    let token = self.token.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().expect("runtime");
+                        rt.block_on(async move {
+                            let _ = tx.send("Connecting to SFU...".to_string());
+                            match Room::connect(&sfu_url, &token, RoomOptions::default()).await {
+                                Ok((_room, mut events)) => {
+                                    let _ = tx.send("Connected to SFU.".to_string());
+                                    while let Some(event) = events.recv().await {
+                                        let _ = tx.send(format!("Event: {:?}", event));
+                                    }
+                                    let _ = tx.send("Disconnected from SFU.".to_string());
+                                }
+                                Err(err) => {
+                                    let _ = tx.send(format!("Connect error: {}", err));
+                                }
+                            }
+                        });
+                    });
                 }
             }
 
@@ -115,7 +170,8 @@ fn fetch_token(base: &str, password: &str, room: &str, identity: &str, name: &st
 
 fn main() -> eframe::Result<()> {
     let mut app = CoreApp::default();
-    app.server_url = "http://127.0.0.1:9090".to_string();
+    app.control_url = "http://127.0.0.1:9090".to_string();
+    app.sfu_url = "ws://127.0.0.1:7880".to_string();
     app.room = "main".to_string();
     app.identity = "sam".to_string();
     app.name = "Sam".to_string();
