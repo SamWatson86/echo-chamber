@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   redis:
     image: redis:7-alpine
@@ -14,4 +13,4 @@ services:
     ports:
       - "7880:7880"
       - "7881:7881"
-      - "50000-60000:50000-60000/udp"
+      - "55000-55100:55000-55100/udp"

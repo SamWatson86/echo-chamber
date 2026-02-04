@@ -16,7 +16,7 @@ Tip: start Redis quickly with:
 The server will listen on:
 - TCP 7880 (signal)
 - TCP 7881 (RTC/TCP fallback)
-- UDP 50000-60000 (media)
+- UDP 55000-55100 (media, local dev range)
 
 ## Docker (optional)
 A docker-compose file is included, but Windows networking can be limiting for large UDP ranges.
@@ -27,4 +27,5 @@ The compose setup uses:
 
 ## Notes
 - For WAN access, you must port-forward the UDP range and TCP 7880/7881.
+- Increase the UDP range for production (we will expand once validated).
 - TURN can be enabled later once we stabilize the baseline.
