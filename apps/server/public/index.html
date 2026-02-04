@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Echo Chamber</title>
-    <link rel="stylesheet" href="/style.css?v=20260204c" />
+    <link rel="stylesheet" href="/style.css?v=20260204d" />
   </head>
   <body>
     <div class="app">
@@ -82,18 +82,26 @@
               <div class="soundboard-header">
                 <h3>Soundboard</h3>
                 <div class="soundboard-actions">
-                  <button id="toggle-soundboard-volume" type="button" class="ghost">Soundboard Volume</button>
+                  <button
+                    id="toggle-soundboard-volume"
+                    type="button"
+                    class="ghost"
+                    aria-expanded="false"
+                    aria-controls="soundboard-volume-panel"
+                  >
+                    Soundboard Volume
+                  </button>
                   <button id="close-soundboard" type="button" class="ghost">Back</button>
                 </div>
               </div>
-              <div class="soundboard-search">
-                <input id="sound-search" type="text" placeholder="Find the perfect sound" />
-              </div>
-              <div id="soundboard-volume-panel" class="soundboard-volume hidden">
+              <div id="soundboard-volume-panel" class="soundboard-volume hidden" aria-hidden="true">
                 <div class="soundboard-volume-row">
                   <input id="soundboard-volume" type="range" min="0" max="100" value="100" />
                   <span id="soundboard-volume-value" class="soundboard-volume-value">100%</span>
                 </div>
+              </div>
+              <div class="soundboard-search">
+                <input id="sound-search" type="text" placeholder="Find the perfect sound" />
               </div>
               <div id="soundboard-grid" class="soundboard-grid"></div>
               <div class="soundboard-upload">
@@ -277,6 +285,6 @@
       </footer>
     </div>
 
-    <script type="module" src="/app.js?v=20260204c"></script>
+    <script type="module" src="/app.js?v=20260204d"></script>
   </body>
 </html>
