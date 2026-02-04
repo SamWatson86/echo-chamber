@@ -18,8 +18,10 @@ If PowerShell blocks `npm` scripts, use `npm.cmd` instead (e.g., `npm.cmd instal
      - npm run setup:env -w @echo/server "yourpassword"
 3) Create .env:
    - Copy apps/server/.env.example to .env (repo root) and fill it in
+   - Optional: use .env.dev or .env.prod for separate configs
 4) Run the server:
    - npm run dev
+   - or tools\\run-dev.ps1 / tools\\run-prod.ps1
 5) Open the app:
    - http://localhost:5050
 
@@ -30,6 +32,7 @@ Tip: share a room link like `http://HOST:PORT/?room=main` and your friends will 
 - docs/OPERATIONS.md
 - docs/BACKUPS.md
 - docs/GITHUB.md
+- docs/WORKFLOW.md
 
 ## HTTPS for screen sharing
 Screen capture in browsers requires a secure context (HTTPS or localhost).
@@ -56,6 +59,9 @@ Desktop config file locations:
 
 ## Configuration
 See apps/server/.env.example for all options.
+Example dev/prod env templates:
+- .env.dev.example
+- .env.prod.example
 If you want to provide TURN/STUN servers, set ICE_SERVERS_JSON to a JSON array of RTCIceServer entries.
 Use MAX_PEERS_PER_ROOM to cap room size, and SERVER_NAME to change the header title.
 Admin controls (optional):

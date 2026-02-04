@@ -5,9 +5,27 @@ import fs from "fs";
 
 const rootEnv = path.resolve(process.cwd(), ".env");
 const serverEnv = path.resolve(process.cwd(), "apps/server/.env");
+const envMode = process.env.ECHO_ENV ?? process.env.NODE_ENV ?? "";
+const explicitEnvFile = process.env.ECHO_ENV_FILE ?? "";
 
-dotenv.config({ path: rootEnv });
-dotenv.config({ path: serverEnv });
+function loadEnvFile(filePath: string, override = false) {
+  if (!filePath) return;
+  if (!fs.existsSync(filePath)) return;
+  dotenv.config({ path: filePath, override });
+}
+
+// Base env files
+loadEnvFile(rootEnv);
+loadEnvFile(serverEnv);
+
+// Optional explicit env file overrides
+loadEnvFile(explicitEnvFile, true);
+
+// Optional env mode overrides
+if (envMode) {
+  loadEnvFile(path.resolve(process.cwd(), `.env.${envMode}`), true);
+  loadEnvFile(path.resolve(process.cwd(), `apps/server/.env.${envMode}`), true);
+}
 
 const port = Number(process.env.PORT ?? 5050);
 const host = process.env.HOST ?? "0.0.0.0";
