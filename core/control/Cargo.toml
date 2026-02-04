@@ -1,0 +1,6 @@
+[package]
+name = "echo-core-control"
+version = "0.1.0"
+edition = "2021"
+
+# Dependencies will be added as the control plane is implemented.

@@ -1,0 +1,6 @@
+[package]
+name = "echo-core-client"
+version = "0.1.0"
+edition = "2021"
+
+# Dependencies will be added as the native client is implemented.

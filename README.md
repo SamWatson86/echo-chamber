@@ -3,6 +3,10 @@
 Self-hosted, password-protected, real-time rooms for microphone and screen sharing.
 Friends join from a browser; the host can run the server directly or install the Windows app.
 
+## Echo Chamber Core (full-stack)
+The full-stack, native build lives in `core/`. It is under active development and kept separate from the web version.
+See `core/README.md` for the Core roadmap and architecture.
+
 ## Requirements
 - Node.js 20+ (for local dev and server hosting)
 - Windows 11 (for the installer)
