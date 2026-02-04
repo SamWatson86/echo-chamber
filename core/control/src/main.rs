@@ -80,6 +80,7 @@ struct LiveKitClaims {
 }
 
 #[derive(Serialize, Deserialize)]
+#[allow(non_snake_case)]
 struct LiveKitVideoGrant {
     room: String,
     roomJoin: bool,
