@@ -35,6 +35,7 @@ export type ServerOptions = {
   iceServers?: IceServer[];
   maxPeersPerRoom?: number;
   serverName?: string;
+  environment?: string;
   logFile?: string;
   soundboardDir?: string;
   soundboardMaxBytes?: number;
@@ -234,6 +235,7 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
     iceServers = [{ urls: "stun:stun.l.google.com:19302" }],
     maxPeersPerRoom,
     serverName = "Echo Chamber",
+    environment = "prod",
     logFile,
     soundboardDir,
     soundboardMaxBytes = 8 * 1024 * 1024,
@@ -432,7 +434,7 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
 
     try {
       verifyToken(token, jwtSecret);
-      res.json({ ok: true, iceServers, maxPeersPerRoom, serverName, adminEnabled });
+      res.json({ ok: true, iceServers, maxPeersPerRoom, serverName, environment, adminEnabled });
     } catch {
       res.status(401).json({ ok: false, error: "Invalid token" });
     }

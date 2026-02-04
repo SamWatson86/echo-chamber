@@ -51,6 +51,30 @@ body {
   gap: 12px;
 }
 
+.env-badge {
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.env-badge.is-prod {
+  border-color: rgba(34, 197, 94, 0.5);
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.env-badge.is-dev {
+  border-color: rgba(248, 113, 113, 0.55);
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+}
+
 .room-list {
   display: flex;
   flex-wrap: wrap;
