@@ -7,12 +7,14 @@ The control plane is a Rust service responsible for:
 - Basic health + metrics
 
 ## Quick start
-1) Set env vars:
+1) Copy env example:
+   - `.env.example` -> `.env`
+2) Set:
    - CORE_ADMIN_PASSWORD (or CORE_ADMIN_PASSWORD_HASH)
    - CORE_ADMIN_JWT_SECRET
-   - LK_API_KEY / LK_API_SECRET
-2) Run:
-   - cargo run -p echo-core-control
+   - LK_API_KEY / LK_API_SECRET (must match LiveKit config)
+3) Run:
+   - `powershell -ExecutionPolicy Bypass -File .\run-control.ps1`
 
 ## Planned endpoints (v1)
 - GET /health
