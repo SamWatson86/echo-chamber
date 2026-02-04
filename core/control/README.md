@@ -6,6 +6,14 @@ The control plane is a Rust service responsible for:
 - Issuing LiveKit access tokens
 - Basic health + metrics
 
+## Quick start
+1) Set env vars:
+   - CORE_ADMIN_PASSWORD (or CORE_ADMIN_PASSWORD_HASH)
+   - CORE_ADMIN_JWT_SECRET
+   - LK_API_KEY / LK_API_SECRET
+2) Run:
+   - cargo run -p echo-core-control
+
 ## Planned endpoints (v1)
 - GET /health
 - POST /v1/auth/login
@@ -17,5 +25,5 @@ The control plane is a Rust service responsible for:
 - GET /v1/metrics
 
 Notes:
-- LiveKit API key/secret will be stored in env and used to sign access tokens.
+- LiveKit API key/secret are used to sign access tokens.
 - Admin auth is separate from room password.
