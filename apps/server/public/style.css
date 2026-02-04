@@ -391,7 +391,7 @@ button.danger {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .hint {
