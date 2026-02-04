@@ -19,6 +19,7 @@ $turnEnvPath = Join-Path $turnDir ".env"
 $turnExePath = Join-Path $turnDir "bin\\echo-turn.exe"
 
 $trayLog = Join-Path $env:APPDATA "@echo\\desktop\\logs\\echo-tray.log"
+$currentIconKey = ""
 
 function Write-Log($message) {
   try {
@@ -37,6 +38,31 @@ function Normalize-Env($value) {
   if ($raw -eq "production") { return "prod" }
   if ($raw -eq "development") { return "dev" }
   return $raw
+}
+
+function Get-EnvValueFor([string]$key, [string]$mode, $default = "") {
+  $modeValue = Normalize-Env $mode
+  $files = @()
+  if ($modeValue) {
+    $files += (Join-Path $repoRoot (".env." + $modeValue))
+    $files += (Join-Path $repoRoot ("apps\\server\\.env." + $modeValue))
+  }
+  $files += $envPath
+  $files += $serverEnvPath
+  foreach ($file in $files) {
+    if (!(Test-Path $file)) { continue }
+    $lines = Get-Content -Path $file -ErrorAction SilentlyContinue
+    foreach ($line in $lines) {
+      $trim = $line.Trim()
+      if (!$trim -or $trim.StartsWith("#")) { continue }
+      $idx = $trim.IndexOf("=")
+      if ($idx -le 0) { continue }
+      $k = $trim.Substring(0, $idx).Trim()
+      if ($k -ne $key) { continue }
+      return $trim.Substring($idx + 1)
+    }
+  }
+  return $default
 }
 
 function Get-ActiveEnv {
@@ -108,6 +134,13 @@ function Get-ServerPort {
   return 5050
 }
 
+function Get-ServerPortFor([string]$mode) {
+  $raw = Get-EnvValueFor "PORT" $mode "5050"
+  $parsed = 0
+  if ([int]::TryParse($raw, [ref]$parsed)) { return $parsed }
+  return 5050
+}
+
 function Get-ServerProtocol {
   $cert = Get-EnvValue "TLS_CERT_PATH" ""
   $key = Get-EnvValue "TLS_KEY_PATH" ""
@@ -115,8 +148,19 @@ function Get-ServerProtocol {
   return "http"
 }
 
+function Get-ServerProtocolFor([string]$mode) {
+  $cert = Get-EnvValueFor "TLS_CERT_PATH" $mode ""
+  $key = Get-EnvValueFor "TLS_KEY_PATH" $mode ""
+  if ($cert -and $key) { return "https" }
+  return "http"
+}
+
 function Get-ServerUrl {
   return "{0}://localhost:{1}" -f (Get-ServerProtocol), (Get-ServerPort)
+}
+
+function Get-ServerUrlFor([string]$mode) {
+  return "{0}://localhost:{1}" -f (Get-ServerProtocolFor $mode), (Get-ServerPortFor $mode)
 }
 
 function Get-LogDir {
@@ -269,6 +313,11 @@ function Open-Admin {
   Start-Process (Get-ServerUrl)
 }
 
+function Open-AdminFor([string]$mode) {
+  $url = Get-ServerUrlFor $mode
+  Start-Process $url
+}
+
 function Open-Logs {
   $dir = Get-LogDir
   if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -321,6 +370,14 @@ $openUiItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openUiItem.Text = "Open Admin UI"
 $openUiItem.add_Click({ Open-Admin })
 
+$openUiDevItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openUiDevItem.Text = "Open UI (Dev)"
+$openUiDevItem.add_Click({ Open-AdminFor "dev" })
+
+$openUiProdItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$openUiProdItem.Text = "Open UI (Prod)"
+$openUiProdItem.add_Click({ Open-AdminFor "prod" })
+
 $openLogsItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $openLogsItem.Text = "Open Logs Folder"
 $openLogsItem.add_Click({ Open-Logs })
@@ -337,6 +394,8 @@ $menu.Items.AddRange(@(
   $envItem,
   (New-Object System.Windows.Forms.ToolStripSeparator),
   $openUiItem,
+  $openUiDevItem,
+  $openUiProdItem,
   (New-Object System.Windows.Forms.ToolStripSeparator),
   $startItem,
   $startDevItem,
@@ -358,6 +417,7 @@ function Update-Status {
   $running = Get-ServerProcess
   $turnRunning = Get-TurnProcess
   $envLabel = $script:activeEnv.ToUpper()
+  $portLabel = Get-ServerPort
   if ($running) {
     $statusItem.Text = "Echo Chamber Server (Running)"
     $startItem.Enabled = $false
@@ -379,7 +439,21 @@ function Update-Status {
   }
   $envItem.Text = "Active Env: $envLabel"
   $turnLabel = if ($turnRunning) { "TURN: on" } else { "TURN: off" }
-  $tray.Text = "{0} - {1} - {2}" -f $statusItem.Text, $envLabel, $turnLabel
+  $tray.Text = "Echo {0} {1} :{2} {3}" -f ($(if ($running) { "Running" } else { "Stopped" })), $envLabel, $portLabel, $turnLabel
+
+  $iconKey = $script:activeEnv
+  if ($currentIconKey -ne $iconKey) {
+    if ($script:activeEnv -eq "dev") {
+      $tray.Icon = [System.Drawing.SystemIcons]::Warning
+    } else {
+      if (Test-Path $iconPath) {
+        $tray.Icon = New-Object System.Drawing.Icon($iconPath)
+      } else {
+        $tray.Icon = [System.Drawing.SystemIcons]::Application
+      }
+    }
+    $script:currentIconKey = $iconKey
+  }
 }
 
 function Ensure-ServerRunning([int]$maxAttempts = 5, [string]$Mode = $script:activeEnv) {
