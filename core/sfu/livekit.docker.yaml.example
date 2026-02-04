@@ -1,0 +1,18 @@
+# LiveKit config (example for docker-compose)
+# Copy to livekit.docker.yaml and fill in keys.
+
+port: 7880
+log_level: info
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+
+redis:
+  address: redis:6379
+
+# Replace with your own key/secret
+keys:
+  LK_API_KEY: LK_API_SECRET
