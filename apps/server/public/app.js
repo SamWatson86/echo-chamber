@@ -1,5 +1,6 @@
 const statusEl = document.getElementById("status");
 const serverNameEl = document.getElementById("server-name");
+const envBadge = document.getElementById("env-badge");
 const roomListEl = document.getElementById("room-list");
 const messageEl = document.getElementById("message");
 const loginSection = document.getElementById("login");
@@ -1286,6 +1287,9 @@ async function loadConfig() {
       serverNameEl.textContent = data.serverName;
       document.title = data.serverName;
     }
+    if (typeof data?.environment === "string") {
+      updateEnvBadge(data.environment);
+    }
     if (typeof data?.maxPeersPerRoom === "number") {
       state.maxPeersPerRoom = data.maxPeersPerRoom;
     }
@@ -1296,6 +1300,22 @@ async function loadConfig() {
   } catch {
     // Ignore config errors; fallback to defaults.
   }
+}
+
+function updateEnvBadge(environment) {
+  if (!envBadge) return;
+  const raw = String(environment ?? "").trim();
+  if (!raw) {
+    envBadge.classList.add("hidden");
+    envBadge.textContent = "";
+    envBadge.classList.remove("is-prod", "is-dev");
+    return;
+  }
+  const label = raw.toUpperCase();
+  envBadge.textContent = label;
+  envBadge.classList.remove("hidden");
+  envBadge.classList.toggle("is-prod", label === "PROD" || label === "PRODUCTION");
+  envBadge.classList.toggle("is-dev", label === "DEV" || label === "DEVELOPMENT");
 }
 
 function formatUptime(ms) {

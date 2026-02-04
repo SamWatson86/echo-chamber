@@ -36,6 +36,7 @@ const adminPasswordHash = process.env.ADMIN_PASSWORD_HASH;
 const adminTokenTtlHours = Number(process.env.ADMIN_TOKEN_TTL_HOURS ?? 12);
 const maxPeersPerRoom = parseOptionalNumber(process.env.MAX_PEERS_PER_ROOM);
 const serverName = process.env.SERVER_NAME;
+const environment = normalizeEnvironment(envMode);
 
 const tlsCertPath = process.env.TLS_CERT_PATH;
 const tlsKeyPath = process.env.TLS_KEY_PATH;
@@ -62,6 +63,7 @@ startServer({
   iceServers,
   maxPeersPerRoom,
   serverName,
+  environment,
   logFile,
   soundboardDir,
   soundboardMaxBytes,
@@ -97,6 +99,14 @@ function parseOptionalNumber(value: string | undefined) {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function normalizeEnvironment(value: string | undefined) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "prod";
+  if (raw === "production" || raw.startsWith("prod")) return "prod";
+  if (raw === "development" || raw.startsWith("dev")) return "dev";
+  return raw;
 }
 
 function resolveLogFile(explicitFile: string | undefined, logDir: string | undefined) {
