@@ -6,6 +6,7 @@
 - Client: Native desktop app in Rust (Windows + macOS).
 - Host: SFU runs on the host PC (gigabit uplink available).
 - Rooms: Default room = "main". Additional rooms supported via control plane.
+ - Control plane will issue LiveKit access tokens using API key/secret stored in env.
 
 Notes:
 - We will keep Echo Chamber Web unchanged while Core is built.
