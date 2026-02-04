@@ -18,5 +18,19 @@ function Load-Env([string]$path) {
 
 Load-Env $EnvFile
 
-Write-Host "Starting Echo Core control plane" -ForegroundColor Cyan
+$vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+if (Test-Path $vcvars) {
+  $cmd = @"
+call \"$vcvars\"
+cd /d \"$PSScriptRoot\"
+\"%USERPROFILE%\.cargo\bin\cargo.exe\" run -p echo-core-control
+"@
+  $tmp = Join-Path $PSScriptRoot ".tmp-run-control.cmd"
+  Set-Content -Path $tmp -Value $cmd -Encoding ascii
+  cmd /c $tmp
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  exit $LASTEXITCODE
+}
+
+Write-Host "vcvars64.bat not found. Ensure Visual Studio Build Tools are installed." -ForegroundColor Yellow
 cargo run -p echo-core-control
