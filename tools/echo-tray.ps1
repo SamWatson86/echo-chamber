@@ -76,6 +76,7 @@ function Get-ActiveEnv {
 }
 
 $activeEnv = Get-ActiveEnv
+Write-Log "Tray starting (env=$activeEnv)"
 
 function Set-ActiveEnv([string]$value) {
   $script:activeEnv = Normalize-Env $value
@@ -331,6 +332,9 @@ if (Test-Path $iconPath) {
   $tray.Icon = [System.Drawing.SystemIcons]::Application
 }
 $tray.Visible = $true
+try {
+  $tray.ShowBalloonTip(3000, "Echo Chamber", "Tray started ($($activeEnv.ToUpper()))", [System.Windows.Forms.ToolTipIcon]::Info)
+} catch {}
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $statusItem = New-Object System.Windows.Forms.ToolStripMenuItem
