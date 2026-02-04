@@ -212,10 +212,10 @@ function Get-ServerProcess {
   }
 }
 
-function Write-Pid($pid) {
+function Write-Pid($serverPidValue) {
   $dir = Split-Path -Parent $pidFile
   if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-  Set-Content -Path $pidFile -Value $pid -Encoding ascii
+  Set-Content -Path $pidFile -Value $serverPidValue -Encoding ascii
 }
 
 function Get-TurnProcess {
@@ -230,10 +230,10 @@ function Get-TurnProcess {
   }
 }
 
-function Write-TurnPid($pid) {
+function Write-TurnPid($turnPidValue) {
   $dir = Split-Path -Parent $turnPidFile
   if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-  Set-Content -Path $turnPidFile -Value $pid -Encoding ascii
+  Set-Content -Path $turnPidFile -Value $turnPidValue -Encoding ascii
 }
 
 function Load-TurnEnv {
