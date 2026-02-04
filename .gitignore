@@ -13,6 +13,8 @@ tools/turn/bin/
 certs/
 .env
 .env.*
+core/sfu/livekit.yaml
+core/sfu/livekit.docker.yaml
 !.env.example
 !.env.dev.example
 !.env.prod.example
