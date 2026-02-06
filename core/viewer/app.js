@@ -4458,64 +4458,43 @@ function startUltraInstinctParticles() {
 
   let w, h;
 
-  // ── Energy flame tongues (rising from bottom like UI aura) ──
-  const FLAME_COUNT = 55;
-  let flames = [];
-
-  function initFlames() {
-    flames = [];
-    for (let i = 0; i < FLAME_COUNT; i++) {
-      const spread = (i / FLAME_COUNT) * w;
-      flames.push({
-        x: spread + (Math.random() - 0.5) * (w / FLAME_COUNT) * 2,
-        width: 40 + Math.random() * 140,
-        height: h * (0.22 + Math.random() * 0.42),
-        phase: Math.random() * Math.PI * 2,
-        speed: 0.3 + Math.random() * 1.2,
-        // Color mix: 40% silver/white, 40% blue/cyan, 20% violet/purple
-        colorType: Math.random() < 0.40 ? "silver" : Math.random() < 0.67 ? "blue" : "violet",
-        opacity: 0.04 + Math.random() * 0.09,
-      });
-    }
-  }
-
-  // ── Particle pool ──
-  const PARTICLE_COUNT = 100;
+  // ── Sparkle particles (overlay on top of GIF background) ──
+  const PARTICLE_COUNT = 80;
   const particles = [];
 
   function spawnParticle() {
     const type = Math.random();
-    if (type < 0.45) {
-      // Silver-white sparks — fast risers
+    if (type < 0.55) {
+      // White sparks — fast rising
       return {
         x: Math.random() * w,
         y: h + Math.random() * 30,
         vx: (Math.random() - 0.5) * 1.0,
-        vy: -(1.2 + Math.random() * 2.2),
+        vy: -(1.0 + Math.random() * 2.0),
         size: 1 + Math.random() * 1.5,
         life: 1,
-        decay: 0.006 + Math.random() * 0.006,
+        decay: 0.005 + Math.random() * 0.006,
         kind: "spark",
       };
-    } else if (type < 0.75) {
-      // Silver orbs — slow, large
+    } else if (type < 0.8) {
+      // Silver orbs — slow drift
       return {
         x: Math.random() * w,
         y: h + Math.random() * 60,
         vx: (Math.random() - 0.5) * 0.4,
-        vy: -(0.3 + Math.random() * 0.7),
-        size: 2 + Math.random() * 4,
+        vy: -(0.3 + Math.random() * 0.6),
+        size: 2 + Math.random() * 3,
         life: 1,
         decay: 0.001 + Math.random() * 0.002,
         kind: "orb",
       };
     } else {
-      // Blue-tinted wisps
+      // Blue-silver wisps
       return {
         x: Math.random() * w,
         y: h + Math.random() * 80,
-        vx: (Math.random() - 0.5) * 0.7,
-        vy: -(0.4 + Math.random() * 0.9),
+        vx: (Math.random() - 0.5) * 0.6,
+        vy: -(0.4 + Math.random() * 0.8),
         size: 2 + Math.random() * 3,
         life: 1,
         decay: 0.002 + Math.random() * 0.003,
@@ -4527,13 +4506,11 @@ function startUltraInstinctParticles() {
   const resize = () => {
     w = uiParticleCanvas.width = window.innerWidth;
     h = uiParticleCanvas.height = window.innerHeight;
-    initFlames();
   };
   resize();
   uiParticleResizeHandler = resize;
   window.addEventListener("resize", uiParticleResizeHandler);
 
-  // Scatter initial particles across screen
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const p = spawnParticle();
     p.y = Math.random() * h;
@@ -4546,64 +4523,8 @@ function startUltraInstinctParticles() {
   function draw(now) {
     const dt = Math.min((now - lastTime) / 16.667, 3);
     lastTime = now;
-
     ctx.clearRect(0, 0, w, h);
 
-    // ── 1. Core glow — bright silver/white radial from bottom center ──
-    const pulse = 0.85 + 0.15 * Math.sin(now * 0.0008);
-    const coreGlow = ctx.createRadialGradient(w / 2, h * 1.05, 0, w / 2, h * 1.05, h * 0.8);
-    coreGlow.addColorStop(0, `rgba(235, 238, 248, ${0.22 * pulse})`);
-    coreGlow.addColorStop(0.15, `rgba(200, 215, 240, ${0.14 * pulse})`);
-    coreGlow.addColorStop(0.35, `rgba(140, 175, 230, ${0.07 * pulse})`);
-    coreGlow.addColorStop(0.6, `rgba(100, 130, 200, ${0.03 * pulse})`);
-    coreGlow.addColorStop(1, "rgba(0, 0, 0, 0)");
-    ctx.fillStyle = coreGlow;
-    ctx.fillRect(0, 0, w, h);
-
-    // ── 2. Energy flame tongues ──
-    for (const f of flames) {
-      const sway = Math.sin(now * 0.0005 * f.speed + f.phase) * 28;
-      const hOsc = f.height * (0.80 + 0.20 * Math.sin(now * 0.001 * f.speed + f.phase * 2.3));
-      const topX = f.x + sway;
-      const topY = h - hOsc;
-      const halfW = f.width / 2;
-
-      const grad = ctx.createLinearGradient(0, h, 0, topY);
-      if (f.colorType === "silver") {
-        grad.addColorStop(0, `rgba(235, 240, 250, ${f.opacity * 1.3})`);
-        grad.addColorStop(0.25, `rgba(210, 218, 230, ${f.opacity * 0.8})`);
-        grad.addColorStop(0.6, `rgba(190, 198, 210, ${f.opacity * 0.35})`);
-        grad.addColorStop(1, "rgba(180, 188, 200, 0)");
-      } else if (f.colorType === "blue") {
-        grad.addColorStop(0, `rgba(150, 200, 255, ${f.opacity * 1.2})`);
-        grad.addColorStop(0.25, `rgba(110, 170, 250, ${f.opacity * 0.7})`);
-        grad.addColorStop(0.6, `rgba(70, 130, 230, ${f.opacity * 0.28})`);
-        grad.addColorStop(1, "rgba(50, 100, 210, 0)");
-      } else {
-        // violet/purple fringe
-        grad.addColorStop(0, `rgba(170, 140, 255, ${f.opacity * 1.0})`);
-        grad.addColorStop(0.25, `rgba(140, 110, 240, ${f.opacity * 0.55})`);
-        grad.addColorStop(0.6, `rgba(110, 80, 220, ${f.opacity * 0.2})`);
-        grad.addColorStop(1, "rgba(90, 60, 200, 0)");
-      }
-
-      // Flame tongue shape: wide base tapering to a point
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.moveTo(f.x - halfW, h + 10);
-      ctx.quadraticCurveTo(
-        f.x - halfW * 0.25 + sway * 0.5, h - hOsc * 0.6,
-        topX, topY
-      );
-      ctx.quadraticCurveTo(
-        f.x + halfW * 0.25 + sway * 0.5, h - hOsc * 0.6,
-        f.x + halfW, h + 10
-      );
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    // ── 3. Particles ──
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.x += p.vx * dt;
@@ -4619,7 +4540,7 @@ function startUltraInstinctParticles() {
         continue;
       }
 
-      const alpha = p.life * (p.kind === "spark" ? 0.85 : 0.55);
+      const alpha = p.life * (p.kind === "spark" ? 0.85 : 0.5);
 
       if (p.kind === "orb") {
         const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 3);
@@ -4640,7 +4561,6 @@ function startUltraInstinctParticles() {
         ctx.arc(p.x, p.y, p.size * 2, 0, Math.PI * 2);
         ctx.fill();
       } else {
-        // Blue-silver wisp
         const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 4);
         grad.addColorStop(0, `rgba(150, 195, 250, ${alpha * 0.6})`);
         grad.addColorStop(0.5, `rgba(120, 165, 235, ${alpha * 0.25})`);

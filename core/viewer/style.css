@@ -2578,59 +2578,36 @@ body[data-theme="midnight"] .theme-card.is-active {
 }
 
 body[data-theme="ultra-instinct"] {
-  --panel: rgba(10, 12, 18, 0.90);
-  --panel-soft: rgba(16, 18, 24, 0.6);
+  --panel: rgba(10, 12, 18, 0.92);
+  --panel-soft: rgba(16, 18, 24, 0.65);
   --text: #eaecf0;
   --muted: #848c98;
   --accent: #c8ced8;
   --border: rgba(200, 206, 216, 0.12);
   --border-hover: rgba(200, 206, 216, 0.28);
-  --glass: rgba(10, 12, 18, 0.65);
-  --glass-hover: rgba(14, 16, 24, 0.85);
-  background: #0c0e16;
-  background-image:
-    radial-gradient(ellipse at 50% 85%, rgba(160, 190, 240, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 100%, rgba(200, 215, 240, 0.06) 0%, transparent 40%),
-    radial-gradient(circle at 50% 50%, #12141c, #0c0e16 70%);
+  --glass: rgba(10, 12, 18, 0.70);
+  --glass-hover: rgba(14, 16, 24, 0.88);
+  background: #080a12;
 }
 
-/* Aura pulse — radiating silver glow from bottom */
+/* Animated GIF background */
 body[data-theme="ultra-instinct"]::before {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: -1;
-  background:
-    radial-gradient(ellipse 600px 400px at 50% 90%, rgba(180, 205, 245, 0.10), transparent),
-    radial-gradient(ellipse 400px 300px at 50% 95%, rgba(220, 228, 242, 0.06), transparent);
-  animation: ui-aura 4s ease-in-out infinite alternate;
+  background: url('/viewer/ultrainstinct.gif') center center / cover no-repeat;
+  opacity: 0.45;
 }
 
-@keyframes ui-aura {
-  0% {
-    opacity: 0.3;
-    transform: scale(0.95);
-    filter: blur(0px);
-  }
-  50% {
-    opacity: 0.8;
-    filter: blur(2px);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1.08);
-    filter: blur(0px);
-  }
-}
-
-/* Ultra Instinct energy flame + particle canvas */
+/* Sparkle particle overlay canvas */
 #ui-particles {
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  opacity: 0.9;
+  opacity: 0.6;
 }
 
 /* Silver accent overrides */
