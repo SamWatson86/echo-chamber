@@ -2574,27 +2574,27 @@ body[data-theme="midnight"] .theme-card.is-active {
    ═══════════════════════════════════════════ */
 
 .ultra-instinct-preview {
-  background: linear-gradient(135deg, #08090e 0%, #1a1c22 25%, #c8ced8 55%, #ffffff 80%, #868c96 100%);
+  background: linear-gradient(to top, #e8ecf8 0%, #8ab0f0 20%, #5080d8 40%, #3050a0 60%, #141828 100%);
 }
 
 body[data-theme="ultra-instinct"] {
-  --panel: rgba(10, 12, 16, 0.88);
-  --panel-soft: rgba(16, 18, 22, 0.6);
+  --panel: rgba(10, 12, 18, 0.90);
+  --panel-soft: rgba(16, 18, 24, 0.6);
   --text: #eaecf0;
   --muted: #848c98;
   --accent: #c8ced8;
   --border: rgba(200, 206, 216, 0.12);
   --border-hover: rgba(200, 206, 216, 0.28);
-  --glass: rgba(10, 12, 16, 0.6);
-  --glass-hover: rgba(14, 16, 22, 0.85);
-  background: #08090e;
+  --glass: rgba(10, 12, 18, 0.65);
+  --glass-hover: rgba(14, 16, 24, 0.85);
+  background: #0c0e16;
   background-image:
-    radial-gradient(ellipse at 50% 40%, rgba(200, 206, 216, 0.06) 0%, transparent 60%),
-    radial-gradient(ellipse at 30% 80%, rgba(160, 165, 175, 0.04) 0%, transparent 50%),
-    radial-gradient(circle at 50% 50%, #0e1014, #08090e 70%);
+    radial-gradient(ellipse at 50% 85%, rgba(160, 190, 240, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 100%, rgba(200, 215, 240, 0.06) 0%, transparent 40%),
+    radial-gradient(circle at 50% 50%, #12141c, #0c0e16 70%);
 }
 
-/* Aura pulse — radiating silver glow */
+/* Aura pulse — radiating silver glow from bottom */
 body[data-theme="ultra-instinct"]::before {
   content: "";
   position: fixed;
@@ -2602,8 +2602,8 @@ body[data-theme="ultra-instinct"]::before {
   pointer-events: none;
   z-index: -1;
   background:
-    radial-gradient(circle 500px at 50% 55%, rgba(200, 206, 216, 0.07), transparent),
-    radial-gradient(circle 300px at 50% 55%, rgba(220, 222, 228, 0.04), transparent);
+    radial-gradient(ellipse 600px 400px at 50% 90%, rgba(180, 205, 245, 0.10), transparent),
+    radial-gradient(ellipse 400px 300px at 50% 95%, rgba(220, 228, 242, 0.06), transparent);
   animation: ui-aura 4s ease-in-out infinite alternate;
 }
 
@@ -2624,13 +2624,13 @@ body[data-theme="ultra-instinct"]::before {
   }
 }
 
-/* Ultra Instinct energy particle canvas */
+/* Ultra Instinct energy flame + particle canvas */
 #ui-particles {
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  opacity: 0.7;
+  opacity: 0.9;
 }
 
 /* Silver accent overrides */
@@ -2726,7 +2726,7 @@ body[data-theme="ultra-instinct"] .soundboard,
 body[data-theme="ultra-instinct"] .camera-lobby,
 body[data-theme="ultra-instinct"] .chat-panel,
 body[data-theme="ultra-instinct"] .debug-panel {
-  background: linear-gradient(168deg, rgba(16, 18, 22, 0.92) 0%, rgba(8, 10, 14, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(14, 16, 24, 0.93) 0%, rgba(8, 10, 16, 0.98) 100%);
 }
 
 body[data-theme="ultra-instinct"] .user-card { background: rgba(10, 12, 16, 0.7); }
@@ -2765,7 +2765,7 @@ body[data-theme="ultra-instinct"] .panel {
 }
 
 body[data-theme="ultra-instinct"] .theme-panel {
-  background: linear-gradient(168deg, rgba(16, 18, 22, 0.97) 0%, rgba(8, 10, 14, 0.99) 100%);
+  background: linear-gradient(168deg, rgba(14, 16, 24, 0.97) 0%, rgba(8, 10, 16, 0.99) 100%);
 }
 
 body[data-theme="ultra-instinct"] .theme-card.is-active {
