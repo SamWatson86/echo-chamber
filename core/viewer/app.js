@@ -667,7 +667,7 @@ function startHeartbeat() {
     }).catch(() => {});
   };
   sendBeat();
-  heartbeatTimer = setInterval(sendBeat, 15000);
+  heartbeatTimer = setInterval(sendBeat, 10000);
 }
 
 function stopHeartbeat() {

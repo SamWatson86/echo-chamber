@@ -293,16 +293,16 @@ async fn main() {
         chat: Arc::new(Mutex::new(chat_state)),
     };
 
-    // Background task: clean up stale participants (no heartbeat for 60s)
+    // Background task: clean up stale participants (no heartbeat for 20s)
     {
         let participants = state.participants.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(15)).await;
+                tokio::time::sleep(Duration::from_secs(10)).await;
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 let mut map = participants.lock().unwrap();
                 let before = map.len();
-                map.retain(|_, p| now.saturating_sub(p.last_seen) < 60);
+                map.retain(|_, p| now.saturating_sub(p.last_seen) < 20);
                 let removed = before - map.len();
                 if removed > 0 {
                     info!("cleaned up {} stale participant(s)", removed);
@@ -635,9 +635,21 @@ async fn issue_token(
         &EncodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
     ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Track participant in room
+    // Track participant in room (dedup: remove old entries with the same name base)
     {
         let mut participants = state.participants.lock().unwrap();
+        let name_base = payload.identity.rsplitn(2, '-').last().unwrap_or(&payload.identity).to_string();
+        let stale_keys: Vec<String> = participants.iter()
+            .filter(|(k, _)| {
+                *k != &payload.identity &&
+                k.rsplitn(2, '-').last().unwrap_or(k) == name_base
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in stale_keys {
+            info!("dedup: removing old identity {} (replaced by {})", key, payload.identity);
+            participants.remove(&key);
+        }
         participants.insert(payload.identity.clone(), ParticipantEntry {
             identity: payload.identity.clone(),
             name: payload.name.clone().unwrap_or_default(),
