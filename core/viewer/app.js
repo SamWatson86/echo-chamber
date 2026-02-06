@@ -114,6 +114,8 @@ let chatDataChannel = null;
 const CHAT_MESSAGE_TYPE = "chat-message";
 const CHAT_FILE_TYPE = "chat-file";
 const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
+let unreadChatCount = 0;
+const chatBadge = document.getElementById("chat-badge");
 
 function safeStorageGet(key) {
   try {
@@ -3460,9 +3462,46 @@ function handleIncomingChatData(payload, participant) {
       const messageEl = renderChatMessage(message);
       chatMessages.appendChild(messageEl);
       chatMessages.scrollTop = chatMessages.scrollHeight;
+
+      // Show notification badge if chat is closed
+      incrementUnreadChat();
     }
   } catch (err) {
     debugLog(`Failed to parse chat data: ${err.message}`);
+  }
+}
+
+function updateChatBadge() {
+  if (!chatBadge) return;
+  if (unreadChatCount > 0) {
+    chatBadge.textContent = unreadChatCount > 99 ? "99+" : unreadChatCount;
+    chatBadge.classList.remove("hidden");
+  } else {
+    chatBadge.classList.add("hidden");
+  }
+}
+
+function incrementUnreadChat() {
+  // Only increment if chat is closed
+  if (chatPanel && chatPanel.classList.contains("hidden")) {
+    unreadChatCount++;
+    updateChatBadge();
+
+    // Trigger pulse animation on chat button
+    if (openChatButton) {
+      openChatButton.classList.remove("has-unread");
+      // Force reflow to restart animation
+      void openChatButton.offsetWidth;
+      openChatButton.classList.add("has-unread");
+    }
+  }
+}
+
+function clearUnreadChat() {
+  unreadChatCount = 0;
+  updateChatBadge();
+  if (openChatButton) {
+    openChatButton.classList.remove("has-unread");
   }
 }
 
@@ -3470,6 +3509,7 @@ function openChat() {
   if (!chatPanel) return;
   chatPanel.classList.remove("hidden");
   chatInput.focus();
+  clearUnreadChat();
 }
 
 function closeChat() {
@@ -3570,6 +3610,9 @@ async function loadChatHistory(roomName) {
     });
 
     chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Clear unread count when loading history (user sees all messages)
+    clearUnreadChat();
   } catch (err) {
     debugLog(`Failed to load chat history: ${err.message}`);
   }
