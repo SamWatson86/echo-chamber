@@ -3263,6 +3263,22 @@ function formatTime(timestamp) {
   return `${hours}:${minutes}`;
 }
 
+async function fetchImageAsBlob(url) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "Authorization": `Bearer ${adminToken}`
+      }
+    });
+    if (!response.ok) throw new Error("Failed to fetch image");
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  } catch (err) {
+    debugLog(`Failed to fetch image: ${err.message}`);
+    return null;
+  }
+}
+
 function renderChatMessage(message) {
   const messageEl = document.createElement("div");
   messageEl.className = "chat-message";
@@ -3289,11 +3305,31 @@ function renderChatMessage(message) {
     if (message.fileType?.startsWith("image/")) {
       const imgEl = document.createElement("img");
       imgEl.className = "chat-message-image";
-      imgEl.src = message.fileUrl;
       imgEl.alt = message.fileName || "Image";
       imgEl.loading = "lazy";
-      imgEl.addEventListener("click", () => {
-        window.open(message.fileUrl, "_blank");
+
+      // Fetch image with auth and create blob URL
+      fetchImageAsBlob(message.fileUrl).then(blobUrl => {
+        if (blobUrl) {
+          imgEl.src = blobUrl;
+        } else {
+          imgEl.src = ""; // Show broken image
+          imgEl.alt = "Failed to load image";
+        }
+      });
+
+      imgEl.addEventListener("click", async () => {
+        // Open image in new tab by fetching with auth
+        try {
+          const response = await fetch(message.fileUrl, {
+            headers: { "Authorization": `Bearer ${adminToken}` }
+          });
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          window.open(url, "_blank");
+        } catch (err) {
+          debugLog(`Failed to open image: ${err.message}`);
+        }
       });
       messageEl.appendChild(imgEl);
 
@@ -3306,8 +3342,24 @@ function renderChatMessage(message) {
     } else {
       const fileEl = document.createElement("div");
       fileEl.className = "chat-message-file";
-      fileEl.addEventListener("click", () => {
-        window.open(message.fileUrl, "_blank");
+      fileEl.addEventListener("click", async () => {
+        // Download file with auth
+        try {
+          const response = await fetch(message.fileUrl, {
+            headers: { "Authorization": `Bearer ${adminToken}` }
+          });
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = message.fileName || "file";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          debugLog(`Failed to download file: ${err.message}`);
+        }
       });
 
       const iconEl = document.createElement("div");
