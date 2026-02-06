@@ -179,9 +179,10 @@ Full theme system with 7 unique visual themes — each overrides CSS variables, 
 7. **Ultra Instinct** — Animated GIF background (Goku UI aura) + sparkle particle overlay, silver/gray UI
 
 **UI**: "Theme" button in sidebar → centered panel with 7 preview swatches (shimmer on hover). Click to apply instantly.
-**Persistence**: Theme saved to localStorage, restored on page load.
+**Persistence**: Theme + transparency saved to localStorage, restored on page load.
 **Matrix canvas**: Created/destroyed dynamically via JS (only runs when Matrix theme is active).
 **Ultra Instinct**: `ultrainstinct.gif` as full-screen CSS background (45% opacity), 80 sparkle particles (sparks, orbs, wisps) overlaid via canvas. Silver/gray accent palette for all UI elements.
+**UI Transparency Slider**: In theme panel, range 20%-100%. Controls `--ui-opacity` CSS variable applied to all panels except theme panel itself. Lets guests see through the UI to the background.
 
 ## Current Status
 
