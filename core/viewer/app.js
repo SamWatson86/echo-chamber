@@ -117,6 +117,7 @@ const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
 const ROOM_DISPLAY_NAMES = { "main": "Main", "breakout-1": "Breakout 1", "breakout-2": "Breakout 2", "breakout-3": "Breakout 3" };
 let roomStatusTimer = null;
 let heartbeatTimer = null;
+let previousRoomParticipants = {};
 let unreadChatCount = 0;
 const chatBadge = document.getElementById("chat-badge");
 
@@ -477,6 +478,76 @@ async function fetchRoomStatus(baseUrl, adminToken) {
   }
 }
 
+// ---- Room chime sounds (Web Audio API) ----
+let chimeAudioCtx = null;
+function getChimeCtx() {
+  if (!chimeAudioCtx) chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return chimeAudioCtx;
+}
+
+function playJoinChime() {
+  try {
+    const ctx = getChimeCtx();
+    const now = ctx.currentTime;
+    // Cheerful ascending two-note chime
+    [[523.25, 0], [659.25, 0.12]].forEach(([freq, offset]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.18, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.4);
+    });
+  } catch {}
+}
+
+function playLeaveChime() {
+  try {
+    const ctx = getChimeCtx();
+    const now = ctx.currentTime;
+    // Comedic descending "womp womp"
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(380, now);
+    osc.frequency.exponentialRampToValueAtTime(200, now + 0.3);
+    osc.frequency.exponentialRampToValueAtTime(120, now + 0.55);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.setValueAtTime(0.05, now + 0.25);
+    gain.gain.setValueAtTime(0.18, now + 0.3);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.75);
+  } catch {}
+}
+
+function detectRoomChanges(statusMap) {
+  const currentIds = {};
+  FIXED_ROOMS.forEach((roomId) => {
+    currentIds[roomId] = new Set((statusMap[roomId] || []).map((p) => p.identity));
+  });
+  const myIdentity = identityInput ? identityInput.value : "";
+  let joined = false;
+  let left = false;
+  FIXED_ROOMS.forEach((roomId) => {
+    const prev = previousRoomParticipants[roomId] || new Set();
+    const curr = currentIds[roomId];
+    for (const id of curr) {
+      if (!prev.has(id) && id !== myIdentity) joined = true;
+    }
+    for (const id of prev) {
+      if (!curr.has(id) && id !== myIdentity) left = true;
+    }
+  });
+  previousRoomParticipants = currentIds;
+  if (joined) playJoinChime();
+  else if (left) playLeaveChime();
+}
+
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
   if (!roomListEl) return;
   const statusList = await fetchRoomStatus(baseUrl, adminToken);
@@ -484,6 +555,7 @@ async function refreshRoomList(baseUrl, adminToken, activeRoom) {
   if (Array.isArray(statusList)) {
     statusList.forEach((r) => { statusMap[r.room_id] = r.participants || []; });
   }
+  detectRoomChanges(statusMap);
   roomListEl.innerHTML = "";
   FIXED_ROOMS.forEach((roomId) => {
     const participants = statusMap[roomId] || [];
