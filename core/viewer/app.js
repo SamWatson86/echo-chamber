@@ -561,6 +561,7 @@ function detectRoomChanges(statusMap) {
     currentIds[roomId] = new Set((statusMap[roomId] || []).map((p) => p.identity));
   });
   const myIdentity = identityInput ? identityInput.value : "";
+  const myRoom = currentRoomName;
   // Build flat lookup: identity -> room for previous and current
   const prevByUser = {};
   const currByUser = {};
@@ -568,24 +569,29 @@ function detectRoomChanges(statusMap) {
     (previousRoomParticipants[roomId] || new Set()).forEach((id) => { prevByUser[id] = roomId; });
     currentIds[roomId].forEach((id) => { currByUser[id] = roomId; });
   });
-  let hadJoin = false;
-  let hadLeave = false;
-  let hadSwitch = false;
-  // Check all identities that changed
-  const allIds = new Set([...Object.keys(prevByUser), ...Object.keys(currByUser)]);
-  for (const id of allIds) {
+  // Perspective-based: only care about people entering/leaving MY room
+  let someoneEnteredMyRoom = false;
+  let someoneSwitchedAway = false;
+  let someoneLeftEntirely = false;
+  const prevMyRoom = previousRoomParticipants[myRoom] || new Set();
+  const currMyRoom = currentIds[myRoom] || new Set();
+  // Someone appeared in my room (join or switch — either way, welcome them)
+  for (const id of currMyRoom) {
     if (id === myIdentity) continue;
-    const wasIn = prevByUser[id];
-    const nowIn = currByUser[id];
-    if (wasIn && nowIn && wasIn !== nowIn) hadSwitch = true;
-    else if (!wasIn && nowIn) hadJoin = true;
-    else if (wasIn && !nowIn) hadLeave = true;
+    if (!prevMyRoom.has(id)) someoneEnteredMyRoom = true;
+  }
+  // Someone disappeared from my room
+  for (const id of prevMyRoom) {
+    if (id === myIdentity) continue;
+    if (!currMyRoom.has(id)) {
+      if (currByUser[id]) someoneSwitchedAway = true;
+      else someoneLeftEntirely = true;
+    }
   }
   previousRoomParticipants = currentIds;
-  // Priority: switch > join > leave (play only one per poll cycle)
-  if (hadSwitch) playSwitchChime();
-  else if (hadJoin) playJoinChime();
-  else if (hadLeave) playLeaveChime();
+  if (someoneEnteredMyRoom) playJoinChime();
+  else if (someoneSwitchedAway) playSwitchChime();
+  else if (someoneLeftEntirely) playLeaveChime();
 }
 
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
