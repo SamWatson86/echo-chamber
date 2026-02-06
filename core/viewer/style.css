@@ -2567,3 +2567,208 @@ body[data-theme="midnight"] .theme-card.is-active {
   border-color: #a78bfa;
   box-shadow: 0 0 20px rgba(167, 139, 250, 0.2);
 }
+
+
+/* ═══════════════════════════════════════════
+   ULTRA INSTINCT — Silver aura, cosmic void
+   ═══════════════════════════════════════════ */
+
+.ultra-instinct-preview {
+  background: linear-gradient(135deg, #060a18 0%, #1a1e3a 25%, #c0cfff 55%, #ffffff 80%, #8090d0 100%);
+}
+
+body[data-theme="ultra-instinct"] {
+  --panel: rgba(10, 14, 32, 0.88);
+  --panel-soft: rgba(18, 22, 48, 0.6);
+  --text: #e8eaff;
+  --muted: #8090b8;
+  --accent: #c0cfff;
+  --border: rgba(192, 207, 255, 0.12);
+  --border-hover: rgba(192, 207, 255, 0.28);
+  --glass: rgba(10, 14, 32, 0.6);
+  --glass-hover: rgba(16, 20, 42, 0.85);
+  background: #060a18;
+  background-image:
+    radial-gradient(ellipse at 50% 40%, rgba(192, 207, 255, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 30% 80%, rgba(100, 120, 200, 0.04) 0%, transparent 50%),
+    radial-gradient(circle at 50% 50%, #0c1028, #060a18 70%);
+}
+
+/* Aura pulse — radiating silver glow */
+body[data-theme="ultra-instinct"]::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(circle 500px at 50% 55%, rgba(192, 207, 255, 0.06), transparent),
+    radial-gradient(circle 300px at 50% 55%, rgba(220, 225, 255, 0.04), transparent);
+  animation: ui-aura 4s ease-in-out infinite alternate;
+}
+
+@keyframes ui-aura {
+  0% {
+    opacity: 0.3;
+    transform: scale(0.95);
+    filter: blur(0px);
+  }
+  50% {
+    opacity: 0.8;
+    filter: blur(2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.08);
+    filter: blur(0px);
+  }
+}
+
+/* Ultra Instinct energy particle canvas */
+#ui-particles {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+/* Silver accent overrides */
+body[data-theme="ultra-instinct"] input:focus,
+body[data-theme="ultra-instinct"] select:focus,
+body[data-theme="ultra-instinct"] .chat-input:focus,
+body[data-theme="ultra-instinct"] .soundboard-search input:focus {
+  border-color: rgba(192, 207, 255, 0.5);
+  box-shadow: 0 0 0 3px rgba(192, 207, 255, 0.1), 0 0 20px rgba(192, 207, 255, 0.05);
+}
+
+body[data-theme="ultra-instinct"] .sidebar-actions button:hover:not(:disabled) {
+  background: rgba(192, 207, 255, 0.1);
+  border-color: rgba(192, 207, 255, 0.3);
+  color: var(--accent);
+  box-shadow: 0 0 15px rgba(192, 207, 255, 0.08);
+}
+
+body[data-theme="ultra-instinct"] button:hover:not(:disabled) {
+  box-shadow: 0 0 12px rgba(192, 207, 255, 0.06);
+}
+
+body[data-theme="ultra-instinct"] .publish-actions button.is-on,
+body[data-theme="ultra-instinct"] .icon-button.is-on,
+body[data-theme="ultra-instinct"] .pill.is-on {
+  border-color: rgba(192, 207, 255, 0.5);
+  color: var(--accent);
+  background: rgba(192, 207, 255, 0.12);
+}
+
+body[data-theme="ultra-instinct"] .enable-all {
+  border-color: rgba(192, 207, 255, 0.2);
+  background: rgba(192, 207, 255, 0.06);
+  color: var(--accent);
+}
+
+body[data-theme="ultra-instinct"] .enable-all:hover {
+  background: rgba(192, 207, 255, 0.12);
+  border-color: rgba(192, 207, 255, 0.35);
+}
+
+/* Active room — bright silver glow */
+body[data-theme="ultra-instinct"] .room-status-btn.is-active {
+  background: rgba(192, 207, 255, 0.12);
+  border-color: rgba(192, 207, 255, 0.45);
+  color: #dce1ff;
+  box-shadow: 0 0 14px rgba(192, 207, 255, 0.2);
+}
+
+body[data-theme="ultra-instinct"] .room-status-btn.is-active .room-status-count {
+  background: rgba(192, 207, 255, 0.2);
+  color: #dce1ff;
+}
+
+/* Rooms with users — subtle silver-blue */
+body[data-theme="ultra-instinct"] .room-status-btn.has-users {
+  background: rgba(140, 160, 220, 0.08);
+  border-color: rgba(140, 160, 220, 0.35);
+  color: #a8b8e0;
+  box-shadow: 0 0 8px rgba(140, 160, 220, 0.1);
+}
+
+body[data-theme="ultra-instinct"] .room-status-btn.has-users:hover {
+  background: rgba(140, 160, 220, 0.15);
+  border-color: rgba(140, 160, 220, 0.5);
+}
+
+body[data-theme="ultra-instinct"] .room-status-count {
+  background: rgba(140, 160, 220, 0.2);
+  color: #a8b8e0;
+}
+
+body[data-theme="ultra-instinct"] .chat-send-btn {
+  background: rgba(192, 207, 255, 0.12);
+  border-color: rgba(192, 207, 255, 0.25);
+  color: var(--accent);
+}
+
+body[data-theme="ultra-instinct"] .chat-send-btn:hover {
+  background: rgba(192, 207, 255, 0.2);
+  border-color: rgba(192, 207, 255, 0.45);
+  box-shadow: 0 0 15px rgba(192, 207, 255, 0.1);
+}
+
+body[data-theme="ultra-instinct"] .chat-message-author { color: #b0c0ff; }
+body[data-theme="ultra-instinct"] .chat-message-author.self { color: #dce1ff; }
+body[data-theme="ultra-instinct"] .chat-message-content a { color: #dce1ff; text-decoration-color: rgba(220, 225, 255, 0.3); }
+body[data-theme="ultra-instinct"] .chat-emoji:hover { background: rgba(192, 207, 255, 0.08); }
+
+body[data-theme="ultra-instinct"] .room-sidebar,
+body[data-theme="ultra-instinct"] .settings-panel,
+body[data-theme="ultra-instinct"] .soundboard,
+body[data-theme="ultra-instinct"] .camera-lobby,
+body[data-theme="ultra-instinct"] .chat-panel,
+body[data-theme="ultra-instinct"] .debug-panel {
+  background: linear-gradient(168deg, rgba(18, 22, 48, 0.92) 0%, rgba(6, 10, 24, 0.98) 100%);
+}
+
+body[data-theme="ultra-instinct"] .user-card { background: rgba(10, 14, 32, 0.7); }
+body[data-theme="ultra-instinct"] .user-card:hover {
+  background: rgba(14, 18, 38, 0.9);
+  box-shadow: 0 4px 20px rgba(192, 207, 255, 0.06);
+}
+body[data-theme="ultra-instinct"] .user-avatar {
+  background: linear-gradient(135deg, #1a1e3a 0%, #0c1028 100%);
+}
+body[data-theme="ultra-instinct"] .user-card:hover .user-avatar {
+  border-color: rgba(192, 207, 255, 0.25);
+  box-shadow: 0 0 10px rgba(192, 207, 255, 0.08);
+}
+
+body[data-theme="ultra-instinct"] .sound-tile:hover,
+body[data-theme="ultra-instinct"] .sound-edit:hover {
+  border-color: rgba(192, 207, 255, 0.3);
+}
+
+body[data-theme="ultra-instinct"] .soundboard-icon-grid button.is-selected,
+body[data-theme="ultra-instinct"] .sound-tile.is-editing {
+  border-color: rgba(192, 207, 255, 0.5);
+  box-shadow: 0 0 0 2px rgba(192, 207, 255, 0.12);
+  background: rgba(192, 207, 255, 0.05);
+}
+
+body[data-theme="ultra-instinct"] .icon-button.is-active {
+  border-color: rgba(192, 207, 255, 0.45);
+  box-shadow: 0 0 14px rgba(192, 207, 255, 0.2);
+  background: rgba(192, 207, 255, 0.06);
+}
+
+body[data-theme="ultra-instinct"] .panel {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(192, 207, 255, 0.04);
+}
+
+body[data-theme="ultra-instinct"] .theme-panel {
+  background: linear-gradient(168deg, rgba(18, 22, 48, 0.97) 0%, rgba(6, 10, 24, 0.99) 100%);
+}
+
+body[data-theme="ultra-instinct"] .theme-card.is-active {
+  border-color: #c0cfff;
+  box-shadow: 0 0 24px rgba(192, 207, 255, 0.25);
+}

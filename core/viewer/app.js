@@ -4444,6 +4444,167 @@ function stopMatrixRain() {
   }
 }
 
+// ── Ultra Instinct energy particles ──
+let uiParticleCanvas = null;
+let uiParticleAnimationId = null;
+let uiParticleResizeHandler = null;
+
+function startUltraInstinctParticles() {
+  if (uiParticleCanvas) return;
+  uiParticleCanvas = document.createElement("canvas");
+  uiParticleCanvas.id = "ui-particles";
+  document.body.prepend(uiParticleCanvas);
+  const ctx = uiParticleCanvas.getContext("2d");
+
+  const resize = () => {
+    uiParticleCanvas.width = window.innerWidth;
+    uiParticleCanvas.height = window.innerHeight;
+  };
+  resize();
+  uiParticleResizeHandler = resize;
+  window.addEventListener("resize", uiParticleResizeHandler);
+
+  // Particle pool
+  const PARTICLE_COUNT = 120;
+  const particles = [];
+
+  function spawnParticle() {
+    const type = Math.random();
+    // Three particle types: orbs, sparks, wisps
+    if (type < 0.4) {
+      // Orbs — slow, large, silver glow
+      return {
+        x: Math.random() * uiParticleCanvas.width,
+        y: uiParticleCanvas.height + Math.random() * 60,
+        vx: (Math.random() - 0.5) * 0.3,
+        vy: -(0.3 + Math.random() * 0.6),
+        size: 2 + Math.random() * 4,
+        life: 1,
+        decay: 0.001 + Math.random() * 0.002,
+        hue: 220 + Math.random() * 30, // blue-silver
+        sat: 20 + Math.random() * 30,
+        kind: "orb",
+      };
+    } else if (type < 0.75) {
+      // Sparks — fast, tiny, bright white
+      return {
+        x: Math.random() * uiParticleCanvas.width,
+        y: uiParticleCanvas.height + Math.random() * 30,
+        vx: (Math.random() - 0.5) * 1.2,
+        vy: -(1.5 + Math.random() * 2.5),
+        size: 1 + Math.random() * 1.5,
+        life: 1,
+        decay: 0.008 + Math.random() * 0.006,
+        hue: 0,
+        sat: 0,
+        kind: "spark",
+      };
+    } else {
+      // Wisps — medium drift, violet tint
+      return {
+        x: Math.random() * uiParticleCanvas.width,
+        y: uiParticleCanvas.height + Math.random() * 100,
+        vx: (Math.random() - 0.5) * 0.8,
+        vy: -(0.5 + Math.random() * 1.0),
+        size: 1.5 + Math.random() * 3,
+        life: 1,
+        decay: 0.002 + Math.random() * 0.003,
+        hue: 260 + Math.random() * 30, // violet
+        sat: 40 + Math.random() * 30,
+        kind: "wisp",
+      };
+    }
+  }
+
+  // Initialize
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = spawnParticle();
+    // Scatter initial particles across the full height so it doesn't start empty
+    p.y = Math.random() * uiParticleCanvas.height;
+    p.life = 0.3 + Math.random() * 0.7;
+    particles.push(p);
+  }
+
+  let lastTime = performance.now();
+
+  function draw(now) {
+    const dt = Math.min((now - lastTime) / 16.667, 3); // normalize to ~60fps, cap at 3x
+    lastTime = now;
+
+    ctx.clearRect(0, 0, uiParticleCanvas.width, uiParticleCanvas.height);
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= p.decay * dt;
+
+      // Slight horizontal wave for wisps
+      if (p.kind === "wisp") {
+        p.x += Math.sin(now * 0.001 + i) * 0.15 * dt;
+      }
+
+      if (p.life <= 0 || p.y < -20) {
+        particles[i] = spawnParticle();
+        continue;
+      }
+
+      const alpha = p.life * (p.kind === "spark" ? 0.9 : 0.6);
+
+      if (p.kind === "orb") {
+        // Glowing orb with radial gradient
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 3);
+        grad.addColorStop(0, `hsla(${p.hue}, ${p.sat}%, 90%, ${alpha})`);
+        grad.addColorStop(0.4, `hsla(${p.hue}, ${p.sat}%, 75%, ${alpha * 0.5})`);
+        grad.addColorStop(1, `hsla(${p.hue}, ${p.sat}%, 60%, 0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (p.kind === "spark") {
+        // Bright white spark with a tiny bloom
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 2);
+        grad.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
+        grad.addColorStop(0.5, `rgba(200, 210, 255, ${alpha * 0.4})`);
+        grad.addColorStop(1, `rgba(180, 200, 255, 0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // Wisp — soft violet glow
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 4);
+        grad.addColorStop(0, `hsla(${p.hue}, ${p.sat}%, 80%, ${alpha * 0.7})`);
+        grad.addColorStop(0.5, `hsla(${p.hue}, ${p.sat}%, 65%, ${alpha * 0.3})`);
+        grad.addColorStop(1, `hsla(${p.hue}, ${p.sat}%, 50%, 0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    uiParticleAnimationId = requestAnimationFrame(draw);
+  }
+
+  uiParticleAnimationId = requestAnimationFrame(draw);
+}
+
+function stopUltraInstinctParticles() {
+  if (uiParticleAnimationId) {
+    cancelAnimationFrame(uiParticleAnimationId);
+    uiParticleAnimationId = null;
+  }
+  if (uiParticleResizeHandler) {
+    window.removeEventListener("resize", uiParticleResizeHandler);
+    uiParticleResizeHandler = null;
+  }
+  if (uiParticleCanvas) {
+    uiParticleCanvas.remove();
+    uiParticleCanvas = null;
+  }
+}
+
 function applyTheme(name) {
   document.body.dataset.theme = name;
   localStorage.setItem(THEME_STORAGE_KEY, name);
@@ -4452,6 +4613,12 @@ function applyTheme(name) {
     startMatrixRain();
   } else {
     stopMatrixRain();
+  }
+  // Toggle ultra instinct particles
+  if (name === "ultra-instinct") {
+    startUltraInstinctParticles();
+  } else {
+    stopUltraInstinctParticles();
   }
   // Update active state on theme cards
   if (themePanel) {
