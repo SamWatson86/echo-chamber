@@ -525,27 +525,67 @@ function playLeaveChime() {
   } catch {}
 }
 
+function playSwitchChime() {
+  try {
+    const ctx = getChimeCtx();
+    const now = ctx.currentTime;
+    // Sci-fi teleport swoosh: quick rising sweep then a soft landing ping
+    const swoosh = ctx.createOscillator();
+    const swooshGain = ctx.createGain();
+    swoosh.type = "sawtooth";
+    swoosh.frequency.setValueAtTime(200, now);
+    swoosh.frequency.exponentialRampToValueAtTime(1200, now + 0.15);
+    swoosh.frequency.exponentialRampToValueAtTime(800, now + 0.2);
+    swooshGain.gain.setValueAtTime(0.08, now);
+    swooshGain.gain.linearRampToValueAtTime(0.12, now + 0.08);
+    swooshGain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    swoosh.connect(swooshGain).connect(ctx.destination);
+    swoosh.start(now);
+    swoosh.stop(now + 0.25);
+    // Landing ping
+    const ping = ctx.createOscillator();
+    const pingGain = ctx.createGain();
+    ping.type = "sine";
+    ping.frequency.value = 880;
+    pingGain.gain.setValueAtTime(0.15, now + 0.18);
+    pingGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    ping.connect(pingGain).connect(ctx.destination);
+    ping.start(now + 0.18);
+    ping.stop(now + 0.55);
+  } catch {}
+}
+
 function detectRoomChanges(statusMap) {
   const currentIds = {};
   FIXED_ROOMS.forEach((roomId) => {
     currentIds[roomId] = new Set((statusMap[roomId] || []).map((p) => p.identity));
   });
   const myIdentity = identityInput ? identityInput.value : "";
-  let joined = false;
-  let left = false;
+  // Build flat lookup: identity -> room for previous and current
+  const prevByUser = {};
+  const currByUser = {};
   FIXED_ROOMS.forEach((roomId) => {
-    const prev = previousRoomParticipants[roomId] || new Set();
-    const curr = currentIds[roomId];
-    for (const id of curr) {
-      if (!prev.has(id) && id !== myIdentity) joined = true;
-    }
-    for (const id of prev) {
-      if (!curr.has(id) && id !== myIdentity) left = true;
-    }
+    (previousRoomParticipants[roomId] || new Set()).forEach((id) => { prevByUser[id] = roomId; });
+    currentIds[roomId].forEach((id) => { currByUser[id] = roomId; });
   });
+  let hadJoin = false;
+  let hadLeave = false;
+  let hadSwitch = false;
+  // Check all identities that changed
+  const allIds = new Set([...Object.keys(prevByUser), ...Object.keys(currByUser)]);
+  for (const id of allIds) {
+    if (id === myIdentity) continue;
+    const wasIn = prevByUser[id];
+    const nowIn = currByUser[id];
+    if (wasIn && nowIn && wasIn !== nowIn) hadSwitch = true;
+    else if (!wasIn && nowIn) hadJoin = true;
+    else if (wasIn && !nowIn) hadLeave = true;
+  }
   previousRoomParticipants = currentIds;
-  if (joined) playJoinChime();
-  else if (left) playLeaveChime();
+  // Priority: switch > join > leave (play only one per poll cycle)
+  if (hadSwitch) playSwitchChime();
+  else if (hadJoin) playJoinChime();
+  else if (hadLeave) playLeaveChime();
 }
 
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
