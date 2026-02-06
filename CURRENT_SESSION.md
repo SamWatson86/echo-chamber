@@ -44,6 +44,19 @@
 ### Mic Fix for Spencer
 - Fixed microphone issues for specific user
 
+### Full UI Redesign
+**File**: `core/viewer/style.css`
+
+Complete CSS overhaul with unified frosted glass aesthetic:
+- CSS custom properties for consistent design tokens (borders, glass, radii, transitions)
+- All panels use backdrop-filter blur with translucent gradient backgrounds
+- Unified button styling with glass backgrounds, subtle borders, hover glow
+- Uppercase headers with letter-spacing across all panel titles
+- Sidebar buttons split into two rows (Debug/Chat/Mute All top, Soundboard/Camera Lobby bottom)
+- Soundboard, Camera Lobby, Chat, Settings, Debug panels all match
+- Thin scrollbars, accent-colored range sliders, refined focus rings
+- Pure CSS changes only — no HTML/JS modifications (zero functionality risk)
+
 ## Current Status
 
 **All core work is committed and pushed to GitHub.** Repo is clean.
