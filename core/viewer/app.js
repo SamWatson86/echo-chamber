@@ -4653,7 +4653,7 @@ initTheme();
 // ── UI Transparency slider ──
 function applyUiOpacity(val) {
   const clamped = Math.max(20, Math.min(100, val));
-  document.documentElement.style.setProperty("--ui-opacity", clamped / 100);
+  document.documentElement.style.setProperty("--ui-bg-alpha", clamped / 100);
   localStorage.setItem(UI_OPACITY_KEY, clamped);
   if (uiOpacityValue) uiOpacityValue.textContent = `${clamped}%`;
   if (uiOpacitySlider && parseInt(uiOpacitySlider.value, 10) !== clamped) {

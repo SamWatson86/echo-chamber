@@ -1,15 +1,16 @@
 :root {
   color-scheme: dark;
   --bg: #0b1220;
-  --panel: rgba(17, 24, 39, 0.8);
-  --panel-soft: rgba(30, 41, 59, 0.6);
+  --ui-bg-alpha: 1;
+  --panel: rgba(17, 24, 39, calc(0.8 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(30, 41, 59, calc(0.6 * var(--ui-bg-alpha, 1)));
   --text: #e5e7eb;
   --muted: #94a3b8;
   --accent: #38bdf8;
   --border: rgba(148, 163, 184, 0.12);
   --border-hover: rgba(148, 163, 184, 0.25);
-  --glass: rgba(15, 23, 42, 0.6);
-  --glass-hover: rgba(15, 23, 42, 0.85);
+  --glass: rgba(15, 23, 42, calc(0.6 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(15, 23, 42, calc(0.85 * var(--ui-bg-alpha, 1)));
   --radius: 14px;
   --radius-sm: 8px;
   --radius-lg: 20px;
@@ -477,7 +478,7 @@ video, audio {
 
 /* ─── Active Users Sidebar ─── */
 .room-sidebar {
-  background: linear-gradient(168deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%);
+  background: linear-gradient(168deg, rgba(30, 41, 59, calc(0.85 * var(--ui-bg-alpha, 1))) 0%, rgba(15, 23, 42, calc(0.95 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-radius: var(--radius-lg);
@@ -549,7 +550,7 @@ video, audio {
   right: 24px;
   width: min(340px, calc(100vw - 48px));
   z-index: 30;
-  background: linear-gradient(168deg, rgba(30, 41, 59, 0.92) 0%, rgba(15, 23, 42, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(30, 41, 59, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(15, 23, 42, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--border);
@@ -607,7 +608,7 @@ video, audio {
   bottom: 18px;
   width: min(420px, 92vw);
   max-height: 280px;
-  background: linear-gradient(168deg, rgba(30, 41, 59, 0.92) 0%, rgba(15, 23, 42, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(30, 41, 59, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(15, 23, 42, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   color: var(--text);
@@ -884,7 +885,7 @@ video, audio {
   position: fixed;
   inset: 90px 24px 24px 24px;
   z-index: 32;
-  background: linear-gradient(168deg, rgba(17, 24, 39, 0.96) 0%, rgba(8, 14, 26, 0.99) 100%);
+  background: linear-gradient(168deg, rgba(17, 24, 39, calc(0.96 * var(--ui-bg-alpha, 1))) 0%, rgba(8, 14, 26, calc(0.99 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(32px);
   -webkit-backdrop-filter: blur(32px);
   border: 1px solid var(--border);
@@ -1202,7 +1203,7 @@ video, audio {
   position: fixed;
   inset: 90px 24px 24px 24px;
   z-index: 33;
-  background: linear-gradient(168deg, rgba(17, 24, 39, 0.96) 0%, rgba(8, 14, 26, 0.99) 100%);
+  background: linear-gradient(168deg, rgba(17, 24, 39, calc(0.96 * var(--ui-bg-alpha, 1))) 0%, rgba(8, 14, 26, calc(0.99 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(32px);
   -webkit-backdrop-filter: blur(32px);
   border: 1px solid var(--border);
@@ -1354,7 +1355,7 @@ video, audio {
   bottom: 24px;
   width: 400px;
   z-index: 34;
-  background: linear-gradient(168deg, rgba(17, 24, 39, 0.96) 0%, rgba(8, 14, 26, 0.99) 100%);
+  background: linear-gradient(168deg, rgba(17, 24, 39, calc(0.96 * var(--ui-bg-alpha, 1))) 0%, rgba(8, 14, 26, calc(0.99 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(32px);
   -webkit-backdrop-filter: blur(32px);
   border: 1px solid var(--border);
@@ -1853,17 +1854,6 @@ video, audio {
   text-align: right;
 }
 
-/* UI opacity applied to all panels except the theme panel itself */
-#connect-panel,
-.room-panel,
-.settings-panel,
-.soundboard,
-.camera-lobby,
-.chat-panel,
-.debug-panel {
-  opacity: var(--ui-opacity, 1);
-  transition: opacity 0.2s ease;
-}
 
 /* Preview swatches */
 .frost-preview {
@@ -1947,15 +1937,15 @@ body[data-theme="frost"]::before {
    ═══════════════════════════════════════════ */
 
 body[data-theme="cyberpunk"] {
-  --panel: rgba(25, 5, 45, 0.85);
-  --panel-soft: rgba(40, 10, 60, 0.6);
+  --panel: rgba(25, 5, 45, calc(0.85 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(40, 10, 60, calc(0.6 * var(--ui-bg-alpha, 1)));
   --text: #e8d5f5;
   --muted: #a78bbd;
   --accent: #ff2d78;
   --border: rgba(255, 45, 120, 0.15);
   --border-hover: rgba(255, 45, 120, 0.35);
-  --glass: rgba(25, 5, 45, 0.6);
-  --glass-hover: rgba(35, 10, 55, 0.85);
+  --glass: rgba(25, 5, 45, calc(0.6 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(35, 10, 55, calc(0.85 * var(--ui-bg-alpha, 1)));
   background: #0a0015;
   background-image:
     repeating-linear-gradient(
@@ -2060,7 +2050,7 @@ body[data-theme="cyberpunk"] .soundboard,
 body[data-theme="cyberpunk"] .camera-lobby,
 body[data-theme="cyberpunk"] .chat-panel,
 body[data-theme="cyberpunk"] .debug-panel {
-  background: linear-gradient(168deg, rgba(40, 10, 60, 0.92) 0%, rgba(15, 3, 30, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(40, 10, 60, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(15, 3, 30, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
 }
 
 body[data-theme="cyberpunk"] .user-card { background: rgba(25, 5, 45, 0.7); }
@@ -2091,15 +2081,15 @@ body[data-theme="cyberpunk"] .theme-card.is-active {
    ═══════════════════════════════════════════ */
 
 body[data-theme="aurora"] {
-  --panel: rgba(10, 30, 25, 0.85);
-  --panel-soft: rgba(15, 45, 35, 0.6);
+  --panel: rgba(10, 30, 25, calc(0.85 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(15, 45, 35, calc(0.6 * var(--ui-bg-alpha, 1)));
   --text: #d1fae5;
   --muted: #6ee7b7;
   --accent: #34d399;
   --border: rgba(52, 211, 153, 0.15);
   --border-hover: rgba(52, 211, 153, 0.3);
-  --glass: rgba(10, 30, 25, 0.6);
-  --glass-hover: rgba(15, 40, 32, 0.85);
+  --glass: rgba(10, 30, 25, calc(0.6 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(15, 40, 32, calc(0.85 * var(--ui-bg-alpha, 1)));
   background: linear-gradient(-45deg, #041210, #0a2520, #0d1f2b, #120a25, #041210);
   background-size: 400% 400%;
   animation: aurora-shift 15s ease infinite;
@@ -2196,7 +2186,7 @@ body[data-theme="aurora"] .soundboard,
 body[data-theme="aurora"] .camera-lobby,
 body[data-theme="aurora"] .chat-panel,
 body[data-theme="aurora"] .debug-panel {
-  background: linear-gradient(168deg, rgba(15, 45, 35, 0.92) 0%, rgba(5, 20, 15, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(15, 45, 35, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(5, 20, 15, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
 }
 
 body[data-theme="aurora"] .user-card { background: rgba(10, 30, 25, 0.7); }
@@ -2219,15 +2209,15 @@ body[data-theme="aurora"] .theme-card.is-active {
    ═══════════════════════════════════════════ */
 
 body[data-theme="ember"] {
-  --panel: rgba(35, 12, 5, 0.85);
-  --panel-soft: rgba(50, 20, 10, 0.6);
+  --panel: rgba(35, 12, 5, calc(0.85 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(50, 20, 10, calc(0.6 * var(--ui-bg-alpha, 1)));
   --text: #fed7aa;
   --muted: #c2875e;
   --accent: #f97316;
   --border: rgba(249, 115, 22, 0.15);
   --border-hover: rgba(249, 115, 22, 0.3);
-  --glass: rgba(35, 12, 5, 0.6);
-  --glass-hover: rgba(45, 18, 8, 0.85);
+  --glass: rgba(35, 12, 5, calc(0.6 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(45, 18, 8, calc(0.85 * var(--ui-bg-alpha, 1)));
   background: #130804;
   background-image:
     radial-gradient(ellipse at 25% 15%, rgba(249, 115, 22, 0.1) 0%, transparent 50%),
@@ -2338,7 +2328,7 @@ body[data-theme="ember"] .soundboard,
 body[data-theme="ember"] .camera-lobby,
 body[data-theme="ember"] .chat-panel,
 body[data-theme="ember"] .debug-panel {
-  background: linear-gradient(168deg, rgba(50, 20, 10, 0.92) 0%, rgba(20, 8, 3, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(50, 20, 10, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(20, 8, 3, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
 }
 
 body[data-theme="ember"] .user-card { background: rgba(35, 12, 5, 0.7); }
@@ -2361,15 +2351,15 @@ body[data-theme="ember"] .theme-card.is-active {
    ═══════════════════════════════════════════ */
 
 body[data-theme="matrix"] {
-  --panel: rgba(0, 15, 0, 0.85);
-  --panel-soft: rgba(0, 25, 0, 0.6);
+  --panel: rgba(0, 15, 0, calc(0.85 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(0, 25, 0, calc(0.6 * var(--ui-bg-alpha, 1)));
   --text: #b5ffb5;
   --muted: #39854c;
   --accent: #00ff41;
   --border: rgba(0, 255, 65, 0.12);
   --border-hover: rgba(0, 255, 65, 0.25);
-  --glass: rgba(0, 15, 0, 0.6);
-  --glass-hover: rgba(0, 22, 0, 0.85);
+  --glass: rgba(0, 15, 0, calc(0.6 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(0, 22, 0, calc(0.85 * var(--ui-bg-alpha, 1)));
   background: #000000;
 }
 
@@ -2453,7 +2443,7 @@ body[data-theme="matrix"] .soundboard,
 body[data-theme="matrix"] .camera-lobby,
 body[data-theme="matrix"] .chat-panel,
 body[data-theme="matrix"] .debug-panel {
-  background: linear-gradient(168deg, rgba(0, 25, 0, 0.92) 0%, rgba(0, 8, 0, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(0, 25, 0, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(0, 8, 0, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
 }
 
 body[data-theme="matrix"] .user-card { background: rgba(0, 15, 0, 0.7); }
@@ -2485,15 +2475,15 @@ body[data-theme="matrix"] .panel {
    ═══════════════════════════════════════════ */
 
 body[data-theme="midnight"] {
-  --panel: rgba(18, 8, 42, 0.85);
-  --panel-soft: rgba(30, 15, 55, 0.6);
+  --panel: rgba(18, 8, 42, calc(0.85 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(30, 15, 55, calc(0.6 * var(--ui-bg-alpha, 1)));
   --text: #e0e4ff;
   --muted: #8b7db8;
   --accent: #a78bfa;
   --border: rgba(167, 139, 250, 0.12);
   --border-hover: rgba(167, 139, 250, 0.28);
-  --glass: rgba(18, 8, 42, 0.6);
-  --glass-hover: rgba(25, 12, 52, 0.85);
+  --glass: rgba(18, 8, 42, calc(0.6 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(25, 12, 52, calc(0.85 * var(--ui-bg-alpha, 1)));
   background: #0c0520;
   background-image:
     radial-gradient(1px 1px at 10% 20%, rgba(255, 255, 255, 0.4), transparent),
@@ -2614,7 +2604,7 @@ body[data-theme="midnight"] .soundboard,
 body[data-theme="midnight"] .camera-lobby,
 body[data-theme="midnight"] .chat-panel,
 body[data-theme="midnight"] .debug-panel {
-  background: linear-gradient(168deg, rgba(30, 15, 55, 0.92) 0%, rgba(10, 5, 25, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(30, 15, 55, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(10, 5, 25, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
 }
 
 body[data-theme="midnight"] .user-card { background: rgba(18, 8, 42, 0.7); }
@@ -2641,15 +2631,15 @@ body[data-theme="midnight"] .theme-card.is-active {
 }
 
 body[data-theme="ultra-instinct"] {
-  --panel: rgba(10, 12, 18, 0.92);
-  --panel-soft: rgba(16, 18, 24, 0.65);
+  --panel: rgba(10, 12, 18, calc(0.92 * var(--ui-bg-alpha, 1)));
+  --panel-soft: rgba(16, 18, 24, calc(0.65 * var(--ui-bg-alpha, 1)));
   --text: #eaecf0;
   --muted: #848c98;
   --accent: #c8ced8;
   --border: rgba(200, 206, 216, 0.12);
   --border-hover: rgba(200, 206, 216, 0.28);
-  --glass: rgba(10, 12, 18, 0.70);
-  --glass-hover: rgba(14, 16, 24, 0.88);
+  --glass: rgba(10, 12, 18, calc(0.70 * var(--ui-bg-alpha, 1)));
+  --glass-hover: rgba(14, 16, 24, calc(0.88 * var(--ui-bg-alpha, 1)));
   background: #080a12;
 }
 
@@ -2766,7 +2756,7 @@ body[data-theme="ultra-instinct"] .soundboard,
 body[data-theme="ultra-instinct"] .camera-lobby,
 body[data-theme="ultra-instinct"] .chat-panel,
 body[data-theme="ultra-instinct"] .debug-panel {
-  background: linear-gradient(168deg, rgba(14, 16, 24, 0.93) 0%, rgba(8, 10, 16, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(14, 16, 24, calc(0.93 * var(--ui-bg-alpha, 1))) 0%, rgba(8, 10, 16, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
 }
 
 body[data-theme="ultra-instinct"] .user-card { background: rgba(10, 12, 16, 0.7); }
