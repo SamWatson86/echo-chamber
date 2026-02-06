@@ -2570,28 +2570,28 @@ body[data-theme="midnight"] .theme-card.is-active {
 
 
 /* ═══════════════════════════════════════════
-   ULTRA INSTINCT — Silver aura, cosmic void
+   ULTRA INSTINCT — True silver aura, void black
    ═══════════════════════════════════════════ */
 
 .ultra-instinct-preview {
-  background: linear-gradient(135deg, #060a18 0%, #1a1e3a 25%, #c0cfff 55%, #ffffff 80%, #8090d0 100%);
+  background: linear-gradient(135deg, #08090e 0%, #1a1c22 25%, #c8ced8 55%, #ffffff 80%, #868c96 100%);
 }
 
 body[data-theme="ultra-instinct"] {
-  --panel: rgba(10, 14, 32, 0.88);
-  --panel-soft: rgba(18, 22, 48, 0.6);
-  --text: #e8eaff;
-  --muted: #8090b8;
-  --accent: #c0cfff;
-  --border: rgba(192, 207, 255, 0.12);
-  --border-hover: rgba(192, 207, 255, 0.28);
-  --glass: rgba(10, 14, 32, 0.6);
-  --glass-hover: rgba(16, 20, 42, 0.85);
-  background: #060a18;
+  --panel: rgba(10, 12, 16, 0.88);
+  --panel-soft: rgba(16, 18, 22, 0.6);
+  --text: #eaecf0;
+  --muted: #848c98;
+  --accent: #c8ced8;
+  --border: rgba(200, 206, 216, 0.12);
+  --border-hover: rgba(200, 206, 216, 0.28);
+  --glass: rgba(10, 12, 16, 0.6);
+  --glass-hover: rgba(14, 16, 22, 0.85);
+  background: #08090e;
   background-image:
-    radial-gradient(ellipse at 50% 40%, rgba(192, 207, 255, 0.06) 0%, transparent 60%),
-    radial-gradient(ellipse at 30% 80%, rgba(100, 120, 200, 0.04) 0%, transparent 50%),
-    radial-gradient(circle at 50% 50%, #0c1028, #060a18 70%);
+    radial-gradient(ellipse at 50% 40%, rgba(200, 206, 216, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse at 30% 80%, rgba(160, 165, 175, 0.04) 0%, transparent 50%),
+    radial-gradient(circle at 50% 50%, #0e1014, #08090e 70%);
 }
 
 /* Aura pulse — radiating silver glow */
@@ -2602,8 +2602,8 @@ body[data-theme="ultra-instinct"]::before {
   pointer-events: none;
   z-index: -1;
   background:
-    radial-gradient(circle 500px at 50% 55%, rgba(192, 207, 255, 0.06), transparent),
-    radial-gradient(circle 300px at 50% 55%, rgba(220, 225, 255, 0.04), transparent);
+    radial-gradient(circle 500px at 50% 55%, rgba(200, 206, 216, 0.07), transparent),
+    radial-gradient(circle 300px at 50% 55%, rgba(220, 222, 228, 0.04), transparent);
   animation: ui-aura 4s ease-in-out infinite alternate;
 }
 
@@ -2630,7 +2630,7 @@ body[data-theme="ultra-instinct"]::before {
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  opacity: 0.6;
+  opacity: 0.7;
 }
 
 /* Silver accent overrides */
@@ -2638,87 +2638,87 @@ body[data-theme="ultra-instinct"] input:focus,
 body[data-theme="ultra-instinct"] select:focus,
 body[data-theme="ultra-instinct"] .chat-input:focus,
 body[data-theme="ultra-instinct"] .soundboard-search input:focus {
-  border-color: rgba(192, 207, 255, 0.5);
-  box-shadow: 0 0 0 3px rgba(192, 207, 255, 0.1), 0 0 20px rgba(192, 207, 255, 0.05);
+  border-color: rgba(200, 206, 216, 0.5);
+  box-shadow: 0 0 0 3px rgba(200, 206, 216, 0.1), 0 0 20px rgba(200, 206, 216, 0.05);
 }
 
 body[data-theme="ultra-instinct"] .sidebar-actions button:hover:not(:disabled) {
-  background: rgba(192, 207, 255, 0.1);
-  border-color: rgba(192, 207, 255, 0.3);
+  background: rgba(200, 206, 216, 0.1);
+  border-color: rgba(200, 206, 216, 0.3);
   color: var(--accent);
-  box-shadow: 0 0 15px rgba(192, 207, 255, 0.08);
+  box-shadow: 0 0 15px rgba(200, 206, 216, 0.08);
 }
 
 body[data-theme="ultra-instinct"] button:hover:not(:disabled) {
-  box-shadow: 0 0 12px rgba(192, 207, 255, 0.06);
+  box-shadow: 0 0 12px rgba(200, 206, 216, 0.06);
 }
 
 body[data-theme="ultra-instinct"] .publish-actions button.is-on,
 body[data-theme="ultra-instinct"] .icon-button.is-on,
 body[data-theme="ultra-instinct"] .pill.is-on {
-  border-color: rgba(192, 207, 255, 0.5);
+  border-color: rgba(200, 206, 216, 0.5);
   color: var(--accent);
-  background: rgba(192, 207, 255, 0.12);
+  background: rgba(200, 206, 216, 0.12);
 }
 
 body[data-theme="ultra-instinct"] .enable-all {
-  border-color: rgba(192, 207, 255, 0.2);
-  background: rgba(192, 207, 255, 0.06);
+  border-color: rgba(200, 206, 216, 0.2);
+  background: rgba(200, 206, 216, 0.06);
   color: var(--accent);
 }
 
 body[data-theme="ultra-instinct"] .enable-all:hover {
-  background: rgba(192, 207, 255, 0.12);
-  border-color: rgba(192, 207, 255, 0.35);
+  background: rgba(200, 206, 216, 0.12);
+  border-color: rgba(200, 206, 216, 0.35);
 }
 
 /* Active room — bright silver glow */
 body[data-theme="ultra-instinct"] .room-status-btn.is-active {
-  background: rgba(192, 207, 255, 0.12);
-  border-color: rgba(192, 207, 255, 0.45);
-  color: #dce1ff;
-  box-shadow: 0 0 14px rgba(192, 207, 255, 0.2);
+  background: rgba(200, 206, 216, 0.12);
+  border-color: rgba(200, 206, 216, 0.45);
+  color: #e0e2e8;
+  box-shadow: 0 0 14px rgba(200, 206, 216, 0.2);
 }
 
 body[data-theme="ultra-instinct"] .room-status-btn.is-active .room-status-count {
-  background: rgba(192, 207, 255, 0.2);
-  color: #dce1ff;
+  background: rgba(200, 206, 216, 0.2);
+  color: #e0e2e8;
 }
 
-/* Rooms with users — subtle silver-blue */
+/* Rooms with users — subtle silver */
 body[data-theme="ultra-instinct"] .room-status-btn.has-users {
-  background: rgba(140, 160, 220, 0.08);
-  border-color: rgba(140, 160, 220, 0.35);
-  color: #a8b8e0;
-  box-shadow: 0 0 8px rgba(140, 160, 220, 0.1);
+  background: rgba(160, 168, 180, 0.08);
+  border-color: rgba(160, 168, 180, 0.35);
+  color: #a8b0b8;
+  box-shadow: 0 0 8px rgba(160, 168, 180, 0.1);
 }
 
 body[data-theme="ultra-instinct"] .room-status-btn.has-users:hover {
-  background: rgba(140, 160, 220, 0.15);
-  border-color: rgba(140, 160, 220, 0.5);
+  background: rgba(160, 168, 180, 0.15);
+  border-color: rgba(160, 168, 180, 0.5);
 }
 
 body[data-theme="ultra-instinct"] .room-status-count {
-  background: rgba(140, 160, 220, 0.2);
-  color: #a8b8e0;
+  background: rgba(160, 168, 180, 0.2);
+  color: #a8b0b8;
 }
 
 body[data-theme="ultra-instinct"] .chat-send-btn {
-  background: rgba(192, 207, 255, 0.12);
-  border-color: rgba(192, 207, 255, 0.25);
+  background: rgba(200, 206, 216, 0.12);
+  border-color: rgba(200, 206, 216, 0.25);
   color: var(--accent);
 }
 
 body[data-theme="ultra-instinct"] .chat-send-btn:hover {
-  background: rgba(192, 207, 255, 0.2);
-  border-color: rgba(192, 207, 255, 0.45);
-  box-shadow: 0 0 15px rgba(192, 207, 255, 0.1);
+  background: rgba(200, 206, 216, 0.2);
+  border-color: rgba(200, 206, 216, 0.45);
+  box-shadow: 0 0 15px rgba(200, 206, 216, 0.1);
 }
 
-body[data-theme="ultra-instinct"] .chat-message-author { color: #b0c0ff; }
-body[data-theme="ultra-instinct"] .chat-message-author.self { color: #dce1ff; }
-body[data-theme="ultra-instinct"] .chat-message-content a { color: #dce1ff; text-decoration-color: rgba(220, 225, 255, 0.3); }
-body[data-theme="ultra-instinct"] .chat-emoji:hover { background: rgba(192, 207, 255, 0.08); }
+body[data-theme="ultra-instinct"] .chat-message-author { color: #b8bec8; }
+body[data-theme="ultra-instinct"] .chat-message-author.self { color: #e0e2e8; }
+body[data-theme="ultra-instinct"] .chat-message-content a { color: #e0e2e8; text-decoration-color: rgba(220, 222, 228, 0.3); }
+body[data-theme="ultra-instinct"] .chat-emoji:hover { background: rgba(200, 206, 216, 0.08); }
 
 body[data-theme="ultra-instinct"] .room-sidebar,
 body[data-theme="ultra-instinct"] .settings-panel,
@@ -2726,49 +2726,49 @@ body[data-theme="ultra-instinct"] .soundboard,
 body[data-theme="ultra-instinct"] .camera-lobby,
 body[data-theme="ultra-instinct"] .chat-panel,
 body[data-theme="ultra-instinct"] .debug-panel {
-  background: linear-gradient(168deg, rgba(18, 22, 48, 0.92) 0%, rgba(6, 10, 24, 0.98) 100%);
+  background: linear-gradient(168deg, rgba(16, 18, 22, 0.92) 0%, rgba(8, 10, 14, 0.98) 100%);
 }
 
-body[data-theme="ultra-instinct"] .user-card { background: rgba(10, 14, 32, 0.7); }
+body[data-theme="ultra-instinct"] .user-card { background: rgba(10, 12, 16, 0.7); }
 body[data-theme="ultra-instinct"] .user-card:hover {
-  background: rgba(14, 18, 38, 0.9);
-  box-shadow: 0 4px 20px rgba(192, 207, 255, 0.06);
+  background: rgba(12, 14, 18, 0.9);
+  box-shadow: 0 4px 20px rgba(200, 206, 216, 0.06);
 }
 body[data-theme="ultra-instinct"] .user-avatar {
-  background: linear-gradient(135deg, #1a1e3a 0%, #0c1028 100%);
+  background: linear-gradient(135deg, #1a1c22 0%, #0e1014 100%);
 }
 body[data-theme="ultra-instinct"] .user-card:hover .user-avatar {
-  border-color: rgba(192, 207, 255, 0.25);
-  box-shadow: 0 0 10px rgba(192, 207, 255, 0.08);
+  border-color: rgba(200, 206, 216, 0.25);
+  box-shadow: 0 0 10px rgba(200, 206, 216, 0.08);
 }
 
 body[data-theme="ultra-instinct"] .sound-tile:hover,
 body[data-theme="ultra-instinct"] .sound-edit:hover {
-  border-color: rgba(192, 207, 255, 0.3);
+  border-color: rgba(200, 206, 216, 0.3);
 }
 
 body[data-theme="ultra-instinct"] .soundboard-icon-grid button.is-selected,
 body[data-theme="ultra-instinct"] .sound-tile.is-editing {
-  border-color: rgba(192, 207, 255, 0.5);
-  box-shadow: 0 0 0 2px rgba(192, 207, 255, 0.12);
-  background: rgba(192, 207, 255, 0.05);
+  border-color: rgba(200, 206, 216, 0.5);
+  box-shadow: 0 0 0 2px rgba(200, 206, 216, 0.12);
+  background: rgba(200, 206, 216, 0.05);
 }
 
 body[data-theme="ultra-instinct"] .icon-button.is-active {
-  border-color: rgba(192, 207, 255, 0.45);
-  box-shadow: 0 0 14px rgba(192, 207, 255, 0.2);
-  background: rgba(192, 207, 255, 0.06);
+  border-color: rgba(200, 206, 216, 0.45);
+  box-shadow: 0 0 14px rgba(200, 206, 216, 0.2);
+  background: rgba(200, 206, 216, 0.06);
 }
 
 body[data-theme="ultra-instinct"] .panel {
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(192, 207, 255, 0.04);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(200, 206, 216, 0.04);
 }
 
 body[data-theme="ultra-instinct"] .theme-panel {
-  background: linear-gradient(168deg, rgba(18, 22, 48, 0.97) 0%, rgba(6, 10, 24, 0.99) 100%);
+  background: linear-gradient(168deg, rgba(16, 18, 22, 0.97) 0%, rgba(8, 10, 14, 0.99) 100%);
 }
 
 body[data-theme="ultra-instinct"] .theme-card.is-active {
-  border-color: #c0cfff;
-  box-shadow: 0 0 24px rgba(192, 207, 255, 0.25);
+  border-color: #c8ced8;
+  box-shadow: 0 0 24px rgba(200, 206, 216, 0.25);
 }

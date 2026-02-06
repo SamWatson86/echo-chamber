@@ -4456,23 +4456,97 @@ function startUltraInstinctParticles() {
   document.body.prepend(uiParticleCanvas);
   const ctx = uiParticleCanvas.getContext("2d");
 
+  // ── Goku Ultra Instinct silhouette path (front-facing bust) ──
+  // Normalized coords: (0,0) = center of shoulders, Y negative = upward
+  const silhouettePath = [
+    [-0.55, 0], [-0.42, -0.02], [-0.25, -0.18], [-0.18, -0.28],
+    [-0.17, -0.35], [-0.20, -0.42], [-0.22, -0.50], [-0.20, -0.58],
+    [-0.18, -0.64], [-0.20, -0.68],
+    // Hair spikes — left side
+    [-0.30, -0.78], [-0.18, -0.72],
+    [-0.34, -0.90], [-0.15, -0.78],
+    [-0.28, -1.00], [-0.10, -0.83],
+    [-0.18, -1.10], [-0.04, -0.88],
+    // Central spikes (tallest)
+    [-0.08, -1.18], [0.02, -0.90],
+    [0.10, -1.20], [0.06, -0.88],
+    // Hair spikes — right side
+    [0.20, -1.08], [0.12, -0.83],
+    [0.30, -0.98], [0.17, -0.78],
+    [0.36, -0.88], [0.20, -0.72],
+    [0.32, -0.76], [0.20, -0.68],
+    // Right face/body (mirror)
+    [0.18, -0.64], [0.20, -0.58], [0.22, -0.50], [0.20, -0.42],
+    [0.17, -0.35], [0.18, -0.28], [0.25, -0.18], [0.42, -0.02],
+    [0.55, 0],
+  ];
+
+  // Pre-render silhouette to offscreen buffer for performance
+  let silBuffer = null;
+
+  function renderSilhouetteBuffer() {
+    silBuffer = document.createElement("canvas");
+    silBuffer.width = uiParticleCanvas.width;
+    silBuffer.height = uiParticleCanvas.height;
+    const sCtx = silBuffer.getContext("2d");
+    const scale = Math.min(silBuffer.width, silBuffer.height) * 0.38;
+    const cx = silBuffer.width / 2;
+    const baseY = silBuffer.height + scale * 0.02;
+
+    // Head-area aura glow (drawn first, behind silhouette)
+    const auraGrad = sCtx.createRadialGradient(
+      cx, baseY + silhouettePath[9][1] * scale * 0.5, 0,
+      cx, baseY + silhouettePath[9][1] * scale * 0.5, scale * 0.6
+    );
+    auraGrad.addColorStop(0, "rgba(210, 214, 222, 0.06)");
+    auraGrad.addColorStop(0.5, "rgba(200, 206, 216, 0.03)");
+    auraGrad.addColorStop(1, "rgba(200, 206, 216, 0)");
+    sCtx.fillStyle = auraGrad;
+    sCtx.fillRect(0, 0, silBuffer.width, silBuffer.height);
+
+    // Multiple glow passes for the silhouette stroke
+    const passes = [
+      { blur: 28, alpha: 0.08, width: 10 },
+      { blur: 16, alpha: 0.14, width: 6 },
+      { blur: 8, alpha: 0.22, width: 4 },
+      { blur: 3, alpha: 0.35, width: 2.5 },
+      { blur: 0, alpha: 0.50, width: 1.5 },
+    ];
+
+    for (const pass of passes) {
+      sCtx.save();
+      sCtx.filter = pass.blur > 0 ? `blur(${pass.blur}px)` : "none";
+      sCtx.strokeStyle = `rgba(210, 214, 222, ${pass.alpha})`;
+      sCtx.lineWidth = pass.width;
+      sCtx.lineJoin = "round";
+      sCtx.lineCap = "round";
+      sCtx.beginPath();
+      sCtx.moveTo(cx + silhouettePath[0][0] * scale, baseY + silhouettePath[0][1] * scale);
+      for (let i = 1; i < silhouettePath.length; i++) {
+        sCtx.lineTo(cx + silhouettePath[i][0] * scale, baseY + silhouettePath[i][1] * scale);
+      }
+      sCtx.stroke();
+      sCtx.restore();
+    }
+  }
+
   const resize = () => {
     uiParticleCanvas.width = window.innerWidth;
     uiParticleCanvas.height = window.innerHeight;
+    renderSilhouetteBuffer();
   };
   resize();
   uiParticleResizeHandler = resize;
   window.addEventListener("resize", uiParticleResizeHandler);
 
-  // Particle pool
+  // ── Particle pool ──
   const PARTICLE_COUNT = 120;
   const particles = [];
 
   function spawnParticle() {
     const type = Math.random();
-    // Three particle types: orbs, sparks, wisps
     if (type < 0.4) {
-      // Orbs — slow, large, silver glow
+      // Orbs — slow, large, pure silver/white glow
       return {
         x: Math.random() * uiParticleCanvas.width,
         y: uiParticleCanvas.height + Math.random() * 60,
@@ -4481,8 +4555,6 @@ function startUltraInstinctParticles() {
         size: 2 + Math.random() * 4,
         life: 1,
         decay: 0.001 + Math.random() * 0.002,
-        hue: 220 + Math.random() * 30, // blue-silver
-        sat: 20 + Math.random() * 30,
         kind: "orb",
       };
     } else if (type < 0.75) {
@@ -4495,12 +4567,10 @@ function startUltraInstinctParticles() {
         size: 1 + Math.random() * 1.5,
         life: 1,
         decay: 0.008 + Math.random() * 0.006,
-        hue: 0,
-        sat: 0,
         kind: "spark",
       };
     } else {
-      // Wisps — medium drift, violet tint
+      // Wisps — medium drift, faint cool-gray shimmer
       return {
         x: Math.random() * uiParticleCanvas.width,
         y: uiParticleCanvas.height + Math.random() * 100,
@@ -4509,17 +4579,14 @@ function startUltraInstinctParticles() {
         size: 1.5 + Math.random() * 3,
         life: 1,
         decay: 0.002 + Math.random() * 0.003,
-        hue: 260 + Math.random() * 30, // violet
-        sat: 40 + Math.random() * 30,
+        lightness: 75 + Math.random() * 15,
         kind: "wisp",
       };
     }
   }
 
-  // Initialize
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const p = spawnParticle();
-    // Scatter initial particles across the full height so it doesn't start empty
     p.y = Math.random() * uiParticleCanvas.height;
     p.life = 0.3 + Math.random() * 0.7;
     particles.push(p);
@@ -4528,18 +4595,26 @@ function startUltraInstinctParticles() {
   let lastTime = performance.now();
 
   function draw(now) {
-    const dt = Math.min((now - lastTime) / 16.667, 3); // normalize to ~60fps, cap at 3x
+    const dt = Math.min((now - lastTime) / 16.667, 3);
     lastTime = now;
 
     ctx.clearRect(0, 0, uiParticleCanvas.width, uiParticleCanvas.height);
 
+    // ── Draw Goku silhouette with breathing pulse ──
+    if (silBuffer) {
+      const pulse = 0.5 + 0.5 * Math.sin(now * 0.0008);
+      ctx.globalAlpha = 0.35 + 0.45 * pulse;
+      ctx.drawImage(silBuffer, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Draw particles ──
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.life -= p.decay * dt;
 
-      // Slight horizontal wave for wisps
       if (p.kind === "wisp") {
         p.x += Math.sin(now * 0.001 + i) * 0.15 * dt;
       }
@@ -4552,31 +4627,32 @@ function startUltraInstinctParticles() {
       const alpha = p.life * (p.kind === "spark" ? 0.9 : 0.6);
 
       if (p.kind === "orb") {
-        // Glowing orb with radial gradient
+        // Silver-white orb
         const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 3);
-        grad.addColorStop(0, `hsla(${p.hue}, ${p.sat}%, 90%, ${alpha})`);
-        grad.addColorStop(0.4, `hsla(${p.hue}, ${p.sat}%, 75%, ${alpha * 0.5})`);
-        grad.addColorStop(1, `hsla(${p.hue}, ${p.sat}%, 60%, 0)`);
+        grad.addColorStop(0, `rgba(220, 222, 228, ${alpha})`);
+        grad.addColorStop(0.4, `rgba(200, 204, 212, ${alpha * 0.5})`);
+        grad.addColorStop(1, `rgba(180, 184, 192, 0)`);
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2);
         ctx.fill();
       } else if (p.kind === "spark") {
-        // Bright white spark with a tiny bloom
+        // Pure white spark
         const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 2);
         grad.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
-        grad.addColorStop(0.5, `rgba(200, 210, 255, ${alpha * 0.4})`);
-        grad.addColorStop(1, `rgba(180, 200, 255, 0)`);
+        grad.addColorStop(0.5, `rgba(220, 222, 228, ${alpha * 0.4})`);
+        grad.addColorStop(1, `rgba(200, 204, 212, 0)`);
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size * 2, 0, Math.PI * 2);
         ctx.fill();
       } else {
-        // Wisp — soft violet glow
+        // Wisp — neutral silver shimmer
+        const l = p.lightness || 80;
         const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 4);
-        grad.addColorStop(0, `hsla(${p.hue}, ${p.sat}%, 80%, ${alpha * 0.7})`);
-        grad.addColorStop(0.5, `hsla(${p.hue}, ${p.sat}%, 65%, ${alpha * 0.3})`);
-        grad.addColorStop(1, `hsla(${p.hue}, ${p.sat}%, 50%, 0)`);
+        grad.addColorStop(0, `hsla(220, 6%, ${l}%, ${alpha * 0.7})`);
+        grad.addColorStop(0.5, `hsla(220, 4%, ${l - 15}%, ${alpha * 0.3})`);
+        grad.addColorStop(1, `hsla(220, 3%, ${l - 25}%, 0)`);
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size * 4, 0, Math.PI * 2);
