@@ -50,6 +50,18 @@ const cameraLobbyGrid = document.getElementById("camera-lobby-grid");
 const lobbyToggleMicButton = document.getElementById("lobby-toggle-mic");
 const lobbyToggleCameraButton = document.getElementById("lobby-toggle-camera");
 
+const openChatButton = document.getElementById("open-chat");
+const closeChatButton = document.getElementById("close-chat");
+const chatPanel = document.getElementById("chat-panel");
+const chatMessages = document.getElementById("chat-messages");
+const chatInput = document.getElementById("chat-input");
+const chatSendBtn = document.getElementById("chat-send-btn");
+const chatUploadBtn = document.getElementById("chat-upload-btn");
+const chatEmojiBtn = document.getElementById("chat-emoji-btn");
+const chatFileInput = document.getElementById("chat-file-input");
+const chatEmojiPicker = document.getElementById("chat-emoji-picker");
+const roomSelector = document.getElementById("room-selector");
+
 const controlUrlInput = document.getElementById("control-url");
 const sfuUrlInput = document.getElementById("sfu-url");
 const roomInput = document.getElementById("room");
@@ -97,6 +109,11 @@ const cameraVideoBySid = new Map();
 const lastTrackHandled = new Map();
 const cameraClearTimers = new Map();
 const screenTileByIdentity = new Map();
+const chatHistory = [];
+let chatDataChannel = null;
+const CHAT_MESSAGE_TYPE = "chat-message";
+const CHAT_FILE_TYPE = "chat-file";
+const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
 
 function safeStorageGet(key) {
   try {
@@ -2930,7 +2947,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.DataReceived) {
-    room.on(LK.RoomEvent.DataReceived, (payload) => {
+    room.on(LK.RoomEvent.DataReceived, (payload, participant) => {
       try {
         const text = new TextDecoder().decode(payload);
         const msg = JSON.parse(text);
@@ -2945,6 +2962,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         } else if (msg.type === "request-reshare") {
           // Ignore remote re-share requests to avoid repeated user prompts.
           // We handle black frames locally via resubscribe + keyframe.
+        } else if (msg.type === CHAT_MESSAGE_TYPE || msg.type === CHAT_FILE_TYPE) {
+          handleIncomingChatData(payload, participant);
         }
       } catch {
         // ignore
@@ -3041,6 +3060,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   currentRoomName = roomId;
   if (openSoundboardButton) openSoundboardButton.disabled = false;
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = false;
+  if (openChatButton) openChatButton.disabled = false;
+  if (roomSelector) roomSelector.disabled = false;
   if (toggleRoomAudioButton) {
     toggleRoomAudioButton.disabled = false;
     setRoomAudioMutedState(false);
@@ -3051,10 +3072,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     if (deviceStatusEl) settingsDevicePanel.appendChild(deviceStatusEl);
   }
   primeSoundboardAudio();
+  initializeEmojiPicker();
+  loadChatHistory(roomId);
+  if (roomSelector) {
+    roomSelector.value = roomId;
+  }
   connectBtn.disabled = true;
   disconnectBtn.disabled = false;
   disconnectTopBtn.disabled = false;
-  createRoomBtn.disabled = false;
   roomListEl.classList.remove("hidden");
   connectPanel.classList.add("hidden");
   setPublishButtonsEnabled(true);
@@ -3175,6 +3200,9 @@ async function disconnect() {
   clearSoundboardState();
   currentAccessToken = "";
   if (openSoundboardButton) openSoundboardButton.disabled = true;
+  if (openCameraLobbyButton) openCameraLobbyButton.disabled = true;
+  if (openChatButton) openChatButton.disabled = true;
+  if (roomSelector) roomSelector.disabled = true;
   if (toggleRoomAudioButton) toggleRoomAudioButton.disabled = true;
   if (openSettingsButton) openSettingsButton.disabled = true;
   if (deviceActionsEl && deviceActionsHome) {
@@ -3187,7 +3215,7 @@ async function disconnect() {
   connectBtn.disabled = false;
   disconnectBtn.disabled = true;
   disconnectTopBtn.disabled = true;
-  createRoomBtn.disabled = true;
+  if (roomSelector) roomSelector.disabled = true;
   roomListEl.classList.add("hidden");
   connectPanel.classList.remove("hidden");
   setPublishButtonsEnabled(false);
@@ -3197,6 +3225,337 @@ async function disconnect() {
   renderPublishButtons();
   setDeviceStatus("");
   setStatus("Disconnected");
+}
+
+// ==================== CHAT FUNCTIONALITY ====================
+
+const EMOJI_LIST = [
+  "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇",
+  "🥰", "😍", "🤩", "😘", "😗", "😚", "😙", "🥲", "😋", "😛", "😜", "🤪", "😝",
+  "🤑", "🤗", "🤭", "🤫", "🤔", "🤐", "🤨", "😐", "😑", "😶", "😏", "😒", "🙄",
+  "😬", "🤥", "😌", "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🤧",
+  "🥵", "🥶", "🥴", "😵", "🤯", "🤠", "🥳", "🥸", "😎", "🤓", "🧐", "😕", "😟",
+  "🙁", "☹️", "😮", "😯", "😲", "😳", "🥺", "😦", "😧", "😨", "😰", "😥", "😢",
+  "😭", "😱", "😖", "😣", "😞", "😓", "😩", "😫", "🥱", "😤", "😡", "😠", "🤬",
+  "😈", "👿", "💀", "☠️", "💩", "🤡", "👹", "👺", "👻", "👽", "👾", "🤖", "😺",
+  "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "👋", "🤚", "🖐️", "✋", "🖖",
+  "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙", "👈", "👉", "👆", "🖕", "👇",
+  "☝️", "👍", "👎", "✊", "👊", "🤛", "🤜", "👏", "🙌", "👐", "🤲", "🤝", "🙏",
+  "✍️", "💅", "🤳", "💪", "🦾", "🦿", "🦵", "🦶", "👂", "🦻", "👃", "🧠", "🫀",
+  "🫁", "🦷", "🦴", "👀", "👁️", "👅", "👄", "💋", "🩸", "❤️", "🧡", "💛", "💚",
+  "💙", "💜", "🤎", "🖤", "🤍", "💔", "❣️", "💕", "💞", "💓", "💗", "💖", "💘",
+  "💝", "💟", "☮️", "✝️", "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎", "☯️", "☦️", "🛐",
+  "⛎", "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓", "🆔", "⚛️",
+  "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫", "⚪", "🟥", "🟧", "🟨", "🟩",
+  "🟦", "🟪", "🟫", "⬛", "⬜", "🔶", "🔷", "🔸", "🔹", "🔺", "🔻", "💠", "🔘",
+  "🔳", "🔲", "🏁", "🚩", "🎌", "🏴", "🏳️", "🏳️‍🌈", "🏳️‍⚧️", "🏴‍☠️", "🇺🇳"
+];
+
+function linkifyText(text) {
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  return text.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+}
+
+function formatTime(timestamp) {
+  const date = new Date(timestamp);
+  const hours = date.getHours().toString().padStart(2, "0");
+  const minutes = date.getMinutes().toString().padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function renderChatMessage(message) {
+  const messageEl = document.createElement("div");
+  messageEl.className = "chat-message";
+
+  const headerEl = document.createElement("div");
+  headerEl.className = "chat-message-header";
+
+  const authorEl = document.createElement("div");
+  authorEl.className = "chat-message-author";
+  if (message.identity === room?.localParticipant?.identity) {
+    authorEl.classList.add("self");
+  }
+  authorEl.textContent = message.name || message.identity;
+
+  const timeEl = document.createElement("div");
+  timeEl.className = "chat-message-time";
+  timeEl.textContent = formatTime(message.timestamp);
+
+  headerEl.appendChild(authorEl);
+  headerEl.appendChild(timeEl);
+  messageEl.appendChild(headerEl);
+
+  if (message.type === CHAT_FILE_TYPE && message.fileUrl) {
+    if (message.fileType?.startsWith("image/")) {
+      const imgEl = document.createElement("img");
+      imgEl.className = "chat-message-image";
+      imgEl.src = message.fileUrl;
+      imgEl.alt = message.fileName || "Image";
+      imgEl.loading = "lazy";
+      imgEl.addEventListener("click", () => {
+        window.open(message.fileUrl, "_blank");
+      });
+      messageEl.appendChild(imgEl);
+
+      if (message.text) {
+        const contentEl = document.createElement("div");
+        contentEl.className = "chat-message-content";
+        contentEl.innerHTML = linkifyText(message.text);
+        messageEl.appendChild(contentEl);
+      }
+    } else {
+      const fileEl = document.createElement("div");
+      fileEl.className = "chat-message-file";
+      fileEl.addEventListener("click", () => {
+        window.open(message.fileUrl, "_blank");
+      });
+
+      const iconEl = document.createElement("div");
+      iconEl.className = "chat-message-file-icon";
+      iconEl.textContent = "📄";
+
+      const nameEl = document.createElement("div");
+      nameEl.className = "chat-message-file-name";
+      nameEl.textContent = message.fileName || "File";
+
+      fileEl.appendChild(iconEl);
+      fileEl.appendChild(nameEl);
+      messageEl.appendChild(fileEl);
+
+      if (message.text) {
+        const contentEl = document.createElement("div");
+        contentEl.className = "chat-message-content";
+        contentEl.innerHTML = linkifyText(message.text);
+        messageEl.appendChild(contentEl);
+      }
+    }
+  } else if (message.text) {
+    const contentEl = document.createElement("div");
+    contentEl.className = "chat-message-content";
+    contentEl.innerHTML = linkifyText(message.text);
+    messageEl.appendChild(contentEl);
+  }
+
+  return messageEl;
+}
+
+function addChatMessage(message) {
+  chatHistory.push(message);
+  const messageEl = renderChatMessage(message);
+  chatMessages.appendChild(messageEl);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  // Persist to server
+  saveChatMessage(message);
+}
+
+function sendChatMessage(text, fileData = null) {
+  if (!room || !room.localParticipant) return;
+
+  const message = {
+    type: fileData ? CHAT_FILE_TYPE : CHAT_MESSAGE_TYPE,
+    identity: room.localParticipant.identity,
+    name: room.localParticipant.name || room.localParticipant.identity,
+    text: text.trim(),
+    timestamp: Date.now(),
+    room: currentRoomName
+  };
+
+  if (fileData) {
+    message.fileUrl = fileData.url;
+    message.fileName = fileData.name;
+    message.fileType = fileData.type;
+  }
+
+  // Send via LiveKit data channel
+  try {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(JSON.stringify(message));
+    room.localParticipant.publishData(data, {reliable: true});
+  } catch (err) {
+    debugLog(`Failed to send chat message: ${err.message}`);
+  }
+
+  // Add to local chat
+  addChatMessage(message);
+}
+
+function handleIncomingChatData(payload, participant) {
+  try {
+    const decoder = new TextDecoder();
+    const text = decoder.decode(payload);
+    const message = JSON.parse(text);
+
+    // Only handle messages for current room
+    if (message.room && message.room !== currentRoomName) return;
+
+    // Ignore messages from self (already added locally)
+    if (participant && participant.identity === room?.localParticipant?.identity) return;
+
+    if (message.type === CHAT_MESSAGE_TYPE || message.type === CHAT_FILE_TYPE) {
+      // Ensure message has required fields
+      if (!message.identity) {
+        message.identity = participant?.identity || "unknown";
+      }
+      if (!message.name) {
+        message.name = participant?.name || participant?.identity || "Unknown";
+      }
+      if (!message.timestamp) {
+        message.timestamp = Date.now();
+      }
+
+      chatHistory.push(message);
+      const messageEl = renderChatMessage(message);
+      chatMessages.appendChild(messageEl);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+  } catch (err) {
+    debugLog(`Failed to parse chat data: ${err.message}`);
+  }
+}
+
+function openChat() {
+  if (!chatPanel) return;
+  chatPanel.classList.remove("hidden");
+  chatInput.focus();
+}
+
+function closeChat() {
+  if (!chatPanel) return;
+  chatPanel.classList.add("hidden");
+}
+
+function initializeEmojiPicker() {
+  if (!chatEmojiPicker) return;
+  chatEmojiPicker.innerHTML = "";
+  EMOJI_LIST.forEach(emoji => {
+    const emojiEl = document.createElement("div");
+    emojiEl.className = "chat-emoji";
+    emojiEl.textContent = emoji;
+    emojiEl.addEventListener("click", () => {
+      const cursorPos = chatInput.selectionStart;
+      const textBefore = chatInput.value.substring(0, cursorPos);
+      const textAfter = chatInput.value.substring(cursorPos);
+      chatInput.value = textBefore + emoji + textAfter;
+      chatInput.focus();
+      chatInput.selectionStart = chatInput.selectionEnd = cursorPos + emoji.length;
+      chatEmojiPicker.classList.add("hidden");
+    });
+    chatEmojiPicker.appendChild(emojiEl);
+  });
+}
+
+function toggleEmojiPicker() {
+  if (!chatEmojiPicker) return;
+  chatEmojiPicker.classList.toggle("hidden");
+}
+
+async function handleChatImagePaste(file) {
+  if (!file) return;
+
+  try {
+    const controlUrl = controlUrlInput?.value || "https://127.0.0.1:9443";
+    const fileBytes = await file.arrayBuffer();
+    const response = await fetch(`${controlUrl}/api/chat/upload?room=${encodeURIComponent(currentRoomName)}`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${adminToken}`
+      },
+      body: fileBytes
+    });
+
+    if (!response.ok) throw new Error("Upload failed");
+
+    const result = await response.json();
+    if (!result.ok || !result.url) {
+      throw new Error(result.error || "Upload failed");
+    }
+
+    const fullUrl = `${controlUrl}${result.url}`;
+    return {
+      url: fullUrl,
+      name: file.name,
+      type: file.type
+    };
+  } catch (err) {
+    debugLog(`Failed to upload file: ${err.message}`);
+    return null;
+  }
+}
+
+async function handleChatFileUpload() {
+  if (!chatFileInput || !chatFileInput.files || chatFileInput.files.length === 0) return;
+
+  const file = chatFileInput.files[0];
+  const fileData = await handleChatImagePaste(file);
+
+  if (fileData) {
+    sendChatMessage("", fileData);
+  }
+
+  chatFileInput.value = "";
+}
+
+async function loadChatHistory(roomName) {
+  try {
+    const controlUrl = controlUrlInput?.value || "https://127.0.0.1:9443";
+    const response = await fetch(`${controlUrl}/api/chat/history/${encodeURIComponent(roomName)}`, {
+      headers: {
+        "Authorization": `Bearer ${adminToken}`
+      }
+    });
+
+    if (!response.ok) return;
+
+    const history = await response.json();
+    chatHistory.length = 0;
+    chatMessages.innerHTML = "";
+
+    history.forEach(message => {
+      chatHistory.push(message);
+      const messageEl = renderChatMessage(message);
+      chatMessages.appendChild(messageEl);
+    });
+
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  } catch (err) {
+    debugLog(`Failed to load chat history: ${err.message}`);
+  }
+}
+
+async function saveChatMessage(message) {
+  try {
+    const controlUrl = controlUrlInput?.value || "https://127.0.0.1:9443";
+    await fetch(`${controlUrl}/api/chat/message`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${adminToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(message)
+    });
+  } catch (err) {
+    debugLog(`Failed to save chat message: ${err.message}`);
+  }
+}
+
+async function switchRoom(newRoomName) {
+  if (newRoomName === currentRoomName) return;
+
+  debugLog(`Switching from ${currentRoomName} to ${newRoomName}`);
+  currentRoomName = newRoomName;
+
+  // Load chat history for new room
+  await loadChatHistory(newRoomName);
+
+  // Disconnect and reconnect to new room
+  if (room) {
+    await disconnect();
+    // Wait a moment before reconnecting
+    setTimeout(() => {
+      connect().catch(() => {});
+    }, 500);
+  }
 }
 
 connectBtn.addEventListener("click", () => {
@@ -3339,14 +3698,15 @@ refreshDevicesBtn.addEventListener("click", async () => {
   setDeviceStatus("");
 });
 
-createRoomBtn.addEventListener("click", async () => {
-  if (!adminToken) return;
-  const controlUrl = controlUrlInput.value.trim();
-  const roomId = prompt("New room name");
-  if (!roomId) return;
-  await ensureRoomExists(controlUrl, adminToken, roomId.trim());
-  await refreshRoomList(controlUrl, adminToken, currentRoomName);
-});
+// Create Room button removed in favor of fixed rooms (Main, Breakout 1-3)
+// createRoomBtn.addEventListener("click", async () => {
+//   if (!adminToken) return;
+//   const controlUrl = controlUrlInput.value.trim();
+//   const roomId = prompt("New room name");
+//   if (!roomId) return;
+//   await ensureRoomExists(controlUrl, adminToken, roomId.trim());
+//   await refreshRoomList(controlUrl, adminToken, currentRoomName);
+// });
 
 micSelect.addEventListener("change", () => {
   switchMic(micSelect.value).catch(() => {});
@@ -3443,6 +3803,101 @@ if (lobbyToggleCameraButton) {
     // Refresh lobby to show/hide local camera
     if (!cameraLobbyPanel.classList.contains('hidden')) {
       populateCameraLobby();
+    }
+  });
+}
+
+// Chat event listeners
+if (openChatButton) {
+  openChatButton.addEventListener("click", () => {
+    openChat();
+  });
+}
+
+if (closeChatButton) {
+  closeChatButton.addEventListener("click", () => {
+    closeChat();
+  });
+}
+
+if (chatSendBtn) {
+  chatSendBtn.addEventListener("click", () => {
+    const text = chatInput.value.trim();
+    if (text) {
+      sendChatMessage(text);
+      chatInput.value = "";
+      chatInput.style.height = "auto";
+    }
+  });
+}
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const text = chatInput.value.trim();
+      if (text) {
+        sendChatMessage(text);
+        chatInput.value = "";
+        chatInput.style.height = "auto";
+      }
+    }
+  });
+
+  chatInput.addEventListener("input", () => {
+    chatInput.style.height = "auto";
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + "px";
+  });
+
+  chatInput.addEventListener("paste", async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          const fileData = await handleChatImagePaste(file);
+          if (fileData) {
+            const text = chatInput.value.trim();
+            sendChatMessage(text, fileData);
+            chatInput.value = "";
+            chatInput.style.height = "auto";
+          }
+        }
+        break;
+      }
+    }
+  });
+}
+
+if (chatEmojiBtn) {
+  chatEmojiBtn.addEventListener("click", () => {
+    toggleEmojiPicker();
+  });
+}
+
+if (chatUploadBtn) {
+  chatUploadBtn.addEventListener("click", () => {
+    if (chatFileInput) {
+      chatFileInput.click();
+    }
+  });
+}
+
+if (chatFileInput) {
+  chatFileInput.addEventListener("change", () => {
+    handleChatFileUpload();
+  });
+}
+
+if (roomSelector) {
+  roomSelector.addEventListener("change", () => {
+    const newRoom = roomSelector.value;
+    if (newRoom && FIXED_ROOMS.includes(newRoom)) {
+      switchRoom(newRoom);
     }
   });
 }

@@ -70,7 +70,15 @@
           </div>
           <div class="room-actions">
             <button id="open-settings" type="button" disabled>Settings</button>
-            <button id="create-room" type="button" disabled>Create Room</button>
+            <label class="room-selector">
+              Room
+              <select id="room-selector" disabled>
+                <option value="main">Main</option>
+                <option value="breakout-1">Breakout 1</option>
+                <option value="breakout-2">Breakout 2</option>
+                <option value="breakout-3">Breakout 3</option>
+              </select>
+            </label>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
           </div>
         </div>
@@ -88,6 +96,7 @@
                 <div class="sidebar-actions">
                   <button id="refresh-videos" type="button" class="hidden" style="background: #10b981; color: white;">Enable Videos</button>
                   <button id="debug-toggle" type="button">Debug</button>
+                  <button id="open-chat" type="button" disabled>Chat</button>
                   <button id="open-soundboard" type="button" disabled>Soundboard</button>
                   <button id="open-camera-lobby" type="button" disabled>Camera Lobby</button>
                   <button id="toggle-room-audio" type="button" disabled>Mute All</button>
@@ -167,6 +176,23 @@
           </div>
         </div>
         <div id="camera-lobby-grid" class="camera-lobby-grid"></div>
+      </div>
+      <div id="chat-panel" class="chat-panel hidden" role="dialog" aria-label="Chat">
+        <div class="chat-header">
+          <h3>Chat</h3>
+          <div class="chat-actions">
+            <button id="close-chat" type="button">Close</button>
+          </div>
+        </div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-input-container">
+          <button id="chat-upload-btn" type="button" class="chat-upload-btn" title="Upload file or image">📎</button>
+          <button id="chat-emoji-btn" type="button" class="chat-emoji-btn" title="Add emoji">😊</button>
+          <input type="file" id="chat-file-input" class="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
+          <div id="chat-emoji-picker" class="chat-emoji-picker hidden"></div>
+          <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
+          <button id="chat-send-btn" type="button" class="chat-send-btn">Send</button>
+        </div>
       </div>
     </main>
     <div id="debug-panel" class="debug-panel hidden">
