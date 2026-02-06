@@ -526,7 +526,7 @@ function startRoomStatusPolling() {
   if (!controlUrl || !adminToken) return;
   roomStatusTimer = setInterval(() => {
     refreshRoomList(controlUrl, adminToken, currentRoomName).catch(() => {});
-  }, 5000);
+  }, 2000);
 }
 
 function stopRoomStatusPolling() {
