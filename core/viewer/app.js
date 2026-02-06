@@ -343,7 +343,10 @@ function getScreenShareOptions() {
     audio: true,
     resolution: { width: 1920, height: 1080 },
     frameRate: 60,
-    encoding: { maxBitrate: 8_000_000, maxFramerate: 60 }
+    encoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+    surfaceSwitching: "exclude",
+    selfBrowserSurface: "exclude",
+    preferCurrentTab: false
   };
   if (preset?.resolution) {
     opts.resolution = preset.resolution;
@@ -3144,28 +3147,42 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   });
   if (LK.RoomEvent?.TrackMuted) {
     room.on(LK.RoomEvent.TrackMuted, (publication, participant) => {
-      if (!participant || publication?.kind !== LK.Track.Kind.Audio) return;
+      if (!participant) return;
       const source = publication?.source;
-      if (source === LK.Track.Source.Microphone) {
+      if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
         if (state) {
           state.micMuted = true;
           applyParticipantAudioVolumes(state);
           updateActiveSpeakerUi();
         }
+      } else if (publication?.kind === LK.Track.Kind.Video && source === LK.Track.Source.Camera) {
+        const cardRef = participantCards.get(participant.identity);
+        if (cardRef) {
+          updateAvatarVideo(cardRef, null);
+          debugLog(`camera muted for ${participant.identity}, avatar cleared`);
+        }
       }
     });
   }
   if (LK.RoomEvent?.TrackUnmuted) {
     room.on(LK.RoomEvent.TrackUnmuted, (publication, participant) => {
-      if (!participant || publication?.kind !== LK.Track.Kind.Audio) return;
+      if (!participant) return;
       const source = publication?.source;
-      if (source === LK.Track.Source.Microphone) {
+      if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
         if (state) {
           state.micMuted = false;
           applyParticipantAudioVolumes(state);
           updateActiveSpeakerUi();
+        }
+      } else if (publication?.kind === LK.Track.Kind.Video && source === LK.Track.Source.Camera) {
+        const cardRef = participantCards.get(participant.identity);
+        if (cardRef && publication.track) {
+          updateAvatarVideo(cardRef, publication.track);
+          const video = cardRef.avatar?.querySelector("video");
+          if (video) ensureVideoPlays(publication.track, video);
+          debugLog(`camera unmuted for ${participant.identity}, avatar restored`);
         }
       }
     });
@@ -3312,6 +3329,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   connectPanel.classList.add("hidden");
   setPublishButtonsEnabled(true);
   refreshDevices().catch(() => {});
+  toggleMicOn().catch(() => {});
   startHeartbeat();
   startRoomStatusPolling();
   refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
@@ -3995,7 +4013,17 @@ async function toggleCam() {
     renderPublishButtons();
     if (room?.localParticipant) {
       const cardRef = ensureParticipantCard(room.localParticipant, true);
-      if (!camEnabled) updateAvatarVideo(cardRef, null);
+      if (!camEnabled) {
+        updateAvatarVideo(cardRef, null);
+      } else {
+        const pubs = getParticipantPublications(room.localParticipant);
+        const camPub = pubs.find((p) => p?.source === getLiveKitClient()?.Track?.Source?.Camera && p.track);
+        if (camPub?.track) {
+          updateAvatarVideo(cardRef, camPub.track);
+          const video = cardRef.avatar?.querySelector("video");
+          if (video) ensureVideoPlays(camPub.track, video);
+        }
+      }
       if (cardRef.controls) {
         cardRef.controls.querySelectorAll(".icon-button")[1]?.classList.toggle("is-on", camEnabled);
       }
