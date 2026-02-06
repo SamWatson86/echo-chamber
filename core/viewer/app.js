@@ -1863,7 +1863,16 @@ function handleTrackSubscribed(track, publication, participant) {
         isActuallyDisplayed = !!(videoEl && videoEl.isConnected && videoEl._lkTrack === track && !videoEl.paused && videoEl.readyState >= 2);
       }
     }
-    // For other tracks (audio, etc), assume displayed if recently handled
+    // For audio tracks, check if audio element actually exists
+    else if (track.kind === "audio") {
+      const audioSid = getTrackSid(publication, track, `${participant.identity}-${source || "audio"}`);
+      const audioEl = audioElBySid.get(audioSid);
+      isActuallyDisplayed = !!(audioEl && audioEl.isConnected && audioEl._lkTrack === track);
+      if (!isActuallyDisplayed) {
+        debugLog(`audio track ${audioSid} not actually displayed - will reprocess`);
+      }
+    }
+    // For other tracks, assume displayed if recently handled
     else {
       isActuallyDisplayed = true;
     }
@@ -3269,12 +3278,27 @@ async function fetchImageAsBlob(url) {
   try {
     // Use LiveKit access token so all room participants can view images
     const token = currentAccessToken || adminToken;
+    debugLog(`fetchImageAsBlob: url=${url}, hasCurrentAccessToken=${!!currentAccessToken}, hasAdminToken=${!!adminToken}, usingToken=${token ? 'yes' : 'no'}`);
+
+    if (!token) {
+      debugLog(`ERROR: No token available for image fetch!`);
+      return null;
+    }
+
     const response = await fetch(url, {
       headers: {
         "Authorization": `Bearer ${token}`
       }
     });
-    if (!response.ok) throw new Error("Failed to fetch image");
+
+    debugLog(`fetchImageAsBlob: response status=${response.status}, ok=${response.ok}`);
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unable to read error');
+      debugLog(`fetchImageAsBlob: server error - ${errorText}`);
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+
     const blob = await response.blob();
     return URL.createObjectURL(blob);
   } catch (err) {
@@ -3312,8 +3336,13 @@ function renderChatMessage(message) {
       imgEl.alt = message.fileName || "Image";
       imgEl.loading = "lazy";
 
+      // Resolve relative URLs using current controlUrl
+      const imageUrl = message.fileUrl.startsWith('http')
+        ? message.fileUrl
+        : `${controlUrlInput?.value || 'https://127.0.0.1:9443'}${message.fileUrl}`;
+
       // Fetch image with auth and create blob URL
-      fetchImageAsBlob(message.fileUrl).then(blobUrl => {
+      fetchImageAsBlob(imageUrl).then(blobUrl => {
         if (blobUrl) {
           imgEl.src = blobUrl;
         } else {
@@ -3621,11 +3650,11 @@ async function handleChatImagePaste(file) {
       throw new Error(result.error || "Upload failed");
     }
 
-    const fullUrl = `${controlUrl}${result.url}`;
-    debugLog(`File uploaded successfully: ${fullUrl}`);
+    debugLog(`File uploaded successfully: ${result.url}`);
 
+    // Store relative URL so it works for all users regardless of their control URL
     return {
-      url: fullUrl,
+      url: result.url,  // Store relative path like /api/chat/uploads/filename
       name: file.name,
       type: file.type
     };

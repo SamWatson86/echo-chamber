@@ -24,6 +24,7 @@ use std::{
 };
 use tracing::{info, warn};
 use tower_http::services::ServeDir;
+use tower_http::cors::{CorsLayer, Any};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -288,6 +289,12 @@ async fn main() {
         .route("/api/chat/history/:room", get(chat_get_history))
         .route("/api/chat/upload", post(chat_upload_file))
         .route("/api/chat/uploads/:file_name", get(chat_get_upload))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
 
@@ -1016,7 +1023,16 @@ async fn chat_get_upload(
     headers: HeaderMap,
     Path(file_name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    ensure_livekit(&state, &headers)?;
+    info!("chat_get_upload: file_name={}, auth_header={:?}", file_name, headers.get("authorization").map(|h| h.to_str().unwrap_or("invalid")));
+
+    match ensure_livekit(&state, &headers) {
+        Ok(claims) => info!("chat_get_upload: auth successful for identity={}", claims.sub),
+        Err(e) => {
+            info!("chat_get_upload: auth failed with status={}", e.as_u16());
+            return Err(e);
+        }
+    }
+
     let chat = state.chat.lock().unwrap();
     let file_path = chat.uploads_dir.join(&file_name);
 

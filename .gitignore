@@ -19,3 +19,11 @@ core/sfu/livekit.docker.yaml
 !.env.dev.example
 !.env.prod.example
 .DS_Store
+
+# Rust build artifacts
+core/target/
+
+# Temp/runtime files
+core/tmp.json
+core/.tmp-build.cmd
+core/control/core-control.pid

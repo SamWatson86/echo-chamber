@@ -2,8 +2,8 @@ $root = $PSScriptRoot
 $controlDir = Join-Path $root "control"
 $pidFile = Join-Path $controlDir "core-control.pid"
 if (Test-Path $pidFile) {
-  $pid = Get-Content $pidFile -ErrorAction SilentlyContinue
-  if ($pid) { try { Stop-Process -Id $pid -Force } catch {} }
+  $procId = Get-Content $pidFile -ErrorAction SilentlyContinue
+  if ($procId) { try { Stop-Process -Id $procId -Force } catch {} }
   Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
 }
 

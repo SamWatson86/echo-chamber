@@ -19,7 +19,11 @@ Get-Content $envPath | ForEach-Object {
   $envMap[$parts[0].Trim()] = $parts[1].Trim()
 }
 
-$base = "http://127.0.0.1:9090"
+$port = $envMap['CORE_PORT']
+if (-not $port) { $port = "9090" }
+$scheme = "http"
+if ($envMap['CORE_TLS_CERT']) { $scheme = "https" }
+$base = "$scheme://127.0.0.1:$port"
 $login = Invoke-RestMethod -Method Post -Uri "$base/v1/auth/login" -ContentType 'application/json' -Body (@{ password = $envMap['CORE_ADMIN_PASSWORD'] } | ConvertTo-Json)
 $token = Invoke-RestMethod -Method Post -Uri "$base/v1/auth/token" -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($login.token)" } -Body (@{ room = $Room; identity = $Identity; name = $Name } | ConvertTo-Json)
 $token.token
