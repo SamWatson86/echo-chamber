@@ -61,6 +61,11 @@ const chatEmojiBtn = document.getElementById("chat-emoji-btn");
 const chatFileInput = document.getElementById("chat-file-input");
 const chatEmojiPicker = document.getElementById("chat-emoji-picker");
 
+const openThemeButton = document.getElementById("open-theme");
+const closeThemeButton = document.getElementById("close-theme");
+const themePanel = document.getElementById("theme-panel");
+const THEME_STORAGE_KEY = "echo-core-theme";
+
 const controlUrlInput = document.getElementById("control-url");
 const sfuUrlInput = document.getElementById("sfu-url");
 const roomInput = document.getElementById("room");
@@ -4371,3 +4376,118 @@ ensureDevicePermissions().then(() => refreshDevices()).catch(() => {});
 window.addEventListener("beforeunload", () => {
   sendLeaveNotification();
 });
+
+// ═══════════════════════════════════════════
+// THEME SYSTEM
+// ═══════════════════════════════════════════
+
+let matrixCanvas = null;
+let matrixAnimationId = null;
+let matrixResizeHandler = null;
+
+function startMatrixRain() {
+  if (matrixCanvas) return;
+  matrixCanvas = document.createElement("canvas");
+  matrixCanvas.id = "matrix-rain";
+  document.body.prepend(matrixCanvas);
+  const ctx = matrixCanvas.getContext("2d");
+  const resize = () => {
+    matrixCanvas.width = window.innerWidth;
+    matrixCanvas.height = window.innerHeight;
+  };
+  resize();
+  matrixResizeHandler = resize;
+  window.addEventListener("resize", matrixResizeHandler);
+  const fontSize = 14;
+  let columns = Math.floor(matrixCanvas.width / fontSize);
+  let drops = new Array(columns).fill(0).map(() => Math.random() * -50);
+  const chars = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEF";
+  function draw() {
+    const cols = Math.floor(matrixCanvas.width / fontSize);
+    if (cols !== columns) {
+      columns = cols;
+      drops = new Array(columns).fill(0).map(() => Math.random() * -50);
+    }
+    ctx.fillStyle = "rgba(0, 0, 0, 0.05)";
+    ctx.fillRect(0, 0, matrixCanvas.width, matrixCanvas.height);
+    ctx.fillStyle = "#00ff41";
+    ctx.font = `${fontSize}px monospace`;
+    for (let i = 0; i < drops.length; i++) {
+      const char = chars[Math.floor(Math.random() * chars.length)];
+      const x = i * fontSize;
+      const y = drops[i] * fontSize;
+      ctx.globalAlpha = 0.8 + Math.random() * 0.2;
+      ctx.fillText(char, x, y);
+      if (y > matrixCanvas.height && Math.random() > 0.975) {
+        drops[i] = 0;
+      }
+      drops[i]++;
+    }
+    ctx.globalAlpha = 1;
+    matrixAnimationId = requestAnimationFrame(draw);
+  }
+  draw();
+}
+
+function stopMatrixRain() {
+  if (matrixAnimationId) {
+    cancelAnimationFrame(matrixAnimationId);
+    matrixAnimationId = null;
+  }
+  if (matrixResizeHandler) {
+    window.removeEventListener("resize", matrixResizeHandler);
+    matrixResizeHandler = null;
+  }
+  if (matrixCanvas) {
+    matrixCanvas.remove();
+    matrixCanvas = null;
+  }
+}
+
+function applyTheme(name) {
+  document.body.dataset.theme = name;
+  localStorage.setItem(THEME_STORAGE_KEY, name);
+  // Toggle matrix rain
+  if (name === "matrix") {
+    startMatrixRain();
+  } else {
+    stopMatrixRain();
+  }
+  // Update active state on theme cards
+  if (themePanel) {
+    themePanel.querySelectorAll(".theme-card").forEach((card) => {
+      card.classList.toggle("is-active", card.dataset.theme === name);
+    });
+  }
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_STORAGE_KEY) || "frost";
+  applyTheme(saved);
+}
+
+// Theme panel open/close
+if (openThemeButton && themePanel) {
+  openThemeButton.addEventListener("click", () => {
+    themePanel.classList.toggle("hidden");
+  });
+}
+
+if (closeThemeButton && themePanel) {
+  closeThemeButton.addEventListener("click", () => {
+    themePanel.classList.add("hidden");
+  });
+}
+
+// Theme card clicks
+if (themePanel) {
+  themePanel.querySelectorAll(".theme-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      const theme = card.dataset.theme;
+      if (theme) applyTheme(theme);
+    });
+  });
+}
+
+// Initialize theme on load
+initTheme();
