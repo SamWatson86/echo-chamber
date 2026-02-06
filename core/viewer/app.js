@@ -1105,7 +1105,15 @@ function configureAudioElement(element) {
   element.muted = false;
   element.controls = false;
   const tryPlay = () => {
-    element.play().catch(() => {});
+    const res = element.play();
+    if (res && typeof res.catch === "function") {
+      res.catch((err) => {
+        debugLog(`audio play() failed for ${element._lkTrack?.sid || "unknown"}: ${err.message}`);
+        if (window._pausedVideos) {
+          window._pausedVideos.add(element);
+        }
+      });
+    }
   };
   tryPlay();
   setTimeout(tryPlay, 300);
@@ -1119,7 +1127,17 @@ function ensureAudioPlays(element) {
     if (!element.isConnected) return;
     try {
       const res = element.play();
-      if (res && typeof res.catch === "function") res.catch(() => {});
+      if (res && typeof res.catch === "function") {
+        res.catch((err) => {
+          if (attempts >= 6) {
+            debugLog(`audio ensurePlay gave up after ${attempts} attempts for ${element._lkTrack?.sid || "unknown"}: ${err.message}`);
+            if (window._pausedVideos) {
+              window._pausedVideos.add(element);
+              debugLog(`Audio ${element._lkTrack?.sid || "unknown"} queued for next user interaction`);
+            }
+          }
+        });
+      }
     } catch {}
     if (attempts < 6) {
       setTimeout(tryPlay, 700);
@@ -2211,6 +2229,7 @@ function handleTrackSubscribed(track, publication, participant) {
       return;
     }
     const element = track.attach();
+    element._lkTrack = track;
     configureAudioElement(element);
     ensureAudioPlays(element);
     audioBucketEl.appendChild(element);
@@ -3392,34 +3411,43 @@ async function connect() {
     // CRITICAL: Add global interaction handler to enable videos on ANY page interaction
     // This captures clicks, touches, keyboard - any user gesture enables all videos
     window._pausedVideos = new Set();
-    const enableAllVideos = async () => {
-      if (!window._pausedVideos || window._pausedVideos.size === 0) return;
+    const enableAllMedia = async () => {
+      if (!window._pausedVideos || window._pausedVideos.size === 0) {
+        // Still try room.startAudio() on any interaction even without paused media
+        try { room?.startAudio?.(); } catch {}
+        return;
+      }
 
-      debugLog(`User interaction detected - enabling ${window._pausedVideos.size} paused videos`);
+      debugLog(`User interaction detected - enabling ${window._pausedVideos.size} paused media elements`);
 
-      const videos = Array.from(window._pausedVideos);
+      const elements = Array.from(window._pausedVideos);
       window._pausedVideos.clear();
       hideRefreshButton();
 
-      for (const video of videos) {
-        if (video && video.paused && video.isConnected) {
+      // Resume LiveKit audio context first
+      try { room?.startAudio?.(); } catch {}
+
+      for (const el of elements) {
+        if (el && el.paused && el.isConnected) {
           try {
-            await video.play();
-            debugLog(`Enabled video ${video._lkTrack?.sid || 'unknown'} via user interaction`);
+            await el.play();
+            const kind = el.tagName === "AUDIO" ? "audio" : "video";
+            debugLog(`Enabled ${kind} ${el._lkTrack?.sid || 'unknown'} via user interaction`);
           } catch (e) {
-            debugLog(`Still failed to enable video ${video._lkTrack?.sid || 'unknown'}: ${e.message}`);
+            const kind = el.tagName === "AUDIO" ? "audio" : "video";
+            debugLog(`Still failed to enable ${kind} ${el._lkTrack?.sid || 'unknown'}: ${e.message}`);
           }
         }
       }
     };
 
-    // Make enableAllVideos globally accessible for the refresh button
-    window._enableAllVideos = enableAllVideos;
+    // Make enableAllMedia globally accessible for the refresh button
+    window._enableAllMedia = enableAllMedia;
 
-    // Listen for ANY interaction on the page
+    // Listen for ANY interaction on the page (persistent - handles late-joining participants)
     const interactionEvents = ['click', 'touchstart', 'keydown', 'mousedown'];
     interactionEvents.forEach(event => {
-      document.addEventListener(event, enableAllVideos, { once: true, capture: true });
+      document.addEventListener(event, enableAllMedia, { capture: true });
     });
   } catch (e) {
     debugLog('WARNING: Failed to prime autoplay: ' + e.message);
@@ -4147,8 +4175,8 @@ speakerSelect.addEventListener("change", () => {
 
 if (refreshVideosButton) {
   refreshVideosButton.addEventListener("click", async () => {
-    if (window._enableAllVideos) {
-      await window._enableAllVideos();
+    if (window._enableAllMedia) {
+      await window._enableAllMedia();
     }
   });
 }
