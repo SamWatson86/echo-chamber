@@ -114,6 +114,9 @@ let chatDataChannel = null;
 const CHAT_MESSAGE_TYPE = "chat-message";
 const CHAT_FILE_TYPE = "chat-file";
 const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
+const ROOM_DISPLAY_NAMES = { "main": "Main", "breakout-1": "Breakout 1", "breakout-2": "Breakout 2", "breakout-3": "Breakout 3" };
+let roomStatusTimer = null;
+let heartbeatTimer = null;
 let unreadChatCount = 0;
 const chatBadge = document.getElementById("chat-badge");
 
@@ -462,30 +465,103 @@ async function fetchRooms(baseUrl, adminToken) {
   return res.json();
 }
 
+async function fetchRoomStatus(baseUrl, adminToken) {
+  try {
+    const res = await fetch(`${baseUrl}/v1/room-status`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  }
+}
+
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
-  const rooms = await fetchRooms(baseUrl, adminToken);
   if (!roomListEl) return;
+  const statusList = await fetchRoomStatus(baseUrl, adminToken);
+  const statusMap = {};
+  if (Array.isArray(statusList)) {
+    statusList.forEach((r) => { statusMap[r.room_id] = r.participants || []; });
+  }
   roomListEl.innerHTML = "";
-  const sorted = Array.isArray(rooms)
-    ? rooms.slice().sort((a, b) => a.room_id.localeCompare(b.room_id))
-    : [];
-  sorted.forEach((room) => {
+  FIXED_ROOMS.forEach((roomId) => {
+    const participants = statusMap[roomId] || [];
+    const displayName = ROOM_DISPLAY_NAMES[roomId] || roomId;
+    const isActive = roomId === activeRoom;
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = room.room_id;
-    btn.classList.toggle("is-active", room.room_id === activeRoom);
+    btn.className = "room-status-btn" + (isActive ? " is-active" : "");
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "room-status-name";
+    nameSpan.textContent = displayName;
+    btn.appendChild(nameSpan);
+    const countSpan = document.createElement("span");
+    countSpan.className = "room-status-count";
+    countSpan.textContent = participants.length > 0 ? participants.length : "";
+    btn.appendChild(countSpan);
+    if (participants.length > 0) {
+      const names = participants.map((p) => p.name || p.identity).join(", ");
+      btn.title = names;
+      btn.classList.add("has-users");
+    }
     btn.addEventListener("click", () => {
-      if (room.room_id === currentRoomName) return;
-      switchRoom(room.room_id).catch(() => {});
+      if (roomId === currentRoomName) return;
+      switchRoom(roomId).catch(() => {});
     });
     roomListEl.appendChild(btn);
   });
-  if (sorted.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "hint";
-    empty.textContent = "No rooms yet.";
-    roomListEl.appendChild(empty);
+}
+
+function startRoomStatusPolling() {
+  stopRoomStatusPolling();
+  const controlUrl = controlUrlInput.value.trim();
+  if (!controlUrl || !adminToken) return;
+  roomStatusTimer = setInterval(() => {
+    refreshRoomList(controlUrl, adminToken, currentRoomName).catch(() => {});
+  }, 5000);
+}
+
+function stopRoomStatusPolling() {
+  if (roomStatusTimer) {
+    clearInterval(roomStatusTimer);
+    roomStatusTimer = null;
   }
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  const controlUrl = controlUrlInput.value.trim();
+  if (!controlUrl || !adminToken) return;
+  const sendBeat = () => {
+    const identity = identityInput ? identityInput.value : "";
+    const name = nameInput.value.trim() || "Viewer";
+    fetch(`${controlUrl}/v1/participants/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ room: currentRoomName, identity, name }),
+    }).catch(() => {});
+  };
+  sendBeat();
+  heartbeatTimer = setInterval(sendBeat, 15000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function sendLeaveNotification() {
+  const controlUrl = controlUrlInput.value.trim();
+  const identity = identityInput ? identityInput.value : "";
+  if (!controlUrl || !adminToken || !identity) return;
+  fetch(`${controlUrl}/v1/participants/leave`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ identity }),
+  }).catch(() => {});
 }
 
 async function switchRoom(roomId) {
@@ -3101,6 +3177,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   connectPanel.classList.add("hidden");
   setPublishButtonsEnabled(true);
   await refreshDevices();
+  startHeartbeat();
+  startRoomStatusPolling();
   setStatus(`Connected to ${roomId}`);
 }
 
@@ -3211,6 +3289,9 @@ async function connect() {
 
 async function disconnect() {
   if (!room) return;
+  sendLeaveNotification();
+  stopHeartbeat();
+  stopRoomStatusPolling();
   room.disconnect();
   room = null;
   clearMedia();
@@ -4132,3 +4213,7 @@ setPublishButtonsEnabled(false);
 setDefaultUrls();
 setRoomAudioMutedState(false);
 ensureDevicePermissions().then(() => refreshDevices()).catch(() => {});
+
+window.addEventListener("beforeunload", () => {
+  sendLeaveNotification();
+});

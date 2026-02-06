@@ -34,8 +34,17 @@ use rcgen::generate_simple_self_signed;
 struct AppState {
     config: Arc<Config>,
     rooms: Arc<Mutex<HashMap<String, RoomInfo>>>,
+    participants: Arc<Mutex<HashMap<String, ParticipantEntry>>>,
     soundboard: Arc<Mutex<SoundboardState>>,
     chat: Arc<Mutex<ChatState>>,
+}
+
+#[derive(Clone, Serialize)]
+struct ParticipantEntry {
+    identity: String,
+    name: String,
+    room_id: String,
+    last_seen: u64,
 }
 
 #[derive(Clone)]
@@ -235,6 +244,23 @@ struct RoomInfo {
     created_at: u64,
 }
 
+#[derive(Serialize)]
+struct RoomStatusEntry {
+    room_id: String,
+    participants: Vec<RoomStatusParticipant>,
+}
+
+#[derive(Serialize)]
+struct RoomStatusParticipant {
+    identity: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct ParticipantLeaveRequest {
+    identity: String,
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -262,9 +288,28 @@ async fn main() {
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
+        participants: Arc::new(Mutex::new(HashMap::new())),
         soundboard: Arc::new(Mutex::new(soundboard_state)),
         chat: Arc::new(Mutex::new(chat_state)),
     };
+
+    // Background task: clean up stale participants (no heartbeat for 60s)
+    {
+        let participants = state.participants.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                let mut map = participants.lock().unwrap();
+                let before = map.len();
+                map.retain(|_, p| now.saturating_sub(p.last_seen) < 60);
+                let removed = before - map.len();
+                if removed > 0 {
+                    info!("cleaned up {} stale participant(s)", removed);
+                }
+            }
+        });
+    }
 
     let viewer_dir = resolve_viewer_dir();
     info!("viewer dir: {:?}", viewer_dir);
@@ -280,6 +325,9 @@ async fn main() {
         .route("/v1/auth/token", post(issue_token))
         .route("/v1/rooms", get(list_rooms).post(create_room))
         .route("/v1/rooms/:room_id", get(get_room).delete(delete_room))
+        .route("/v1/room-status", get(rooms_status))
+        .route("/v1/participants/heartbeat", post(participant_heartbeat))
+        .route("/v1/participants/leave", post(participant_leave))
         .route("/v1/metrics", get(metrics))
         .route("/api/soundboard/list", get(soundboard_list))
         .route("/api/soundboard/file/:sound_id", get(soundboard_file))
@@ -587,6 +635,17 @@ async fn issue_token(
         &EncodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
     ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Track participant in room
+    {
+        let mut participants = state.participants.lock().unwrap();
+        participants.insert(payload.identity.clone(), ParticipantEntry {
+            identity: payload.identity.clone(),
+            name: payload.name.clone().unwrap_or_default(),
+            room_id: payload.room.clone(),
+            last_seen: now,
+        });
+    }
+
     Ok(Json(TokenResponse {
         token,
         expires_in_seconds: state.config.livekit_token_ttl_secs,
@@ -622,6 +681,59 @@ async fn delete_room(State(state): State<AppState>, headers: HeaderMap, axum::ex
     ensure_admin(&state, &headers)?;
     let mut rooms = state.rooms.lock().unwrap();
     rooms.remove(&room_id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rooms_status(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<RoomStatusEntry>>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let participants = state.participants.lock().unwrap();
+    // Group participants by room
+    let mut room_map: HashMap<String, Vec<RoomStatusParticipant>> = HashMap::new();
+    for p in participants.values() {
+        room_map.entry(p.room_id.clone()).or_default().push(RoomStatusParticipant {
+            identity: p.identity.clone(),
+            name: p.name.clone(),
+        });
+    }
+    let result: Vec<RoomStatusEntry> = room_map.into_iter().map(|(room_id, participants)| {
+        RoomStatusEntry { room_id, participants }
+    }).collect();
+    Ok(Json(result))
+}
+
+async fn participant_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<TokenRequest>,
+) -> Result<StatusCode, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let now = now_ts();
+    let mut participants = state.participants.lock().unwrap();
+    if let Some(entry) = participants.get_mut(&payload.identity) {
+        entry.last_seen = now;
+        entry.room_id = payload.room.clone();
+        if let Some(name) = &payload.name {
+            entry.name = name.clone();
+        }
+    } else {
+        participants.insert(payload.identity.clone(), ParticipantEntry {
+            identity: payload.identity.clone(),
+            name: payload.name.clone().unwrap_or_default(),
+            room_id: payload.room.clone(),
+            last_seen: now,
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn participant_leave(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ParticipantLeaveRequest>,
+) -> Result<StatusCode, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let mut participants = state.participants.lock().unwrap();
+    participants.remove(&payload.identity);
     Ok(StatusCode::NO_CONTENT)
 }
 
