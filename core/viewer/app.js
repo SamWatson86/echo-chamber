@@ -688,22 +688,31 @@ function sendLeaveNotification() {
   }).catch(() => {});
 }
 
+let switchingRoom = false;
+let connectSequence = 0;
+
 async function switchRoom(roomId) {
   if (!room) return;
   if (roomId === currentRoomName) return;
+  if (switchingRoom) {
+    debugLog(`Switch to ${roomId} ignored — already switching`);
+    return;
+  }
+  switchingRoom = true;
   debugLog(`Switching from ${currentRoomName} to ${roomId}`);
   currentRoomName = roomId;
-  if (typeof loadChatHistory === "function") {
-    loadChatHistory(roomId).catch(() => {});
+  try {
+    const controlUrl = controlUrlInput.value.trim();
+    const sfuUrl = sfuUrlInput.value.trim();
+    const name = nameInput.value.trim() || "Viewer";
+    const identity = buildIdentity(name);
+    if (identityInput) {
+      identityInput.value = identity;
+    }
+    await connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuseAdmin: true });
+  } finally {
+    switchingRoom = false;
   }
-  const controlUrl = controlUrlInput.value.trim();
-  const sfuUrl = sfuUrlInput.value.trim();
-  const name = nameInput.value.trim() || "Viewer";
-  const identity = buildIdentity(name);
-  if (identityInput) {
-    identityInput.value = identity;
-  }
-  await connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuseAdmin: true });
 }
 
 function addTile(label, element) {
@@ -2985,16 +2994,21 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
 
   setStatus("Requesting token...");
-  await ensureRoomExists(controlUrl, adminToken, roomId);
-  await refreshRoomList(controlUrl, adminToken, roomId);
-  const accessToken = await fetchRoomToken(controlUrl, adminToken, roomId, identity, name);
-  currentAccessToken = accessToken;
-
+  const seq = ++connectSequence;
+  if (!reuseAdmin) {
+    // First connect: ensure room exists (not needed for subsequent switches of fixed rooms)
+    await ensureRoomExists(controlUrl, adminToken, roomId);
+  }
+  // Disconnect old room ASAP to reduce perceived lag
   if (room) {
     room.disconnect();
     clearMedia();
     clearSoundboardState();
   }
+  if (seq !== connectSequence) return; // a newer connect started, bail
+  const accessToken = await fetchRoomToken(controlUrl, adminToken, roomId, identity, name);
+  if (seq !== connectSequence) return;
+  currentAccessToken = accessToken;
 
   setStatus("Connecting to SFU...");
   const LK = getLiveKitClient();
@@ -3246,6 +3260,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
 
   await room.connect(sfuUrl, accessToken, { autoSubscribe: true });
+  if (seq !== connectSequence) { room.disconnect(); return; }
   startMediaReconciler();
   try {
     room.startAudio?.();
@@ -3296,9 +3311,10 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   roomListEl.classList.remove("hidden");
   connectPanel.classList.add("hidden");
   setPublishButtonsEnabled(true);
-  await refreshDevices();
+  refreshDevices().catch(() => {});
   startHeartbeat();
   startRoomStatusPolling();
+  refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
   setStatus(`Connected to ${roomId}`);
 }
 
