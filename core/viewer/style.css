@@ -372,6 +372,52 @@ video, audio {
   display: none;
 }
 
+.room-status-btn {
+  position: relative;
+}
+
+.room-status-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 120px;
+  padding: 8px 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-hover);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.95));
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  pointer-events: none;
+}
+
+.room-status-tooltip::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 8px;
+  height: 8px;
+  background: rgba(15, 23, 42, 0.95);
+  border-top: 1px solid var(--border-hover);
+  border-left: 1px solid var(--border-hover);
+}
+
+.room-status-btn:hover .room-status-tooltip {
+  display: block;
+}
+
+.room-status-tooltip-name {
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .room-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;

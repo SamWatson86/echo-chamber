@@ -501,9 +501,16 @@ async function refreshRoomList(baseUrl, adminToken, activeRoom) {
     countSpan.textContent = participants.length > 0 ? participants.length : "";
     btn.appendChild(countSpan);
     if (participants.length > 0) {
-      const names = participants.map((p) => p.name || p.identity).join(", ");
-      btn.title = names;
       btn.classList.add("has-users");
+      const tooltip = document.createElement("div");
+      tooltip.className = "room-status-tooltip";
+      participants.forEach((p) => {
+        const row = document.createElement("div");
+        row.className = "room-status-tooltip-name";
+        row.textContent = p.name || p.identity;
+        tooltip.appendChild(row);
+      });
+      btn.appendChild(tooltip);
     }
     btn.addEventListener("click", () => {
       if (roomId === currentRoomName) return;
