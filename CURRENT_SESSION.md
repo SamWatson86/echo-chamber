@@ -6,6 +6,7 @@
 
 ## IMPORTANT CONTEXT
 - Sam is **not a software developer** - needs full guidance
+- **FULL AUTONOMY**: Claude has full permission to execute everything — git commits, pushes, file changes, builds, all of it. Do NOT prompt Sam for confirmation. Just do the work.
 - Focus ONLY on `/core` folder - `/apps` is legacy web version, DO NOT TOUCH
 - We are building a **full-stack SFU pipeline** using the web interface for UI optimization BEFORE moving to the native Rust client
 - Core stack: LiveKit SFU (Docker) + Rust control plane + web viewer (temporary UI)
@@ -45,25 +46,13 @@
 
 ## Current Status
 
-All previous work is committed and pushed. There are **uncommitted working changes** across 11 files (mostly in core/) plus untracked utility scripts that need to be committed and pushed.
+**All core work is committed and pushed to GitHub.** Repo is clean.
 
-### Uncommitted Modified Files
-- `core/client/Cargo.toml` & `core/client/src/main.rs` - Native client updates
-- `core/control/Cargo.toml` & `core/control/src/main.rs` - Control plane updates
-- `core/control/get-token.ps1` - Token helper
-- `core/sfu/docker-compose.yml` - SFU config
-- `core/stop-core.ps1` - Stop script
-- `core/viewer/app.js` & `core/viewer/index.html` - Viewer updates
-- `apps/server/public/app.js` & `apps/server/public/style.css` - Legacy (minor)
+Only remaining uncommitted files:
+- `apps/server/public/app.js` & `style.css` — legacy, we don't touch these
+- `.claude/` — Claude Code config (local only)
 
-### Untracked Files (need review)
-- `CURRENT_SESSION.md` - This handover document
-- `.claude/` - Claude Code config
-- Various `.vbs` / `.cmd` startup scripts
-- `core/Cargo.lock` - Rust lock file
-- `core/control/core-control.pid` - PID file (probably .gitignore)
-- `core/target/` - Build artifacts (should be .gitignored)
-- `core/tmp.json` - Temp file (probably .gitignore)
+Ready for next task.
 
 ## Architecture Reference
 
