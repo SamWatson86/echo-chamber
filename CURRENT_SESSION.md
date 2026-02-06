@@ -57,9 +57,119 @@ Complete CSS overhaul with unified frosted glass aesthetic:
 - Thin scrollbars, accent-colored range sliders, refined focus rings
 - Pure CSS changes only — no HTML/JS modifications (zero functionality risk)
 
+### Room Switching Fix
+**File**: `core/viewer/app.js`
+
+- Fixed room switching snapping back to Main (duplicate `switchRoom()` + hardcoded "main" in `connect()`)
+- Consolidated into single `switchRoom()` that uses `currentRoomName`
+
+### Cross-Room Participant Visibility (Room List)
+**Files**: `core/control/src/main.rs`, `core/viewer/app.js`, `core/viewer/style.css`
+
+**Problem**: Users in different rooms couldn't see who was in other rooms or click to join them.
+
+**Control plane changes**:
+- Added `ParticipantEntry` tracking (identity, name, room_id, last_seen timestamp)
+- `participants` HashMap added to `AppState` - tracks all connected users
+- Participants auto-registered when tokens are issued (`issue_token`)
+- New `GET /v1/room-status` endpoint - returns all rooms with participant lists
+- New `POST /v1/participants/heartbeat` - keeps participant entries alive
+- New `POST /v1/participants/leave` - removes participant on disconnect
+- Background cleanup task removes stale entries (20s timeout, runs every 10s)
+
+**Viewer changes**:
+- Room list shows all 4 fixed rooms (Main, Breakout 1-3) with participant counts
+- Participant count badges appear as accent-colored pills (green default, blue for current room)
+- Styled frosted glass hover tooltip shows participant names (with arrow pseudo-element)
+- Rooms with active users get green glow highlight
+- Current room is accent-highlighted (blue)
+- Click any room to switch
+- Polls room status every 2 seconds for live cross-room updates
+- Sends heartbeat every 10 seconds
+- Sends leave notification on disconnect and page close (`beforeunload`)
+
+### Styled Hover Tooltips for Room Buttons
+**File**: `core/viewer/style.css`
+
+- Replaced browser `title` attribute with custom CSS tooltips
+- Frosted glass style matching the overall UI aesthetic
+- Arrow pseudo-element pointing to the room button
+- Shows list of participant names in each room
+
+### Green Highlight for Active Rooms
+**File**: `core/viewer/style.css`
+
+- `.has-users` class adds green glow border to rooms with people
+- Uses `rgba(16, 185, 129, ...)` green tones for consistency
+
+### Join/Leave/Switch Chime Sounds
+**File**: `core/viewer/app.js`
+
+- **Join chime**: Ascending two-note chime (C5→E5) using sine wave — plays when someone enters your room
+- **Leave chime**: Descending "womp womp" triangle wave — plays when someone disconnects entirely from your room
+- **Switch chime**: Sci-fi sawtooth swoosh + landing ping — plays when someone leaves your room to switch to another
+- All sounds synthesized via Web Audio API (no audio files needed)
+- Perspective-based: chimes only trigger for events in YOUR current room
+- `detectRoomChanges()` compares previous vs current participants per room
+
+### Room Dropdown Removal
+**Files**: `core/viewer/index.html`, `core/viewer/app.js`, `core/viewer/style.css`
+
+- Removed the `<select id="room-selector">` dropdown from HTML (room list buttons handle switching)
+- Cleaned up all `roomSelector` JS references
+- Removed `.room-selector` CSS rules
+
+### Phantom Participant Count Fix
+**Files**: `core/control/src/main.rs`
+
+**Problem**: Room showed 4 people but only 3 existed. Mobile browser reconnects created new identities (e.g. `sam-phone-2757` → `sam-phone-5299`) and old entries lingered.
+
+**Fix**:
+- Name-based deduplication on token issue: strips `-XXXX` suffix and removes old entries with same base name
+- Reduced stale timeout from 60s to 20s
+- Reduced cleanup interval from 15s to 10s
+- Reduced heartbeat from 15s to 10s
+
+### Rapid Room Switching Race Condition Fix
+**Files**: `core/viewer/app.js`
+
+**Problem**: Bradford clicked through Main→B1→B2→B3→Main rapidly and lost mic functionality. Multiple concurrent `connectToRoom` calls raced, creating stale room objects.
+
+**Fix**:
+- Added `switchingRoom` lock preventing concurrent room switches
+- Added `connectSequence` counter — older connections bail at async checkpoints
+- Optimized switch speed: disconnect old room BEFORE fetching new token
+- Skip `ensureRoomExists` for room switches (fixed rooms already exist)
+- Deferred `refreshRoomList` to after connection (non-blocking)
+- Made `refreshDevices` non-blocking
+
+### Screen Share "Sharing Another Window" Popup Fix
+**File**: `core/viewer/app.js`
+
+- Added `surfaceSwitching: "exclude"` to `getScreenShareOptions()` — suppresses Chrome's "You are sharing another application's window" popup when tabbing back to the viewer
+- Added `selfBrowserSurface: "exclude"` — removes current browser tab from the share picker
+- Added `preferCurrentTab: false` — prevents Chrome defaulting to sharing the viewer tab
+
+### Camera Toggle Tile Update Fix
+**File**: `core/viewer/app.js`
+
+**Problem**: Brad toggled camera on/off/on and his active user tile didn't update (stuck on initials instead of showing video).
+
+**Fix**:
+- `TrackMuted`/`TrackUnmuted` handlers now handle video camera tracks (previously only handled audio) — clears/restores avatar when camera is muted/unmuted
+- `toggleCam()` now explicitly finds and attaches the camera track to the avatar when re-enabling (instead of relying solely on `LocalTrackPublished` event timing)
+
+### Auto-Enable Mic on Join
+**File**: `core/viewer/app.js`
+
+- Mic is now automatically enabled when users connect to a room (`toggleMicOn()` called after connection)
+- Users no longer need to manually click "Enable Mic" after joining
+
 ## Current Status
 
 **All core work is committed and pushed to GitHub.** Repo is clean.
+
+Control plane was rebuilt and restarted with all changes active.
 
 Only remaining uncommitted files:
 - `apps/server/public/app.js` & `style.css` — legacy, we don't touch these
@@ -77,16 +187,24 @@ Ready for next task.
 
 ### How Core Starts
 - Run script: `F:\Codex AI\The Echo Chamber\core\run-core.ps1`
+- Stop script: `F:\Codex AI\The Echo Chamber\core\stop-core.ps1`
 - Health check: `http://127.0.0.1:9090/health`
 - Viewer: `http://127.0.0.1:9090/viewer`
+
+### Key Timing Parameters
+- Room status polling: every 2 seconds
+- Heartbeat: every 10 seconds
+- Stale participant cleanup: 20s timeout, 10s check interval
 
 ### Logs
 - Control plane: `core/logs/core-control.out.log`, `core/logs/core-control.err.log`
 - SFU: `docker compose logs --tail 200` (from `core/sfu` directory)
 
 ## Files to Know
-- `core/viewer/app.js` - Web viewer (video + chat UI) ~4100 lines
-- `core/control/src/main.rs` - Rust control plane
+- `core/viewer/app.js` - Web viewer (video + chat UI) ~4200+ lines
+- `core/viewer/style.css` - Frosted glass CSS theme
+- `core/viewer/index.html` - Viewer HTML structure
+- `core/control/src/main.rs` - Rust control plane (with participant tracking)
 - `core/client/src/main.rs` - Native Rust client
 - `core/sfu/docker-compose.yml` - LiveKit SFU config
 
