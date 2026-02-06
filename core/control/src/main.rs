@@ -1016,7 +1016,7 @@ async fn chat_get_upload(
     headers: HeaderMap,
     Path(file_name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    ensure_admin(&state, &headers)?;
+    ensure_livekit(&state, &headers)?;
     let chat = state.chat.lock().unwrap();
     let file_path = chat.uploads_dir.join(&file_name);
 

@@ -3267,9 +3267,11 @@ function formatTime(timestamp) {
 
 async function fetchImageAsBlob(url) {
   try {
+    // Use LiveKit access token so all room participants can view images
+    const token = currentAccessToken || adminToken;
     const response = await fetch(url, {
       headers: {
-        "Authorization": `Bearer ${adminToken}`
+        "Authorization": `Bearer ${token}`
       }
     });
     if (!response.ok) throw new Error("Failed to fetch image");
@@ -3323,8 +3325,9 @@ function renderChatMessage(message) {
       imgEl.addEventListener("click", async () => {
         // Open image in new tab by fetching with auth
         try {
+          const token = currentAccessToken || adminToken;
           const response = await fetch(message.fileUrl, {
-            headers: { "Authorization": `Bearer ${adminToken}` }
+            headers: { "Authorization": `Bearer ${token}` }
           });
           const blob = await response.blob();
           const url = URL.createObjectURL(blob);
@@ -3347,8 +3350,9 @@ function renderChatMessage(message) {
       fileEl.addEventListener("click", async () => {
         // Download file with auth
         try {
+          const token = currentAccessToken || adminToken;
           const response = await fetch(message.fileUrl, {
-            headers: { "Authorization": `Bearer ${adminToken}` }
+            headers: { "Authorization": `Bearer ${token}` }
           });
           const blob = await response.blob();
           const url = URL.createObjectURL(blob);
@@ -3542,6 +3546,35 @@ function toggleEmojiPicker() {
   chatEmojiPicker.classList.toggle("hidden");
 }
 
+async function fixImageOrientation(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Set canvas size to image size
+        canvas.width = img.width;
+        canvas.height = img.height;
+
+        // Draw image onto canvas (this strips EXIF and normalizes orientation)
+        ctx.drawImage(img, 0, 0);
+
+        // Convert canvas back to blob
+        canvas.toBlob((blob) => {
+          resolve(blob || file);
+        }, file.type || 'image/png', 0.95);
+      };
+      img.onerror = () => resolve(file);
+      img.src = e.target.result;
+    };
+    reader.onerror = () => resolve(file);
+    reader.readAsDataURL(file);
+  });
+}
+
 async function handleChatImagePaste(file) {
   if (!file) {
     debugLog("No file provided to upload");
@@ -3552,6 +3585,12 @@ async function handleChatImagePaste(file) {
     debugLog("Cannot upload file: Not authenticated (adminToken missing)");
     setStatus("Cannot upload: Not connected", true);
     return null;
+  }
+
+  // Fix image orientation if it's an image
+  if (file.type.startsWith('image/')) {
+    debugLog("Fixing image orientation...");
+    file = await fixImageOrientation(file);
   }
 
   try {
