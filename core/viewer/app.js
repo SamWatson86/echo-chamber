@@ -490,6 +490,12 @@ async function refreshRoomList(baseUrl, adminToken, activeRoom) {
 
 async function switchRoom(roomId) {
   if (!room) return;
+  if (roomId === currentRoomName) return;
+  debugLog(`Switching from ${currentRoomName} to ${roomId}`);
+  currentRoomName = roomId;
+  if (typeof loadChatHistory === "function") {
+    loadChatHistory(roomId).catch(() => {});
+  }
   const controlUrl = controlUrlInput.value.trim();
   const sfuUrl = sfuUrlInput.value.trim();
   const name = nameInput.value.trim() || "Viewer";
@@ -3190,7 +3196,7 @@ async function connect() {
   const name = nameInput.value.trim() || "Viewer";
   if (nameInput) safeStorageSet(REMEMBER_NAME_KEY, name);
   if (passwordInput) safeStorageSet(REMEMBER_PASS_KEY, passwordInput.value);
-  const roomName = "main";
+  const roomName = currentRoomName || "main";
   const identity = buildIdentity(name);
   if (identityInput) {
     identityInput.value = identity;
@@ -3724,24 +3730,7 @@ async function saveChatMessage(message) {
   }
 }
 
-async function switchRoom(newRoomName) {
-  if (newRoomName === currentRoomName) return;
-
-  debugLog(`Switching from ${currentRoomName} to ${newRoomName}`);
-  currentRoomName = newRoomName;
-
-  // Load chat history for new room
-  await loadChatHistory(newRoomName);
-
-  // Disconnect and reconnect to new room
-  if (room) {
-    await disconnect();
-    // Wait a moment before reconnecting
-    setTimeout(() => {
-      connect().catch(() => {});
-    }, 500);
-  }
-}
+/* switchRoom is defined earlier (line ~491) - this block loads chat and reconnects */
 
 connectBtn.addEventListener("click", () => {
   connect().catch(() => {});
