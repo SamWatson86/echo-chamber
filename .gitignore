@@ -27,3 +27,6 @@ core/target/
 core/tmp.json
 core/.tmp-build.cmd
 core/control/core-control.pid
+
+# Claude Code config
+.claude/
