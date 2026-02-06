@@ -3543,10 +3543,21 @@ function toggleEmojiPicker() {
 }
 
 async function handleChatImagePaste(file) {
-  if (!file) return;
+  if (!file) {
+    debugLog("No file provided to upload");
+    return null;
+  }
+
+  if (!adminToken) {
+    debugLog("Cannot upload file: Not authenticated (adminToken missing)");
+    setStatus("Cannot upload: Not connected", true);
+    return null;
+  }
 
   try {
     const controlUrl = controlUrlInput?.value || "https://127.0.0.1:9443";
+    debugLog(`Uploading file: ${file.name} (${file.type}, ${file.size} bytes)`);
+
     const fileBytes = await file.arrayBuffer();
     const response = await fetch(`${controlUrl}/api/chat/upload?room=${encodeURIComponent(currentRoomName)}`, {
       method: "POST",
@@ -3556,14 +3567,24 @@ async function handleChatImagePaste(file) {
       body: fileBytes
     });
 
-    if (!response.ok) throw new Error("Upload failed");
+    debugLog(`Upload response status: ${response.status} ${response.statusText}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      debugLog(`Upload failed: ${errorText}`);
+      throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
+    }
 
     const result = await response.json();
+    debugLog(`Upload result: ${JSON.stringify(result)}`);
+
     if (!result.ok || !result.url) {
       throw new Error(result.error || "Upload failed");
     }
 
     const fullUrl = `${controlUrl}${result.url}`;
+    debugLog(`File uploaded successfully: ${fullUrl}`);
+
     return {
       url: fullUrl,
       name: file.name,
@@ -3571,6 +3592,7 @@ async function handleChatImagePaste(file) {
     };
   } catch (err) {
     debugLog(`Failed to upload file: ${err.message}`);
+    setStatus(`Upload failed: ${err.message}`, true);
     return null;
   }
 }
