@@ -60,7 +60,6 @@ const chatUploadBtn = document.getElementById("chat-upload-btn");
 const chatEmojiBtn = document.getElementById("chat-emoji-btn");
 const chatFileInput = document.getElementById("chat-file-input");
 const chatEmojiPicker = document.getElementById("chat-emoji-picker");
-const roomSelector = document.getElementById("room-selector");
 
 const controlUrlInput = document.getElementById("control-url");
 const sfuUrlInput = document.getElementById("sfu-url");
@@ -3279,7 +3278,6 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (openSoundboardButton) openSoundboardButton.disabled = false;
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = false;
   if (openChatButton) openChatButton.disabled = false;
-  if (roomSelector) roomSelector.disabled = false;
   if (toggleRoomAudioButton) {
     toggleRoomAudioButton.disabled = false;
     setRoomAudioMutedState(false);
@@ -3292,9 +3290,6 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   primeSoundboardAudio();
   initializeEmojiPicker();
   loadChatHistory(roomId);
-  if (roomSelector) {
-    roomSelector.value = roomId;
-  }
   connectBtn.disabled = true;
   disconnectBtn.disabled = false;
   disconnectTopBtn.disabled = false;
@@ -3425,7 +3420,6 @@ async function disconnect() {
   if (openSoundboardButton) openSoundboardButton.disabled = true;
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = true;
   if (openChatButton) openChatButton.disabled = true;
-  if (roomSelector) roomSelector.disabled = true;
   if (toggleRoomAudioButton) toggleRoomAudioButton.disabled = true;
   if (openSettingsButton) openSettingsButton.disabled = true;
   if (deviceActionsEl && deviceActionsHome) {
@@ -3438,7 +3432,6 @@ async function disconnect() {
   connectBtn.disabled = false;
   disconnectBtn.disabled = true;
   disconnectTopBtn.disabled = true;
-  if (roomSelector) roomSelector.disabled = true;
   roomListEl.classList.add("hidden");
   connectPanel.classList.remove("hidden");
   setPublishButtonsEnabled(false);
@@ -4273,14 +4266,6 @@ if (chatFileInput) {
   });
 }
 
-if (roomSelector) {
-  roomSelector.addEventListener("change", () => {
-    const newRoom = roomSelector.value;
-    if (newRoom && FIXED_ROOMS.includes(newRoom)) {
-      switchRoom(newRoom);
-    }
-  });
-}
 
 if (soundClipVolumeInput) {
   soundClipVolumeInput.addEventListener("input", () => {

@@ -1344,35 +1344,7 @@ video, audio {
 }
 
 /* ─── Room Selector ─── */
-.room-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--muted);
-  font-weight: 500;
-}
 
-.room-selector select {
-  background: var(--glass);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  transition: var(--transition);
-}
-
-.room-selector select:hover {
-  border-color: var(--border-hover);
-  background: var(--glass-hover);
-}
-
-.room-selector select:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
 
 /* ─── Chat Panel ─── */
 .chat-panel {
