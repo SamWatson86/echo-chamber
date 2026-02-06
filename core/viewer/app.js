@@ -65,6 +65,9 @@ const openThemeButton = document.getElementById("open-theme");
 const closeThemeButton = document.getElementById("close-theme");
 const themePanel = document.getElementById("theme-panel");
 const THEME_STORAGE_KEY = "echo-core-theme";
+const uiOpacitySlider = document.getElementById("ui-opacity-slider");
+const uiOpacityValue = document.getElementById("ui-opacity-value");
+const UI_OPACITY_KEY = "echo-core-ui-opacity";
 
 const controlUrlInput = document.getElementById("control-url");
 const sfuUrlInput = document.getElementById("sfu-url");
@@ -4646,3 +4649,23 @@ if (themePanel) {
 
 // Initialize theme on load
 initTheme();
+
+// ── UI Transparency slider ──
+function applyUiOpacity(val) {
+  const clamped = Math.max(20, Math.min(100, val));
+  document.documentElement.style.setProperty("--ui-opacity", clamped / 100);
+  localStorage.setItem(UI_OPACITY_KEY, clamped);
+  if (uiOpacityValue) uiOpacityValue.textContent = `${clamped}%`;
+  if (uiOpacitySlider && parseInt(uiOpacitySlider.value, 10) !== clamped) {
+    uiOpacitySlider.value = clamped;
+  }
+}
+
+// Init from saved value
+applyUiOpacity(parseInt(localStorage.getItem(UI_OPACITY_KEY) || "100", 10));
+
+if (uiOpacitySlider) {
+  uiOpacitySlider.addEventListener("input", (e) => {
+    applyUiOpacity(parseInt(e.target.value, 10));
+  });
+}

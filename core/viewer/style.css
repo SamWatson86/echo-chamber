@@ -1802,6 +1802,69 @@ video, audio {
   letter-spacing: 0.06em;
 }
 
+/* UI Transparency slider */
+.theme-opacity {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.theme-opacity-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.theme-opacity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.theme-opacity-row input[type="range"] {
+  flex: 1;
+  height: 6px;
+  appearance: none;
+  background: var(--border);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+.theme-opacity-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.3);
+}
+
+.theme-opacity-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 40px;
+  text-align: right;
+}
+
+/* UI opacity applied to all panels except the theme panel itself */
+#connect-panel,
+.room-panel,
+.settings-panel,
+.soundboard,
+.camera-lobby,
+.chat-panel,
+.debug-panel {
+  opacity: var(--ui-opacity, 1);
+  transition: opacity 0.2s ease;
+}
+
 /* Preview swatches */
 .frost-preview {
   background: linear-gradient(135deg, #0b1220 0%, #1e293b 40%, #38bdf8 100%);
