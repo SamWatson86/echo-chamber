@@ -165,6 +165,22 @@ Complete CSS overhaul with unified frosted glass aesthetic:
 - Mic is now automatically enabled when users connect to a room (`toggleMicOn()` called after connection)
 - Users no longer need to manually click "Enable Mic" after joining
 
+### Theme System (6 Interactive Themes)
+**Files**: `core/viewer/style.css`, `core/viewer/index.html`, `core/viewer/app.js`
+
+Full theme system with 6 unique visual themes — each overrides CSS variables, panel backgrounds, button states, focus rings, chat colors, room buttons, and includes animated background effects:
+
+1. **Frost** (default) — Current blue/dark look enhanced with drifting shimmer animation
+2. **Cyberpunk** — Hot pink (#ff2d78) + cyan (#00f0ff) neon, scan-line overlay, sweeping light animation
+3. **Aurora** — Northern lights shifting gradient background, emerald green accent, indigo secondary, glowing orbs
+4. **Ember** — Volcanic deep red/orange, warm pulsing glow, amber active room highlights
+5. **Matrix** — Pure black + real falling code rain (canvas-based, Japanese/hex characters), all-green UI
+6. **Midnight** — Deep indigo starfield background (CSS dot stars), purple/pink nebula gradients
+
+**UI**: "Theme" button in sidebar → centered panel with 6 preview swatches (shimmer on hover). Click to apply instantly.
+**Persistence**: Theme saved to localStorage, restored on page load.
+**Matrix canvas**: Created/destroyed dynamically via JS (only runs when Matrix theme is active).
+
 ## Current Status
 
 **All core work is committed and pushed to GitHub.** Repo is clean.
