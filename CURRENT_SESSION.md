@@ -176,12 +176,12 @@ Full theme system with 7 unique visual themes — each overrides CSS variables, 
 4. **Ember** — Volcanic deep red/orange, warm pulsing glow, amber active room highlights
 5. **Matrix** — Pure black + real falling code rain (canvas-based, Japanese/hex characters), all-green UI
 6. **Midnight** — Deep indigo starfield background (CSS dot stars), purple/pink nebula gradients
-7. **Ultra Instinct** — Custom Goku-inspired silver/cosmic theme with animated energy particles
+7. **Ultra Instinct** — Custom Goku-inspired true silver/gray theme with iconic spiky hair silhouette + energy particles
 
 **UI**: "Theme" button in sidebar → centered panel with 7 preview swatches (shimmer on hover). Click to apply instantly.
 **Persistence**: Theme saved to localStorage, restored on page load.
 **Matrix canvas**: Created/destroyed dynamically via JS (only runs when Matrix theme is active).
-**Ultra Instinct particles**: Canvas-based energy particle system with 3 types (silver orbs, white sparks, violet wisps) floating upward — created/destroyed dynamically like Matrix rain.
+**Ultra Instinct**: True silver/gray palette (no blue), Goku bust silhouette with multi-pass glow + breathing pulse, energy particles (silver orbs, white sparks, neutral wisps). Silhouette pre-rendered to offscreen buffer for performance.
 
 ## Current Status
 
