@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Echo Chamber Core Viewer</title>
+    <link rel="stylesheet" href="/viewer/style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>Echo Chamber Core Viewer</h1>
+        <p>Test viewer for the full-stack SFU pipeline.</p>
+      </header>
+
+      <section id="connect-panel" class="panel">
+        <div class="grid">
+          <label>
+            Control URL
+            <input id="control-url" type="text" placeholder="http://127.0.0.1:9090" />
+          </label>
+          <label>
+            SFU URL
+            <input id="sfu-url" type="text" placeholder="ws://127.0.0.1:7880" />
+          </label>
+          <input id="room" type="hidden" value="main" />
+          <input id="identity" type="hidden" value="" />
+          <label>
+            Name
+            <input id="name" type="text" value="Viewer" />
+          </label>
+          <label>
+            Admin password
+            <input id="admin-password" type="password" placeholder="Enter admin password" />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="connect">Connect</button>
+          <button id="disconnect" disabled>Disconnect</button>
+        </div>
+        <div class="actions publish-actions hidden">
+          <button id="toggle-mic" disabled>Enable Mic</button>
+          <button id="toggle-cam" disabled>Enable Camera</button>
+          <button id="toggle-screen" disabled>Share Screen</button>
+        </div>
+        <div class="actions device-actions">
+          <label class="device-field">
+            Mic
+            <select id="mic-select" disabled></select>
+          </label>
+          <label class="device-field">
+            Camera
+            <select id="cam-select" disabled></select>
+          </label>
+          <label class="device-field">
+            Output
+            <select id="speaker-select" disabled></select>
+          </label>
+          <button id="refresh-devices" disabled>Refresh Devices</button>
+        </div>
+        <div id="device-status" class="status device-status"></div>
+        <div id="status" class="status">Idle</div>
+      </section>
+
+      <section class="panel room-panel">
+        <div class="room-top">
+          <div>
+            <div class="room-title">Rooms</div>
+            <div id="room-list" class="room-list hidden"></div>
+          </div>
+          <div class="room-actions">
+            <button id="open-settings" type="button" disabled>Settings</button>
+            <button id="create-room" type="button" disabled>Create Room</button>
+            <button id="disconnect-top" type="button" disabled>Disconnect</button>
+          </div>
+        </div>
+        <div class="room-layout">
+          <div class="room-main">
+            <div class="grid-header">
+              <h2>Screens</h2>
+            </div>
+            <div id="screen-grid" class="media-grid screens-grid"></div>
+          </div>
+          <aside class="room-sidebar">
+            <div class="sidebar-header">
+              <div class="sidebar-title-row">
+                <h2>Active Users</h2>
+                <div class="sidebar-actions">
+                  <button id="refresh-videos" type="button" class="hidden" style="background: #10b981; color: white;">Enable Videos</button>
+                  <button id="debug-toggle" type="button">Debug</button>
+                  <button id="open-soundboard" type="button" disabled>Soundboard</button>
+                  <button id="open-camera-lobby" type="button" disabled>Camera Lobby</button>
+                  <button id="toggle-room-audio" type="button" disabled>Mute All</button>
+                </div>
+              </div>
+            </div>
+            <div id="user-list" class="user-list"></div>
+          </aside>
+        </div>
+        <div id="audio-bucket" class="audio-bucket"></div>
+      </section>
+      <div id="settings-panel" class="settings-panel hidden" role="dialog" aria-label="Settings">
+        <div class="settings-header">
+          <h3>Settings</h3>
+          <button id="close-settings" type="button">Close</button>
+        </div>
+        <div id="settings-device-panel" class="settings-body"></div>
+      </div>
+      <div id="soundboard" class="soundboard hidden" role="dialog" aria-label="Soundboard">
+        <div class="soundboard-header">
+          <h3>Soundboard</h3>
+          <div class="soundboard-actions">
+            <button
+              id="toggle-soundboard-volume"
+              type="button"
+              aria-expanded="false"
+              aria-controls="soundboard-volume-panel"
+            >
+              Soundboard Volume
+            </button>
+            <button id="close-soundboard" type="button">Back</button>
+          </div>
+        </div>
+        <div id="soundboard-volume-panel" class="soundboard-volume hidden" aria-hidden="true">
+          <div class="soundboard-volume-row">
+            <input id="soundboard-volume" type="range" min="0" max="100" value="100" />
+            <span id="soundboard-volume-value" class="soundboard-volume-value">100%</span>
+          </div>
+        </div>
+        <div class="soundboard-search">
+          <input id="sound-search" type="text" placeholder="Find the perfect sound" />
+        </div>
+        <div id="soundboard-grid" class="soundboard-grid"></div>
+        <div class="soundboard-upload">
+          <div class="soundboard-upload-row">
+            <input id="sound-name" type="text" maxlength="60" placeholder="Name (e.g. Hooray!)" />
+            <button id="sound-upload-button" type="button">Upload</button>
+            <button id="sound-cancel-edit" type="button" class="hidden">Cancel</button>
+            <label class="sound-file">
+              <input id="sound-file" type="file" accept="audio/*" />
+              <span id="sound-file-label">Select audio</span>
+            </label>
+          </div>
+          <div class="soundboard-upload-volume">
+            <div class="soundboard-upload-volume-label">Clip volume</div>
+            <input id="sound-clip-volume" type="range" min="0" max="200" value="100" />
+            <div id="sound-clip-volume-value" class="soundboard-volume-value">100%</div>
+          </div>
+          <div class="soundboard-icons">
+            <div class="soundboard-icons-label">Pick an icon</div>
+            <div id="soundboard-icon-grid" class="soundboard-icon-grid"></div>
+          </div>
+          <div id="soundboard-hint" class="hint"></div>
+        </div>
+      </div>
+      <div id="camera-lobby" class="camera-lobby hidden" role="dialog" aria-label="Camera Lobby">
+        <div class="camera-lobby-header">
+          <h3>Camera Lobby</h3>
+          <div class="camera-lobby-actions">
+            <button id="lobby-toggle-mic" type="button" class="lobby-control-btn">
+              <span class="mic-icon">🎤</span> Mute Mic
+            </button>
+            <button id="lobby-toggle-camera" type="button" class="lobby-control-btn">
+              <span class="camera-icon">📹</span> Turn Off Camera
+            </button>
+            <button id="close-camera-lobby" type="button">Close</button>
+          </div>
+        </div>
+        <div id="camera-lobby-grid" class="camera-lobby-grid"></div>
+      </div>
+    </main>
+    <div id="debug-panel" class="debug-panel hidden">
+      <div class="debug-panel-header">
+        <div>Debug Log</div>
+        <div class="debug-panel-actions">
+          <button id="debug-copy" type="button">Copy</button>
+          <button id="debug-clear" type="button">Clear</button>
+          <button id="debug-close" type="button">Close</button>
+        </div>
+      </div>
+      <pre id="debug-log"></pre>
+    </div>
+
+    <script src="/viewer/livekit-client.umd.js"></script>
+    <script src="/viewer/app.js"></script>
+  </body>
+</html>

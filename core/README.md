@@ -18,6 +18,8 @@ This is separate from the existing web build (Echo Chamber Web). Do not mix file
    - `powershell -ExecutionPolicy Bypass -File .\run-core.ps1`
 2) Health check:
    - `http://127.0.0.1:9090/health`
+3) Viewer (web):
+   - `http://127.0.0.1:9090/viewer`
 
 ## Logs
 - Control plane:
@@ -27,7 +29,9 @@ This is separate from the existing web build (Echo Chamber Web). Do not mix file
   - `docker compose logs --tail 200` (run in `core/sfu`)
 
 ## Status
-Scaffolding + SFU + control plane are in place. Native client work is next.
+Scaffolding + SFU + control plane are in place. Native client publishes test audio/video
+to validate the full media pipeline (synthetic frames + tone). A web viewer is included
+to subscribe to test streams.
 
 ## Notes
 - The web app remains the primary working product while Core is built.

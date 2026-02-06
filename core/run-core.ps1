@@ -5,6 +5,11 @@ param(
 $root = $PSScriptRoot
 $logsDir = Join-Path $root "logs"
 if (!(Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir | Out-Null }
+$runLog = Join-Path $logsDir "run-core.log"
+function Log([string]$msg) {
+  $ts = (Get-Date).ToString("s")
+  Add-Content -Path $runLog -Value "$ts $msg"
+}
 
 function Load-Env([string]$path) {
   if (!(Test-Path $path)) { return }
@@ -23,10 +28,12 @@ function Load-Env([string]$path) {
 function Ensure-Docker {
   try {
     docker info | Out-Null
+    Log "Docker ready."
     return $true
   } catch {
     try {
       Start-Process -FilePath "C:\Program Files\Docker\Docker\Docker Desktop.exe" | Out-Null
+      Log "Docker Desktop start requested."
     } catch {}
   }
   $tries = 0
@@ -34,11 +41,13 @@ function Ensure-Docker {
     $tries++
     try {
       docker info | Out-Null
+      Log "Docker ready after retry."
       return $true
     } catch {
       Start-Sleep -Seconds 2
     }
   }
+  Log "Docker not ready after initial retries."
   return $false
 }
 
@@ -100,13 +109,35 @@ if (!(Test-Path $envFile)) {
 
 Load-Env $envFile
 
+# Ensure TLS certs if configured
+if ($env:CORE_TLS_SELF_SIGNED) {
+  # No file generation needed; cert is generated in-memory by the control server.
+} elseif ($env:CORE_TLS_CERT -and $env:CORE_TLS_KEY) {
+  $certPath = Join-Path $root $env:CORE_TLS_CERT
+  $keyPath = Join-Path $root $env:CORE_TLS_KEY
+  if (!(Test-Path $certPath) -or !(Test-Path $keyPath)) {
+    $gen = Join-Path $root "control\generate-cert.ps1"
+    if (Test-Path $gen) {
+      powershell -ExecutionPolicy Bypass -File $gen | Out-Null
+    }
+  }
+}
+
 # Start SFU
 if (Ensure-Docker) {
   Push-Location (Join-Path $root "sfu")
   docker compose up -d | Out-Null
   Pop-Location
+  Log "SFU started via docker compose."
 } else {
   Write-Host "Docker not ready; SFU not started." -ForegroundColor Yellow
+  $retry = Join-Path $root "retry-sfu.ps1"
+  if (Test-Path $retry) {
+    Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$retry`"" -WindowStyle Hidden | Out-Null
+    Log "SFU retry helper launched."
+  } else {
+    Log "SFU retry helper missing."
+  }
 }
 
 # Build + start control
