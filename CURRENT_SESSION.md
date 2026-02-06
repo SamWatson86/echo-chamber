@@ -176,12 +176,12 @@ Full theme system with 7 unique visual themes — each overrides CSS variables, 
 4. **Ember** — Volcanic deep red/orange, warm pulsing glow, amber active room highlights
 5. **Matrix** — Pure black + real falling code rain (canvas-based, Japanese/hex characters), all-green UI
 6. **Midnight** — Deep indigo starfield background (CSS dot stars), purple/pink nebula gradients
-7. **Ultra Instinct** — Custom Goku-inspired flame-aura energy theme with silver/blue/violet fire rising from bottom
+7. **Ultra Instinct** — Animated GIF background (Goku UI aura) + sparkle particle overlay, silver/gray UI
 
 **UI**: "Theme" button in sidebar → centered panel with 7 preview swatches (shimmer on hover). Click to apply instantly.
 **Persistence**: Theme saved to localStorage, restored on page load.
 **Matrix canvas**: Created/destroyed dynamically via JS (only runs when Matrix theme is active).
-**Ultra Instinct**: 55 flame tongues (silver + blue + violet) rising from bottom via bezier curves, bright core glow from bottom center, 100 particles (sparks, orbs, wisps). Silver/gray UI accent palette. Canvas at 0.9 opacity for vibrant flames.
+**Ultra Instinct**: `ultrainstinct.gif` as full-screen CSS background (45% opacity), 80 sparkle particles (sparks, orbs, wisps) overlaid via canvas. Silver/gray accent palette for all UI elements.
 
 ## Current Status
 
