@@ -1,0 +1,62 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Game Process List
+#  Add game executable names here (one per line, without .exe)
+#  The watcher checks if any of these processes are running.
+#  Lines starting with # are ignored.
+#
+#  NOTE: GPU usage detection (nvidia-smi) already catches most games
+#  automatically. This list is a backup for games that use low GPU
+#  but should still trigger Gaming mode.
+# ═══════════════════════════════════════════════════════════════════
+
+# ── FPS / Shooters ──
+FortniteClient-Win64-Shipping
+VALORANT-Win64-Shipping
+ShooterGame
+cod
+ModernWarfare
+BlackOpsColdWar
+r5apex
+Overwatch
+cs2
+csgo
+destiny2
+RainbowSix
+EscapeFromTarkov
+
+# ── Battle Royale / Survival ──
+PUBG
+RustClient
+DayZ
+Phasmophobia
+
+# ── RPG / Open World ──
+eldenring
+Cyberpunk2077
+Hogwarts Legacy
+starfield
+GTA5
+re4
+
+# ── Strategy / MOBA ──
+League of Legends
+DOTA2
+RocketLeague
+
+# ── Racing ──
+ForzaHorizon5
+ForzaHorizon4
+
+# ── Minecraft / Sandbox ──
+javaw
+Minecraft.Windows
+
+# ── Other ──
+Baldur's Gate 3
+HogwartsLegacy
+Palworld-Win64-Shipping
+
+# ═══════════════════════════════════════════════════════════════════
+#  Add your own games below this line:
+# ═══════════════════════════════════════════════════════════════════
+

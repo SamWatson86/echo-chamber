@@ -30,3 +30,6 @@ core/control/core-control.pid
 
 # Claude Code config
 .claude/
+
+# Power manager runtime config (machine-specific)
+power-manager/config.json
