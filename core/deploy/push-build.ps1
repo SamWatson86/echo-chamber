@@ -108,4 +108,20 @@ try {
     Write-Status "Deployed: $($data.status)" Green
 } catch {
     Write-Status "Deploy failed: $_" Red
+    return
+}
+
+# Push config.json so the client knows where the server is
+$configFile = Join-Path $PSScriptRoot "config.json"
+if (Test-Path $configFile) {
+    Write-Status "Pushing config.json..."
+    $configBody = Get-Content $configFile -Raw
+    try {
+        Invoke-WebRequest -Uri "$baseUrl/config" -Method POST -Body $configBody -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
+        Write-Status "Config pushed." Green
+    } catch {
+        Write-Status "Config push failed (client may use defaults): $_" Yellow
+    }
+} else {
+    Write-Status "No config.json in deploy folder, client will use defaults." Yellow
 }

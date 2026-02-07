@@ -136,6 +136,7 @@ struct ChatUploadResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct ChatUploadQuery {
     room: String,
 }
@@ -508,7 +509,6 @@ async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri) {
                     Ok(AxumMessage::Ping(payload)) => { let _ = up_tx.send(WsMessage::Ping(payload)).await; }
                     Ok(AxumMessage::Pong(payload)) => { let _ = up_tx.send(WsMessage::Pong(payload)).await; }
                     Ok(AxumMessage::Close(_)) | Err(_) => { let _ = up_tx.send(WsMessage::Close(None)).await; break; }
-                    _ => {}
                 }
             }
             Some(msg) = up_rx.next() => {
@@ -871,33 +871,29 @@ async fn soundboard_update(
     ensure_livekit(&state, &headers)?;
     let mut board = state.soundboard.lock().unwrap_or_else(|e| e.into_inner());
     let sound_id = payload.sound_id.clone();
-    let mut updated: Option<SoundboardSound> = None;
-    if let Some(sound) = board.index.get_mut(&sound_id) {
-        if sound.room_id != payload.room_id {
-            return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Room mismatch".into()) }));
-        }
-        if let Some(name) = payload.name {
-            sound.name = name.trim().chars().take(60).collect();
-        }
-        if let Some(icon) = payload.icon {
-            sound.icon = icon;
-        }
-        if let Some(volume) = payload.volume {
-            sound.volume = volume.min(200);
-        }
-        sound.uploaded_at = now_ts_ms();
-        updated = Some(sound.clone());
-    } else {
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Sound not found".into()) }));
+    let sound = match board.index.get_mut(&sound_id) {
+        Some(sound) => sound,
+        None => return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Sound not found".into()) })),
+    };
+    if sound.room_id != payload.room_id {
+        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Room mismatch".into()) }));
     }
-    if let Some(sound) = updated.clone() {
-        if let Some(room) = board.rooms.get_mut(&sound.room_id) {
-            room.insert(sound.id.clone(), sound.clone());
-        }
-        persist_soundboard(&board);
-        return Ok(Json(SoundboardSoundResponse { ok: true, sound: Some(soundboard_public(&sound)), error: None }));
+    if let Some(name) = payload.name {
+        sound.name = name.trim().chars().take(60).collect();
     }
-    Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Update failed".into()) }))
+    if let Some(icon) = payload.icon {
+        sound.icon = icon;
+    }
+    if let Some(volume) = payload.volume {
+        sound.volume = volume.min(200);
+    }
+    sound.uploaded_at = now_ts_ms();
+    let updated = sound.clone();
+    if let Some(room) = board.rooms.get_mut(&updated.room_id) {
+        room.insert(updated.id.clone(), updated.clone());
+    }
+    persist_soundboard(&board);
+    Ok(Json(SoundboardSoundResponse { ok: true, sound: Some(soundboard_public(&updated)), error: None }))
 }
 
 #[derive(Deserialize)]

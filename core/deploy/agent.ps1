@@ -211,6 +211,20 @@ while ($listener.IsListening) {
                 Send-Response $context 200 '{"status":"stopped"}'
             }
 
+            "/config" {
+                if ($method -ne "POST") {
+                    Send-Response $context 405 '{"error":"POST required"}'
+                    continue
+                }
+                $reader = New-Object System.IO.StreamReader($context.Request.InputStream)
+                $body = $reader.ReadToEnd()
+                $reader.Dispose()
+                $configPath = Join-Path $InstallDir "config.json"
+                Set-Content -Path $configPath -Value $body -Encoding UTF8
+                Write-Log "Config written to $configPath"
+                Send-Response $context 200 '{"status":"config updated"}'
+            }
+
             default {
                 Send-Response $context 404 '{"error":"not found"}'
             }
