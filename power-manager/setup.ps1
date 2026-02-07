@@ -1,19 +1,32 @@
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  Echo Chamber Power Manager — Setup
 #  Run this ONCE as Administrator to create power plans + install
 #  the background watcher that auto-switches between modes.
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 
-#Requires -RunAsAdministrator
-
+# Requires elevation - run via run-setup.cmd or right-click > Run as Administrator
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
+if (-not $root) { $root = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $configPath = Join-Path $root "config.json"
+$setupLogPath = Join-Path $root "setup.log"
+
+# Try to redirect output to log file (fails silently if stdout already redirected)
+try { Start-Transcript -Path $setupLogPath -Force | Out-Null } catch {}
+
+# Check elevation
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "ERROR: This script must be run as Administrator." -ForegroundColor Red
+    Write-Host "Right-click run-setup.cmd and select 'Run as administrator'" -ForegroundColor Yellow
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 1
+}
 
 Write-Host ""
-Write-Host "  ╔═══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║   Echo Chamber Power Manager Setup    ║" -ForegroundColor Cyan
-Write-Host "  ╚═══════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "  +=======================================+" -ForegroundColor Cyan
+Write-Host "  |   Echo Chamber Power Manager Setup    |" -ForegroundColor Cyan
+Write-Host "  +=======================================+" -ForegroundColor Cyan
 Write-Host ""
 
 # ── Helper: find or create a power plan ──
@@ -30,7 +43,7 @@ function Get-OrCreatePlan {
     }
     # Create by duplicating the base scheme
     $output = powercfg /duplicatescheme $BaseSchemeGuid 2>&1
-    $match = [regex]::Match("$output", '([0-9a-f\-]{36})\s*$')
+    $match = [regex]::Match("$output", '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
     if (-not $match.Success) {
         throw "Failed to create power plan '$Name'. Output: $output"
     }
@@ -47,9 +60,9 @@ function Set-PlanSetting {
     powercfg /setdcvalueindex $PlanGuid $SubGroup $Setting $DcValue | Out-Null
 }
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 1: Create Power Plans
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host "Step 1: Creating power plans..." -ForegroundColor Yellow
 
 # Well-known Windows GUIDs
@@ -122,9 +135,9 @@ Set-PlanSetting $gamingGuid $PCIE $PCIE_LINK 0 0
 
 Write-Host "  [OK] Echo Gaming: CPU 100%, display off 15min, never sleep" -ForegroundColor Green
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 2: Detect NVIDIA GPU
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host ""
 Write-Host "Step 2: Detecting NVIDIA GPU..." -ForegroundColor Yellow
 
@@ -141,7 +154,7 @@ $searchPaths = @(
 
 foreach ($p in $searchPaths) {
     try {
-        $test = & $p --version 2>&1
+        $null = & $p --version 2>&1
         if ($LASTEXITCODE -eq 0) {
             $nvidiaSmi = $p
             break
@@ -167,9 +180,9 @@ if ($nvidiaSmi) {
     Write-Host "  [WARN] nvidia-smi not found. GPU throttling disabled." -ForegroundColor DarkYellow
 }
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 3: Save config
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host ""
 Write-Host "Step 3: Saving configuration..." -ForegroundColor Yellow
 
@@ -187,9 +200,9 @@ $config = @{
 $config | ConvertTo-Json -Depth 3 | Set-Content $configPath -Encoding UTF8
 Write-Host "  [OK] Config saved to $configPath" -ForegroundColor Green
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 4: Create default games.txt if missing
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 $gamesPath = Join-Path $root "games.txt"
 if (-not (Test-Path $gamesPath)) {
     Write-Host ""
@@ -201,9 +214,9 @@ if (-not (Test-Path $gamesPath)) {
     Write-Host "Step 4: games.txt already exists, keeping yours" -ForegroundColor Yellow
 }
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 5: Install watcher as scheduled task
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host ""
 Write-Host "Step 5: Installing background watcher..." -ForegroundColor Yellow
 
@@ -245,30 +258,30 @@ Register-ScheduledTask `
 
 Write-Host "  [OK] Scheduled task '$taskName' installed (runs at startup)" -ForegroundColor Green
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 6: Start watcher now
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host ""
 Write-Host "Step 6: Starting watcher..." -ForegroundColor Yellow
 
 Start-ScheduledTask -TaskName $taskName
 Write-Host "  [OK] Watcher is running!" -ForegroundColor Green
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  STEP 7: Activate server plan now (since you're not gaming yet)
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host ""
 Write-Host "Step 7: Activating Echo Server mode..." -ForegroundColor Yellow
 powercfg /setactive $serverGuid
 Write-Host "  [OK] Now in Echo Server mode (low power)" -ForegroundColor Green
 
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 #  Done!
-# ═══════════════════════════════════════════════════════════════════
+# ===================================================================
 Write-Host ""
-Write-Host "  ╔═══════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "  ║         Setup Complete!                ║" -ForegroundColor Green
-Write-Host "  ╚═══════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "  +=======================================+" -ForegroundColor Green
+Write-Host "  |         Setup Complete!                |" -ForegroundColor Green
+Write-Host "  +=======================================+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  How it works:" -ForegroundColor White
 Write-Host "  - Background watcher checks GPU every 45 seconds" -ForegroundColor Gray
@@ -288,5 +301,7 @@ Write-Host "  To check current mode:  powercfg /getactivescheme" -ForegroundColo
 Write-Host "  To stop the watcher:    Stop-ScheduledTask EchoChamberPowerWatcher" -ForegroundColor Cyan
 Write-Host "  To uninstall:           Unregister-ScheduledTask EchoChamberPowerWatcher" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  Log file: $(Join-Path $root 'watcher.log')" -ForegroundColor Cyan
+$logFile = Join-Path $root "watcher.log"
+Write-Host "  Log file: $logFile" -ForegroundColor Cyan
 Write-Host ""
+try { Stop-Transcript | Out-Null } catch {}

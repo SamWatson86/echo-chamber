@@ -38,7 +38,6 @@ if (Test-Path $gamesPath) {
 # ── State ──
 $currentMode = "unknown"
 $lastGamingTime = [datetime]::MinValue
-$startTime = Get-Date
 
 # ── Logging ──
 function Log($msg) {
@@ -106,7 +105,7 @@ function Get-CurrentMode {
 # ═══════════════════════════════════════════════════════════════════
 #  Main loop
 # ═══════════════════════════════════════════════════════════════════
-Log "═══ Watcher started ═══"
+Log "=== Watcher started ==="
 Log "Server plan: $serverGuid"
 Log "Gaming plan: $gamingGuid"
 Log "GPU threshold: ${gpuThreshold}%, cooldown: ${idleCooldown}s, check: ${checkInterval}s"
