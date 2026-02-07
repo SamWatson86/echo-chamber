@@ -38,9 +38,9 @@ function Write-Log([string]$msg) {
 
 function Get-ClientProcess {
     if (Test-Path $pidFile) {
-        $pid = Get-Content $pidFile -ErrorAction SilentlyContinue
-        if ($pid) {
-            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        $cpid = Get-Content $pidFile -ErrorAction SilentlyContinue
+        if ($cpid) {
+            $proc = Get-Process -Id $cpid -ErrorAction SilentlyContinue
             if ($proc -and $proc.ProcessName -eq "echo-core-client") {
                 return $proc
             }
