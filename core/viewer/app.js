@@ -340,33 +340,22 @@ function unlockAudio() {
   } catch {}
 }
 
-function getScreenShareOptions() {
-  const LK = getLiveKitClient();
-  const preset =
-    LK?.ScreenSharePresets?.h1080fps60 ||
-    LK?.ScreenSharePresets?.h1080fps30 ||
-    LK?.ScreenSharePresets?.h720fps30 ||
-    null;
-  const opts = {
+function getScreenShareCaptureOptions() {
+  return {
     audio: true,
     resolution: { width: 1920, height: 1080 },
     frameRate: 60,
-    encoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
     surfaceSwitching: "exclude",
     selfBrowserSurface: "exclude",
     preferCurrentTab: false
   };
-  if (preset?.resolution) {
-    opts.resolution = preset.resolution;
-  }
-  if (preset?.encoding) {
-    opts.encoding = {
-      ...preset.encoding,
-      maxBitrate: Math.max(preset.encoding.maxBitrate || 0, opts.encoding.maxBitrate),
-      maxFramerate: Math.max(preset.encoding.maxFramerate || 0, opts.encoding.maxFramerate)
-    };
-  }
-  return opts;
+}
+
+function getScreenSharePublishOptions() {
+  return {
+    videoEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+    simulcast: false,
+  };
 }
 
 document.addEventListener(
@@ -3046,15 +3035,22 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     throw new Error("LiveKit client failed to load. Please refresh and try again.");
   }
   room = new LK.Room({
-    adaptiveStream: true,
+    adaptiveStream: false,
     dynacast: true,
     autoSubscribe: true,
     videoCaptureDefaults: {
-      resolution: LK.VideoPresets?.h1080?.resolution || { width: 1920, height: 1080, frameRate: 60 },
+      resolution: { width: 1920, height: 1080, frameRate: 60 },
     },
     publishDefaults: {
       simulcast: true,
-      videoEncoding: { maxBitrate: 3_000_000, maxFramerate: 60 },
+      videoCodec: "h264",
+      videoEncoding: { maxBitrate: 5_000_000, maxFramerate: 60 },
+      videoSimulcastLayers: [
+        { width: 960, height: 540, encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
+        { width: 480, height: 270, encoding: { maxBitrate: 400_000, maxFramerate: 15 } },
+      ],
+      screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+      screenShareSimulcastLayers: [],
     },
   });
   try {
@@ -4087,7 +4083,7 @@ async function toggleScreen() {
   const desired = !screenEnabled;
   screenBtn.disabled = true;
   try {
-    await room.localParticipant.setScreenShareEnabled(desired, getScreenShareOptions());
+    await room.localParticipant.setScreenShareEnabled(desired, getScreenShareCaptureOptions(), getScreenSharePublishOptions());
     screenEnabled = desired;
     renderPublishButtons();
     if (room?.localParticipant) {
@@ -4111,7 +4107,7 @@ async function restartScreenShare() {
     screenEnabled = false;
     renderPublishButtons();
     await new Promise((resolve) => setTimeout(resolve, 500));
-    await room.localParticipant.setScreenShareEnabled(true, getScreenShareOptions());
+    await room.localParticipant.setScreenShareEnabled(true, getScreenShareCaptureOptions(), getScreenSharePublishOptions());
     screenEnabled = true;
     renderPublishButtons();
   } catch (err) {
