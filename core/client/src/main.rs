@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
 
-const DEFAULT_SERVER: &str = "https://127.0.0.1:9443";
+const DEFAULT_SERVER: &str = "https://99.111.153.69:9443";
 
 #[derive(Deserialize)]
 struct Config {
