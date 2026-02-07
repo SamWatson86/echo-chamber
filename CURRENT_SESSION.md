@@ -182,17 +182,76 @@ Full theme system with 7 unique visual themes — each overrides CSS variables, 
 **Persistence**: Theme + transparency saved to localStorage, restored on page load.
 **Matrix canvas**: Created/destroyed dynamically via JS (only runs when Matrix theme is active).
 **Ultra Instinct**: `ultrainstinct.gif` as full-screen CSS background (45% opacity), 80 sparkle particles (sparks, orbs, wisps) overlaid via canvas. Silver/gray accent palette for all UI elements.
-**UI Transparency Slider**: In theme panel, range 20%-100%. Controls `--ui-opacity` CSS variable applied to all panels except theme panel itself. Lets guests see through the UI to the background.
+**UI Transparency Slider**: In theme panel, range 20%-100%. Controls `--ui-bg-alpha` CSS variable which multiplies alpha values in all panel background `rgba()` declarations via `calc()`. Only backgrounds become transparent — text, buttons, user cards, and video elements stay fully solid.
+
+### Audio Not Playing for Late-Joining Participants
+**File**: `core/viewer/app.js`
+
+**Problem**: Sam couldn't hear Jeff's mic after Jeff joined. Chrome's autoplay policy blocked audio `play()`, but unlike video (which has a retry-on-user-interaction mechanism), audio failures were silently swallowed with no recovery path. Also, `_lkTrack` was never set on audio elements, causing the dedup display check to always report them as "not displayed".
+
+**Fixes**:
+- Set `_lkTrack = track` on audio elements (fixes dedup display check)
+- Log audio `play()` failures instead of silently catching them
+- Queue failed audio elements in `_pausedVideos` set for user interaction retry
+- Made interaction listeners persistent (removed `once: true`) so late-joining participants' audio gets enabled on any subsequent click
+- Call `room.startAudio()` on every user interaction to keep AudioContext alive
+- Renamed `enableAllVideos` → `enableAllMedia` (handles both audio + video)
+
+### UI Transparency Slider Fix (Background-Only)
+**File**: `core/viewer/style.css`, `core/viewer/app.js`
+
+**Problem**: Transparency slider was using `opacity` on entire panel containers, making text/buttons/video transparent too.
+
+**Fix**: Changed to `calc()`-based alpha multiplier (`--ui-bg-alpha`) on background `rgba()` values only. All panel backgrounds across all 7 themes use the variable. Interactive elements stay solid.
+
+### Power Manager (Auto Server/Gaming Mode)
+**Files**: `power-manager/setup.ps1`, `power-manager/watcher.ps1`, `power-manager/switch-mode.ps1`, `power-manager/games.txt`
+
+**Purpose**: PC acts as always-on server for Echo Chamber, auto-switching between low-power server mode and full-power gaming mode.
+
+**How it works**:
+- `setup.ps1` (run once as Admin): Creates two Windows power plans + installs background watcher as scheduled task
+- **Echo Server** plan: CPU 30%, GPU throttled to 25% of max, display off after 1 min, never sleep
+- **Echo Gaming** plan: CPU 100%, GPU full power, display off after 15 min, never sleep
+- Background watcher checks GPU utilization via `nvidia-smi` every 45 seconds
+- GPU usage > 25% or known game process detected → switches to Gaming
+- 3 minutes of low GPU → switches back to Server
+- NVIDIA GPU power limit adjusted per mode via `nvidia-smi -pl`
+- `switch-mode.ps1` for manual override
+- `games.txt` for explicit game process names (backup to GPU detection)
+
+**Status**: Setup complete and running. Echo Server plan active (CPU 30%, GPU 112W/450W). Watcher task installed at startup.
+
+### MCP Plugins Installed
+**File**: `.mcp.json`
+
+Two MCP plugins configured for the project:
+1. **GitHub MCP** (HTTP) — Direct GitHub API access for managing PRs, issues, reviews. Uses OAuth (will prompt for GitHub login on first use).
+2. **Chrome DevTools MCP** (stdio/npx) — Connects to Chrome browser for real-time debugging of the web viewer (console, network, DOM inspection).
+3. **Context7** — Already installed via VS Code plugin. Up-to-date library documentation.
+
+### LiveKit Adaptive Quality + Simulcast
+**File**: `core/viewer/app.js`
+
+**Problem**: Room was created with `adaptiveStream: false, dynacast: false` — all viewers received identical full-quality streams regardless of connection or viewport size. No simulcast encoding.
+
+**Fix** — Enabled three core LiveKit performance features in the Room constructor:
+1. **`adaptiveStream: true`** — Auto-adjusts received video quality based on element size/visibility. Small tiles get lower quality, saving bandwidth.
+2. **`dynacast: true`** — Only sends video layers that someone is actively watching. If nobody views a stream, encoding stops entirely.
+3. **`simulcast: true`** (via `publishDefaults`) — Encodes video at multiple quality layers so the SFU sends each viewer the appropriate quality for their connection.
+4. **`videoCaptureDefaults`** — Set to 1080p capture resolution.
+5. **`publishDefaults.videoEncoding`** — 3 Mbps max bitrate at 60fps.
+
+These are LiveKit's primary adaptive quality features and directly support the 1080p/60fps goal with adaptive fallback for bad connections.
 
 ## Current Status
 
 **All core work is committed and pushed to GitHub.** Repo is clean.
 
-Control plane was rebuilt and restarted with all changes active.
-
 Only remaining uncommitted files:
 - `apps/server/public/app.js` & `style.css` — legacy, we don't touch these
 - `.claude/` — Claude Code config (local only)
+- `.mcp.json` — MCP plugin configuration (should be committed)
 
 Ready for next task.
 

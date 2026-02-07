@@ -3045,7 +3045,18 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (!LK || !LK.Room) {
     throw new Error("LiveKit client failed to load. Please refresh and try again.");
   }
-  room = new LK.Room({ adaptiveStream: false, dynacast: false, autoSubscribe: true });
+  room = new LK.Room({
+    adaptiveStream: true,
+    dynacast: true,
+    autoSubscribe: true,
+    videoCaptureDefaults: {
+      resolution: LK.VideoPresets?.h1080?.resolution || { width: 1920, height: 1080, frameRate: 60 },
+    },
+    publishDefaults: {
+      simulcast: true,
+      videoEncoding: { maxBitrate: 3_000_000, maxFramerate: 60 },
+    },
+  });
   try {
     if (typeof room.startAudio === "function") {
       room.startAudio().catch(() => {});
