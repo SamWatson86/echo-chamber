@@ -300,7 +300,7 @@ async fn main() {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                let mut map = participants.lock().unwrap();
+                let mut map = participants.lock().unwrap_or_else(|e| e.into_inner());
                 let before = map.len();
                 map.retain(|_, p| now.saturating_sub(p.last_seen) < 20);
                 let removed = before - map.len();
@@ -637,7 +637,7 @@ async fn issue_token(
 
     // Track participant in room (dedup: remove old entries with the same name base)
     {
-        let mut participants = state.participants.lock().unwrap();
+        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
         let name_base = payload.identity.rsplitn(2, '-').last().unwrap_or(&payload.identity).to_string();
         let stale_keys: Vec<String> = participants.iter()
             .filter(|(k, _)| {
@@ -666,13 +666,13 @@ async fn issue_token(
 
 async fn list_rooms(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<RoomInfo>>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let rooms = state.rooms.lock().unwrap();
+    let rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(rooms.values().cloned().collect()))
 }
 
 async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(payload): Json<CreateRoomRequest>) -> Result<Json<RoomInfo>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let mut rooms = state.rooms.lock().unwrap();
+    let mut rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     let entry = rooms.entry(payload.room_id.clone()).or_insert(RoomInfo {
         room_id: payload.room_id.clone(),
         created_at: now_ts(),
@@ -682,7 +682,7 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(pay
 
 async fn get_room(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(room_id): axum::extract::Path<String>) -> Result<Json<RoomInfo>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let rooms = state.rooms.lock().unwrap();
+    let rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     match rooms.get(&room_id) {
         Some(info) => Ok(Json(info.clone())),
         None => Err(StatusCode::NOT_FOUND),
@@ -691,14 +691,14 @@ async fn get_room(State(state): State<AppState>, headers: HeaderMap, axum::extra
 
 async fn delete_room(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(room_id): axum::extract::Path<String>) -> Result<impl IntoResponse, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let mut rooms = state.rooms.lock().unwrap();
+    let mut rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     rooms.remove(&room_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn rooms_status(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<RoomStatusEntry>>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let participants = state.participants.lock().unwrap();
+    let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     // Group participants by room
     let mut room_map: HashMap<String, Vec<RoomStatusParticipant>> = HashMap::new();
     for p in participants.values() {
@@ -720,7 +720,7 @@ async fn participant_heartbeat(
 ) -> Result<StatusCode, StatusCode> {
     ensure_admin(&state, &headers)?;
     let now = now_ts();
-    let mut participants = state.participants.lock().unwrap();
+    let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = participants.get_mut(&payload.identity) {
         entry.last_seen = now;
         entry.room_id = payload.room.clone();
@@ -744,14 +744,14 @@ async fn participant_leave(
     Json(payload): Json<ParticipantLeaveRequest>,
 ) -> Result<StatusCode, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let mut participants = state.participants.lock().unwrap();
+    let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     participants.remove(&payload.identity);
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MetricsResponse>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let rooms = state.rooms.lock().unwrap();
+    let rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(MetricsResponse {
         rooms: rooms.len() as u64,
         ts: now_ts(),
@@ -764,7 +764,7 @@ async fn soundboard_list(
     Query(query): Query<SoundboardListQuery>,
 ) -> Result<Json<SoundboardListResponse>, StatusCode> {
     ensure_livekit(&state, &headers)?;
-    let board = state.soundboard.lock().unwrap();
+    let board = state.soundboard.lock().unwrap_or_else(|e| e.into_inner());
     let sounds = board
         .rooms
         .get(&query.room_id)
@@ -783,7 +783,7 @@ async fn soundboard_file(
     Path(sound_id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
     ensure_livekit(&state, &headers)?;
-    let board = state.soundboard.lock().unwrap();
+    let board = state.soundboard.lock().unwrap_or_else(|e| e.into_inner());
     let Some(sound) = board.index.get(&sound_id) else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -811,7 +811,7 @@ async fn soundboard_upload(
     if body.is_empty() {
         return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Empty audio payload".into()) }));
     }
-    let mut board = state.soundboard.lock().unwrap();
+    let mut board = state.soundboard.lock().unwrap_or_else(|e| e.into_inner());
     if body.len() > board.max_bytes {
         return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Audio file too large".into()) }));
     }
@@ -869,7 +869,7 @@ async fn soundboard_update(
     Json(payload): Json<SoundboardUpdateRequest>,
 ) -> Result<Json<SoundboardSoundResponse>, StatusCode> {
     ensure_livekit(&state, &headers)?;
-    let mut board = state.soundboard.lock().unwrap();
+    let mut board = state.soundboard.lock().unwrap_or_else(|e| e.into_inner());
     let sound_id = payload.sound_id.clone();
     let mut updated: Option<SoundboardSound> = None;
     if let Some(sound) = board.index.get_mut(&sound_id) {
@@ -1077,7 +1077,7 @@ async fn chat_save_message(
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let chat = state.chat.lock().unwrap();
+    let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
     save_chat_message(&chat.dir, &message);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1088,7 +1088,7 @@ async fn chat_get_history(
     Path(room): Path<String>,
 ) -> Result<Json<Vec<ChatMessage>>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let chat = state.chat.lock().unwrap();
+    let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
     let history = load_chat_history(&chat.dir, &room);
     Ok(Json(history))
 }
@@ -1109,7 +1109,7 @@ async fn chat_upload_file(
         }));
     }
 
-    let chat = state.chat.lock().unwrap();
+    let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
     if body.len() > chat.max_upload_bytes {
         return Ok(Json(ChatUploadResponse {
             ok: false,
@@ -1157,7 +1157,7 @@ async fn chat_get_upload(
         }
     }
 
-    let chat = state.chat.lock().unwrap();
+    let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
     let file_path = chat.uploads_dir.join(&file_name);
 
     let bytes = fs::read(file_path).map_err(|_| StatusCode::NOT_FOUND)?;
