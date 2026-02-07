@@ -184,26 +184,82 @@ Full theme system with 7 unique visual themes:
   - `-Restart` / `-Stop` — Remote control
   - Default: builds release + pushes .exe to SAM-PC
 
-**Not yet tested**: HTTP connectivity between dev PC and SAM-PC still needs firewall verification.
+### Deploy Agent Deployed to SAM-PC — WORKING
+**Date**: 2026-02-07
+
+**What happened**:
+1. SMB connection established via File Explorer network discovery (SAM-PC\Sam / echo123)
+2. Mapped `\\SAM-PC\EchoChamber` share (points to `C:\EchoChamber` on SAM-PC)
+3. Copied agent.ps1, setup-agent.ps1, config.json to SAM-PC via SMB
+4. Firewall rule added on SAM-PC: `netsh advfirewall firewall add rule name="Echo Chamber Deploy Agent" dir=in action=allow protocol=tcp localport=8080`
+5. Agent started manually on SAM-PC (not yet installed as scheduled task)
+6. Release build pushed from dev PC: 10.5 MB binary deployed via HTTP POST
+7. Config pushed: `{"server": "https://192.168.5.70:9443"}`
+8. Client launched automatically on SAM-PC!
+
+**Bug fixed during deploy**: `$pid` is read-only in PowerShell — renamed to `$cpid` in agent.ps1
+
+**Deploy workflow** (from dev PC):
+```
+powershell -ExecutionPolicy Bypass -File core\deploy\push-build.ps1
+```
+This builds release, pushes exe + config to SAM-PC, and the agent auto-starts the client.
+
+### NSIS Installer + Auto-Updater — BUILT AND WORKING
+**Files**: `core/client/tauri.conf.json`, `core/client/Cargo.toml`, `core/client/src/main.rs`, `core/deploy/build-release.ps1`
+
+**What was built**:
+- NSIS installer that friends can download and double-click to install (no admin required)
+- WebView2 auto-downloads if missing (downloadBootstrapper, silent)
+- Start Menu shortcut in "Echo Chamber" folder
+- Auto-updater plugin (`tauri-plugin-updater`) checks GitHub Releases on startup
+- Signing keypair for update verification (password: "echo")
+- Release build script generates installer + signature + `latest.json` manifest
+
+**Build output** (in `core/target/release/bundle/nsis/`):
+- `Echo Chamber_0.1.0_x64-setup.exe` (5 MB) — installer for friends
+- `Echo Chamber_0.1.0_x64-setup.exe.sig` — signature for auto-updates
+- `latest.json` — update manifest for GitHub Releases
+
+**How to build a release**:
+```
+powershell -ExecutionPolicy Bypass -File core\deploy\build-release.ps1
+```
+
+**How to publish**:
+1. Bump version in `core/client/tauri.conf.json`
+2. Run build-release.ps1
+3. Create GitHub Release tagged `v<version>`
+4. Upload the .exe, .exe.sig, and latest.json files
+
+**Key details**:
+- Signing keys at `core/client/.tauri-keys` (private, gitignored) and `.tauri-keys.pub`
+- Password for signing key: "echo"
+- Public key in tauri.conf.json (base64-wrapped minisign format)
+- Auto-updater checks `https://github.com/SamWatson86/echo-chamber/releases/latest/download/latest.json`
 
 ## Current Status
 
-**Tauri native client is built and working.** Viewer loads correctly inside the native window with full CSS themes, animations, and all functionality preserved.
+**Installer is built and ready for distribution.** The NSIS installer produces a 5 MB setup.exe that friends can download and install with one double-click. Auto-updates are configured to check GitHub Releases.
 
-**Deploy agent scripts are written** but not yet tested on SAM-PC (needs firewall setup and connectivity verification).
+**Deploy pipeline to SAM-PC is operational:**
+- Dev PC builds release binary
+- HTTP push to SAM-PC deploy agent (port 8080)
+- Agent receives, writes exe, starts client
 
-### What's Uncommitted
-- Tauri client rewrite (core/client/)
-- Deploy agent scripts (core/deploy/)
-- CURRENT_SESSION.md updates
-- .mcp.json (MCP plugin config)
+### Recent Commits
+- `95046c1` — Fix $pid read-only variable bug in deploy agent
+- `e433f07` — Prepare for SAM-PC deployment and clean up warnings
+- `cfaff80` — Harden control plane mutex locks against thread panics
+- `945e01e` — Add Tauri hybrid native client and HTTP deploy agent
 
 ### Next Steps
-1. **Commit and push** the Tauri client + deploy agent
-2. **Set up deploy agent on SAM-PC** — Copy files, run setup-agent.ps1 as Admin
-3. **Test remote deploy** — Push a release build to SAM-PC, verify it runs
-4. **Add native features** — LiveKit native SDK, hardware encode/decode
-5. **Release build optimization** — Smaller binary, proper icons, installer
+1. **Set up external access** — Port forward router 9443 -> dev PC, get public IP or dynamic DNS
+2. **Publish first GitHub Release** — Upload installer so friends can download
+3. **Install deploy agent as scheduled task** — So it starts on SAM-PC boot
+4. **Test video streaming** — SAM-PC joins a room, verify 1080p/60fps
+5. **Code signing certificate** — Prevents "Unknown publisher" Windows SmartScreen warning (costs money, can add later)
+6. **Add native features** — LiveKit native SDK, hardware encode/decode (NVENC on GTX 760)
 
 ## Architecture Reference
 

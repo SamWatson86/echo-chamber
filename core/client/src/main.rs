@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_updater::UpdaterExt;
 
 const DEFAULT_SERVER: &str = "https://127.0.0.1:9443";
 
@@ -89,6 +90,7 @@ fn main() {
     let viewer_url = format!("{}/viewer", server);
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(server)
         .invoke_handler(tauri::generate_handler![
             get_app_info,
@@ -103,6 +105,23 @@ fn main() {
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(800.0, 600.0)
                 .build()?;
+
+            // Check for updates in the background
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let updater = handle.updater_builder().build().unwrap();
+                match updater.check().await {
+                    Ok(Some(update)) => {
+                        eprintln!("[updater] update available: v{}", update.version);
+                        if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                            eprintln!("[updater] install failed: {}", e);
+                        }
+                    }
+                    Ok(None) => eprintln!("[updater] up to date"),
+                    Err(e) => eprintln!("[updater] check failed (ok if offline): {}", e),
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -1,0 +1,2 @@
+# Tauri updater private signing key - NEVER commit this
+.tauri-keys

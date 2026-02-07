@@ -14,12 +14,31 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "Echo Chamber"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/SamWatson86/echo-chamber/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwNUNGNjlEMTFCRUE2NDIKUldSQ3ByNFJuZlpjMElna0FjaXNKYU1DcFZpRDVEbmk2Mms0bU5JcGFlTEh3Ujl0YUFPUWRrRlAK"
+    }
   }
 }

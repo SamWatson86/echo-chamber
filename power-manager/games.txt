@@ -56,6 +56,16 @@ Baldur's Gate 3
 HogwartsLegacy
 Palworld-Win64-Shipping
 
+# ── GPU-Heavy Dev Tools (treat as gaming so CPU stays uncapped) ──
+UnrealEditor
+UE4Editor
+UE5Editor
+UnrealEditor-Win64-Shipping
+UnrealEditor-Cmd
+UnrealBuildTool
+UnrealLightmass
+ShaderCompileWorker
+
 # ═══════════════════════════════════════════════════════════════════
 #  Add your own games below this line:
 # ═══════════════════════════════════════════════════════════════════
