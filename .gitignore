@@ -26,7 +26,17 @@ core/target/
 # Temp/runtime files
 core/tmp.json
 core/.tmp-build.cmd
+core/.tmp-build-control.cmd
 core/control/core-control.pid
+nul
+
+# Runtime PID files
+*.pid
+
+# Native binaries (too large for git)
+core/sfu/livekit-server.exe
+core/sfu/*.zip
+core/turn/echo-turn.exe
 
 # Claude Code config
 .claude/

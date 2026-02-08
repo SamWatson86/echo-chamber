@@ -9,7 +9,8 @@
 - **FULL AUTONOMY**: Claude has full permission to execute everything — git commits, pushes, file changes, builds, all of it. Do NOT prompt Sam for confirmation. Just do the work.
 - Focus ONLY on `/core` folder - `/apps` is legacy web version, DO NOT TOUCH
 - We are building a **full-stack SFU pipeline** using the web interface for UI optimization BEFORE moving to the native Rust client
-- Core stack: LiveKit SFU (Docker) + Rust control plane + web viewer + Tauri native client
+- Core stack: LiveKit SFU (native exe) + Rust control plane + TURN server (native Go) + web viewer + Tauri native client
+- **Docker is REMOVED** — all services run as native Windows processes
 
 ## Project Vision
 - **Goal**: 1080p at 60fps for all guests
@@ -17,258 +18,147 @@
 - **Pipeline**: Web viewer (current) -> Tauri hybrid native client (in progress)
 - The web viewer is for rapid UI/UX iteration. The Tauri app wraps the same web UI in a native window.
 
+## External Access — CONFIGURED AND WORKING
+
+### Network Setup
+- **Public IP**: 99.111.153.69 (may change — consider dynamic DNS later)
+- **Router**: Eero
+- **Port forwards**: 9443 TCP (control plane + WSS proxy) + 56100-56199 UDP (WebRTC media) + 7881 TCP (RTC) + 3478 UDP (TURN) + 40000-40099 UDP (TURN relay)
+- **NOT forwarded**: 7880 (LiveKit signaling proxied through 9443)
+- **Firewall**: `core/allow-firewall.ps1` covers 9443, 7880, 7881, 56100-56199, 3478, 40000-40099
+
+### LiveKit STUN
+- STUN servers configured in `core/sfu/livekit.yaml` (native config)
+- Format: `stun.l.google.com:19302` (NOT `stun:host:port` — causes "too many colons" error)
+- `use_external_ip: true` — LiveKit detects public IP via STUN automatically
+
+### Two Installer Tracks
+1. **SAM-PC (LAN only)**: Uses deploy agent on port 8080, config has `server: "https://192.168.5.70:9443"`
+2. **External friends (GitHub Release)**: DEFAULT_SERVER baked as `https://99.111.153.69:9443`, published as v0.1.0
+
+### GitHub Release v0.1.0 — PUBLISHED
+- URL: https://github.com/SamWatson86/echo-chamber/releases/tag/v0.1.0
+- `Echo Chamber_0.1.0_x64-setup.exe` (5 MB) — installer with public IP baked in
+- `Echo Chamber_0.1.0_x64-setup.exe.sig` — signature for auto-updates
+- `latest.json` — update manifest
+- Friends download the .exe, install, and they connect to Sam's public IP
+
 ## Completed Work
+
+### Docker Removed — All Native Now
+- **LiveKit SFU**: Native Windows binary `core/sfu/livekit-server.exe` (v1.9.11, 49 MB)
+- **Config**: `core/sfu/livekit.yaml` (no Redis needed — single-node mode)
+- **TURN server**: Native Go binary `core/turn/echo-turn.exe` (5 MB, pion/turn v4)
+- **Old Docker files** (`docker-compose.yml`, `livekit.docker.yaml`) still exist but are unused
+- **Why**: Docker Desktop uses Hyper-V which causes gaming stutter. Native = no hypervisor overhead.
+- **Docker Desktop is UNINSTALLED.** Hyper-V is removed from boot config.
+
+### Native TURN Server — BUILT AND RUNNING
+**Files**: `core/turn/` (Go project using pion/turn v4)
+- **Binary**: `core/turn/echo-turn.exe` (5 MB standalone, built from Go)
+- **Port**: UDP 3478 (standard TURN port)
+- **Relay range**: UDP 40000-40099 (native Windows networking, NOT Docker)
+- **Credentials**: username=`echo`, password=`chamber`, realm=`echo-chamber`
+- **Config**: Environment variables or defaults in main.go
+- **Start**: `core/turn/start-turn.ps1` or auto-started by `run-core.ps1` / `startup.ps1`
+- **Stop**: `stop-core.ps1` handles cleanup via PID file
+- **Client config**: `app.js` passes TURN server in `rtcConfig.iceServers` at room.connect()
+- **Router forwards needed**: UDP 3478 + UDP 40000-40099 on Eero
+- **Why native**: Runs outside Docker, uses Windows networking directly, no packet reordering
+
+### Screen Share 60fps Fix — WORKING
+**File**: `core/viewer/app.js`
+
+**Problem**: Screen share was capped at 30fps even though 60fps was configured.
+**Root cause**: LiveKit SDK passes `frameRate: 60` as a plain number to `getDisplayMedia()`, which Chromium interprets as `{ max: 60 }` (defaults to 30). The browser needs `{ ideal: 60 }` to actively target 60fps.
+**Fix**: Bypassed LiveKit's `setScreenShareEnabled()` capture. Now calls `getDisplayMedia()` manually with explicit `frameRate: { ideal: 60 }` constraint, creates LiveKit `LocalVideoTrack`/`LocalAudioTrack` from the stream, and publishes them manually.
+- `startScreenShareManual()` — manual capture + publish
+- `stopScreenShareManual()` — unpublish + stop tracks
+- Content hint `"motion"` set directly on MediaStreamTrack
+- Browser "Stop sharing" button handled via `track.ended` event
+- Debug log confirms: **"Screen capture actual FPS: 60, resolution: 1920x1080"**
+
+### Video Quality Tuning
+**File**: `core/viewer/app.js`
+- Camera: H264 codec, 5 Mbps, 1080p60, simulcast with 3 layers (q/h/f)
+- Screen share: VP9, L1T3 scalability, 8 Mbps, `maintain-framerate`, `contentHint: 'motion'`
+- Manual `getDisplayMedia()` with `frameRate: { ideal: 60 }` for true 60fps capture
+- `adaptiveStream: true` + `dynacast: true` for mixed-quality participant support
+- Audio DTX enabled (near-zero bandwidth during silence)
+
+### Chat Scroll to Latest Messages
+**File**: `core/viewer/app.js`
+- Chat now scrolls to the most recent message when opened
+- `scrollTop = scrollHeight` applied in `openChat()` (not during hidden panel load)
+
+### Camera Lobby Dynamic Grid
+**Files**: `core/viewer/app.js`, `core/viewer/style.css`
+- Camera feeds use maximum space, shrinking into grid as more people join
+- CSS `data-count` attribute drives responsive grid columns
+- 1 person = full width, 2 = 2 columns, 3-4 = 2 columns, 5-6 = 3 columns
+- Aspect ratio changed from 4:3 to 16:9
 
 ### Track Subscription Race Condition Fix
 **File**: `core/viewer/app.js`
-
-**Problem**: Existing users couldn't see new users joining the room. Race condition in deduplication logic.
-
-**Fixes Applied**:
-1. Reduced deduplication window from 1200ms to 200ms
-2. Added debug logging for dropped track events
-3. Added 200ms delay before attaching tracks to new participants
+- Reduced deduplication window from 1200ms to 200ms
+- Added debug logging for dropped track events
+- Added 200ms delay before attaching tracks to new participants
 
 ### Chat Feature
-**What was built**:
-- Full chat system integrated into the viewer
-- Image and file upload support
+- Full chat system with image/file upload support
 - Chat notification badge with pulse animation
-
-**Bug fixes applied**:
-- Chat image/file loading with authentication
-- Chat upload endpoint authentication
-- Chat image aspect ratio (prevent stretching)
-- Chat images visible for all users (not just admins)
-
-### Mic Fix for Spencer
-- Fixed microphone issues for specific user
+- Auth, aspect ratio, and all-users visibility bug fixes
 
 ### Full UI Redesign
 **File**: `core/viewer/style.css`
-
-Complete CSS overhaul with unified frosted glass aesthetic:
-- CSS custom properties for consistent design tokens (borders, glass, radii, transitions)
-- All panels use backdrop-filter blur with translucent gradient backgrounds
-- Unified button styling with glass backgrounds, subtle borders, hover glow
-- Uppercase headers with letter-spacing across all panel titles
-- Sidebar buttons split into two rows (Debug/Chat/Mute All top, Soundboard/Camera Lobby bottom)
-- Soundboard, Camera Lobby, Chat, Settings, Debug panels all match
-- Thin scrollbars, accent-colored range sliders, refined focus rings
-- Pure CSS changes only — no HTML/JS modifications (zero functionality risk)
-
-### Room Switching Fix
-**File**: `core/viewer/app.js`
-
-- Fixed room switching snapping back to Main (duplicate `switchRoom()` + hardcoded "main" in `connect()`)
-- Consolidated into single `switchRoom()` that uses `currentRoomName`
-
-### Cross-Room Participant Visibility (Room List)
-**Files**: `core/control/src/main.rs`, `core/viewer/app.js`, `core/viewer/style.css`
-
-**Problem**: Users in different rooms couldn't see who was in other rooms or click to join them.
-
-**Control plane changes**:
-- Added `ParticipantEntry` tracking (identity, name, room_id, last_seen timestamp)
-- `participants` HashMap added to `AppState` - tracks all connected users
-- Participants auto-registered when tokens are issued (`issue_token`)
-- New `GET /v1/room-status` endpoint - returns all rooms with participant lists
-- New `POST /v1/participants/heartbeat` - keeps participant entries alive
-- New `POST /v1/participants/leave` - removes participant on disconnect
-- Background cleanup task removes stale entries (20s timeout, runs every 10s)
-
-**Viewer changes**:
-- Room list shows all 4 fixed rooms (Main, Breakout 1-3) with participant counts
-- Participant count badges appear as accent-colored pills (green default, blue for current room)
-- Styled frosted glass hover tooltip shows participant names (with arrow pseudo-element)
-- Rooms with active users get green glow highlight
-- Current room is accent-highlighted (blue)
-- Click any room to switch
-- Polls room status every 2 seconds for live cross-room updates
-- Sends heartbeat every 10 seconds
-- Sends leave notification on disconnect and page close (`beforeunload`)
-
-### Join/Leave/Switch Chime Sounds
-**File**: `core/viewer/app.js`
-
-- **Join chime**: Ascending two-note chime (C5->E5) using sine wave
-- **Leave chime**: Descending "womp womp" triangle wave
-- **Switch chime**: Sci-fi sawtooth swoosh + landing ping
-- All sounds synthesized via Web Audio API (no audio files needed)
-- Perspective-based: chimes only trigger for events in YOUR current room
+- Frosted glass aesthetic with CSS custom properties
+- All panels use backdrop-filter blur
+- Unified button styling, hover glow
 
 ### Theme System (7 Interactive Themes)
-**Files**: `core/viewer/style.css`, `core/viewer/index.html`, `core/viewer/app.js`
-
-Full theme system with 7 unique visual themes:
-1. **Frost** (default) — Blue/dark with drifting shimmer
-2. **Cyberpunk** — Hot pink + cyan neon, scan-line overlay
-3. **Aurora** — Northern lights gradient, emerald green accent
-4. **Ember** — Volcanic deep red/orange, warm pulsing glow
-5. **Matrix** — Pure black + falling code rain (canvas-based)
-6. **Midnight** — Deep indigo starfield, purple/pink nebula
-7. **Ultra Instinct** — Animated GIF background + sparkle particles
-
-### Audio Not Playing for Late-Joining Participants
-**File**: `core/viewer/app.js`
-
-- Set `_lkTrack` on audio elements, queued failed audio for user interaction retry
-- Made interaction listeners persistent, call `room.startAudio()` on every interaction
-
-### LiveKit Adaptive Quality + Simulcast
-**File**: `core/viewer/app.js`
-
-- `adaptiveStream: true` — Auto-adjusts received video quality based on viewport
-- `dynacast: true` — Only sends video layers someone is watching
-- `simulcast: true` — Multiple quality layers per stream
-- 1080p capture resolution, 3 Mbps max bitrate at 60fps
-
-### Power Manager (Auto Server/Gaming Mode)
-**Files**: `power-manager/`
-
-- Auto-switches between low-power server mode and full-power gaming mode
-- Background watcher checks GPU via nvidia-smi every 45 seconds
-
-### MCP Plugins Installed
-**File**: `.mcp.json`
-
-1. GitHub MCP (HTTP) — PR/issue management
-2. Chrome DevTools MCP (stdio/npx) — Web viewer debugging (configured for Edge, not Chrome)
-3. Context7 — Up-to-date library documentation
+1. Frost (default), 2. Cyberpunk, 3. Aurora, 4. Ember, 5. Matrix, 6. Midnight, 7. Ultra Instinct
 
 ### Tauri Hybrid Native Client — BUILT AND WORKING
-**Files**: `core/client/` (complete rewrite from egui to Tauri v2)
-
-**What was built**:
-- Complete Tauri v2 project replacing the old egui scaffold
-- Native window wrapping the web viewer at `https://127.0.0.1:9443/viewer`
-- WebView2 configured to accept self-signed TLS cert (`--ignore-certificate-errors`)
-- Rust backend exposes Tauri commands: `get_app_info`, `get_control_url`, `toggle_fullscreen`, `set_always_on_top`
-- App icons generated (32x32, 128x128, 256x256 PNGs + ICO)
-- Capabilities/permissions configured for the main window
-
-**Key files**:
-- `core/client/Cargo.toml` — Tauri v2 + serde + reqwest + tokio
-- `core/client/build.rs` — Tauri build script
-- `core/client/src/main.rs` — Tauri Builder with external URL window
-- `core/client/tauri.conf.json` — App config (name, version, icons, CSP disabled for dev)
-- `core/client/capabilities/default.json` — Window permissions
-
-**How it works**:
-1. Control plane must be running first (`run-core.ps1`)
-2. Client opens a native window pointing to the viewer URL
-3. All existing web UI (themes, chat, video, rooms) works unchanged
-4. Rust commands available for native-only features (fullscreen, always-on-top)
-
-**Build**: `cargo build -p echo-core-client` (from `core/`)
-**Run**: `core/target/debug/echo-core-client.exe`
-
-### HTTP Deploy Agent for SAM-PC
-**Files**: `core/deploy/`
-
-**Purpose**: Automated build push/log pull between dev PC and test PC (SAM-PC).
-
-**Components**:
-- `core/deploy/agent.ps1` — HTTP listener for SAM-PC (port 8080)
-  - `GET /health` — Agent status + client running state
-  - `POST /deploy` — Receives .exe binary, replaces client, auto-starts
-  - `GET /logs` — Returns stdout/stderr/agent logs
-  - `POST /restart` — Restarts the client
-  - `POST /stop` — Stops the client
-- `core/deploy/setup-agent.ps1` — One-time setup script (run as Admin on SAM-PC)
-  - Creates install directory, copies agent, adds firewall rule
-  - Installs as scheduled task (runs at startup as SYSTEM)
-- `core/deploy/push-build.ps1` — Dev-side deploy script
-  - `-Health` — Check agent status
-  - `-LogsOnly` — Fetch remote logs
-  - `-Restart` / `-Stop` — Remote control
-  - Default: builds release + pushes .exe to SAM-PC
-
-### Deploy Agent Deployed to SAM-PC — WORKING
-**Date**: 2026-02-07
-
-**What happened**:
-1. SMB connection established via File Explorer network discovery (SAM-PC\Sam / echo123)
-2. Mapped `\\SAM-PC\EchoChamber` share (points to `C:\EchoChamber` on SAM-PC)
-3. Copied agent.ps1, setup-agent.ps1, config.json to SAM-PC via SMB
-4. Firewall rule added on SAM-PC: `netsh advfirewall firewall add rule name="Echo Chamber Deploy Agent" dir=in action=allow protocol=tcp localport=8080`
-5. Agent started manually on SAM-PC (not yet installed as scheduled task)
-6. Release build pushed from dev PC: 10.5 MB binary deployed via HTTP POST
-7. Config pushed: `{"server": "https://192.168.5.70:9443"}`
-8. Client launched automatically on SAM-PC!
-
-**Bug fixed during deploy**: `$pid` is read-only in PowerShell — renamed to `$cpid` in agent.ps1
-
-**Deploy workflow** (from dev PC):
-```
-powershell -ExecutionPolicy Bypass -File core\deploy\push-build.ps1
-```
-This builds release, pushes exe + config to SAM-PC, and the agent auto-starts the client.
-
-### NSIS Installer + Auto-Updater — BUILT AND WORKING
-**Files**: `core/client/tauri.conf.json`, `core/client/Cargo.toml`, `core/client/src/main.rs`, `core/deploy/build-release.ps1`
-
-**What was built**:
-- NSIS installer that friends can download and double-click to install (no admin required)
-- WebView2 auto-downloads if missing (downloadBootstrapper, silent)
-- Start Menu shortcut in "Echo Chamber" folder
-- Auto-updater plugin (`tauri-plugin-updater`) checks GitHub Releases on startup
+- Tauri v2 wrapping web viewer in native window
+- NSIS installer (5 MB), auto-updater via GitHub Releases
 - Signing keypair for update verification (password: "echo")
-- Release build script generates installer + signature + `latest.json` manifest
 
-**Build output** (in `core/target/release/bundle/nsis/`):
-- `Echo Chamber_0.1.0_x64-setup.exe` (5 MB) — installer for friends
-- `Echo Chamber_0.1.0_x64-setup.exe.sig` — signature for auto-updates
-- `latest.json` — update manifest for GitHub Releases
+### Deploy Pipeline to SAM-PC — WORKING
+- HTTP deploy agent on port 8080
+- Build + push + auto-launch
 
-**How to build a release**:
-```
-powershell -ExecutionPolicy Bypass -File core\deploy\build-release.ps1
-```
-
-**How to publish**:
-1. Bump version in `core/client/tauri.conf.json`
-2. Run build-release.ps1
-3. Create GitHub Release tagged `v<version>`
-4. Upload the .exe, .exe.sig, and latest.json files
-
-**Key details**:
-- Signing keys at `core/client/.tauri-keys` (private, gitignored) and `.tauri-keys.pub`
-- Password for signing key: "echo"
-- Public key in tauri.conf.json (base64-wrapped minisign format)
-- Auto-updater checks `https://github.com/SamWatson86/echo-chamber/releases/latest/download/latest.json`
+### Auto-Start on Boot
+- Scheduled task "EchoChamberStartup" runs at login
+- Starts LiveKit SFU, control plane, TURN server (all native)
 
 ## Current Status
 
-**Installer is built and ready for distribution.** The NSIS installer produces a 5 MB setup.exe that friends can download and install with one double-click. Auto-updates are configured to check GitHub Releases.
+**100% Docker-free.** All services run as native Windows processes:
+- LiveKit SFU: `core/sfu/livekit-server.exe`
+- Control plane: `core/target/debug/echo-core-control.exe`
+- TURN server: `core/turn/echo-turn.exe`
 
-**Deploy pipeline to SAM-PC is operational:**
-- Dev PC builds release binary
-- HTTP push to SAM-PC deploy agent (port 8080)
-- Agent receives, writes exe, starts client
+**Screen share is 60fps.** Confirmed via debug log. Manual `getDisplayMedia()` bypass of LiveKit SDK.
 
-### Recent Commits
-- `95046c1` — Fix $pid read-only variable bug in deploy agent
-- `e433f07` — Prepare for SAM-PC deployment and clean up warnings
-- `cfaff80` — Harden control plane mutex locks against thread panics
-- `945e01e` — Add Tauri hybrid native client and HTTP deploy agent
+**External access is configured and working.** Friends download installer from GitHub Release and connect to Sam's public IP.
+
+**TURN server running natively** on Windows (port 3478 UDP). Brad connecting via UDP (confirmed in LiveKit logs, 1.3s connect time).
 
 ### Next Steps
-1. **Set up external access** — Port forward router 9443 -> dev PC, get public IP or dynamic DNS
-2. **Publish first GitHub Release** — Upload installer so friends can download
-3. **Install deploy agent as scheduled task** — So it starts on SAM-PC boot
-4. **Test video streaming** — SAM-PC joins a room, verify 1080p/60fps
-5. **Code signing certificate** — Prevents "Unknown publisher" Windows SmartScreen warning (costs money, can add later)
-6. **Add native features** — LiveKit native SDK, hardware encode/decode (NVENC on GTX 760)
+1. **Test Brad on TURN** — Have Brad reconnect, check if he gets UDP relay instead of TCP
+2. **Dynamic DNS** — Public IP 99.111.153.69 may change; consider noip.com or similar
+3. **Code signing certificate** — Prevents "Unknown publisher" Windows SmartScreen warning
+4. **Add native features** — LiveKit native SDK, hardware encode/decode (NVENC on GTX 760)
 
 ## Architecture Reference
 
 ### Core Components
-- **SFU**: LiveKit server (Docker) — handles media routing
+- **SFU**: LiveKit server (native Windows exe) — handles media routing
 - **Control**: Rust control plane — auth, rooms, admin (`core/control`)
-- **Client**: Tauri hybrid native app — web UI + Rust backend (`core/client`) — **WORKING**
-- **Viewer**: Web viewer for UI optimization (`core/viewer`) — serves both browser and Tauri
+- **Client**: Tauri hybrid native app — web UI + Rust backend (`core/client`)
+- **Viewer**: Web viewer for UI optimization (`core/viewer`)
 - **Deploy**: HTTP deploy agent for test PC (`core/deploy`)
+- **TURN**: Native Go TURN server (`core/turn`)
 
 ### How Core Starts
 - Run script: `F:\Codex AI\The Echo Chamber\core\run-core.ps1`
@@ -284,18 +174,26 @@ powershell -ExecutionPolicy Bypass -File core\deploy\build-release.ps1
 
 ### Logs
 - Control plane: `core/logs/core-control.out.log`, `core/logs/core-control.err.log`
-- SFU: `docker compose logs --tail 200` (from `core/sfu` directory)
+- LiveKit SFU: `core/logs/livekit.err.log`, `core/logs/livekit.out.log`
+- TURN server: `core/logs/turn.out.log`, `core/logs/turn.err.log`
 
 ## Files to Know
 - `core/viewer/app.js` — Web viewer (video + chat UI) ~4700 lines
 - `core/viewer/style.css` — Frosted glass CSS with 7 themes
 - `core/viewer/index.html` — Viewer HTML structure
 - `core/control/src/main.rs` — Rust control plane (with participant tracking)
-- `core/client/src/main.rs` — Tauri native client (wraps web viewer)
+- `core/client/src/main.rs` — Tauri native client (DEFAULT_SERVER = public IP)
 - `core/client/tauri.conf.json` — Tauri app configuration
 - `core/deploy/agent.ps1` — Deploy agent for test PC
 - `core/deploy/push-build.ps1` — Dev-side deploy script
-- `core/sfu/docker-compose.yml` — LiveKit SFU config
+- `core/deploy/build-release.ps1` — Release build script
+- `core/sfu/livekit.yaml` — LiveKit native config
+- `core/sfu/start-livekit.ps1` — Start LiveKit natively
+- `core/turn/main.go` — TURN server source
+- `core/turn/start-turn.ps1` — Start TURN server
+- `core/run-core.ps1` — Start all services
+- `core/stop-core.ps1` — Stop all services
+- `core/startup.ps1` — Auto-start on boot
 
 ---
 

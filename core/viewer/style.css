@@ -1272,17 +1272,28 @@ video, audio {
 
 .camera-lobby-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 14px;
   overflow-y: auto;
   padding: 4px;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.15) transparent;
+  align-content: center;
+}
+
+/* Dynamic grid: 1 tile = full, 2 = side-by-side, 3-4 = 2x2, 5-6 = 3x2, 7-9 = 3x3 */
+.camera-lobby-grid[data-count="1"] { grid-template-columns: 1fr; }
+.camera-lobby-grid[data-count="2"] { grid-template-columns: 1fr 1fr; }
+.camera-lobby-grid[data-count="3"],
+.camera-lobby-grid[data-count="4"] { grid-template-columns: 1fr 1fr; }
+.camera-lobby-grid[data-count="5"],
+.camera-lobby-grid[data-count="6"] { grid-template-columns: 1fr 1fr 1fr; }
+.camera-lobby-grid:not([data-count="1"]):not([data-count="2"]):not([data-count="3"]):not([data-count="4"]):not([data-count="5"]):not([data-count="6"]) {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
 }
 
 .camera-lobby-tile {
   position: relative;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 9;
   background: rgba(15, 23, 42, 0.7);
   border-radius: var(--radius);
   overflow: hidden;

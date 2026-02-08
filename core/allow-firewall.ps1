@@ -6,7 +6,9 @@ $rules = @(
   @{ Name = "Echo Core Control TCP 9443"; Protocol = "TCP"; Ports = "9443" },
   @{ Name = "Echo Core Signal TCP 7880"; Protocol = "TCP"; Ports = "7880" },
   @{ Name = "Echo Core RTC TCP 7881"; Protocol = "TCP"; Ports = "7881" },
-  @{ Name = "Echo Core RTC UDP 56100-56199"; Protocol = "UDP"; Ports = "56100-56199" }
+  @{ Name = "Echo Core RTC UDP 56100-56199"; Protocol = "UDP"; Ports = "56100-56199" },
+  @{ Name = "Echo Core TURN UDP 3478"; Protocol = "UDP"; Ports = "3478" },
+  @{ Name = "Echo Core TURN Relay UDP 40000-40099"; Protocol = "UDP"; Ports = "40000-40099" }
 )
 
 if ($Remove) {

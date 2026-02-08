@@ -340,22 +340,90 @@ function unlockAudio() {
   } catch {}
 }
 
-function getScreenShareCaptureOptions() {
+function getScreenSharePublishOptions() {
   return {
-    audio: true,
-    resolution: { width: 1920, height: 1080 },
-    frameRate: 60,
-    surfaceSwitching: "exclude",
-    selfBrowserSurface: "exclude",
-    preferCurrentTab: false
+    videoCodec: "vp9",
+    scalabilityMode: "L1T3",
+    videoEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+    degradationPreference: "maintain-framerate",
   };
 }
 
-function getScreenSharePublishOptions() {
-  return {
-    videoEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
-    simulcast: false,
-  };
+// Track refs for manual screen share (so we can unpublish on stop)
+let _screenShareVideoTrack = null;
+let _screenShareAudioTrack = null;
+
+async function startScreenShareManual() {
+  const LK = getLiveKitClient();
+
+  // Call getDisplayMedia ourselves with explicit { ideal: 60 } constraint
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 60 },
+    },
+    audio: {
+      autoGainControl: false,
+      echoCancellation: false,
+      noiseSuppression: false,
+    },
+    surfaceSwitching: "exclude",
+    selfBrowserSurface: "exclude",
+    preferCurrentTab: false,
+  });
+
+  // Log the actual capture frame rate
+  const videoMst = stream.getVideoTracks()[0];
+  if (videoMst) {
+    const settings = videoMst.getSettings();
+    debugLog("Screen capture actual FPS: " + (settings.frameRate || "unknown") +
+      ", resolution: " + settings.width + "x" + settings.height);
+
+    // Set content hint for smooth motion (gaming/video)
+    videoMst.contentHint = "motion";
+
+    // Create LiveKit LocalVideoTrack and publish
+    _screenShareVideoTrack = new LK.LocalVideoTrack(videoMst, undefined, false);
+    await room.localParticipant.publishTrack(_screenShareVideoTrack, {
+      source: LK.Track.Source.ScreenShare,
+      ...getScreenSharePublishOptions(),
+    });
+
+    // Handle browser "Stop sharing" button
+    videoMst.addEventListener("ended", () => {
+      debugLog("Screen share ended by browser stop button");
+      stopScreenShareManual().catch(() => {});
+      screenEnabled = false;
+      renderPublishButtons();
+    });
+  }
+
+  // Publish audio track if available
+  const audioMst = stream.getAudioTracks()[0];
+  if (audioMst) {
+    _screenShareAudioTrack = new LK.LocalAudioTrack(audioMst, undefined, false);
+    await room.localParticipant.publishTrack(_screenShareAudioTrack, {
+      source: LK.Track.Source.ScreenShareAudio,
+    });
+  }
+}
+
+async function stopScreenShareManual() {
+  try {
+    if (_screenShareVideoTrack) {
+      await room.localParticipant.unpublishTrack(_screenShareVideoTrack, true);
+      _screenShareVideoTrack.mediaStreamTrack?.stop();
+      _screenShareVideoTrack = null;
+    }
+    if (_screenShareAudioTrack) {
+      await room.localParticipant.unpublishTrack(_screenShareAudioTrack, true);
+      _screenShareAudioTrack.mediaStreamTrack?.stop();
+      _screenShareAudioTrack = null;
+    }
+  } catch (e) {
+    debugLog("stopScreenShareManual error: " + e.message);
+  }
 }
 
 document.addEventListener(
@@ -2755,13 +2823,17 @@ function populateCameraLobby() {
   cameraLobbyGrid.innerHTML = '';
 
   const allParticipants = [room.localParticipant, ...Array.from(room.remoteParticipants.values())];
+  let count = 0;
 
   allParticipants.forEach(participant => {
     const tile = createCameraTile(participant);
     if (tile) {
       cameraLobbyGrid.appendChild(tile);
+      count++;
     }
   });
+
+  cameraLobbyGrid.dataset.count = Math.min(count, 6);
 }
 
 function createCameraTile(participant) {
@@ -3035,7 +3107,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     throw new Error("LiveKit client failed to load. Please refresh and try again.");
   }
   room = new LK.Room({
-    adaptiveStream: false,
+    adaptiveStream: true,
     dynacast: true,
     autoSubscribe: true,
     videoCaptureDefaults: {
@@ -3050,7 +3122,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         { width: 480, height: 270, encoding: { maxBitrate: 400_000, maxFramerate: 15 } },
       ],
       screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
-      screenShareSimulcastLayers: [],
+      dtx: true,
+      degradationPreference: "maintain-resolution",
     },
   });
   try {
@@ -3310,7 +3383,20 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
 
-  await room.connect(sfuUrl, accessToken, { autoSubscribe: true });
+  await room.connect(sfuUrl, accessToken, {
+    autoSubscribe: true,
+    rtcConfig: {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        {
+          urls: "turn:99.111.153.69:3478?transport=udp",
+          username: "echo",
+          credential: "chamber",
+        },
+      ],
+    },
+  });
   if (seq !== connectSequence) { room.disconnect(); return; }
   startMediaReconciler();
   try {
@@ -3489,6 +3575,11 @@ async function disconnect() {
   sendLeaveNotification();
   stopHeartbeat();
   stopRoomStatusPolling();
+  // Clean up manual screen share tracks before disconnecting
+  _screenShareVideoTrack?.mediaStreamTrack?.stop();
+  _screenShareAudioTrack?.mediaStreamTrack?.stop();
+  _screenShareVideoTrack = null;
+  _screenShareAudioTrack = null;
   room.disconnect();
   room = null;
   clearMedia();
@@ -3823,6 +3914,7 @@ function clearUnreadChat() {
 function openChat() {
   if (!chatPanel) return;
   chatPanel.classList.remove("hidden");
+  chatMessages.scrollTop = chatMessages.scrollHeight;
   chatInput.focus();
   clearUnreadChat();
 }
@@ -4083,7 +4175,11 @@ async function toggleScreen() {
   const desired = !screenEnabled;
   screenBtn.disabled = true;
   try {
-    await room.localParticipant.setScreenShareEnabled(desired, getScreenShareCaptureOptions(), getScreenSharePublishOptions());
+    if (desired) {
+      await startScreenShareManual();
+    } else {
+      await stopScreenShareManual();
+    }
     screenEnabled = desired;
     renderPublishButtons();
     if (room?.localParticipant) {
@@ -4103,11 +4199,11 @@ async function restartScreenShare() {
   if (!room || !screenEnabled || screenRestarting) return;
   screenRestarting = true;
   try {
-    await room.localParticipant.setScreenShareEnabled(false);
+    await stopScreenShareManual();
     screenEnabled = false;
     renderPublishButtons();
     await new Promise((resolve) => setTimeout(resolve, 500));
-    await room.localParticipant.setScreenShareEnabled(true, getScreenShareCaptureOptions(), getScreenSharePublishOptions());
+    await startScreenShareManual();
     screenEnabled = true;
     renderPublishButtons();
   } catch (err) {

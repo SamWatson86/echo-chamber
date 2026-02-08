@@ -25,31 +25,6 @@ function Load-Env([string]$path) {
   }
 }
 
-function Ensure-Docker {
-  try {
-    docker info | Out-Null
-    Log "Docker ready."
-    return $true
-  } catch {
-    try {
-      Start-Process -FilePath "C:\Program Files\Docker\Docker\Docker Desktop.exe" | Out-Null
-      Log "Docker Desktop start requested."
-    } catch {}
-  }
-  $tries = 0
-  while ($tries -lt 30) {
-    $tries++
-    try {
-      docker info | Out-Null
-      Log "Docker ready after retry."
-      return $true
-    } catch {
-      Start-Sleep -Seconds 2
-    }
-  }
-  Log "Docker not ready after initial retries."
-  return $false
-}
 
 function Build-Control([string]$controlDir) {
   $exe = Join-Path $root "target\debug\echo-core-control.exe"
@@ -123,21 +98,25 @@ if ($env:CORE_TLS_SELF_SIGNED) {
   }
 }
 
-# Start SFU
-if (Ensure-Docker) {
-  Push-Location (Join-Path $root "sfu")
-  docker compose up -d | Out-Null
-  Pop-Location
-  Log "SFU started via docker compose."
-} else {
-  Write-Host "Docker not ready; SFU not started." -ForegroundColor Yellow
-  $retry = Join-Path $root "retry-sfu.ps1"
-  if (Test-Path $retry) {
-    Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$retry`"" -WindowStyle Hidden | Out-Null
-    Log "SFU retry helper launched."
-  } else {
-    Log "SFU retry helper missing."
+# Start LiveKit SFU (native, no Docker)
+$lkExe = Join-Path $root "sfu\livekit-server.exe"
+$lkConfig = Join-Path $root "sfu\livekit.yaml"
+$lkPidFile = Join-Path $root "sfu\livekit-server.pid"
+if (Test-Path $lkExe) {
+  if (Test-Path $lkPidFile) {
+    $oldLk = Get-Content $lkPidFile -ErrorAction SilentlyContinue
+    if ($oldLk) { try { Stop-Process -Id $oldLk -Force } catch {} }
+    Remove-Item $lkPidFile -Force -ErrorAction SilentlyContinue
   }
+  $lkOut = Join-Path $logsDir "livekit.out.log"
+  $lkErr = Join-Path $logsDir "livekit.err.log"
+  $lkProc = Start-Process -FilePath $lkExe -ArgumentList "--config `"$lkConfig`"" -WorkingDirectory (Join-Path $root "sfu") -PassThru -WindowStyle Hidden -RedirectStandardOutput $lkOut -RedirectStandardError $lkErr
+  Set-Content -Path $lkPidFile -Value $lkProc.Id -Encoding ascii
+  Write-Host "LiveKit SFU started natively (PID $($lkProc.Id))." -ForegroundColor Green
+  Log "LiveKit SFU started natively (PID $($lkProc.Id))."
+} else {
+  Write-Host "LiveKit exe not found at $lkExe" -ForegroundColor Red
+  Log "LiveKit exe not found at $lkExe"
 }
 
 # Build + start control
@@ -146,4 +125,25 @@ if (Build-Control $controlDir) {
   Write-Host "Core control plane started." -ForegroundColor Green
 } else {
   Write-Host "Control plane build failed." -ForegroundColor Red
+}
+
+# Start TURN server (native, outside Docker)
+$turnExe = Join-Path $root "turn\echo-turn.exe"
+if (Test-Path $turnExe) {
+  # Kill old TURN process if running
+  $turnPidFile = Join-Path $root "turn\echo-turn.pid"
+  if (Test-Path $turnPidFile) {
+    $oldTurn = Get-Content $turnPidFile -ErrorAction SilentlyContinue
+    if ($oldTurn) { try { Stop-Process -Id $oldTurn -Force } catch {} }
+    Remove-Item $turnPidFile -Force -ErrorAction SilentlyContinue
+  }
+  $turnOut = Join-Path $logsDir "turn.out.log"
+  $turnErr = Join-Path $logsDir "turn.err.log"
+  $turnProc = Start-Process -FilePath $turnExe -WorkingDirectory (Join-Path $root "turn") -PassThru -WindowStyle Hidden -RedirectStandardOutput $turnOut -RedirectStandardError $turnErr
+  Set-Content -Path $turnPidFile -Value $turnProc.Id -Encoding ascii
+  Write-Host "TURN server started (PID $($turnProc.Id))." -ForegroundColor Green
+  Log "TURN server started (PID $($turnProc.Id))."
+} else {
+  Write-Host "TURN server exe not found. Skipping." -ForegroundColor Yellow
+  Log "TURN server exe not found at $turnExe"
 }
