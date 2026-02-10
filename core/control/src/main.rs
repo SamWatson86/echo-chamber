@@ -37,6 +37,8 @@ struct AppState {
     participants: Arc<Mutex<HashMap<String, ParticipantEntry>>>,
     soundboard: Arc<Mutex<SoundboardState>>,
     chat: Arc<Mutex<ChatState>>,
+    avatars: Arc<Mutex<HashMap<String, String>>>,  // identity_base -> filename
+    avatars_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -139,6 +141,11 @@ struct ChatUploadResponse {
 #[allow(dead_code)]
 struct ChatUploadQuery {
     room: String,
+}
+
+#[derive(Deserialize)]
+struct AvatarUploadQuery {
+    identity: String,
 }
 
 #[derive(Serialize)]
@@ -264,6 +271,10 @@ struct ParticipantLeaveRequest {
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .init();
@@ -286,12 +297,33 @@ async fn main() {
     };
     fs::create_dir_all(&chat_state.dir).ok();
     fs::create_dir_all(&chat_state.uploads_dir).ok();
+    let avatars_dir = chat_state.uploads_dir.parent().unwrap_or(std::path::Path::new(".")).join("avatars");
+    fs::create_dir_all(&avatars_dir).ok();
+
+    // Scan existing avatar files on startup so GET works after restarts
+    let mut existing_avatars = HashMap::new();
+    if let Ok(entries) = fs::read_dir(&avatars_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            // Expected format: avatar-{identity_base}.{ext}
+            if fname.starts_with("avatar-") {
+                if let Some(dot_pos) = fname.rfind('.') {
+                    let identity_base = fname[7..dot_pos].to_string(); // skip "avatar-"
+                    info!("loaded existing avatar: {} -> {}", identity_base, fname);
+                    existing_avatars.insert(identity_base, fname);
+                }
+            }
+        }
+    }
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
         participants: Arc::new(Mutex::new(HashMap::new())),
         soundboard: Arc::new(Mutex::new(soundboard_state)),
         chat: Arc::new(Mutex::new(chat_state)),
+        avatars: Arc::new(Mutex::new(existing_avatars)),
+        avatars_dir,
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -338,6 +370,9 @@ async fn main() {
         .route("/api/chat/history/:room", get(chat_get_history))
         .route("/api/chat/upload", post(chat_upload_file))
         .route("/api/chat/uploads/:file_name", get(chat_get_upload))
+        .route("/api/online", get(online_users))
+        .route("/api/avatar/upload", post(avatar_upload))
+        .route("/api/avatar/:identity", get(avatar_get))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -554,6 +589,14 @@ async fn generate_self_signed() -> RustlsConfig {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true, ts: now_ts() })
+}
+
+async fn online_users(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+    let users: Vec<serde_json::Value> = participants.values().map(|p| {
+        serde_json::json!({ "name": p.name, "room": p.room_id })
+    }).collect();
+    Json(serde_json::json!(users))
 }
 
 async fn root_route(
@@ -1177,6 +1220,141 @@ async fn chat_get_upload(
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static(content_type),
+    );
+
+    Ok(response)
+}
+
+// ── Avatar endpoints ────────────────────────────────────────────────
+
+async fn avatar_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AvatarUploadQuery>,
+    body: Bytes,
+) -> Result<Json<ChatUploadResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    if body.is_empty() {
+        return Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some("Empty file".into()),
+        }));
+    }
+
+    // 10 MB limit for avatars (animated GIFs can be large)
+    if body.len() > 10 * 1024 * 1024 {
+        return Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some("Avatar too large (max 10MB)".into()),
+        }));
+    }
+
+    // Determine extension from content-type
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let ext = match content_type {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => {
+            return Ok(Json(ChatUploadResponse {
+                ok: false,
+                url: None,
+                error: Some("Unsupported image type (use jpeg, png, webp, or gif)".into()),
+            }));
+        }
+    };
+
+    // Strip -XXXX numeric suffix to get identity base (persists across reconnects)
+    let identity_base = query
+        .identity
+        .rsplitn(2, '-')
+        .last()
+        .unwrap_or(&query.identity)
+        .to_string();
+
+    let file_name = format!("avatar-{}.{}", identity_base, ext);
+    let file_path = state.avatars_dir.join(&file_name);
+
+    // Remove any old avatar for this identity base (might have a different extension)
+    {
+        let avatars = state.avatars.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old_file) = avatars.get(&identity_base) {
+            if *old_file != file_name {
+                let old_path = state.avatars_dir.join(old_file);
+                let _ = fs::remove_file(old_path);
+            }
+        }
+    }
+
+    let _ = fs::create_dir_all(&state.avatars_dir);
+    match fs::write(&file_path, &body) {
+        Ok(_) => {
+            let mut avatars = state.avatars.lock().unwrap_or_else(|e| e.into_inner());
+            avatars.insert(identity_base.clone(), file_name);
+            let url = format!("/api/avatar/{}", identity_base);
+            info!("avatar uploaded for identity_base={}", identity_base);
+            Ok(Json(ChatUploadResponse {
+                ok: true,
+                url: Some(url),
+                error: None,
+            }))
+        }
+        Err(err) => Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some(format!("Avatar upload failed: {}", err)),
+        })),
+    }
+}
+
+async fn avatar_get(
+    State(state): State<AppState>,
+    Path(identity): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Strip -XXXX suffix in case caller passes full identity
+    let identity_base = identity
+        .rsplitn(2, '-')
+        .last()
+        .unwrap_or(&identity)
+        .to_string();
+
+    let file_name = {
+        let avatars = state.avatars.lock().unwrap_or_else(|e| e.into_inner());
+        avatars.get(&identity_base).cloned()
+    };
+
+    let file_name = file_name.ok_or(StatusCode::NOT_FOUND)?;
+    let file_path = state.avatars_dir.join(&file_name);
+    let bytes = fs::read(&file_path).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let content_type = if file_name.ends_with(".png") {
+        "image/png"
+    } else if file_name.ends_with(".jpg") || file_name.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if file_name.ends_with(".gif") {
+        "image/gif"
+    } else if file_name.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    };
+
+    let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_str(content_type).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    // Cache avatars for 5 minutes
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
     );
 
     Ok(response)

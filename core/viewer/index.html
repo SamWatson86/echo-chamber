@@ -60,6 +60,7 @@
         </div>
         <div id="device-status" class="status device-status"></div>
         <div id="status" class="status">Idle</div>
+        <div id="online-users" class="online-users"></div>
       </section>
 
       <section class="panel room-panel">
@@ -99,6 +100,23 @@
             </div>
             <div id="user-list" class="user-list"></div>
           </aside>
+          <div id="chat-panel" class="chat-panel hidden" role="dialog" aria-label="Chat">
+            <div class="chat-header">
+              <h3>Chat</h3>
+              <div class="chat-actions">
+                <button id="close-chat" type="button">Close</button>
+              </div>
+            </div>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div class="chat-input-container">
+              <button id="chat-upload-btn" type="button" class="chat-upload-btn" title="Upload file or image">📎</button>
+              <button id="chat-emoji-btn" type="button" class="chat-emoji-btn" title="Add emoji">😊</button>
+              <input type="file" id="chat-file-input" class="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
+              <div id="chat-emoji-picker" class="chat-emoji-picker hidden"></div>
+              <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
+              <button id="chat-send-btn" type="button" class="chat-send-btn">Send</button>
+            </div>
+          </div>
         </div>
         <div id="audio-bucket" class="audio-bucket"></div>
       </section>
@@ -109,7 +127,26 @@
         </div>
         <div id="settings-device-panel" class="settings-body"></div>
       </div>
-      <div id="soundboard" class="soundboard hidden" role="dialog" aria-label="Soundboard">
+      <!-- Soundboard Compact (Quick Play) -->
+      <div id="soundboard-compact" class="soundboard-compact hidden" role="dialog" aria-label="Soundboard Quick Play">
+        <div class="soundboard-compact-header">
+          <h3>Soundboard</h3>
+          <button id="close-soundboard" type="button" class="soundboard-compact-close" title="Close">Back</button>
+        </div>
+        <button id="open-soundboard-edit" type="button" class="soundboard-compact-btn">Edit Soundboard</button>
+        <button id="toggle-soundboard-volume-compact" type="button" class="soundboard-compact-btn"
+          aria-expanded="false" aria-controls="soundboard-volume-panel-compact">Soundboard Volume</button>
+        <div id="soundboard-volume-panel-compact" class="soundboard-volume-compact hidden" aria-hidden="true">
+          <div class="soundboard-volume-row">
+            <input id="soundboard-volume" type="range" min="0" max="100" value="100" />
+            <span id="soundboard-volume-value" class="soundboard-volume-value">100%</span>
+          </div>
+        </div>
+        <div id="soundboard-compact-grid" class="soundboard-compact-grid"></div>
+      </div>
+
+      <!-- Soundboard Edit (Full Screen) -->
+      <div id="soundboard" class="soundboard soundboard-edit hidden" role="dialog" aria-label="Soundboard Edit">
         <div class="soundboard-header">
           <h3>Soundboard</h3>
           <div class="soundboard-actions">
@@ -121,13 +158,13 @@
             >
               Soundboard Volume
             </button>
-            <button id="close-soundboard" type="button">Back</button>
+            <button id="back-to-soundboard" type="button">Back to Soundboard</button>
           </div>
         </div>
         <div id="soundboard-volume-panel" class="soundboard-volume hidden" aria-hidden="true">
           <div class="soundboard-volume-row">
-            <input id="soundboard-volume" type="range" min="0" max="100" value="100" />
-            <span id="soundboard-volume-value" class="soundboard-volume-value">100%</span>
+            <input id="soundboard-volume-edit" type="range" min="0" max="100" value="100" />
+            <span id="soundboard-volume-value-edit" class="soundboard-volume-value">100%</span>
           </div>
         </div>
         <div class="soundboard-search">
@@ -149,7 +186,7 @@
             <input id="sound-clip-volume" type="range" min="0" max="200" value="100" />
             <div id="sound-clip-volume-value" class="soundboard-volume-value">100%</div>
           </div>
-          <div class="soundboard-icons">
+          <div class="soundboard-icons hidden" id="soundboard-icons-section">
             <div class="soundboard-icons-label">Pick an icon</div>
             <div id="soundboard-icon-grid" class="soundboard-icon-grid"></div>
           </div>
@@ -170,23 +207,6 @@
           </div>
         </div>
         <div id="camera-lobby-grid" class="camera-lobby-grid"></div>
-      </div>
-      <div id="chat-panel" class="chat-panel hidden" role="dialog" aria-label="Chat">
-        <div class="chat-header">
-          <h3>Chat</h3>
-          <div class="chat-actions">
-            <button id="close-chat" type="button">Close</button>
-          </div>
-        </div>
-        <div id="chat-messages" class="chat-messages"></div>
-        <div class="chat-input-container">
-          <button id="chat-upload-btn" type="button" class="chat-upload-btn" title="Upload file or image">📎</button>
-          <button id="chat-emoji-btn" type="button" class="chat-emoji-btn" title="Add emoji">😊</button>
-          <input type="file" id="chat-file-input" class="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
-          <div id="chat-emoji-picker" class="chat-emoji-picker hidden"></div>
-          <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
-          <button id="chat-send-btn" type="button" class="chat-send-btn">Send</button>
-        </div>
       </div>
       <div id="theme-panel" class="theme-panel hidden" role="dialog" aria-label="Theme">
         <div class="theme-header">

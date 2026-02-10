@@ -26,11 +26,19 @@ const deviceActionsHome = deviceActionsEl?.parentElement || null;
 const deviceStatusHome = deviceStatusEl?.parentElement || null;
 const openSoundboardButton = document.getElementById("open-soundboard");
 const closeSoundboardButton = document.getElementById("close-soundboard");
+const soundboardCompactPanel = document.getElementById("soundboard-compact");
+const soundboardCompactGrid = document.getElementById("soundboard-compact-grid");
+const openSoundboardEditButton = document.getElementById("open-soundboard-edit");
+const backToSoundboardButton = document.getElementById("back-to-soundboard");
 const soundboardPanel = document.getElementById("soundboard");
 const toggleSoundboardVolumeButton = document.getElementById("toggle-soundboard-volume");
+const toggleSoundboardVolumeCompactButton = document.getElementById("toggle-soundboard-volume-compact");
 const soundboardVolumePanel = document.getElementById("soundboard-volume-panel");
+const soundboardVolumePanelCompact = document.getElementById("soundboard-volume-panel-compact");
 const soundboardVolumeInput = document.getElementById("soundboard-volume");
+const soundboardVolumeInputEdit = document.getElementById("soundboard-volume-edit");
 const soundboardVolumeValue = document.getElementById("soundboard-volume-value");
+const soundboardVolumeValueEdit = document.getElementById("soundboard-volume-value-edit");
 const soundSearchInput = document.getElementById("sound-search");
 const soundboardGrid = document.getElementById("soundboard-grid");
 const soundNameInput = document.getElementById("sound-name");
@@ -116,17 +124,74 @@ const cameraVideoBySid = new Map();
 const lastTrackHandled = new Map();
 const cameraClearTimers = new Map();
 const screenTileByIdentity = new Map();
+const hiddenScreens = new Set();
 const chatHistory = [];
 let chatDataChannel = null;
 const CHAT_MESSAGE_TYPE = "chat-message";
 const CHAT_FILE_TYPE = "chat-file";
 const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
+const avatarUrls = new Map(); // identity_base -> avatar URL
 const ROOM_DISPLAY_NAMES = { "main": "Main", "breakout-1": "Breakout 1", "breakout-2": "Breakout 2", "breakout-3": "Breakout 3" };
 let roomStatusTimer = null;
 let heartbeatTimer = null;
 let previousRoomParticipants = {};
+let previousDetectedRoom = null;
 let unreadChatCount = 0;
 const chatBadge = document.getElementById("chat-badge");
+let onlineUsersTimer = null;
+const onlineUsersEl = document.getElementById("online-users");
+
+// ─── Who's Online polling (pre-connect) ───
+function getControlUrl() {
+  const val = controlUrlInput?.value?.trim();
+  if (val) return val;
+  return `https://${window.location.host}`;
+}
+
+async function fetchOnlineUsers(controlUrl) {
+  try {
+    const resp = await fetch(`${controlUrl}/api/online`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return [];
+    return await resp.json();
+  } catch {
+    return [];
+  }
+}
+
+function renderOnlineUsers(users) {
+  if (!onlineUsersEl) return;
+  if (!users || users.length === 0) {
+    onlineUsersEl.innerHTML = '<div class="online-users-empty">No one is currently online</div>';
+    return;
+  }
+  const pills = users.map(u => {
+    const name = u.name || "Unknown";
+    const room = u.room || "";
+    const title = room ? `In room: ${room}` : "";
+    return `<span class="online-user-pill" title="${title}">${name}</span>`;
+  }).join("");
+  onlineUsersEl.innerHTML =
+    `<div class="online-users-header">Currently Online (${users.length})</div>` +
+    `<div class="online-users-list">${pills}</div>`;
+}
+
+function startOnlineUsersPolling() {
+  if (onlineUsersTimer) return;
+  const poll = async () => {
+    const users = await fetchOnlineUsers(getControlUrl());
+    renderOnlineUsers(users);
+  };
+  poll(); // immediate first fetch
+  onlineUsersTimer = setInterval(poll, 10000);
+}
+
+function stopOnlineUsersPolling() {
+  if (onlineUsersTimer) {
+    clearInterval(onlineUsersTimer);
+    onlineUsersTimer = null;
+  }
+  if (onlineUsersEl) onlineUsersEl.innerHTML = "";
+}
 
 function safeStorageGet(key) {
   try {
@@ -167,6 +232,13 @@ let soundboardContext = null;
 let soundboardMasterGain = null;
 let soundboardCurrentSource = null;
 const soundboardBufferCache = new Map();
+let soundboardFavorites = (() => {
+  try { return JSON.parse(localStorage.getItem("echo-soundboard-favorites")) || []; } catch { return []; }
+})();
+let soundboardCustomOrder = (() => {
+  try { return JSON.parse(localStorage.getItem("echo-soundboard-order")) || []; } catch { return []; }
+})();
+let soundboardDragId = null;
 const debugPanel = document.getElementById("debug-panel");
 const debugToggleBtn = document.getElementById("debug-toggle");
 const debugCloseBtn = document.getElementById("debug-close");
@@ -186,6 +258,42 @@ function debugLog(message) {
     debugLogEl.textContent = debugLines.join("\n");
   }
 }
+
+// ── WebCodecs NVENC diagnostic ──
+// Test if hardware video encoding is available via WebCodecs API.
+(async function testHardwareEncoding() {
+  try {
+    if (typeof VideoEncoder === "undefined") {
+      console.log("[NVENC] WebCodecs VideoEncoder not available");
+      return;
+    }
+    const configs = [
+      { codec: "avc1.640028", label: "H264-High" },
+      { codec: "av01.0.08M.08", label: "AV1" },
+    ];
+    for (const { codec, label } of configs) {
+      const support = await VideoEncoder.isConfigSupported({
+        codec,
+        width: 1920,
+        height: 1080,
+        framerate: 60,
+        bitrate: 8_000_000,
+        hardwareAcceleration: "prefer-hardware",
+      });
+      const supportSw = await VideoEncoder.isConfigSupported({
+        codec,
+        width: 1920,
+        height: 1080,
+        framerate: 60,
+        bitrate: 8_000_000,
+        hardwareAcceleration: "prefer-software",
+      });
+      console.log(`[NVENC] ${label}: hw=${support.supported}, sw=${supportSw.supported}`);
+    }
+  } catch (e) {
+    console.log("[NVENC] diagnostic error: " + e.message);
+  }
+})();
 
 if (debugToggleBtn && debugPanel) {
   debugToggleBtn.addEventListener("click", () => {
@@ -342,9 +450,9 @@ function unlockAudio() {
 
 function getScreenSharePublishOptions() {
   return {
-    videoCodec: "vp9",
-    scalabilityMode: "L1T3",
-    videoEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+    videoCodec: "h264",
+    simulcast: false,
+    screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
     degradationPreference: "maintain-framerate",
   };
 }
@@ -352,15 +460,17 @@ function getScreenSharePublishOptions() {
 // Track refs for manual screen share (so we can unpublish on stop)
 let _screenShareVideoTrack = null;
 let _screenShareAudioTrack = null;
+let _screenShareStatsInterval = null;
 
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
 
-  // Call getDisplayMedia ourselves with explicit { ideal: 60 } constraint
+  // Call getDisplayMedia ourselves — no fixed width/height so ultrawides
+  // capture at native aspect ratio instead of being forced to 16:9
   const stream = await navigator.mediaDevices.getDisplayMedia({
     video: {
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
+      width: { max: 3840 },
+      height: { max: 2160 },
       frameRate: { ideal: 60 },
     },
     audio: {
@@ -383,12 +493,191 @@ async function startScreenShareManual() {
     // Set content hint for smooth motion (gaming/video)
     videoMst.contentHint = "motion";
 
+    // Bypass Chrome's 30fps screen capture cap by rendering through a canvas.
+    // Chrome caps getDisplayMedia-derived tracks at 30fps in WebRTC encoding,
+    // regardless of codec or encoding params. Canvas captureStream creates a
+    // completely new pixel source with no screen-capture tag.
+    let publishMst = videoMst;
+    try {
+      const _offVideo = document.createElement("video");
+      _offVideo.srcObject = new MediaStream([videoMst]);
+      _offVideo.muted = true;
+      _offVideo.playsInline = true;
+      await _offVideo.play();
+
+      // Use actual video dimensions to preserve aspect ratio (critical for ultrawides)
+      // _offVideo.videoWidth/Height are the TRUE frame dimensions from the capture
+      let cw = _offVideo.videoWidth || settings.width || 1920;
+      let ch = _offVideo.videoHeight || settings.height || 1080;
+      debugLog("Canvas pipeline: source dimensions " + cw + "x" + ch + " (ratio " + (cw/ch).toFixed(2) + ")");
+      const _offCanvas = document.createElement("canvas");
+      _offCanvas.width = cw;
+      _offCanvas.height = ch;
+      const _ctx = _offCanvas.getContext("2d");
+
+      // captureStream(0) = manual frame pushing
+      const canvasStream = _offCanvas.captureStream(0);
+      publishMst = canvasStream.getVideoTracks()[0];
+      publishMst.contentHint = "motion";
+
+      // Push frames at 60fps using setTimeout (NOT requestAnimationFrame).
+      // rAF gets throttled when the Tauri window is behind the shared screen.
+      // setTimeout is not throttled for occluded (non-backgrounded) windows.
+      const TARGET_FPS = 60;
+      const FRAME_INTERVAL = 1000 / TARGET_FPS;
+      let _frameCount = 0;
+      let _fpsStart = performance.now();
+      function _pushFrame() {
+        if (videoMst.readyState === "ended") return;
+        // Resize canvas if source dimensions changed (e.g. window resize during capture)
+        const vw = _offVideo.videoWidth, vh = _offVideo.videoHeight;
+        if (vw && vh && (vw !== _offCanvas.width || vh !== _offCanvas.height)) {
+          _offCanvas.width = vw;
+          _offCanvas.height = vh;
+          debugLog("Canvas pipeline: resized to " + vw + "x" + vh + " (ratio " + (vw/vh).toFixed(2) + ")");
+        }
+        // Draw at native dimensions — never stretch
+        _ctx.drawImage(_offVideo, 0, 0, _offCanvas.width, _offCanvas.height);
+        publishMst.requestFrame();
+        _frameCount++;
+        // Log actual canvas FPS every 5 seconds
+        const now = performance.now();
+        const elapsed = now - _fpsStart;
+        if (elapsed >= 5000) {
+          debugLog("Canvas pipeline: " + Math.round(_frameCount / (elapsed / 1000)) + " fps pushed @ " + _offCanvas.width + "x" + _offCanvas.height);
+          _frameCount = 0;
+          _fpsStart = now;
+        }
+        window._canvasFrameLoop = setTimeout(_pushFrame, FRAME_INTERVAL);
+      }
+      window._canvasFrameLoop = setTimeout(_pushFrame, FRAME_INTERVAL);
+      window._canvasOffVideo = _offVideo;
+      debugLog("Screen capture routed through canvas pipeline (bypasses 30fps cap)");
+    } catch (e) {
+      debugLog("Canvas pipeline failed, using raw track: " + e.message);
+    }
+
+    // Ghost subscriber REMOVED — was causing DTLS timeouts and encoder death.
+    // SDP bandwidth munging (b=AS:8000 + b=TIAS:8000000) now handles BWE priming.
+
     // Create LiveKit LocalVideoTrack and publish
-    _screenShareVideoTrack = new LK.LocalVideoTrack(videoMst, undefined, false);
+    _screenShareVideoTrack = new LK.LocalVideoTrack(publishMst, undefined, false);
     await room.localParticipant.publishTrack(_screenShareVideoTrack, {
       source: LK.Track.Source.ScreenShare,
       ...getScreenSharePublishOptions(),
     });
+
+    // Lock sender parameters to prevent LiveKit SDK from overriding
+    const sender = _screenShareVideoTrack?.sender;
+    if (sender) {
+      const _origSetParams = sender.setParameters.bind(sender);
+      sender.setParameters = async (params) => {
+        params.degradationPreference = "maintain-framerate";
+        if (params.encodings) {
+          for (const enc of params.encodings) {
+            enc.maxFramerate = 60;
+            enc.maxBitrate = 8_000_000;
+            enc.scaleResolutionDownBy = 1.0;
+            enc.priority = "high";
+            enc.networkPriority = "high";
+          }
+        }
+        return _origSetParams(params);
+      };
+
+      // Apply our params now
+      const params = sender.getParameters();
+      params.degradationPreference = "maintain-framerate";
+      if (params.encodings) {
+        for (const enc of params.encodings) {
+          enc.maxFramerate = 60;
+          enc.maxBitrate = 8_000_000;
+          enc.scaleResolutionDownBy = 1.0;
+          enc.priority = "high";
+          enc.networkPriority = "high";
+        }
+      }
+      await _origSetParams(params);
+      // Verify parameters actually took effect
+      const vp = sender.getParameters();
+      const vEnc = vp.encodings?.[0];
+      debugLog("Screen share LOCKED: fps=" + vEnc?.maxFramerate + " bps=" + vEnc?.maxBitrate +
+        " scale=" + vEnc?.scaleResolutionDownBy + " degPref=" + vp.degradationPreference);
+
+      // Diagnostic: dump actual SDP bandwidth after 3s to see if munging worked
+      setTimeout(() => {
+        try {
+          const pc = room.engine?.pcManager?.publisher?.pc;
+          if (pc) {
+            const ldBas = pc.localDescription?.sdp?.match(/b=(AS|TIAS):\d+/g) || ["NONE"];
+            const rdBas = pc.remoteDescription?.sdp?.match(/b=(AS|TIAS):\d+/g) || ["NONE"];
+            debugLog("SDP-CHECK local: " + ldBas.join(", ") + " | remote: " + rdBas.join(", "));
+            // Also check if x-google params exist
+            const xg = pc.localDescription?.sdp?.match(/x-google-start-bitrate=\d+/g) || ["NONE"];
+            debugLog("SDP-CHECK x-google: " + xg.join(", "));
+          } else {
+            debugLog("SDP-CHECK: cannot access PeerConnection (engine.pcManager.publisher.pc)");
+          }
+        } catch (e) { debugLog("SDP-CHECK error: " + e.message); }
+      }, 3000);
+    }
+
+    // Monitor encoding stats every 2s
+    if (_screenShareStatsInterval) clearInterval(_screenShareStatsInterval);
+    let _lastBytesSent = 0;
+    let _lastStatsTime = Date.now();
+    _screenShareStatsInterval = setInterval(async () => {
+      try {
+        const sender = _screenShareVideoTrack?.sender;
+        if (!sender) return;
+
+        // Check if capture track is still alive
+        const captureTrack = sender.track;
+        if (captureTrack && captureTrack.readyState !== "live") {
+          debugLog("Screen share: CAPTURE TRACK DEAD: " + captureTrack.readyState);
+        }
+
+        // Get BWE + ICE candidate info from sender stats
+        let bwe = "?";
+        let iceInfo = "";
+        const stats = await sender.getStats();
+        const candidateMap = new Map();
+        stats.forEach((report) => {
+          if (report.type === "local-candidate" || report.type === "remote-candidate") {
+            candidateMap.set(report.id, report);
+          }
+        });
+        stats.forEach((report) => {
+          if (report.type === "candidate-pair" && report.state === "succeeded") {
+            bwe = Math.round((report.availableOutgoingBitrate || 0) / 1000);
+            const local = candidateMap.get(report.localCandidateId);
+            const remote = candidateMap.get(report.remoteCandidateId);
+            const lType = local?.candidateType || "?";
+            const rType = remote?.candidateType || "?";
+            const lAddr = local ? `${local.address}:${local.port}` : "?";
+            const rAddr = remote ? `${remote.address}:${remote.port}` : "?";
+            iceInfo = `ice=${lType}->${rType} ${lAddr}->${rAddr}`;
+          }
+        });
+
+        stats.forEach((report) => {
+          if (report.type === "outbound-rtp" && report.kind === "video") {
+            const fps = report.framesPerSecond || 0;
+            const w = report.frameWidth || 0;
+            const h = report.frameHeight || 0;
+            const now = Date.now();
+            const elapsed = (now - _lastStatsTime) / 1000;
+            const bytesDelta = report.bytesSent - _lastBytesSent;
+            const kbps = elapsed > 0 ? Math.round((bytesDelta * 8) / elapsed / 1000) : 0;
+            _lastBytesSent = report.bytesSent;
+            _lastStatsTime = now;
+            const codec = report.encoderImplementation || "unknown";
+            const limit = report.qualityLimitationReason || "none";
+            debugLog(`Screen: ${fps}fps ${w}x${h} ${kbps}kbps bwe=${bwe}kbps codec=${codec} limit=${limit} ${iceInfo}`);
+          }
+        });
+      } catch {}
+    }, 2000);
 
     // Handle browser "Stop sharing" button
     videoMst.addEventListener("ended", () => {
@@ -410,6 +699,18 @@ async function startScreenShareManual() {
 }
 
 async function stopScreenShareManual() {
+  // Clean up canvas pipeline
+  if (window._canvasFrameLoop) { clearTimeout(window._canvasFrameLoop); window._canvasFrameLoop = null; }
+  if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
+  // Ghost subscriber removed (was causing DTLS timeouts)
+  if (window._ghostSubscriber) {
+    try { window._ghostSubscriber.disconnect(); } catch {}
+    window._ghostSubscriber = null;
+  }
+  if (_screenShareStatsInterval) {
+    clearInterval(_screenShareStatsInterval);
+    _screenShareStatsInterval = null;
+  }
   try {
     if (_screenShareVideoTrack) {
       await room.localParticipant.unpublishTrack(_screenShareVideoTrack, true);
@@ -629,6 +930,13 @@ function detectRoomChanges(statusMap) {
   });
   const myIdentity = identityInput ? identityInput.value : "";
   const myRoom = currentRoomName;
+  // If Sam just switched rooms (or this is the first poll), skip chime detection.
+  // Stale previousRoomParticipants for the new room would trigger false leave/join chimes.
+  if (previousDetectedRoom !== myRoom) {
+    previousDetectedRoom = myRoom;
+    previousRoomParticipants = currentIds;
+    return;
+  }
   // Build flat lookup: identity -> room for previous and current
   const prevByUser = {};
   const currByUser = {};
@@ -796,6 +1104,11 @@ function addTile(label, element) {
 
 function addScreenTile(label, element, trackSid) {
   configureVideoElement(element, true);
+  // Force contain so ultrawides and non-standard ratios are never stretched
+  element.style.objectFit = "contain";
+  element.style.width = "100%";
+  element.style.height = "100%";
+  element.style.background = "transparent";
   ensureVideoPlays(element._lkTrack, element);
   const tile = addTile(label, element);
   tile.addEventListener("click", () => {
@@ -817,6 +1130,20 @@ function addScreenTile(label, element, trackSid) {
   }
   if (element && element.tagName === "VIDEO") {
     attachVideoDiagnostics(element._lkTrack || null, element, overlay);
+    // Once video dimensions are known, tag the tile's aspect ratio class
+    const tagAspect = () => {
+      const vw = element.videoWidth, vh = element.videoHeight;
+      if (vw && vh) {
+        const ratio = vw / vh;
+        tile.classList.toggle("ultrawide", ratio > 2.0);
+        tile.classList.toggle("superwide", ratio > 2.8);
+        tile.dataset.aspectRatio = ratio.toFixed(2);
+      }
+    };
+    element.addEventListener("loadedmetadata", tagAspect);
+    element.addEventListener("resize", tagAspect);
+    // Check immediately in case already loaded
+    tagAspect();
   }
   return tile;
 }
@@ -1024,6 +1351,11 @@ function getInitials(name) {
   if (!name) return "??";
   const parts = name.trim().split(/\s+/);
   return parts.slice(0, 2).map((p) => p[0]?.toUpperCase() || "").join("");
+}
+
+function getIdentityBase(identity) {
+  // Strip the -XXXX numeric suffix from "name-1234" -> "name"
+  return identity ? identity.replace(/-\d+$/, "") : identity;
 }
 
 function showRefreshButton() {
@@ -1626,6 +1958,8 @@ if (!soundboardSelectedIcon) {
 
 function ensureParticipantCard(participant, isLocal = false) {
   const key = participant.identity;
+  // Hide ghost subscriber from UI
+  if (key.startsWith("__echo_ghost_")) return null;
   if (participantCards.has(key)) {
     debugLog(`participant card already exists for ${key}`);
     return participantCards.get(key);
@@ -1645,6 +1979,27 @@ function ensureParticipantCard(participant, isLocal = false) {
   const avatar = document.createElement("div");
   avatar.className = "user-avatar";
   avatar.textContent = getInitials(participant.name || participant.identity);
+  if (isLocal) {
+    const avatarFileInput = document.createElement("input");
+    avatarFileInput.type = "file";
+    avatarFileInput.accept = "image/*";
+    avatarFileInput.className = "hidden";
+    avatarFileInput.addEventListener("change", async () => {
+      const file = avatarFileInput.files?.[0];
+      if (!file) return;
+      await uploadAvatar(file);
+      avatarFileInput.value = "";
+    });
+    avatar.appendChild(avatarFileInput);
+    avatar.style.cursor = "pointer";
+    avatar.title = "Click to upload avatar";
+    avatar.addEventListener("click", (e) => {
+      // Don't trigger if camera video is playing
+      const video = avatar.querySelector("video");
+      if (video && video.videoWidth > 0) return;
+      avatarFileInput.click();
+    });
+  }
   const meta = document.createElement("div");
   meta.className = "user-meta";
   let micIndicator = null;
@@ -1680,6 +2035,33 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenMuteButton.textContent = "Mute";
     micIndicatorRow.append(micIndicator, micMuteButton);
     screenIndicatorRow.append(screenIndicator, screenMuteButton);
+    var watchToggleBtn = document.createElement("button");
+    watchToggleBtn.type = "button";
+    watchToggleBtn.className = "watch-toggle-btn";
+    watchToggleBtn.textContent = "Stop Watching";
+    watchToggleBtn.style.display = "none";
+    watchToggleBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var identity = participant.identity;
+      if (hiddenScreens.has(identity)) {
+        hiddenScreens.delete(identity);
+        var tile = screenTileByIdentity.get(identity);
+        if (tile) tile.style.display = "";
+        watchToggleBtn.textContent = "Stop Watching";
+      } else {
+        hiddenScreens.add(identity);
+        var tile = screenTileByIdentity.get(identity);
+        if (tile) {
+          if (tile.classList.contains("is-focused")) {
+            tile.classList.remove("is-focused");
+            screenGridEl.classList.remove("is-focused");
+          }
+          tile.style.display = "none";
+        }
+        watchToggleBtn.textContent = "Start Watching";
+      }
+    });
+    screenIndicatorRow.append(watchToggleBtn);
     indicators.append(micIndicatorRow, screenIndicatorRow);
     const audioControls = document.createElement("div");
     audioControls.className = "audio-controls";
@@ -1741,6 +2123,34 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenControl.addEventListener("click", () => toggleScreen().catch(() => {}));
     row.append(micControl, camControl, screenControl);
     controls.append(enableAll, row);
+    // Add watch toggle button for local user's own screen share
+    var watchToggleBtn = document.createElement("button");
+    watchToggleBtn.type = "button";
+    watchToggleBtn.className = "watch-toggle-btn";
+    watchToggleBtn.textContent = "Stop Watching";
+    watchToggleBtn.style.display = "none";
+    watchToggleBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var identity = participant.identity;
+      if (hiddenScreens.has(identity)) {
+        hiddenScreens.delete(identity);
+        var tile = screenTileByIdentity.get(identity);
+        if (tile) tile.style.display = "";
+        watchToggleBtn.textContent = "Stop Watching";
+      } else {
+        hiddenScreens.add(identity);
+        var tile = screenTileByIdentity.get(identity);
+        if (tile) {
+          if (tile.classList.contains("is-focused")) {
+            tile.classList.remove("is-focused");
+            screenGridEl.classList.remove("is-focused");
+          }
+          tile.style.display = "none";
+        }
+        watchToggleBtn.textContent = "Start Watching";
+      }
+    });
+    controls.append(watchToggleBtn);
     meta.append(controls);
     micStatusEl = micControl;
     screenStatusEl = screenControl;
@@ -1824,10 +2234,13 @@ function ensureParticipantCard(participant, isLocal = false) {
     micMuteButton,
     screenMuteButton,
     micRow,
-    screenRow
+    screenRow,
+    watchToggleBtn: typeof watchToggleBtn !== "undefined" ? watchToggleBtn : null
   });
   participantState.set(key, state);
   debugLog(`participant card created and added to DOM for ${key}, card.isConnected=${card.isConnected}, avatar exists=${!!avatar}`);
+  // Show avatar image if one exists for this user
+  updateAvatarDisplay(key);
   return participantCards.get(key);
 }
 
@@ -1858,7 +2271,10 @@ function updateAvatarVideo(cardRef, track) {
     return;
   }
   const { avatar } = cardRef;
+  // Preserve the hidden file input for local user avatar upload
+  const fileInput = avatar.querySelector('input[type="file"]');
   avatar.innerHTML = "";
+  if (fileInput) avatar.appendChild(fileInput);
   if (track) {
     const element = createLockedVideoElement(track);
     configureVideoElement(element, true);
@@ -1867,6 +2283,114 @@ function updateAvatarVideo(cardRef, track) {
     debugLog(`video attached to avatar for track ${track.sid || 'unknown'}`);
   } else {
     avatar.textContent = getInitials(cardRef.card.querySelector(".user-name")?.textContent || "");
+    if (fileInput) avatar.appendChild(fileInput);
+    // Show avatar image if one exists (replaces initials)
+    const identity = cardRef.card?.dataset?.identity;
+    if (identity) updateAvatarDisplay(identity);
+  }
+}
+
+async function uploadAvatar(file) {
+  if (!adminToken || !room?.localParticipant) return;
+  const identityBase = getIdentityBase(room.localParticipant.identity);
+
+  // GIFs: upload raw file to preserve animation. Others: resize to 160x160 via canvas.
+  let uploadBlob;
+  let uploadMime;
+  if (file.type === "image/gif") {
+    uploadBlob = file;
+    uploadMime = "image/gif";
+  } else {
+    uploadMime = "image/jpeg";
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.src = url;
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+    const canvas = document.createElement("canvas");
+    canvas.width = 160;
+    canvas.height = 160;
+    const ctx = canvas.getContext("2d");
+    const size = Math.min(img.width, img.height);
+    const sx = (img.width - size) / 2;
+    const sy = (img.height - size) / 2;
+    ctx.drawImage(img, sx, sy, size, size, 0, 0, 160, 160);
+    URL.revokeObjectURL(url);
+    uploadBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    if (!uploadBlob) { debugLog("Avatar: canvas.toBlob returned null"); return; }
+  }
+
+  try {
+    const res = await fetch(`/api/avatar/upload?identity=${encodeURIComponent(identityBase)}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+        "Content-Type": uploadMime
+      },
+      body: uploadBlob
+    });
+    const data = await res.json().catch(() => ({}));
+    debugLog("Avatar upload response: " + JSON.stringify(data));
+    if (data?.ok && data?.url) {
+      const avatarUrl = data.url + "?t=" + Date.now(); // cache bust
+      avatarUrls.set(identityBase, avatarUrl);
+      localStorage.setItem("echo-avatar-" + identityBase, avatarUrl);
+
+      // Update own card
+      updateAvatarDisplay(room.localParticipant.identity);
+
+      // Broadcast to other participants
+      broadcastAvatar(identityBase, avatarUrl);
+
+      debugLog("Avatar uploaded for " + identityBase + ", url=" + avatarUrl);
+    } else {
+      debugLog("Avatar upload NOT ok: " + JSON.stringify(data));
+    }
+  } catch (e) {
+    debugLog("Avatar upload failed: " + e.message);
+  }
+}
+
+function updateAvatarDisplay(identity) {
+  const cardRef = participantCards.get(identity);
+  if (!cardRef) return;
+  const avatar = cardRef.avatar;
+  if (!avatar) return;
+
+  // If camera is active and showing video, don't change
+  const video = avatar.querySelector("video");
+  if (video && video.videoWidth > 0 && !video.paused) return;
+
+  const identityBase = getIdentityBase(identity);
+  const avatarUrl = avatarUrls.get(identityBase);
+
+  if (avatarUrl) {
+    // Show avatar image
+    let img = avatar.querySelector("img.avatar-img");
+    if (!img) {
+      // Clear initials text nodes
+      const textNodes = Array.from(avatar.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
+      textNodes.forEach(n => n.remove());
+
+      img = document.createElement("img");
+      img.className = "avatar-img";
+      img.alt = "Avatar";
+      avatar.appendChild(img);
+    }
+    img.src = avatarUrl;
+  } else {
+    // No avatar -- show initials (current behavior)
+    const img = avatar.querySelector("img.avatar-img");
+    if (img) img.remove();
+  }
+}
+
+function broadcastAvatar(identityBase, avatarUrl) {
+  if (!room?.localParticipant) return;
+  const msg = JSON.stringify({ type: "avatar-update", identityBase, avatarUrl });
+  try {
+    room.localParticipant.publishData(new TextEncoder().encode(msg), { reliable: true });
+  } catch (e) {
+    debugLog("Avatar broadcast failed: " + e.message);
   }
 }
 
@@ -1974,6 +2498,22 @@ function runFullReconcile(reason) {
   if (!room) return;
   if (room.remoteParticipants?.forEach) {
     room.remoteParticipants.forEach((participant) => reconcileParticipantMedia(participant));
+  }
+  // Diagnostic: log remote participants and their screen share status
+  if (room.remoteParticipants?.size > 0) {
+    const LK = getLiveKitClient();
+    const parts = [];
+    room.remoteParticipants.forEach((p) => {
+      const pubs = getParticipantPublications(p);
+      const screenPub = pubs.find(pub => pub?.source === LK?.Track?.Source?.ScreenShare && pub?.kind === LK?.Track?.Kind?.Video);
+      const hasTile = screenTileByIdentity.has(p.identity);
+      if (screenPub) {
+        parts.push(`${p.identity}: screen=${screenPub.isSubscribed ? "sub" : "unsub"} track=${screenPub.track ? "yes" : "no"} tile=${hasTile}`);
+      }
+    });
+    if (parts.length > 0) {
+      debugLog("[reconcile] remote screens: " + parts.join(", "));
+    }
   }
 }
 
@@ -2203,6 +2743,10 @@ function handleTrackSubscribed(track, publication, participant) {
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
     if (existingTile) {
       const existingVideo = existingTile.querySelector("video");
+      if (cardRef && cardRef.watchToggleBtn) {
+        cardRef.watchToggleBtn.style.display = "";
+        cardRef.watchToggleBtn.textContent = hiddenScreens.has(identity) ? "Start Watching" : "Stop Watching";
+      }
       if (existingVideo && existingVideo._lkTrack === track && existingVideo.videoWidth > 0) {
         ensureVideoPlays(track, existingVideo);
         ensureVideoSubscribed(publication, existingVideo);
@@ -2233,6 +2777,7 @@ function handleTrackSubscribed(track, publication, participant) {
     setTimeout(() => requestVideoKeyFrame(publication, track), 200);
     setTimeout(() => requestVideoKeyFrame(publication, track), 600);
     const tile = addScreenTile(label, element, screenTrackSid);
+    debugLog("[screen-tile] CREATED for " + participant.identity + " trackSid=" + screenTrackSid + " label=" + label);
     ensureVideoSubscribed(publication, element);
     if (screenTrackSid) {
       registerScreenTrack(screenTrackSid, publication, tile, participant.identity);
@@ -2240,6 +2785,13 @@ function handleTrackSubscribed(track, publication, participant) {
       screenResubscribeIntent.delete(screenTrackSid);
     }
     screenTileByIdentity.set(participant.identity, tile);
+    if (hiddenScreens.has(participant.identity)) {
+      tile.style.display = "none";
+    }
+    if (cardRef && cardRef.watchToggleBtn) {
+      cardRef.watchToggleBtn.style.display = "";
+      cardRef.watchToggleBtn.textContent = hiddenScreens.has(participant.identity) ? "Start Watching" : "Stop Watching";
+    }
     participantState.get(participant.identity).screenTrackSid = screenTrackSid;
     forceVideoLayer(publication, element);
     return;
@@ -2285,11 +2837,30 @@ function handleTrackSubscribed(track, publication, participant) {
     if (audioSid && audioElBySid.has(audioSid)) {
       return;
     }
+    // Create audio element — use track.attach() then verify srcObject
     const element = track.attach();
     element._lkTrack = track;
+    // Safety: ensure srcObject is set (some SDK versions may not set it immediately)
+    if (!element.srcObject && track.mediaStreamTrack) {
+      element.srcObject = new MediaStream([track.mediaStreamTrack]);
+    }
+    element.volume = 1.0;
+    // Append to DOM FIRST, then configure and play (some browsers need element in DOM)
+    audioBucketEl.appendChild(element);
+    // Apply selected speaker device BEFORE playing so audio routes correctly from the start
+    if (selectedSpeakerId && typeof element.setSinkId === "function") {
+      element.setSinkId(selectedSpeakerId).catch(() => {});
+    }
     configureAudioElement(element);
     ensureAudioPlays(element);
-    audioBucketEl.appendChild(element);
+    // Re-trigger play when track's mediaStreamTrack unmutes (first data arrives)
+    if (track.mediaStreamTrack) {
+      track.mediaStreamTrack.addEventListener("unmute", () => {
+        debugLog(`audio track unmuted ${participant.identity} src=${source}`);
+        ensureAudioPlays(element);
+      });
+    }
+    debugLog(`audio element created: ${participant.identity} src=${source} sid=${audioSid} srcObj=${!!element.srcObject} mst=${!!track.mediaStreamTrack} mstEnabled=${track.mediaStreamTrack?.enabled} mstMuted=${track.mediaStreamTrack?.muted}`);
     if (audioSid) {
       audioElBySid.set(audioSid, element);
     }
@@ -2340,6 +2911,14 @@ function handleTrackUnsubscribed(track, publication, participant) {
       unregisterScreenTrack(trackSid);
       if (identity) screenTileByIdentity.delete(identity);
       if (trackSid) screenResubscribeIntent.delete(trackSid);
+    }
+    if (identity) {
+      hiddenScreens.delete(identity);
+      var cardRef2 = participantCards.get(identity);
+      if (cardRef2 && cardRef2.watchToggleBtn) {
+        cardRef2.watchToggleBtn.style.display = "none";
+        cardRef2.watchToggleBtn.textContent = "Stop Watching";
+      }
     }
   } else if (track.kind === "video" && source === LK.Track.Source.Camera) {
     const identity = participant?.identity;
@@ -2408,10 +2987,7 @@ function setPublishButtonsEnabled(enabled) {
   micBtn.disabled = !enabled;
   camBtn.disabled = !enabled;
   screenBtn.disabled = !enabled;
-  micSelect.disabled = !enabled;
-  camSelect.disabled = !enabled;
-  speakerSelect.disabled = !enabled;
-  refreshDevicesBtn.disabled = !enabled;
+  // Device selects stay enabled so users can choose devices before connecting
 }
 
 function renderPublishButtons() {
@@ -2470,9 +3046,32 @@ async function refreshDevices() {
   setSelectOptions(micSelect, mics, "Default mic");
   setSelectOptions(camSelect, cams, "Default camera");
   setSelectOptions(speakerSelect, speakers, "Default output");
-  if (selectedMicId) micSelect.value = selectedMicId;
-  if (selectedCamId) camSelect.value = selectedCamId;
-  if (selectedSpeakerId) speakerSelect.value = selectedSpeakerId;
+  // Restore saved device selections from localStorage if not already set
+  if (!selectedMicId) {
+    try { selectedMicId = localStorage.getItem("echo-device-mic") || ""; } catch (_) {}
+  }
+  if (!selectedCamId) {
+    try { selectedCamId = localStorage.getItem("echo-device-cam") || ""; } catch (_) {}
+  }
+  if (!selectedSpeakerId) {
+    try { selectedSpeakerId = localStorage.getItem("echo-device-speaker") || ""; } catch (_) {}
+  }
+  // Apply selections — only if the saved device still exists in the dropdown
+  if (selectedMicId) {
+    const opt = Array.from(micSelect.options).find(o => o.value === selectedMicId);
+    if (opt) micSelect.value = selectedMicId;
+    else selectedMicId = "";
+  }
+  if (selectedCamId) {
+    const opt = Array.from(camSelect.options).find(o => o.value === selectedCamId);
+    if (opt) camSelect.value = selectedCamId;
+    else selectedCamId = "";
+  }
+  if (selectedSpeakerId) {
+    const opt = Array.from(speakerSelect.options).find(o => o.value === selectedSpeakerId);
+    if (opt) speakerSelect.value = selectedSpeakerId;
+    else selectedSpeakerId = "";
+  }
   if (!mics.length || !cams.length) {
     setDeviceStatus("Device names may be hidden until permissions are granted.");
   } else {
@@ -2505,18 +3104,21 @@ function resumeAnalyser(analyserObj) {
 
 async function switchMic(deviceId) {
   selectedMicId = deviceId || "";
+  try { localStorage.setItem("echo-device-mic", selectedMicId); } catch (_) {}
   if (!room || !micEnabled) return;
   await room.localParticipant.setMicrophoneEnabled(true, { deviceId: selectedMicId || undefined });
 }
 
 async function switchCam(deviceId) {
   selectedCamId = deviceId || "";
+  try { localStorage.setItem("echo-device-cam", selectedCamId); } catch (_) {}
   if (!room || !camEnabled) return;
   await room.localParticipant.setCameraEnabled(true, { deviceId: selectedCamId || undefined });
 }
 
 async function switchSpeaker(deviceId) {
   selectedSpeakerId = deviceId || "";
+  try { localStorage.setItem("echo-device-speaker", selectedSpeakerId); } catch (_) {}
   await applySpeakerToMedia();
 }
 
@@ -2547,12 +3149,12 @@ function updateSoundboardEditControls() {
 }
 
 function updateSoundboardVolumeUi() {
-  if (soundboardVolumeInput) {
-    soundboardVolumeInput.value = String(soundboardUserVolume);
-  }
-  if (soundboardVolumeValue) {
-    soundboardVolumeValue.textContent = `${Math.round(soundboardUserVolume)}%`;
-  }
+  const vol = String(soundboardUserVolume);
+  const pct = `${Math.round(soundboardUserVolume)}%`;
+  if (soundboardVolumeInput) soundboardVolumeInput.value = vol;
+  if (soundboardVolumeInputEdit) soundboardVolumeInputEdit.value = vol;
+  if (soundboardVolumeValue) soundboardVolumeValue.textContent = pct;
+  if (soundboardVolumeValueEdit) soundboardVolumeValueEdit.textContent = pct;
   updateSoundboardMasterGain();
 }
 
@@ -2672,6 +3274,10 @@ async function playSoundboardSound(soundId) {
 function upsertSoundboardSound(sound) {
   if (!sound || !sound.id) return;
   soundboardSounds.set(sound.id, sound);
+  // Re-render whichever view is visible
+  if (soundboardCompactPanel && !soundboardCompactPanel.classList.contains("hidden")) {
+    renderSoundboardCompact();
+  }
   if (soundboardPanel && !soundboardPanel.classList.contains("hidden")) {
     renderSoundboard();
   }
@@ -2695,15 +3301,136 @@ function renderSoundboardIconPicker() {
   });
 }
 
-function renderSoundboard() {
-  if (!soundboardGrid) return;
-  const query = (soundSearchInput?.value ?? "").trim().toLowerCase();
-  const sounds = Array.from(soundboardSounds.values()).filter((sound) => {
+function toggleSoundboardFavorite(soundId) {
+  const idx = soundboardFavorites.indexOf(soundId);
+  if (idx >= 0) {
+    soundboardFavorites.splice(idx, 1);
+    debugLog("[soundboard] Unfavorited: " + soundId);
+  } else {
+    soundboardFavorites.push(soundId);
+    debugLog("[soundboard] Favorited: " + soundId);
+  }
+  localStorage.setItem("echo-soundboard-favorites", JSON.stringify(soundboardFavorites));
+  renderAllSoundboardViews();
+}
+
+function saveSoundboardOrder(orderedIds) {
+  soundboardCustomOrder = orderedIds;
+  localStorage.setItem("echo-soundboard-order", JSON.stringify(soundboardCustomOrder));
+}
+
+function sortSoundboardSounds(sounds) {
+  const favSet = new Set(soundboardFavorites);
+  const favs = [];
+  const rest = [];
+  sounds.forEach((s) => (favSet.has(s.id) ? favs : rest).push(s));
+  // Sort each group by custom order if available
+  const orderMap = new Map();
+  soundboardCustomOrder.forEach((id, i) => orderMap.set(id, i));
+  const bySavedOrder = (a, b) => {
+    const ai = orderMap.has(a.id) ? orderMap.get(a.id) : 999999;
+    const bi = orderMap.has(b.id) ? orderMap.get(b.id) : 999999;
+    return ai - bi;
+  };
+  favs.sort(bySavedOrder);
+  rest.sort(bySavedOrder);
+  return [...favs, ...rest];
+}
+
+function getSoundboardSoundsFiltered(query) {
+  return Array.from(soundboardSounds.values()).filter((sound) => {
     if (soundboardLoadedRoomId && sound.roomId && sound.roomId !== soundboardLoadedRoomId) return false;
     if (!query) return true;
     const name = (sound.name || "").toLowerCase();
     return name.includes(query);
   });
+}
+
+function attachSoundboardDragDrop(el, sound, gridEl, selectorClass, rerenderFn) {
+  const favSet = new Set(soundboardFavorites);
+  el.addEventListener("dragstart", (e) => {
+    soundboardDragId = sound.id;
+    el.classList.add("is-dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", sound.id);
+  });
+  el.addEventListener("dragend", () => {
+    soundboardDragId = null;
+    el.classList.remove("is-dragging");
+    gridEl.querySelectorAll("." + selectorClass + ".drag-over").forEach((x) => x.classList.remove("drag-over"));
+  });
+  el.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (soundboardDragId && soundboardDragId !== sound.id) {
+      el.classList.add("drag-over");
+    }
+  });
+  el.addEventListener("dragleave", () => {
+    el.classList.remove("drag-over");
+  });
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("drag-over");
+    if (!soundboardDragId || soundboardDragId === sound.id) return;
+    // Unrestricted reorder — any sound can be dragged to any position
+    const children = Array.from(gridEl.querySelectorAll("[data-sound-id]"));
+    const ids = children.map((t) => t.dataset.soundId);
+    const fromIdx = ids.indexOf(soundboardDragId);
+    const toIdx = ids.indexOf(sound.id);
+    if (fromIdx < 0 || toIdx < 0) return;
+    ids.splice(fromIdx, 1);
+    ids.splice(toIdx, 0, soundboardDragId);
+    debugLog("[soundboard] Reordered sounds");
+    saveSoundboardOrder(ids);
+    rerenderFn();
+  });
+}
+
+function renderSoundboardCompact() {
+  if (!soundboardCompactGrid) return;
+  const sounds = getSoundboardSoundsFiltered("");
+  soundboardCompactGrid.innerHTML = "";
+  if (sounds.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.style.gridColumn = "1 / -1";
+    empty.style.fontSize = "11px";
+    empty.textContent = "No sounds yet.";
+    soundboardCompactGrid.appendChild(empty);
+    return;
+  }
+  const sorted = sortSoundboardSounds(sounds);
+  const favSet = new Set(soundboardFavorites);
+
+  sorted.forEach((sound) => {
+    const btn = document.createElement("div");
+    btn.setAttribute("role", "button");
+    btn.setAttribute("tabindex", "0");
+    btn.className = "sound-icon-btn";
+    btn.dataset.soundId = sound.id;
+    btn.draggable = true;
+    btn.setAttribute("draggable", "true");
+    btn.title = sound.name || "Sound";
+    btn.textContent = sound.icon || "\u{1F50A}";
+    if (favSet.has(sound.id)) {
+      btn.classList.add("is-favorite");
+    }
+    btn.addEventListener("click", () => {
+      if (!room) return;
+      primeSoundboardAudio();
+      playSoundboardSound(sound.id).catch(() => {});
+      sendSoundboardMessage({ type: "sound-play", soundId: sound.id });
+    });
+    attachSoundboardDragDrop(btn, sound, soundboardCompactGrid, "sound-icon-btn", renderAllSoundboardViews);
+    soundboardCompactGrid.appendChild(btn);
+  });
+}
+
+function renderSoundboard() {
+  if (!soundboardGrid) return;
+  const query = (soundSearchInput?.value ?? "").trim().toLowerCase();
+  const sounds = getSoundboardSoundsFiltered(query);
   soundboardGrid.innerHTML = "";
   if (sounds.length === 0) {
     const empty = document.createElement("div");
@@ -2712,24 +3439,51 @@ function renderSoundboard() {
     soundboardGrid.appendChild(empty);
     return;
   }
-  sounds.forEach((sound) => {
+  const sorted = sortSoundboardSounds(sounds);
+  const favSet = new Set(soundboardFavorites);
+
+  sorted.forEach((sound) => {
     const tile = document.createElement("div");
     tile.className = "sound-tile";
+    tile.dataset.soundId = sound.id;
+    tile.draggable = true;
+    tile.setAttribute("draggable", "true");
     if (sound.id === soundboardEditingId) {
       tile.classList.add("is-editing");
     }
+    if (favSet.has(sound.id)) {
+      tile.classList.add("is-favorite");
+    }
+
+    // --- Favorite button ---
+    const favBtn = document.createElement("button");
+    favBtn.type = "button";
+    favBtn.className = "sound-fav" + (favSet.has(sound.id) ? " is-active" : "");
+    favBtn.title = favSet.has(sound.id) ? "Remove from favorites" : "Add to favorites";
+    favBtn.draggable = false;
+    favBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`;
+    favBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleSoundboardFavorite(sound.id);
+    });
+    favBtn.addEventListener("dragstart", (e) => { e.preventDefault(); e.stopPropagation(); });
+
     const main = document.createElement("div");
     main.className = "sound-tile-main";
+    main.draggable = false;
     const iconEl = document.createElement("div");
     iconEl.className = "sound-icon";
+    iconEl.draggable = false;
     iconEl.textContent = sound.icon || "\u{1F50A}";
     const nameEl = document.createElement("div");
     nameEl.className = "sound-name";
+    nameEl.draggable = false;
     nameEl.textContent = sound.name || "Sound";
     main.append(iconEl, nameEl);
     const editBtn = document.createElement("button");
     editBtn.type = "button";
     editBtn.className = "sound-edit";
+    editBtn.draggable = false;
     editBtn.innerHTML = `
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 20h9"></path>
@@ -2739,15 +3493,25 @@ function renderSoundboard() {
       event.stopPropagation();
       enterSoundboardEditMode(sound);
     });
-    tile.append(main, editBtn);
+    editBtn.addEventListener("dragstart", (e) => { e.preventDefault(); e.stopPropagation(); });
+    tile.append(favBtn, main, editBtn);
     tile.addEventListener("click", () => {
       if (!room) return;
       primeSoundboardAudio();
       playSoundboardSound(sound.id).catch(() => {});
       sendSoundboardMessage({ type: "sound-play", soundId: sound.id });
     });
+
+    // --- Drag and drop (unrestricted) ---
+    attachSoundboardDragDrop(tile, sound, soundboardGrid, "sound-tile", renderAllSoundboardViews);
+
     soundboardGrid.appendChild(tile);
   });
+}
+
+function renderAllSoundboardViews() {
+  renderSoundboardCompact();
+  renderSoundboard();
 }
 
 function enterSoundboardEditMode(sound) {
@@ -2758,6 +3522,8 @@ function enterSoundboardEditMode(sound) {
   renderSoundboardIconPicker();
   updateSoundClipVolumeUi(sound.volume ?? 100);
   updateSoundboardEditControls();
+  const iconsSection = document.getElementById("soundboard-icons-section");
+  if (iconsSection) iconsSection.classList.remove("hidden");
   setSoundboardHint(`Editing "${sound.name ?? "Sound"}". Update name/icon/volume and click Save.`);
   renderSoundboard();
 }
@@ -2769,11 +3535,52 @@ function exitSoundboardEditMode() {
   soundboardSelectedIcon = SOUNDBOARD_ICONS[0] ?? "\u{1F50A}";
   updateSoundClipVolumeUi(soundboardClipVolume);
   updateSoundboardEditControls();
+  const iconsSection = document.getElementById("soundboard-icons-section");
+  if (iconsSection) iconsSection.classList.add("hidden");
   renderSoundboard();
 }
 
 function openSoundboard() {
+  if (!soundboardCompactPanel) return;
+  soundboardEditingId = null;
+  // Reset compact volume panel
+  if (soundboardVolumePanelCompact) {
+    soundboardVolumePanelCompact.classList.add("hidden");
+    soundboardVolumePanelCompact.setAttribute("aria-hidden", "true");
+  }
+  updateSoundboardVolumeUi();
+  // Make sure edit mode is hidden, show compact
+  if (soundboardPanel) soundboardPanel.classList.add("hidden");
+  // Position compact panel directly below the Soundboard button
+  const btn = openSoundboardButton;
+  if (btn) {
+    const rect = btn.getBoundingClientRect();
+    soundboardCompactPanel.style.top = (rect.bottom + 6) + "px";
+    soundboardCompactPanel.style.right = (window.innerWidth - rect.right) + "px";
+  }
+  soundboardCompactPanel.classList.remove("hidden");
+  if (currentRoomName) {
+    void loadSoundboardList();
+  }
+  renderSoundboardCompact();
+  primeSoundboardAudio();
+}
+
+function closeSoundboard() {
+  // Close both compact and edit views
+  if (soundboardCompactPanel) soundboardCompactPanel.classList.add("hidden");
+  if (soundboardPanel) {
+    soundboardPanel.classList.add("hidden");
+    soundboardEditingId = null;
+    updateSoundboardEditControls();
+    setSoundboardHint("");
+  }
+}
+
+function openSoundboardEdit() {
   if (!soundboardPanel) return;
+  // Hide compact, show edit
+  if (soundboardCompactPanel) soundboardCompactPanel.classList.add("hidden");
   soundboardEditingId = null;
   if (soundboardVolumePanel) {
     soundboardVolumePanel.classList.add("hidden");
@@ -2785,19 +3592,21 @@ function openSoundboard() {
   renderSoundboardIconPicker();
   updateSoundboardEditControls();
   soundboardPanel.classList.remove("hidden");
-  if (currentRoomName) {
-    void loadSoundboardList();
-  }
   renderSoundboard();
-  primeSoundboardAudio();
 }
 
-function closeSoundboard() {
-  if (!soundboardPanel) return;
-  soundboardPanel.classList.add("hidden");
-  soundboardEditingId = null;
-  updateSoundboardEditControls();
-  setSoundboardHint("");
+function closeSoundboardEdit() {
+  // Hide edit, return to compact
+  if (soundboardPanel) {
+    soundboardPanel.classList.add("hidden");
+    soundboardEditingId = null;
+    updateSoundboardEditControls();
+    setSoundboardHint("");
+  }
+  if (soundboardCompactPanel) {
+    soundboardCompactPanel.classList.remove("hidden");
+    renderSoundboardCompact();
+  }
 }
 
 // Camera Lobby Management
@@ -2922,6 +3731,7 @@ function clearSoundboardState() {
   soundboardSounds.clear();
   soundboardBufferCache.clear();
   if (soundboardGrid) soundboardGrid.innerHTML = "";
+  if (soundboardCompactGrid) soundboardCompactGrid.innerHTML = "";
   updateSoundboardEditControls();
   stopSoundboardPlayback();
   setSoundboardHint("");
@@ -2949,6 +3759,9 @@ async function loadSoundboardList() {
     (data?.sounds || []).forEach((sound) => {
       if (sound?.id) soundboardSounds.set(sound.id, sound);
     });
+    if (soundboardCompactPanel && !soundboardCompactPanel.classList.contains("hidden")) {
+      renderSoundboardCompact();
+    }
     if (soundboardPanel && !soundboardPanel.classList.contains("hidden")) {
       renderSoundboard();
     }
@@ -3009,6 +3822,8 @@ async function uploadSoundboardSound() {
     if (soundNameInput) soundNameInput.value = "";
     if (soundFileInput) soundFileInput.value = "";
     updateSoundboardEditControls();
+    const iconsSection = document.getElementById("soundboard-icons-section");
+    if (iconsSection) iconsSection.classList.add("hidden");
     setSoundboardHint("Uploaded!");
   } catch {
     setSoundboardHint("Upload failed.", true);
@@ -3102,13 +3917,123 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   currentAccessToken = accessToken;
 
   setStatus("Connecting to SFU...");
+
+  // ── SDP munging: Force high bandwidth to prevent BWE starvation ──
+  // Chrome BWE starts at ~300kbps and probes up. If the SFU answer caps bandwidth
+  // (b=AS or b=TIAS), Chrome never probes higher. We munge BOTH local and remote
+  // descriptions to set 8Mbps bandwidth and add x-google bitrate hints.
+  if (!window._sdpMungingInstalled) {
+    window._sdpMungingInstalled = true;
+
+    function _mungeSDPBandwidth(sdp) {
+      const lines = sdp.split("\r\n");
+      const result = [];
+      let inVideo = false;
+      let addedBW = false;
+      for (const line of lines) {
+        if (line.startsWith("m=video")) { inVideo = true; addedBW = false; }
+        else if (line.startsWith("m=")) { inVideo = false; }
+        // Remove existing bandwidth lines in video section
+        if (inVideo && (line.startsWith("b=AS:") || line.startsWith("b=TIAS:"))) continue;
+        result.push(line);
+        // Add our bandwidth right after c= line in video section
+        if (inVideo && line.startsWith("c=") && !addedBW) {
+          result.push("b=AS:8000");
+          result.push("b=TIAS:8000000");
+          addedBW = true;
+        }
+      }
+      return result.join("\r\n");
+    }
+
+    function _addH264BitrateHints(sdp) {
+      // Upgrade H264 profile level to at least 4.2 (0x2A) for 1080p@60fps.
+      // Level 4.0 (0x28) caps at 30fps for 1080p (245,760 max MBps / 8,160 MBs = 30fps).
+      // Level 4.2 (0x2A) allows 64fps at 1080p (522,240 max MBps).
+      sdp = sdp.replace(/profile-level-id=([0-9a-fA-F]{4})([0-9a-fA-F]{2})/g, function(match, profile, level) {
+        const lvl = parseInt(level, 16);
+        if (lvl < 0x2A) {
+          debugLog("[SDP] H264 level " + level + " -> 2A (4.0->4.2 for 60fps)");
+          return "profile-level-id=" + profile + "2A";
+        }
+        return match;
+      });
+
+      // Add max-fr=60 to H264 fmtp lines
+      const h264Matches = sdp.matchAll(/a=rtpmap:(\d+) H264\/90000/g);
+      for (const m of h264Matches) {
+        const pt = m[1];
+        const re = new RegExp(`(a=fmtp:${pt} [^\\r\\n]*)`, "g");
+        if (re.test(sdp)) {
+          sdp = sdp.replace(new RegExp(`(a=fmtp:${pt} [^\\r\\n]*)`, "g"),
+            "$1;x-google-start-bitrate=5000;x-google-min-bitrate=3000;x-google-max-bitrate=8000;max-fr=60");
+        }
+      }
+      return sdp;
+    }
+
+    // Hook createOffer to catch SDP before LiveKit passes it anywhere
+    const _origCreateOffer = RTCPeerConnection.prototype.createOffer;
+    RTCPeerConnection.prototype.createOffer = async function(...args) {
+      const offer = await _origCreateOffer.apply(this, args);
+      if (offer && offer.sdp) {
+        offer.sdp = _addH264BitrateHints(_mungeSDPBandwidth(offer.sdp));
+        debugLog("[SDP] OFFER munged: b=AS:8000 + H264 hints");
+      }
+      return offer;
+    };
+
+    const _origSLD = RTCPeerConnection.prototype.setLocalDescription;
+    RTCPeerConnection.prototype.setLocalDescription = function(desc, ...args) {
+      if (desc && desc.sdp) {
+        desc = { type: desc.type, sdp: _addH264BitrateHints(_mungeSDPBandwidth(desc.sdp)) };
+        debugLog("[SDP] LOCAL munged");
+      } else if (!desc) {
+        debugLog("[SDP] WARNING: implicit setLocalDescription (no SDP to munge)");
+      }
+      return _origSLD.apply(this, [desc, ...args]);
+    };
+
+    const _origSRD = RTCPeerConnection.prototype.setRemoteDescription;
+    RTCPeerConnection.prototype.setRemoteDescription = function(desc, ...args) {
+      if (desc && desc.sdp) {
+        // Apply bandwidth AND H264 level upgrade to SFU answer too
+        desc = { type: desc.type, sdp: _addH264BitrateHints(_mungeSDPBandwidth(desc.sdp)) };
+        debugLog("[SDP] REMOTE munged: bandwidth + H264 level upgrade");
+      }
+      return _origSRD.apply(this, [desc, ...args]);
+    };
+
+    // Override addTransceiver to force 60fps from creation.
+    // LiveKit SDK defaults screen share to 15fps (h1080fps15 preset).
+    // Chrome may not allow setParameters() to override maxFramerate set in addTransceiver.
+    const _origAddTransceiver = RTCPeerConnection.prototype.addTransceiver;
+    RTCPeerConnection.prototype.addTransceiver = function(trackOrKind, init, ...args) {
+      if (init && init.sendEncodings) {
+        for (const enc of init.sendEncodings) {
+          if (typeof enc.maxFramerate === "number" && enc.maxFramerate < 60) {
+            debugLog("[TRANSCEIVER] Overriding maxFramerate " + enc.maxFramerate + " -> 60");
+            enc.maxFramerate = 60;
+          }
+          if (typeof enc.maxBitrate === "number" && enc.maxBitrate < 8000000) {
+            enc.maxBitrate = 8000000;
+          }
+          enc.scaleResolutionDownBy = 1.0;
+        }
+      }
+      return _origAddTransceiver.apply(this, [trackOrKind, init, ...args]);
+    };
+
+    debugLog("SDP + transceiver overrides installed (60fps, 8Mbps, b=AS:8000)");
+  }
+
   const LK = getLiveKitClient();
   if (!LK || !LK.Room) {
     throw new Error("LiveKit client failed to load. Please refresh and try again.");
   }
   room = new LK.Room({
-    adaptiveStream: true,
-    dynacast: true,
+    adaptiveStream: false,
+    dynacast: false,
     autoSubscribe: true,
     videoCaptureDefaults: {
       resolution: { width: 1920, height: 1080, frameRate: 60 },
@@ -3121,7 +4046,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         { width: 960, height: 540, encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
         { width: 480, height: 270, encoding: { maxBitrate: 400_000, maxFramerate: 15 } },
       ],
-      screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+      screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 60 },
       dtx: true,
       degradationPreference: "maintain-resolution",
     },
@@ -3231,6 +4156,12 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       }
     }, 200);
     scheduleReconcileWaves("participant-connected");
+    // Re-broadcast own avatar so new participant receives it
+    setTimeout(() => {
+      const identityBase = getIdentityBase(room.localParticipant.identity);
+      const avatarUrl = avatarUrls.get(identityBase);
+      if (avatarUrl) broadcastAvatar(identityBase, avatarUrl);
+    }, 1000);
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
     room.on(LK.RoomEvent.ParticipantNameChanged, (participant) => {
@@ -3241,6 +4172,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       if (nameEl) nameEl.textContent = label;
       if (!cardRef.avatar.querySelector("video")) {
         cardRef.avatar.textContent = getInitials(label);
+        updateAvatarDisplay(participant.identity);
       }
     });
   }
@@ -3319,6 +4251,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           // We handle black frames locally via resubscribe + keyframe.
         } else if (msg.type === CHAT_MESSAGE_TYPE || msg.type === CHAT_FILE_TYPE) {
           handleIncomingChatData(payload, participant);
+        } else if (msg.type === "avatar-update" && msg.identityBase && msg.avatarUrl) {
+          avatarUrls.set(msg.identityBase, msg.avatarUrl);
+          // Update all cards that match this identity base
+          participantCards.forEach((cardRef, ident) => {
+            if (getIdentityBase(ident) === msg.identityBase) {
+              updateAvatarDisplay(ident);
+            }
+          });
         }
       } catch {
         // ignore
@@ -3335,8 +4275,16 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         const element = publication.track.attach();
         const label = `${name} (Screen)`;
         const tile = addScreenTile(label, element, publication.trackSid);
+        const localIdentity = local.identity;
+        screenTileByIdentity.set(localIdentity, tile);
         if (publication.trackSid) {
-          registerScreenTrack(publication.trackSid, publication, tile, room?.localParticipant?.identity || "");
+          registerScreenTrack(publication.trackSid, publication, tile, localIdentity);
+        }
+        // Show "Stop Watching" button for local screen share
+        const localCardRef = participantCards.get(localIdentity);
+        if (localCardRef && localCardRef.watchToggleBtn) {
+          localCardRef.watchToggleBtn.style.display = "";
+          localCardRef.watchToggleBtn.textContent = hiddenScreens.has(localIdentity) ? "Start Watching" : "Stop Watching";
         }
       } else if (publication.track?.kind === "video" && source === LK.Track.Source.Camera) {
         updateAvatarVideo(ensureParticipantCard(local, true), publication.track);
@@ -3364,6 +4312,17 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (publication.trackSid === localScreenTrackSid) {
           localScreenTrackSid = "";
         }
+        // Hide "Stop Watching" button when local screen share ends
+        const localId = room?.localParticipant?.identity;
+        if (localId) {
+          hiddenScreens.delete(localId);
+          screenTileByIdentity.delete(localId);
+          const localCard = participantCards.get(localId);
+          if (localCard && localCard.watchToggleBtn) {
+            localCard.watchToggleBtn.style.display = "none";
+            localCard.watchToggleBtn.textContent = "Stop Watching";
+          }
+        }
       } else if (publication.track?.kind === "video" && source === LK.Track.Source.Camera) {
         const cardRef = participantCards.get(room?.localParticipant?.identity || "");
         if (cardRef) updateAvatarVideo(cardRef, null);
@@ -3390,7 +4349,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
         {
-          urls: "turn:99.111.153.69:3478?transport=udp",
+          urls: `turn:${window.location.hostname}:3478?transport=udp`,
           username: "echo",
           credential: "chamber",
         },
@@ -3402,6 +4361,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   try {
     room.startAudio?.();
   } catch {}
+  // Pre-load soundboard sounds so remote playback works even if user never opens the panel
+  loadSoundboardList().catch(() => {});
   const remoteList = room.remoteParticipants
     ? (typeof room.remoteParticipants.forEach === "function"
         ? Array.from(room.remoteParticipants.values ? room.remoteParticipants.values() : room.remoteParticipants)
@@ -3442,6 +4403,18 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   primeSoundboardAudio();
   initializeEmojiPicker();
   loadChatHistory(roomId);
+  // Load own avatar from localStorage and broadcast to room
+  {
+    const identityBase = getIdentityBase(identity);
+    const savedAvatar = localStorage.getItem("echo-avatar-" + identityBase);
+    if (savedAvatar) {
+      avatarUrls.set(identityBase, savedAvatar);
+      updateAvatarDisplay(identity);
+      // Broadcast to room after a short delay (let others join first)
+      setTimeout(() => broadcastAvatar(identityBase, savedAvatar), 2000);
+    }
+  }
+  stopOnlineUsersPolling();
   connectBtn.disabled = true;
   disconnectBtn.disabled = false;
   disconnectTopBtn.disabled = false;
@@ -3460,6 +4433,8 @@ async function connect() {
   // CRITICAL: Prime and MAINTAIN autoplay permission by playing a continuous silent audio loop
   // This keeps the browser's autoplay permission active indefinitely
   // This MUST happen IMMEDIATELY while we still have the user gesture from the button click
+  // Also prime soundboard AudioContext NOW (user gesture) so remote sound-play events work
+  getSoundboardContext();
   try {
     // Create a silent audio loop to maintain autoplay permission
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -3602,6 +4577,7 @@ async function disconnect() {
   disconnectTopBtn.disabled = true;
   roomListEl.classList.add("hidden");
   connectPanel.classList.remove("hidden");
+  startOnlineUsersPolling();
   setPublishButtonsEnabled(false);
   micEnabled = false;
   camEnabled = false;
@@ -3914,6 +4890,7 @@ function clearUnreadChat() {
 function openChat() {
   if (!chatPanel) return;
   chatPanel.classList.remove("hidden");
+  document.querySelector(".room-layout")?.classList.add("chat-open");
   chatMessages.scrollTop = chatMessages.scrollHeight;
   chatInput.focus();
   clearUnreadChat();
@@ -3922,6 +4899,7 @@ function openChat() {
 function closeChat() {
   if (!chatPanel) return;
   chatPanel.classList.add("hidden");
+  document.querySelector(".room-layout")?.classList.remove("chat-open");
 }
 
 function initializeEmojiPicker() {
@@ -4296,6 +5274,29 @@ if (closeSoundboardButton) {
   });
 }
 
+if (openSoundboardEditButton) {
+  openSoundboardEditButton.addEventListener("click", () => {
+    openSoundboardEdit();
+  });
+}
+
+if (backToSoundboardButton) {
+  backToSoundboardButton.addEventListener("click", () => {
+    closeSoundboardEdit();
+  });
+}
+
+// Compact view volume toggle
+if (toggleSoundboardVolumeCompactButton && soundboardVolumePanelCompact) {
+  toggleSoundboardVolumeCompactButton.addEventListener("click", () => {
+    soundboardVolumePanelCompact.classList.toggle("hidden");
+    const isOpen = !soundboardVolumePanelCompact.classList.contains("hidden");
+    toggleSoundboardVolumeCompactButton.setAttribute("aria-expanded", String(isOpen));
+    soundboardVolumePanelCompact.setAttribute("aria-hidden", String(!isOpen));
+  });
+}
+
+// Edit view volume toggle
 if (toggleSoundboardVolumeButton && soundboardVolumePanel) {
   toggleSoundboardVolumeButton.addEventListener("click", () => {
     soundboardVolumePanel.classList.toggle("hidden");
@@ -4305,12 +5306,27 @@ if (toggleSoundboardVolumeButton && soundboardVolumePanel) {
   });
 }
 
+// Volume input handler — works for both compact and edit sliders
+function handleSoundboardVolumeChange(inputEl) {
+  const value = Number(inputEl.value);
+  soundboardUserVolume = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 100;
+  localStorage.setItem("echo-core-soundboard-volume", String(soundboardUserVolume));
+  updateSoundboardVolumeUi();
+}
+
 if (soundboardVolumeInput) {
   soundboardVolumeInput.addEventListener("input", () => {
-    const value = Number(soundboardVolumeInput.value);
-    soundboardUserVolume = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 100;
-    localStorage.setItem("echo-core-soundboard-volume", String(soundboardUserVolume));
-    updateSoundboardVolumeUi();
+    handleSoundboardVolumeChange(soundboardVolumeInput);
+    // Sync the edit slider if it exists
+    if (soundboardVolumeInputEdit) soundboardVolumeInputEdit.value = soundboardVolumeInput.value;
+  });
+}
+
+if (soundboardVolumeInputEdit) {
+  soundboardVolumeInputEdit.addEventListener("input", () => {
+    handleSoundboardVolumeChange(soundboardVolumeInputEdit);
+    // Sync the compact slider if it exists
+    if (soundboardVolumeInput) soundboardVolumeInput.value = soundboardVolumeInputEdit.value;
   });
 }
 
@@ -4466,6 +5482,11 @@ if (soundClipVolumeInput) {
 if (soundFileInput) {
   soundFileInput.addEventListener("change", () => {
     updateSoundboardEditControls();
+    // Show icon picker when a file is selected for upload
+    const iconsSection = document.getElementById("soundboard-icons-section");
+    if (iconsSection && soundFileInput.files && soundFileInput.files.length > 0) {
+      iconsSection.classList.remove("hidden");
+    }
   });
 }
 
@@ -4505,7 +5526,12 @@ renderPublishButtons();
 setPublishButtonsEnabled(false);
 setDefaultUrls();
 setRoomAudioMutedState(false);
-ensureDevicePermissions().then(() => refreshDevices()).catch(() => {});
+ensureDevicePermissions().then(() => refreshDevices()).then(() => {
+  micSelect.disabled = false;
+  camSelect.disabled = false;
+  speakerSelect.disabled = false;
+  refreshDevicesBtn.disabled = false;
+}).catch(() => {});
 
 window.addEventListener("beforeunload", () => {
   sendLeaveNotification();
@@ -4800,3 +5826,6 @@ if (uiOpacitySlider) {
     applyUiOpacity(parseInt(e.target.value, 10));
   });
 }
+
+// Start Who's Online polling on page load (only while not connected)
+startOnlineUsersPolling();

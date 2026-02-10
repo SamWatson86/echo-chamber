@@ -78,11 +78,16 @@ fn set_always_on_top(app: tauri::AppHandle, on_top: bool) -> Result<(), String> 
 }
 
 fn main() {
-    // Allow WebView2 to accept our self-signed TLS cert
+    // WebView2 browser arguments:
+    // --ignore-certificate-errors: Accept self-signed TLS cert
+    // --enable-features=AcceleratedVideoEncoder: Enable GPU hardware video encoding (NVENC on NVIDIA)
+    // --ignore-gpu-blocklist: Force GPU acceleration even if driver is blocklisted
+    // --webrtc-max-cpu-consumption-percentage=100: Allow WebRTC full CPU for encoding
+    // --force-fieldtrials: Tune WebRTC BWE for faster ramp-up
     unsafe {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--ignore-certificate-errors",
+            "--ignore-certificate-errors --enable-features=AcceleratedVideoEncoder,MediaFoundationVideoEncoding --ignore-gpu-blocklist --webrtc-max-cpu-consumption-percentage=100 --force-fieldtrials=WebRTC-Bwe-AllocationProbing/Enabled/",
         );
     }
 

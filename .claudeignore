@@ -1,0 +1,52 @@
+# Binaries and executables
+*.exe
+*.dll
+*.so
+*.dylib
+*.pid
+
+# Build artifacts
+core/target/
+core/client/target/
+target/
+
+# Archives
+*.zip
+*.tar.gz
+*.7z
+
+# Logs
+*.log
+logs/
+
+# Node modules
+node_modules/
+
+# LiveKit SFU binary and assets (large)
+core/sfu/livekit-server.exe
+core/sfu/*.zip
+
+# TURN server binary
+core/turn/echo-turn.exe
+
+# Legacy apps folder
+apps/
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Temp files
+*.tmp
+.tmp-*
+nul
+
+# Power manager (separate project)
+power-manager/
+
+# Certificates
+*.pem
+*.key
+*.crt
+*.pfx
