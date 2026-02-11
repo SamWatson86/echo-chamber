@@ -331,6 +331,8 @@ let audioMonitorTimer = null;
 let roomAudioMuted = false;
 let localScreenTrackSid = "";
 let screenRestarting = false;
+let _cameraReducedForScreenShare = false;
+let _bwLimitedCount = 0; // consecutive stats ticks showing bandwidth limitation
 const screenReshareRequests = new Map();
 const ENABLE_SCREEN_WATCHDOG = true;
 let lastActiveSpeakerEvent = 0;
@@ -1041,6 +1043,25 @@ async function startScreenShareManual() {
             const codec = report.encoderImplementation || "unknown";
             const limit = report.qualityLimitationReason || "none";
             debugLog(`Screen: ${fps}fps ${w}x${h} ${kbps}kbps bwe=${bwe}kbps codec=${codec} limit=${limit} ${iceInfo}`);
+
+            // Adaptive camera quality: reduce camera when bandwidth-constrained during screen share
+            if (limit === "bandwidth" || fps === 0) {
+              _bwLimitedCount++;
+            } else {
+              _bwLimitedCount = Math.max(0, _bwLimitedCount - 1);
+            }
+            // Reduce camera after 3 consecutive bandwidth-limited ticks (~6 seconds)
+            if (_bwLimitedCount >= 3 && camEnabled && !_cameraReducedForScreenShare) {
+              _cameraReducedForScreenShare = true;
+              debugLog("Adaptive: reducing camera to 360p/15fps to free bandwidth for screen share");
+              reduceCameraForScreenShare();
+            }
+            // Restore camera after 5 consecutive non-limited ticks (~10 seconds of good bandwidth)
+            if (_bwLimitedCount === 0 && _cameraReducedForScreenShare) {
+              _cameraReducedForScreenShare = false;
+              debugLog("Adaptive: restoring camera to full quality (bandwidth recovered)");
+              restoreCameraQuality();
+            }
           }
         });
       } catch {}
@@ -1096,6 +1117,13 @@ async function stopScreenShareManual() {
   if (_screenShareStatsInterval) {
     clearInterval(_screenShareStatsInterval);
     _screenShareStatsInterval = null;
+  }
+  // Restore camera quality if it was reduced for screen share
+  if (_cameraReducedForScreenShare) {
+    _cameraReducedForScreenShare = false;
+    _bwLimitedCount = 0;
+    restoreCameraQuality();
+    debugLog("Adaptive: camera quality restored (screen share stopped)");
   }
   try {
     if (_screenShareVideoTrack) {
@@ -6011,6 +6039,41 @@ async function toggleMic() {
   }
 }
 
+// Adaptive camera quality: reduce camera when screen share is bandwidth-constrained
+async function reduceCameraForScreenShare() {
+  try {
+    const LK = getLiveKitClient();
+    const pubs = getParticipantPublications(room.localParticipant);
+    const camPub = pubs.find((p) => p?.source === LK?.Track?.Source?.Camera && p.track);
+    if (!camPub?.track?.sender) return;
+    const sender = camPub.track.sender;
+    const params = sender.getParameters();
+    if (params.encodings && params.encodings.length > 0) {
+      params.encodings[0].maxBitrate = 300000; // 300kbps
+      params.encodings[0].maxFramerate = 15;
+      params.encodings[0].scaleResolutionDownBy = 2; // halve resolution
+      await sender.setParameters(params);
+    }
+  } catch (e) { debugLog("Adaptive camera reduce failed: " + e.message); }
+}
+
+async function restoreCameraQuality() {
+  try {
+    const LK = getLiveKitClient();
+    const pubs = getParticipantPublications(room.localParticipant);
+    const camPub = pubs.find((p) => p?.source === LK?.Track?.Source?.Camera && p.track);
+    if (!camPub?.track?.sender) return;
+    const sender = camPub.track.sender;
+    const params = sender.getParameters();
+    if (params.encodings && params.encodings.length > 0) {
+      delete params.encodings[0].maxBitrate;
+      params.encodings[0].maxFramerate = 30;
+      delete params.encodings[0].scaleResolutionDownBy;
+      await sender.setParameters(params);
+    }
+  } catch (e) { debugLog("Adaptive camera restore failed: " + e.message); }
+}
+
 async function toggleCam() {
   if (!room) return;
   const desired = !camEnabled;
@@ -6647,6 +6710,81 @@ function buildChimeSettingsUI() {
 
   settingsDevicePanel.appendChild(section);
 }
+
+// ── Version info + Update button at bottom of settings ──
+(function buildVersionSection() {
+  if (!settingsDevicePanel) return;
+  var section = document.createElement("div");
+  section.className = "settings-section";
+  section.innerHTML = '<div class="settings-section-title">About</div>';
+  var versionRow = document.createElement("div");
+  versionRow.style.cssText = "display:flex; align-items:center; gap:10px; margin-top:6px;";
+  var versionLabel = document.createElement("span");
+  versionLabel.id = "app-version-label";
+  versionLabel.textContent = "Version: ...";
+  versionLabel.style.cssText = "opacity:0.7; font-size:13px;";
+  var updateBtn = document.createElement("button");
+  updateBtn.type = "button";
+  updateBtn.textContent = "Check for Updates";
+  updateBtn.style.cssText = "font-size:12px; padding:4px 10px; cursor:pointer;";
+  var updateStatus = document.createElement("span");
+  updateStatus.id = "update-status";
+  updateStatus.style.cssText = "font-size:12px; opacity:0.7; margin-left:4px;";
+  versionRow.appendChild(versionLabel);
+  versionRow.appendChild(updateBtn);
+  versionRow.appendChild(updateStatus);
+  section.appendChild(versionRow);
+  settingsDevicePanel.appendChild(section);
+
+  // Populate version from Tauri IPC or fallback
+  (async function() {
+    try {
+      if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+        var info = await tauriInvoke("get_app_info");
+        versionLabel.textContent = "Version: v" + info.version + " (" + info.platform + ")";
+      } else {
+        versionLabel.textContent = "Version: browser viewer";
+      }
+    } catch (e) {
+      versionLabel.textContent = "Version: unknown";
+    }
+  })();
+
+  // Check for updates button
+  updateBtn.addEventListener("click", async function() {
+    if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) {
+      updateStatus.textContent = "Updates only available in native client";
+      return;
+    }
+    updateBtn.disabled = true;
+    updateStatus.textContent = "Checking...";
+    try {
+      // Use the Tauri updater plugin JS API
+      var updaterMod = window.__TAURI__?.updater || await window.__TAURI_INTERNALS__?.invoke?.("plugin:updater|check");
+      // Fallback: invoke the Rust-side check directly
+      var check = window.__TAURI__?.updater?.check;
+      if (check) {
+        var update = await check();
+        if (update) {
+          updateStatus.textContent = "Downloading v" + update.version + "...";
+          await update.downloadAndInstall();
+          updateStatus.textContent = "Installed! Restarting...";
+          setTimeout(function() {
+            try { window.__TAURI__?.process?.relaunch(); } catch(e) {}
+          }, 1500);
+        } else {
+          updateStatus.textContent = "Up to date!";
+        }
+      } else {
+        // If JS updater API not available, tell user the app checks on startup
+        updateStatus.textContent = "Auto-checks on startup. Restart app to update.";
+      }
+    } catch (e) {
+      updateStatus.textContent = "Error: " + (e.message || e);
+    }
+    updateBtn.disabled = false;
+  });
+})();
 
 renderPublishButtons();
 setPublishButtonsEnabled(false);
