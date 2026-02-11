@@ -505,6 +505,9 @@ function echoSet(key, value) {
 
 function _debouncedPersist() {
   if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) return;
+  // Don't persist until settings have been loaded from file — prevents
+  // synchronous init code from overwriting the saved file with defaults
+  if (!_settingsLoaded) return;
   if (_settingsSaveTimer) clearTimeout(_settingsSaveTimer);
   _settingsSaveTimer = setTimeout(_persistSettings, 300);
 }
@@ -516,9 +519,28 @@ function _persistSettings() {
   });
 }
 
-// Fire settings load at startup — async but resolves before user interaction
-loadAllSettings().then(function() {
+function _reapplySettingsAfterLoad() {
+  // Theme
+  var savedTheme = echoGet(THEME_STORAGE_KEY);
+  if (savedTheme && savedTheme !== document.body.dataset.theme) {
+    debugLog("[settings] reapplying theme: " + savedTheme);
+    applyTheme(savedTheme);
+  }
+  // UI opacity
+  var savedOpacity = echoGet(UI_OPACITY_KEY);
+  if (savedOpacity) applyUiOpacity(parseInt(savedOpacity, 10));
+  // Name + password in lobby
+  var savedName = echoGet(REMEMBER_NAME_KEY);
+  if (savedName && nameInput) nameInput.value = savedName;
+  var savedPass = echoGet(REMEMBER_PASS_KEY);
+  if (savedPass && passwordInput) passwordInput.value = savedPass;
+}
+
+// Fire settings load at startup — async, re-applies settings when loaded
+var _settingsReadyPromise = loadAllSettings().then(function() {
   debugLog("[settings] ready (" + Object.keys(_settingsCache).length + " keys)");
+  // Re-apply settings that were initialized with defaults before the file loaded
+  _reapplySettingsAfterLoad();
 }).catch(function(e) {
   debugLog("[settings] loadAllSettings error: " + e);
 });

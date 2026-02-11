@@ -131,15 +131,26 @@ fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: String) -> Result<(), String> {
     let path = settings_path(&app)?;
-    std::fs::write(&path, &settings).map_err(|e| e.to_string())
+    eprintln!("[settings] saving to {:?} ({} bytes)", path, settings.len());
+    std::fs::write(&path, &settings).map_err(|e| {
+        eprintln!("[settings] write error: {}", e);
+        e.to_string()
+    })
 }
 
 #[tauri::command]
 fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
     let path = settings_path(&app)?;
+    eprintln!("[settings] loading from {:?}", path);
     match std::fs::read_to_string(&path) {
-        Ok(s) => Ok(s),
-        Err(_) => Ok("{}".to_string()),
+        Ok(s) => {
+            eprintln!("[settings] loaded {} bytes", s.len());
+            Ok(s)
+        }
+        Err(e) => {
+            eprintln!("[settings] file not found ({}), returning empty", e);
+            Ok("{}".to_string())
+        }
     }
 }
 
