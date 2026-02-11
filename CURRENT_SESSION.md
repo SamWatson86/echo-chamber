@@ -1,7 +1,7 @@
 # Echo Chamber - Current Session Notes
 
 **Last Updated**: 2026-02-10
-**Working On**: Native per-process audio capture + Tauri IPC fix
+**Working On**: Settings persistence + upgrade lessons documented
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
 ## IMPORTANT CONTEXT
@@ -78,27 +78,82 @@
 - **Impact**: Future updates will auto-clear stale cache, no manual refresh needed
 - **Files**: `core/client/src/main.rs`
 
+### 46. WASAPI Audio Format Conversion + Diagnostics
+- **Problem**: Remote participants (DMountain) can't hear audio from window shares. Pipeline: getDisplayMedia (0 audio tracks for window shares) -> autoDetectNativeAudio -> WASAPI capture -> base64 events -> AudioWorklet -> LiveKit publish. Audio was being sent as raw bytes but JS always interprets as Float32Array, so non-float32 formats (int16, int24) produce garbage.
+- **Fix 1 (Rust)**: Added format detection in `audio_capture.rs` — checks `wFormatTag` for `WAVE_FORMAT_IEEE_FLOAT` (3) or `WAVE_FORMAT_EXTENSIBLE` (0xFFFE) SubFormat GUID. If NOT float32, converts:
+  - Int16 PCM: divide by 32768.0
+  - Int24 PCM: sign-extend + divide by 8388608.0
+  - Float32: pass through (existing behavior)
+- **Fix 2 (Rust)**: Added `formatTag` and `isFloat` to the `audio-capture-format` event payload. Added first-frame byte logging for diagnostics.
+- **Fix 3 (JS)**: Added `await`/`.catch()` on `autoDetectNativeAudio()` call — was fire-and-forget, errors were silently lost.
+- **Fix 4 (JS)**: Added Strategy 4 exe_name matching in `autoDetectNativeAudio` — matches window's exe name against track label. Edge track labels for window shares often contain the process name.
+- **Fix 5 (JS)**: Added green "Native Audio Active" indicator (fixed bottom-right) when WASAPI capture is running. Hidden when capture stops.
+- **Fix 6 (JS)**: Added "FIRST NON-SILENT chunk" log message — confirms when real audio data starts flowing through the pipeline.
+- **Files**: `core/client/src/audio_capture.rs`, `core/viewer/app.js`
+- **Build**: `cargo check` passes clean.
+
+### 47. WASAPI Process Loopback Fix — NOW WORKING
+- **Problem**: WASAPI per-process audio capture silently failed. `ActivateAudioInterfaceAsync` succeeded but capture loop errored with `E_NOTIMPL (0x80004001)`.
+- **Root cause 1**: `GetMixFormat()` returns `E_NOTIMPL` on process loopback IAudioClient — unlike regular audio clients, the process loopback client doesn't support this call.
+- **Root cause 2**: Missing `AUDCLNT_STREAMFLAGS_LOOPBACK` flag in `Initialize()` — only had `EVENTCALLBACK`, but loopback mode requires both flags.
+- **Fix**: In `core/client/src/audio_capture.rs`:
+  1. Wrapped `GetMixFormat()` in match — if E_NOTIMPL, falls back to default WAVEFORMATEX (IEEE float32, 48000 Hz, stereo, 8 bytes block align)
+  2. Added `AUDCLNT_STREAMFLAGS_LOOPBACK` to `Initialize()` flags in both success and fallback paths
+- **Result**: WASAPI per-process audio capture is NOW WORKING. Audio flows through the full pipeline.
+- **Files**: `core/client/src/audio_capture.rs`
+
+### 48. Ultrawide Screen Share Grid Layout Fix
+- **Problem**: Screen share video spanned full width on ultrawide monitors, pushing other participants off-screen
+- **Fix**: Removed the full-width spanning CSS rule for screen share tiles in the grid layout
+- **Files**: `core/viewer/style.css`
+
+### 49. Persistent Settings (Origin-Independent Storage)
+- **Problem**: Switching from remote (`WebviewUrl::External`) to local (`WebviewUrl::App`) loading changed the WebView2 origin from `https://127.0.0.1:9443` to `tauri://localhost`. All localStorage settings vanished — theme, soundboard favorites, device selections, noise cancel, UI opacity.
+- **Root cause**: localStorage is origin-scoped. Data stored under the old origin is physically on disk but invisible to the new origin.
+- **Fix (Rust)**: Added `save_settings`/`load_settings` IPC commands in `core/client/src/main.rs` that read/write `settings.json` in `%APPDATA%/com.echochamber.app/`
+- **Fix (JS)**: Added `echoGet(key)`/`echoSet(key, value)` wrappers in `core/viewer/app.js`:
+  - In-memory `_settingsCache` (synchronous reads, same API as localStorage)
+  - Debounced file writes (300ms) via Tauri IPC for native client
+  - localStorage fallback for browser viewer
+  - One-time migration: copies known keys from localStorage to file on first native run
+- **Replaced**: ALL ~25 `localStorage.getItem`/`localStorage.setItem` and 4 `safeStorageGet`/`safeStorageSet` calls replaced with `echoGet`/`echoSet`
+- **Startup**: `await loadAllSettings()` called before any UI initialization
+- **Files**: `core/client/src/main.rs`, `core/viewer/app.js`
+
+### 50. Ultra Instinct GIF Background Fix
+- **Problem**: Ultra Instinct theme's animated GIF background disappeared after switching to local loading
+- **Root cause**: CSS had `url('/viewer/ultrainstinct.gif')` — absolute path that doesn't exist in Tauri local loading
+- **Fix**: Changed to relative `url('ultrainstinct.gif')` in `core/viewer/style.css`
+
+### 51. Lessons Learned Documentation
+- Created `memory/upgrade-lessons.md` with 7 detailed lessons from WASAPI migration and upgrade distribution
+- Updated `memory/MEMORY.md` with 7 new Key Lesson bullets linking to the topic file
+- Topics: localStorage origin scoping, CSS asset URLs, adaptive bitrate, LiveKit config fields, Windows paths with spaces, NSIS settings survival, WebView2 cache persistence
+
 ### What Needs Testing
-1. **Jeff/external friends**: Re-download v0.2.0 or wait for auto-update, verify mic/camera publishing works
-2. **Main PC**: Verify everything still works locally (LAN)
-3. **Port forwarding check**: Ports 9443 TCP, 7881 TCP, 3478 UDP, 40000-40099 UDP must be forwarded on Eero
+1. **Settings persistence**: Change theme, close client, reopen → theme should persist
+2. **Soundboard favorites**: Verify favorites/order persist across restarts
+3. **Noise cancel toggle**: Re-enable noise cancellation in settings → verify it persists
+4. **External user audio**: Confirm friends over WAN hear per-process audio from window shares
+5. **Ultrawide grid**: Verify screen share tiles no longer span full width
 
 ## Current Status
 
-**All services rebuilt and running** (control plane, SFU, client).
+**All changes are UNCOMMITTED.** Massive amount of work needs a git commit.
 
-**v0.2.0 release on GitHub** — friends need to re-run installer or wait for auto-update.
+**Rust client needs rebuild** — `cargo build --workspace` in `core/` then restart control plane + client.
 
-**Key fixes this session**: External users couldn't publish media because (1) LiveKit advertised LAN IP and (2) TURN URL was broken in Tauri client. Both fixed. Also added WebView2 cache clearing on upgrade.
+**Key fixes this session**: WASAPI process loopback, persistent settings (echoGet/echoSet), ultrawide grid fix, Ultra Instinct GIF fix, upgrade lessons documented.
 
 ## Previous Session Work (2026-02-09)
 See git log and previous session notes for: screen share codec fixes, noise cancellation, custom chime sounds, soundboard, avatar system, device selection, screen grid fixes, and more.
 
 ## Next Steps
-1. **Test screen share audio end-to-end** — Verify auto-detect works with VLC/games
+1. **Rebuild and test** — `cargo build --workspace` in `core/`, restart control plane + client, verify settings persist
 2. **Git commit all changes** — massive amount of uncommitted work
-3. **Custom chime sounds plan** — See plan file (joyful-conjuring-taco.md)
-4. **Split app.js into modules** — currently ~6500+ lines
+3. **Reconfigure noise cancellation** — Re-enable in settings, will now persist via echoGet/echoSet
+4. **Test external user audio** — Confirm friends over WAN hear per-process window audio
+5. **Split app.js into modules** — currently ~6800+ lines
 
 ## Network Setup
 - **ATT BGW320-500**: IP passthrough / bridge mode
@@ -130,4 +185,6 @@ See git log and previous session notes for: screen share codec fixes, noise canc
 2. Check git log for any commits after this document was last updated
 3. The Tauri client now loads viewer files locally — `window.__TAURI__` IPC works
 4. Native audio capture auto-detects shared window — no manual selection needed
-5. Next priority: test screen share audio, git commit
+5. WASAPI per-process audio capture is NOW WORKING (LOOPBACK flag + GetMixFormat fallback fixed)
+6. Settings now persist via `echoGet`/`echoSet` → `settings.json` in `%APPDATA%` (survives origin changes + upgrades)
+7. Next priority: rebuild, test settings persistence, git commit

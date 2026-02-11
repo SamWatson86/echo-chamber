@@ -229,7 +229,7 @@ function stopNoiseGate() {
 
 function updateNoiseGateLevel(level) {
   ncSuppressionLevel = level;
-  localStorage.setItem("echo-nc-level", String(level));
+  echoSet("echo-nc-level", String(level));
   debugLog("[noise-cancel] Suppression level changed to " + ["Light", "Medium", "Strong"][level]);
   if (noiseCancelEnabled && ncGateNode) {
     if (level === 0) { stopNoiseGate(); ncGateNode.gain.value = 1.0; }
@@ -305,8 +305,8 @@ let room = null;
 let micEnabled = false;
 let camEnabled = false;
 let screenEnabled = false;
-let noiseCancelEnabled = localStorage.getItem("echo-noise-cancel") === "true";
-let ncSuppressionLevel = parseInt(localStorage.getItem("echo-nc-level") || "1", 10); // 0=light, 1=medium, 2=strong
+let noiseCancelEnabled = echoGet("echo-noise-cancel") === "true";
+let ncSuppressionLevel = parseInt(echoGet("echo-nc-level") || "1", 10); // 0=light, 1=medium, 2=strong
 let rnnoiseNode = null;
 let rnnoiseCtx = null;
 let rnnoiseOriginalTrack = null;
@@ -432,12 +432,103 @@ function safeStorageSet(key, value) {
   }
 }
 
+// ─── Persistent Settings (origin-independent) ───
+// In native client, settings are stored in a JSON file via Tauri IPC.
+// In browser, falls back to localStorage. echoGet/echoSet are synchronous
+// after the initial async loadAllSettings() call at startup.
+var _settingsCache = {};
+var _settingsLoaded = false;
+var _settingsSaveTimer = null;
+
+var _SETTINGS_KEYS = [
+  "echo-core-theme", "echo-core-ui-opacity",
+  "echo-core-soundboard-volume", "echo-core-soundboard-clip-volume",
+  "echo-soundboard-favorites", "echo-soundboard-order",
+  "echo-noise-cancel", "echo-nc-level",
+  "echo-device-mic", "echo-device-cam", "echo-device-speaker"
+];
+
+async function loadAllSettings() {
+  if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+    try {
+      var json = await tauriInvoke("load_settings");
+      _settingsCache = JSON.parse(json || "{}");
+      debugLog("[settings] loaded " + Object.keys(_settingsCache).length + " settings from file");
+    } catch (e) {
+      debugLog("[settings] load_settings failed: " + e + " — using defaults");
+      _settingsCache = {};
+    }
+  }
+  // If cache is empty (first run or browser mode), try localStorage migration
+  if (Object.keys(_settingsCache).length === 0) {
+    var migrated = 0;
+    for (var i = 0; i < _SETTINGS_KEYS.length; i++) {
+      try {
+        var v = localStorage.getItem(_SETTINGS_KEYS[i]);
+        if (v !== null) { _settingsCache[_SETTINGS_KEYS[i]] = v; migrated++; }
+      } catch (e) {}
+    }
+    // Also migrate dynamic avatar keys
+    try {
+      for (var j = 0; j < localStorage.length; j++) {
+        var k = localStorage.key(j);
+        if (k && k.startsWith("echo-avatar-")) {
+          _settingsCache[k] = localStorage.getItem(k);
+          migrated++;
+        }
+      }
+    } catch (e) {}
+    if (migrated > 0) {
+      debugLog("[settings] migrated " + migrated + " settings from localStorage");
+      _persistSettings();
+    }
+  }
+  _settingsLoaded = true;
+}
+
+function echoGet(key) {
+  // Before _settingsCache is assigned (var hoisting), fall back to localStorage
+  if (_settingsCache) {
+    var v = _settingsCache[key];
+    if (v !== undefined) return v;
+  }
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+
+function echoSet(key, value) {
+  _settingsCache[key] = String(value);
+  // Also write to localStorage as fallback
+  try { localStorage.setItem(key, String(value)); } catch (e) {}
+  // Debounced persist to file (batch rapid writes like volume slider)
+  _debouncedPersist();
+}
+
+function _debouncedPersist() {
+  if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) return;
+  if (_settingsSaveTimer) clearTimeout(_settingsSaveTimer);
+  _settingsSaveTimer = setTimeout(_persistSettings, 300);
+}
+
+function _persistSettings() {
+  if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) return;
+  tauriInvoke("save_settings", { settings: JSON.stringify(_settingsCache) }).catch(function(e) {
+    debugLog("[settings] save failed: " + e);
+  });
+}
+
+// Fire settings load at startup — async but resolves before user interaction
+loadAllSettings().then(function() {
+  debugLog("[settings] ready (" + Object.keys(_settingsCache).length + " keys)");
+}).catch(function(e) {
+  debugLog("[settings] loadAllSettings error: " + e);
+});
+
 if (nameInput) {
-  const savedName = safeStorageGet(REMEMBER_NAME_KEY);
+  const savedName = echoGet(REMEMBER_NAME_KEY);
   if (savedName) nameInput.value = savedName;
 }
 if (passwordInput) {
-  const savedPass = safeStorageGet(REMEMBER_PASS_KEY);
+  const savedPass = echoGet(REMEMBER_PASS_KEY);
   if (savedPass) passwordInput.value = savedPass;
 }
 
@@ -445,10 +536,10 @@ const soundboardSounds = new Map();
 let soundboardSelectedIcon = null;
 let soundboardLoadedRoomId = null;
 let soundboardEditingId = null;
-let soundboardUserVolume = Number(localStorage.getItem("echo-core-soundboard-volume") ?? "100");
+let soundboardUserVolume = Number(echoGet("echo-core-soundboard-volume") ?? "100");
 if (!Number.isFinite(soundboardUserVolume)) soundboardUserVolume = 100;
 soundboardUserVolume = Math.min(100, Math.max(0, soundboardUserVolume));
-let soundboardClipVolume = Number(localStorage.getItem("echo-core-soundboard-clip-volume") ?? "100");
+let soundboardClipVolume = Number(echoGet("echo-core-soundboard-clip-volume") ?? "100");
 if (!Number.isFinite(soundboardClipVolume)) soundboardClipVolume = 100;
 soundboardClipVolume = Math.min(200, Math.max(0, soundboardClipVolume));
 let soundboardContext = null;
@@ -456,10 +547,10 @@ let soundboardMasterGain = null;
 let soundboardCurrentSource = null;
 const soundboardBufferCache = new Map();
 let soundboardFavorites = (() => {
-  try { return JSON.parse(localStorage.getItem("echo-soundboard-favorites")) || []; } catch { return []; }
+  try { return JSON.parse(echoGet("echo-soundboard-favorites")) || []; } catch { return []; }
 })();
 let soundboardCustomOrder = (() => {
-  try { return JSON.parse(localStorage.getItem("echo-soundboard-order")) || []; } catch { return []; }
+  try { return JSON.parse(echoGet("echo-soundboard-order")) || []; } catch { return []; }
 })();
 let soundboardDragId = null;
 const debugPanel = document.getElementById("debug-panel");
@@ -675,7 +766,7 @@ function getScreenSharePublishOptions() {
   return {
     videoCodec: "h264",
     simulcast: false,
-    screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
+    screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
     degradationPreference: "maintain-framerate",
   };
 }
@@ -838,41 +929,24 @@ async function startScreenShareManual() {
       ...getScreenSharePublishOptions(),
     });
 
-    // Lock sender parameters to prevent LiveKit SDK from overriding
+    // Set initial sender parameters — prioritize framerate over resolution.
+    // Do NOT lock bitrate — let congestion control adapt per-viewer.
+    // High bandwidth viewers get full quality, low bandwidth viewers get lower resolution but smooth FPS.
     const sender = _screenShareVideoTrack?.sender;
     if (sender) {
-      const _origSetParams = sender.setParameters.bind(sender);
-      sender.setParameters = async (params) => {
-        params.degradationPreference = "maintain-framerate";
-        if (params.encodings) {
-          for (const enc of params.encodings) {
-            enc.maxFramerate = 60;
-            enc.maxBitrate = 8_000_000;
-            enc.scaleResolutionDownBy = 1.0;
-            enc.priority = "high";
-            enc.networkPriority = "high";
-          }
-        }
-        return _origSetParams(params);
-      };
-
-      // Apply our params now
       const params = sender.getParameters();
       params.degradationPreference = "maintain-framerate";
       if (params.encodings) {
         for (const enc of params.encodings) {
           enc.maxFramerate = 60;
-          enc.maxBitrate = 8_000_000;
-          enc.scaleResolutionDownBy = 1.0;
           enc.priority = "high";
           enc.networkPriority = "high";
         }
       }
-      await _origSetParams(params);
-      // Verify parameters actually took effect
+      await sender.setParameters(params);
       const vp = sender.getParameters();
       const vEnc = vp.encodings?.[0];
-      debugLog("Screen share LOCKED: fps=" + vEnc?.maxFramerate + " bps=" + vEnc?.maxBitrate +
+      debugLog("Screen share params: fps=" + vEnc?.maxFramerate + " bps=" + vEnc?.maxBitrate +
         " scale=" + vEnc?.scaleResolutionDownBy + " degPref=" + vp.degradationPreference);
 
       // Diagnostic: dump actual SDP bandwidth after 3s to see if munging worked
@@ -980,7 +1054,9 @@ async function startScreenShareManual() {
   // In native client, auto-detect and capture per-process audio via WASAPI
   if (isNativeClient && hasTauriIPC()) {
     var shareTrackLabel = videoMst ? videoMst.label : "";
-    autoDetectNativeAudio(shareTrackLabel);
+    autoDetectNativeAudio(shareTrackLabel).catch(function(err) {
+      debugLog("[native-audio] autoDetect error: " + err);
+    });
   }
 }
 
@@ -1108,6 +1184,23 @@ async function autoDetectNativeAudio(trackLabel) {
       }
     }
 
+    // Strategy 4: Match by exe name from track label
+    // Chromium/Edge track labels for window shares often contain the process/exe name
+    if (!matched && trackLower.length > 2) {
+      for (var i = 0; i < windows.length; i++) {
+        var w = windows[i];
+        if (!w.exe_name) continue;
+        var exeLower = w.exe_name.toLowerCase().replace(/\.exe$/, "");
+        if (exeLower.length < 3) continue;
+        if (w.title.toLowerCase().indexOf("echo chamber") !== -1) continue;
+        if (trackLower.indexOf(exeLower) !== -1 || exeLower.indexOf(trackLower) !== -1) {
+          matched = w;
+          debugLog("[native-audio] matched by exe name '" + w.exe_name + "': '" + w.title + "' pid=" + w.pid);
+          break;
+        }
+      }
+    }
+
     if (matched) {
       debugLog("[native-audio] auto-starting capture for '" + matched.title + "' (pid " + matched.pid + ")");
       try {
@@ -1174,6 +1267,7 @@ async function startNativeAudioCapture(pid) {
   // Debug: track data flow
   var _dataChunkCount = 0;
   var _dataSampleCount = 0;
+  var _firstNonSilentLogged = false;
 
   // Listen for audio data from Rust via Tauri events
   var captureFormat = null;
@@ -1194,14 +1288,23 @@ async function startNativeAudioCapture(pid) {
       _dataChunkCount++;
       _dataSampleCount += floats.length;
 
+      // Check peak level for this chunk
+      var maxVal = 0;
+      for (var j = 0; j < Math.min(floats.length, 200); j++) {
+        var abs = Math.abs(floats[j]);
+        if (abs > maxVal) maxVal = abs;
+      }
+
+      // Log first non-silent chunk (confirms real audio is flowing)
+      if (!_firstNonSilentLogged && maxVal > 0.001) {
+        _firstNonSilentLogged = true;
+        debugLog("[native-audio] FIRST NON-SILENT chunk at #" + _dataChunkCount +
+          " peak=" + maxVal.toFixed(4) + " samples=" + floats.length +
+          " — audio data is flowing!");
+      }
+
       // Log first few chunks and then every 50th for diagnostics
       if (_dataChunkCount <= 3 || _dataChunkCount % 50 === 0) {
-        // Check if audio has non-zero samples
-        var maxVal = 0;
-        for (var j = 0; j < Math.min(floats.length, 200); j++) {
-          var abs = Math.abs(floats[j]);
-          if (abs > maxVal) maxVal = abs;
-        }
         debugLog("[native-audio] chunk #" + _dataChunkCount + " samples=" + floats.length +
           " totalSamples=" + _dataSampleCount + " peak=" + maxVal.toFixed(4));
       }
@@ -1253,12 +1356,27 @@ async function startNativeAudioCapture(pid) {
   }
 
   _nativeAudioActive = true;
+
+  // Show native audio indicator
+  var indicator = document.getElementById("native-audio-indicator");
+  if (!indicator) {
+    indicator = document.createElement("div");
+    indicator.id = "native-audio-indicator";
+    indicator.style.cssText = "position:fixed;bottom:8px;right:8px;background:rgba(0,200,0,0.8);color:#fff;padding:4px 10px;border-radius:12px;font-size:12px;z-index:99999;pointer-events:none;";
+    document.body.appendChild(indicator);
+  }
+  indicator.textContent = "Native Audio Active";
+  indicator.style.display = "";
 }
 
 async function stopNativeAudioCapture() {
   if (!_nativeAudioActive) return;
   _nativeAudioActive = false;
   debugLog("[native-audio] stopping capture");
+
+  // Hide native audio indicator
+  var indicator = document.getElementById("native-audio-indicator");
+  if (indicator) indicator.style.display = "none";
 
   // Tell Rust to stop
   try {
@@ -2995,7 +3113,7 @@ async function uploadAvatar(file) {
     if (data?.ok && data?.url) {
       const avatarUrl = apiUrl(data.url) + "?t=" + Date.now(); // cache bust
       avatarUrls.set(identityBase, avatarUrl);
-      localStorage.setItem("echo-avatar-" + identityBase, avatarUrl);
+      echoSet("echo-avatar-" + identityBase, avatarUrl);
 
       // Update own card
       updateAvatarDisplay(room.localParticipant.identity);
@@ -3746,13 +3864,13 @@ async function refreshDevices() {
   setSelectOptions(speakerSelect, speakers, "Default output");
   // Restore saved device selections from localStorage if not already set
   if (!selectedMicId) {
-    try { selectedMicId = localStorage.getItem("echo-device-mic") || ""; } catch (_) {}
+    selectedMicId = echoGet("echo-device-mic") || "";
   }
   if (!selectedCamId) {
-    try { selectedCamId = localStorage.getItem("echo-device-cam") || ""; } catch (_) {}
+    selectedCamId = echoGet("echo-device-cam") || "";
   }
   if (!selectedSpeakerId) {
-    try { selectedSpeakerId = localStorage.getItem("echo-device-speaker") || ""; } catch (_) {}
+    selectedSpeakerId = echoGet("echo-device-speaker") || "";
   }
   // Apply selections — only if the saved device still exists in the dropdown
   if (selectedMicId) {
@@ -3802,7 +3920,7 @@ function resumeAnalyser(analyserObj) {
 
 async function switchMic(deviceId) {
   selectedMicId = deviceId || "";
-  try { localStorage.setItem("echo-device-mic", selectedMicId); } catch (_) {}
+  echoSet("echo-device-mic", selectedMicId);
   if (!room || !micEnabled) return;
   // Tear down existing noise cancellation before switching
   disableNoiseCancellation();
@@ -3817,14 +3935,14 @@ async function switchMic(deviceId) {
 
 async function switchCam(deviceId) {
   selectedCamId = deviceId || "";
-  try { localStorage.setItem("echo-device-cam", selectedCamId); } catch (_) {}
+  echoSet("echo-device-cam", selectedCamId);
   if (!room || !camEnabled) return;
   await room.localParticipant.setCameraEnabled(true, { deviceId: selectedCamId || undefined });
 }
 
 async function switchSpeaker(deviceId) {
   selectedSpeakerId = deviceId || "";
-  try { localStorage.setItem("echo-device-speaker", selectedSpeakerId); } catch (_) {}
+  echoSet("echo-device-speaker", selectedSpeakerId);
   await applySpeakerToMedia();
 }
 
@@ -4016,13 +4134,13 @@ function toggleSoundboardFavorite(soundId) {
     soundboardFavorites.push(soundId);
     debugLog("[soundboard] Favorited: " + soundId);
   }
-  localStorage.setItem("echo-soundboard-favorites", JSON.stringify(soundboardFavorites));
+  echoSet("echo-soundboard-favorites", JSON.stringify(soundboardFavorites));
   renderAllSoundboardViews();
 }
 
 function saveSoundboardOrder(orderedIds) {
   soundboardCustomOrder = orderedIds;
-  localStorage.setItem("echo-soundboard-order", JSON.stringify(soundboardCustomOrder));
+  echoSet("echo-soundboard-order", JSON.stringify(soundboardCustomOrder));
 }
 
 function sortSoundboardSounds(sounds) {
@@ -4646,8 +4764,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         result.push(line);
         // Add our bandwidth right after c= line in video section
         if (inVideo && line.startsWith("c=") && !addedBW) {
-          result.push("b=AS:8000");
-          result.push("b=TIAS:8000000");
+          result.push("b=AS:10000");
+          result.push("b=TIAS:10000000");
           addedBW = true;
         }
       }
@@ -4723,10 +4841,10 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
             debugLog("[TRANSCEIVER] Overriding maxFramerate " + enc.maxFramerate + " -> 60");
             enc.maxFramerate = 60;
           }
-          if (typeof enc.maxBitrate === "number" && enc.maxBitrate < 8000000) {
-            enc.maxBitrate = 8000000;
+          // Don't override bitrate — let it adapt. Only ensure high initial ceiling.
+          if (typeof enc.maxBitrate === "number" && enc.maxBitrate < 3000000) {
+            enc.maxBitrate = 10000000;
           }
-          enc.scaleResolutionDownBy = 1.0;
         }
       }
       return _origAddTransceiver.apply(this, [trackOrKind, init, ...args]);
@@ -4753,7 +4871,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       videoSimulcastLayers: [
         { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
       ],
-      screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 60 },
+      screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
       dtx: true,
       degradationPreference: "maintain-resolution",
     },
@@ -5121,7 +5239,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   // Load own avatar from localStorage and broadcast to room
   {
     const identityBase = getIdentityBase(identity);
-    const savedAvatar = localStorage.getItem("echo-avatar-" + identityBase);
+    const savedAvatar = echoGet("echo-avatar-" + identityBase);
     if (savedAvatar) {
       // Resolve relative URLs (may be stored from a previous browser session)
       const resolvedAvatar = savedAvatar.startsWith("/") ? apiUrl(savedAvatar) : savedAvatar;
@@ -5247,8 +5365,8 @@ async function connect() {
   const controlUrl = controlUrlInput.value.trim();
   const sfuUrl = sfuUrlInput.value.trim();
   const name = nameInput.value.trim() || "Viewer";
-  if (nameInput) safeStorageSet(REMEMBER_NAME_KEY, name);
-  if (passwordInput) safeStorageSet(REMEMBER_PASS_KEY, passwordInput.value);
+  if (nameInput) echoSet(REMEMBER_NAME_KEY, name);
+  if (passwordInput) echoSet(REMEMBER_PASS_KEY, passwordInput.value);
   const roomName = currentRoomName || "main";
   const identity = buildIdentity(name);
   if (identityInput) {
@@ -6062,7 +6180,7 @@ if (toggleSoundboardVolumeButton && soundboardVolumePanel) {
 function handleSoundboardVolumeChange(inputEl) {
   const value = Number(inputEl.value);
   soundboardUserVolume = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 100;
-  localStorage.setItem("echo-core-soundboard-volume", String(soundboardUserVolume));
+  echoSet("echo-core-soundboard-volume", String(soundboardUserVolume));
   updateSoundboardVolumeUi();
 }
 
@@ -6225,7 +6343,7 @@ if (soundClipVolumeInput) {
     updateSoundClipVolumeUi(normalized);
     if (!soundboardEditingId) {
       soundboardClipVolume = normalized;
-      localStorage.setItem("echo-core-soundboard-clip-volume", String(soundboardClipVolume));
+      echoSet("echo-core-soundboard-clip-volume", String(soundboardClipVolume));
     }
     renderSoundboard();
   });
@@ -6308,7 +6426,7 @@ function buildChimeSettingsUI() {
     debugLog("[noise-cancel] Button clicked, was: " + noiseCancelEnabled + ", micEnabled: " + micEnabled + ", room: " + !!room);
     noiseCancelEnabled = !noiseCancelEnabled;
     debugLog("[noise-cancel] Now: " + noiseCancelEnabled);
-    localStorage.setItem("echo-noise-cancel", noiseCancelEnabled ? "true" : "false");
+    echoSet("echo-noise-cancel", noiseCancelEnabled ? "true" : "false");
     ncBtn.textContent = noiseCancelEnabled ? "ON" : "OFF";
     ncBtn.classList.toggle("is-on", noiseCancelEnabled);
 
@@ -6320,7 +6438,7 @@ function buildChimeSettingsUI() {
       } catch (err) {
         debugLog("[noise-cancel] RNNoise enable failed: " + (err.message || err));
         noiseCancelEnabled = false;
-        localStorage.setItem("echo-noise-cancel", "false");
+        echoSet("echo-noise-cancel", "false");
         ncBtn.textContent = "OFF";
         ncBtn.classList.remove("is-on");
         setStatus("Noise cancellation failed: " + (err.message || err), true);
@@ -6736,7 +6854,7 @@ function stopUltraInstinctParticles() {
 
 function applyTheme(name) {
   document.body.dataset.theme = name;
-  localStorage.setItem(THEME_STORAGE_KEY, name);
+  echoSet(THEME_STORAGE_KEY, name);
   // Toggle matrix rain
   if (name === "matrix") {
     startMatrixRain();
@@ -6758,7 +6876,7 @@ function applyTheme(name) {
 }
 
 function initTheme() {
-  const saved = localStorage.getItem(THEME_STORAGE_KEY) || "frost";
+  const saved = echoGet(THEME_STORAGE_KEY) || "frost";
   applyTheme(saved);
 }
 
@@ -6792,7 +6910,7 @@ initTheme();
 function applyUiOpacity(val) {
   const clamped = Math.max(20, Math.min(100, val));
   document.documentElement.style.setProperty("--ui-bg-alpha", clamped / 100);
-  localStorage.setItem(UI_OPACITY_KEY, clamped);
+  echoSet(UI_OPACITY_KEY, clamped);
   if (uiOpacityValue) uiOpacityValue.textContent = `${clamped}%`;
   if (uiOpacitySlider && parseInt(uiOpacitySlider.value, 10) !== clamped) {
     uiOpacitySlider.value = clamped;
@@ -6800,7 +6918,7 @@ function applyUiOpacity(val) {
 }
 
 // Init from saved value
-applyUiOpacity(parseInt(localStorage.getItem(UI_OPACITY_KEY) || "100", 10));
+applyUiOpacity(parseInt(echoGet(UI_OPACITY_KEY) || "100", 10));
 
 if (uiOpacitySlider) {
   uiOpacitySlider.addEventListener("input", (e) => {

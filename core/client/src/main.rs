@@ -122,6 +122,27 @@ fn stop_audio_capture() -> Result<(), String> {
     Ok(())
 }
 
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let _ = std::fs::create_dir_all(&dir);
+    Ok(dir.join("settings.json"))
+}
+
+#[tauri::command]
+fn save_settings(app: tauri::AppHandle, settings: String) -> Result<(), String> {
+    let path = settings_path(&app)?;
+    std::fs::write(&path, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
+    let path = settings_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(s),
+        Err(_) => Ok("{}".to_string()),
+    }
+}
+
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     // Validate URL scheme to prevent command injection
@@ -160,6 +181,8 @@ fn main() {
             toggle_fullscreen,
             set_always_on_top,
             open_external_url,
+            save_settings,
+            load_settings,
             list_capturable_windows,
             start_audio_capture,
             stop_audio_capture,

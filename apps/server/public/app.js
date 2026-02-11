@@ -5125,14 +5125,17 @@ function connectWebSocket() {
 }
 
 async function joinRoom(displayName, roomName) {
-  state.displayName = displayName;
-  state.roomId = roomName;
-  localStorage.setItem("echo-display-name", displayName);
-  localStorage.setItem("echo-room-name", roomName);
+  const nextDisplayName = displayName;
+  const nextRoomName = roomName;
   setMessage("");
   setJoinFormEnabled(false);
-  renderRoomList();
   await ensureWebSocketClosed(800);
+  cleanupRoom();
+  state.displayName = nextDisplayName;
+  state.roomId = nextRoomName;
+  localStorage.setItem("echo-display-name", nextDisplayName);
+  localStorage.setItem("echo-room-name", nextRoomName);
+  renderRoomList();
   connectWebSocket();
 }
 

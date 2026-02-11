@@ -438,6 +438,7 @@ button.danger {
   margin-left: 0;
   margin-right: auto;
   justify-self: start;
+  align-self: start;
 }
 
 .local h3 {

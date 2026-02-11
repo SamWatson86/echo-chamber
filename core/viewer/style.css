@@ -576,9 +576,10 @@ video {
   flex-shrink: 0;
 }
 
-/* Ultrawide screen shares (>2:1 ratio) — span full width for maximum horizontal space */
+/* Ultrawide screen shares (>2:1 ratio) — no special spanning; grid distributes space equally.
+   object-fit: contain on the video handles letterboxing naturally. */
 .screens-grid .tile.ultrawide {
-  grid-column: 1 / -1;
+  /* Let the grid auto-fit handle sizing — don't force full-width span */
 }
 
 .screens-grid.is-focused {
@@ -3257,7 +3258,7 @@ body[data-theme="ultra-instinct"]::before {
   inset: 0;
   pointer-events: none;
   z-index: -1;
-  background: url('/viewer/ultrainstinct.gif') center center / cover no-repeat;
+  background: url('ultrainstinct.gif') center center / cover no-repeat;
   opacity: 0.45;
 }
 

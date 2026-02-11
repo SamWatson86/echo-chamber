@@ -265,7 +265,9 @@ fn capture_loop(
     running: &AtomicBool,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     unsafe {
+        eprintln!("[audio-capture] capture_loop starting for PID {}", pid);
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+        eprintln!("[audio-capture] COM initialized");
 
         // Build activation params
         let params = AudioClientActivationParams {
@@ -302,63 +304,143 @@ fn capture_loop(
 
         // Activate audio interface for process loopback
         // VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback"
+        eprintln!("[audio-capture] calling ActivateAudioInterfaceAsync for PID {} (params_size={})", pid, params_size);
         let _operation = ActivateAudioInterfaceAsync(
             w!("VAD\\Process_Loopback"),
             &IAudioClient::IID,
             Some(propvariant),
             &handler,
         )?;
+        eprintln!("[audio-capture] ActivateAudioInterfaceAsync call succeeded, waiting for completion...");
 
         // Wait for activation (5 second timeout)
         let client = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| format!("activation timeout: {}", e))?
-            .map_err(|e| format!("activation failed: {}", e))?;
+            .map_err(|e| {
+                eprintln!("[audio-capture] activation FAILED: {}", e);
+                format!("activation failed: {}", e)
+            })?;
+        eprintln!("[audio-capture] activation completed — got IAudioClient");
 
-        // Get mix format
-        let fmt_ptr = client.GetMixFormat()?;
-        let fmt = &*fmt_ptr;
-        let sample_rate = fmt.nSamplesPerSec;
-        let channels = fmt.nChannels as u32;
-        let bits = fmt.wBitsPerSample;
-        let block_align = fmt.nBlockAlign as usize;
+        // Get mix format — may fail with E_NOTIMPL on process loopback
+        let (sample_rate, channels, bits, block_align, is_float, fmt_ptr_owned);
+        match client.GetMixFormat() {
+            Ok(ptr) => {
+                let fmt = &*ptr;
+                sample_rate = fmt.nSamplesPerSec;
+                channels = fmt.nChannels as u32;
+                bits = fmt.wBitsPerSample;
+                block_align = fmt.nBlockAlign as usize;
+                let format_tag = fmt.wFormatTag;
 
-        eprintln!(
-            "[audio-capture] format: {}Hz {}ch {}bit blockAlign={}",
-            sample_rate, channels, bits, block_align
-        );
+                // Determine if the format is IEEE float32
+                is_float = if format_tag == 3 {
+                    true
+                } else if format_tag == 0xFFFE_u16 {
+                    let ext_ptr = ptr as *const u8;
+                    let sub_format_offset = std::mem::size_of::<WAVEFORMATEX>();
+                    let guid_offset = sub_format_offset + 2 + 4;
+                    let guid_bytes = std::slice::from_raw_parts(ext_ptr.add(guid_offset), 16);
+                    let first_u32 = u32::from_le_bytes([guid_bytes[0], guid_bytes[1], guid_bytes[2], guid_bytes[3]]);
+                    first_u32 == 3
+                } else {
+                    false
+                };
 
-        let _ = app.emit(
-            "audio-capture-format",
-            serde_json::json!({
-                "sampleRate": sample_rate,
-                "channels": channels,
-                "bitsPerSample": bits,
-            }),
-        );
+                eprintln!(
+                    "[audio-capture] format from GetMixFormat: {}Hz {}ch {}bit blockAlign={} formatTag={} isFloat={}",
+                    sample_rate, channels, bits, block_align, format_tag, is_float
+                );
+                let _ = app.emit(
+                    "audio-capture-format",
+                    serde_json::json!({
+                        "sampleRate": sample_rate,
+                        "channels": channels,
+                        "bitsPerSample": bits,
+                        "formatTag": format_tag,
+                        "isFloat": is_float,
+                    }),
+                );
 
-        // Initialize audio client — 20ms buffer, shared mode
-        let buffer_duration: i64 = 200_000; // 20ms in 100ns units
-        client.Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            buffer_duration,
-            0,
-            fmt_ptr,
-            None,
-        )?;
+                // Initialize with the mix format
+                eprintln!("[audio-capture] initializing audio client (shared mode, event-driven, 20ms buffer)");
+                let buffer_duration: i64 = 200_000;
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    buffer_duration,
+                    0,
+                    ptr,
+                    None,
+                )?;
+            }
+            Err(e) => {
+                eprintln!("[audio-capture] GetMixFormat failed: {} -- falling back to default float32 48kHz stereo", e);
+
+                // Build a default WAVEFORMATEX: float32, 48000 Hz, stereo
+                sample_rate = 48000;
+                channels = 2;
+                bits = 32;
+                block_align = channels as usize * bits as usize / 8; // 8 bytes per frame
+                is_float = true;
+
+                let default_fmt = WAVEFORMATEX {
+                    wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
+                    nChannels: channels as u16,
+                    nSamplesPerSec: sample_rate,
+                    nAvgBytesPerSec: sample_rate * block_align as u32,
+                    nBlockAlign: block_align as u16,
+                    wBitsPerSample: bits as u16,
+                    cbSize: 0,
+                };
+                fmt_ptr_owned = Some(default_fmt);
+
+                eprintln!(
+                    "[audio-capture] using default format: {}Hz {}ch {}bit blockAlign={} isFloat={}",
+                    sample_rate, channels, bits, block_align, is_float
+                );
+
+                let _ = app.emit(
+                    "audio-capture-format",
+                    serde_json::json!({
+                        "sampleRate": sample_rate,
+                        "channels": channels,
+                        "bitsPerSample": bits,
+                        "formatTag": 3,
+                        "isFloat": true,
+                    }),
+                );
+
+                // Initialize with default format + LOOPBACK flag
+                eprintln!("[audio-capture] initializing audio client with default format + LOOPBACK flag");
+                let buffer_duration: i64 = 200_000;
+                let fmt_ref = fmt_ptr_owned.as_ref().unwrap() as *const WAVEFORMATEX;
+                client.Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    buffer_duration,
+                    0,
+                    fmt_ref,
+                    None,
+                )?;
+            }
+        }
+        eprintln!("[audio-capture] audio client initialized");
 
         // Event-driven capture
         let event = CreateEventW(None, false, false, None)?;
         client.SetEventHandle(event)?;
 
         let capture: IAudioCaptureClient = client.GetService()?;
+        eprintln!("[audio-capture] got IAudioCaptureClient, starting capture");
 
         client.Start()?;
         eprintln!("[audio-capture] started for PID {}", pid);
         let _ = app.emit("audio-capture-started", pid);
 
         // Read loop
+        let mut frame_count: u64 = 0;
         while running.load(Ordering::SeqCst) {
             let wait = WaitForSingleObject(event, 100);
             if wait == WAIT_TIMEOUT {
@@ -390,7 +472,77 @@ fn capture_loop(
 
                 if !silent && !buf_ptr.is_null() && data_len > 0 {
                     let slice = std::slice::from_raw_parts(buf_ptr, data_len);
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(slice);
+
+                    // Log first few frames for diagnostics
+                    frame_count += 1;
+                    if frame_count <= 5 {
+                        let preview_bytes = std::cmp::min(slice.len(), 32);
+                        eprintln!(
+                            "[audio-capture] frame #{} len={} first_bytes={:?}",
+                            frame_count, data_len, &slice[..preview_bytes]
+                        );
+                    }
+
+                    let send_bytes: Vec<u8> = if is_float {
+                        // Already float32 — send raw bytes as-is
+                        slice.to_vec()
+                    } else if bits == 16 {
+                        // Int16 PCM → Float32 conversion
+                        let sample_count = data_len / 2;
+                        let mut float_buf = Vec::with_capacity(sample_count * 4);
+                        let samples = std::slice::from_raw_parts(
+                            buf_ptr as *const i16,
+                            sample_count,
+                        );
+                        for &s in samples {
+                            let f = s as f32 / 32768.0;
+                            float_buf.extend_from_slice(&f.to_le_bytes());
+                        }
+                        if frame_count <= 3 {
+                            eprintln!(
+                                "[audio-capture] int16->float32: {} samples, first few: {:?}",
+                                sample_count,
+                                &samples[..std::cmp::min(samples.len(), 8)]
+                            );
+                        }
+                        float_buf
+                    } else if bits == 24 {
+                        // Int24 PCM → Float32 conversion
+                        let sample_count = data_len / 3;
+                        let mut float_buf = Vec::with_capacity(sample_count * 4);
+                        for i in 0..sample_count {
+                            let b0 = slice[i * 3] as i32;
+                            let b1 = slice[i * 3 + 1] as i32;
+                            let b2 = slice[i * 3 + 2] as i32;
+                            // Sign-extend 24-bit to 32-bit
+                            let raw = b0 | (b1 << 8) | (b2 << 16);
+                            let signed = if raw & 0x800000 != 0 {
+                                raw | !0xFFFFFF_i32
+                            } else {
+                                raw
+                            };
+                            let f = signed as f32 / 8388608.0;
+                            float_buf.extend_from_slice(&f.to_le_bytes());
+                        }
+                        if frame_count <= 3 {
+                            eprintln!(
+                                "[audio-capture] int24->float32: {} samples converted",
+                                sample_count
+                            );
+                        }
+                        float_buf
+                    } else {
+                        // Unknown format — send raw and log warning
+                        if frame_count <= 3 {
+                            eprintln!(
+                                "[audio-capture] WARNING: unknown format {}bit, sending raw bytes",
+                                bits
+                            );
+                        }
+                        slice.to_vec()
+                    };
+
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&send_bytes);
                     let _ = app.emit("audio-capture-data", b64);
                 }
 
