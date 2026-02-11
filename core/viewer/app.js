@@ -5288,6 +5288,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     if (deviceStatusEl) settingsDevicePanel.appendChild(deviceStatusEl);
   }
   buildChimeSettingsUI();
+  buildVersionSection();
   primeSoundboardAudio();
   initializeEmojiPicker();
   loadChatHistory(roomId);
@@ -6712,11 +6713,14 @@ function buildChimeSettingsUI() {
 }
 
 // ── Version info + Update button at bottom of settings ──
-(function buildVersionSection() {
+// Called after room connect so it appears at the bottom (after device/NC/chime sections)
+function buildVersionSection() {
   if (!settingsDevicePanel) return;
+  if (document.getElementById("version-settings-section")) return; // already built
   var section = document.createElement("div");
-  section.className = "settings-section";
-  section.innerHTML = '<div class="settings-section-title">About</div>';
+  section.id = "version-settings-section";
+  section.className = "chime-settings-section";
+  section.innerHTML = '<div class="chime-settings-title">About</div>';
   var versionRow = document.createElement("div");
   versionRow.style.cssText = "display:flex; align-items:center; gap:10px; margin-top:6px;";
   var versionLabel = document.createElement("span");
@@ -6784,7 +6788,7 @@ function buildChimeSettingsUI() {
     }
     updateBtn.disabled = false;
   });
-})();
+}
 
 renderPublishButtons();
 setPublishButtonsEnabled(false);
