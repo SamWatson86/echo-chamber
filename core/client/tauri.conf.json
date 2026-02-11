@@ -7,6 +7,7 @@
     "frontendDist": "../viewer"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [],
     "security": {
       "csp": null

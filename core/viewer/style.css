@@ -47,6 +47,21 @@ body {
   box-sizing: border-box;
 }
 
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-badge {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  object-fit: cover !important;
+  border: 2px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
 header h1 {
   margin: 0;
   font-size: 22px;
@@ -56,8 +71,9 @@ header h1 {
 
 header p {
   color: var(--muted);
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   font-size: 13px;
+  font-style: italic;
 }
 
 /* ─── Base Panel ─── */
@@ -158,6 +174,7 @@ select:focus {
   color: var(--accent);
   background: rgba(56, 189, 248, 0.15);
 }
+
 
 /* ─── Icon Buttons ─── */
 .icon-button {
@@ -344,6 +361,11 @@ video, audio {
   width: 100%;
   border-radius: var(--radius-sm);
   background: #020617;
+}
+
+/* Global anti-stretch — overrides any inline styles from LiveKit SDK */
+video {
+  object-fit: contain !important;
 }
 
 /* ─── Room Layout ─── */
@@ -539,17 +561,15 @@ video, audio {
 }
 
 .screens-grid {
-  align-content: stretch;
-  grid-auto-rows: 1fr;
+  align-content: start;
+  grid-auto-rows: auto;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .screens-grid .tile {
   min-height: 0;
   overflow: hidden;
-  display: flex;
-  flex-direction: column;
 }
 
 .screens-grid .tile h3 {
@@ -713,6 +733,145 @@ video, audio {
   width: 100%;
 }
 
+/* Custom Sounds (Settings) */
+.chime-settings-section {
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+/* ─── Noise Cancellation Toggle ─── */
+.nc-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.nc-toggle-label {
+  font-size: 13px;
+  color: rgba(226, 232, 240, 0.9);
+  font-weight: 500;
+  flex: 1;
+}
+
+.nc-toggle-btn {
+  padding: 4px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(100, 116, 139, 0.2);
+  color: rgba(148, 163, 184, 0.7);
+  transition: all 0.2s;
+}
+
+.nc-toggle-btn.is-on {
+  background: var(--accent, #38bdf8);
+  border-color: var(--accent, #38bdf8);
+  color: #fff;
+}
+
+.nc-description {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.5);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.nc-level-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.nc-level-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.nc-level-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(100, 116, 139, 0.15);
+  color: rgba(148, 163, 184, 0.7);
+  transition: all 0.2s;
+}
+
+.nc-level-btn.is-active {
+  background: var(--accent, #38bdf8);
+  border-color: var(--accent, #38bdf8);
+  color: #fff;
+}
+
+.chime-settings-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(148, 163, 184, 0.7);
+  margin-bottom: 8px;
+}
+
+.chime-upload-row {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.chime-label {
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.8);
+  font-weight: 500;
+}
+
+.chime-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.chime-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(30, 41, 59, 0.6);
+  color: rgba(226, 232, 240, 0.9);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.chime-btn:hover {
+  background: rgba(51, 65, 85, 0.8);
+}
+
+.chime-remove {
+  color: rgba(248, 113, 113, 0.9);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+.chime-remove:hover {
+  background: rgba(248, 113, 113, 0.15);
+}
+
+.chime-status {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
 /* ─── Debug Panel ─── */
 .debug-panel {
   position: fixed;
@@ -785,6 +944,7 @@ video, audio {
   padding: 2px;
   overflow-y: auto;
   min-height: 0;
+  align-content: start;
 }
 
 .user-card {
@@ -855,7 +1015,7 @@ video, audio {
 .user-avatar video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: cover !important;
   border-radius: 13px;
 }
 
@@ -1182,9 +1342,7 @@ video, audio {
 .sound-name {
   font-weight: 600;
   font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .sound-edit {
@@ -1508,15 +1666,15 @@ video, audio {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 6px;
-  padding: 4px 2px 4px 0;
+  padding: 4px 0;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.15) transparent;
   min-height: 0;
 }
 
 .sound-icon-btn {
-  width: 44px;
-  height: 44px;
+  width: 100%;
+  aspect-ratio: 1;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--glass);
@@ -1558,23 +1716,62 @@ video, audio {
   background: rgba(56, 189, 248, 0.08);
 }
 
-/* Tooltip for compact icons */
-.sound-icon-btn[title]:hover::after {
-  content: attr(title);
+/* Tooltip for compact icons — rendered via JS into #sound-tooltip */
+#sound-tooltip {
+  position: fixed;
+  background: rgba(15, 23, 42, 0.97);
+  color: rgba(226, 232, 240, 0.95);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  max-width: 200px;
+  white-space: normal;
+  word-break: break-word;
+  text-align: center;
+  pointer-events: none;
+  z-index: 999;
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  display: none;
+}
+#sound-tooltip.visible {
+  display: block;
+}
+
+/* ─── Fullscreen Video ─── */
+.fullscreen-video-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.fullscreen-video-wrapper video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain !important;
+}
+.fullscreen-hint {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: 40px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(15, 23, 42, 0.95);
-  color: var(--text);
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.7);
+  color: rgba(255, 255, 255, 0.9);
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
   pointer-events: none;
-  z-index: 40;
-  border: 1px solid var(--border);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+  transition: opacity 0.6s ease;
+}
+.fullscreen-hint.fade-out {
+  opacity: 0;
 }
 
 /* ─── Responsive ─── */
@@ -3211,4 +3408,57 @@ body[data-theme="ultra-instinct"] .theme-panel {
 body[data-theme="ultra-instinct"] .theme-card.is-active {
   border-color: #c8ced8;
   box-shadow: 0 0 24px rgba(200, 206, 216, 0.25);
+}
+
+/* ---------- Native Audio Picker (Tauri client) ---------- */
+.native-audio-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: rgba(var(--glass-rgb, 20, 22, 30), 0.75);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  margin: 6px auto;
+  max-width: 600px;
+  animation: fadeInUp 0.2s ease;
+}
+
+.native-audio-picker-label {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
+
+.native-audio-select {
+  flex: 1;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 0.82rem;
+  outline: none;
+  cursor: pointer;
+  max-width: 350px;
+}
+
+.native-audio-select:focus {
+  border-color: var(--accent);
+}
+
+.native-audio-status {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+}
+
+.native-audio-status.active {
+  color: var(--accent);
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }

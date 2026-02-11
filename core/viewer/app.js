@@ -58,6 +58,221 @@ const cameraLobbyGrid = document.getElementById("camera-lobby-grid");
 const lobbyToggleMicButton = document.getElementById("lobby-toggle-mic");
 const lobbyToggleCameraButton = document.getElementById("lobby-toggle-camera");
 
+// Floating tooltip for soundboard icons (appended to body so it's never clipped)
+const soundTooltipEl = document.createElement("div");
+soundTooltipEl.id = "sound-tooltip";
+document.body.appendChild(soundTooltipEl);
+function showSoundTooltip(el, text) {
+  const rect = el.getBoundingClientRect();
+  soundTooltipEl.textContent = text;
+  soundTooltipEl.classList.add("visible");
+  soundTooltipEl.style.left = (rect.left + rect.width / 2) + "px";
+  soundTooltipEl.style.top = (rect.top - 8) + "px";
+  soundTooltipEl.style.transform = "translate(-50%, -100%)";
+}
+function hideSoundTooltip() {
+  soundTooltipEl.classList.remove("visible");
+}
+
+// Fullscreen video helper — click video to exit, overlay hint shown on enter
+function enterVideoFullscreen(videoEl) {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+    return;
+  }
+  // Wrap in a container so we can overlay a hint
+  var wrapper = document.createElement("div");
+  wrapper.className = "fullscreen-video-wrapper";
+  var hint = document.createElement("div");
+  hint.className = "fullscreen-hint";
+  hint.textContent = "Click or press ESC to exit";
+  wrapper.appendChild(hint);
+
+  // Move video into wrapper temporarily
+  var parent = videoEl.parentNode;
+  var next = videoEl.nextSibling;
+  wrapper.appendChild(videoEl);
+  document.body.appendChild(wrapper);
+
+  // Fade out hint after 2s
+  setTimeout(function() { hint.classList.add("fade-out"); }, 2000);
+
+  wrapper.requestFullscreen().then(function() {
+    // Click anywhere on wrapper exits fullscreen
+    wrapper.addEventListener("click", function() {
+      if (document.fullscreenElement) document.exitFullscreen();
+    });
+  }).catch(function() {
+    // Fullscreen denied — restore video
+    parent.insertBefore(videoEl, next);
+    wrapper.remove();
+  });
+
+  // When exiting fullscreen, restore video to original location
+  var onFsChange = function() {
+    if (!document.fullscreenElement) {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      if (wrapper.contains(videoEl)) {
+        parent.insertBefore(videoEl, next);
+      }
+      wrapper.remove();
+    }
+  };
+  document.addEventListener("fullscreenchange", onFsChange);
+}
+
+// --- RNNoise Noise Cancellation ---
+// Detects SIMD support for optimal WASM variant
+async function detectSimdSupport() {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11
+    ]));
+  } catch (e) { return false; }
+}
+
+// Noise cancellation applies ONLY to the microphone track — never screen share audio
+async function enableNoiseCancellation() {
+  if (!room || !micEnabled) return;
+  var LK = getLiveKitClient();
+  if (!LK) { debugLog("[noise-cancel] LiveKit SDK not loaded"); return; }
+  var micPub = room.localParticipant.getTrackPublication(LK.Track.Source.Microphone);
+  if (!micPub || !micPub.track) return;
+  if (micPub.source === LK.Track.Source.ScreenShareAudio) return;
+
+  try {
+    var mediaTrack = micPub.track.mediaStreamTrack;
+    if (!mediaTrack) return;
+
+    // Create audio context at mic's sample rate
+    var sampleRate = mediaTrack.getSettings().sampleRate || 48000;
+    rnnoiseCtx = new AudioContext({ sampleRate: sampleRate });
+
+    // Register the RNNoise worklet
+    await rnnoiseCtx.audioWorklet.addModule("/viewer/rnnoise-processor.js");
+
+    // Fetch the WASM binary (SIMD if supported)
+    var simd = await detectSimdSupport();
+    var wasmUrl = simd ? "/viewer/rnnoise_simd.wasm" : "/viewer/rnnoise.wasm";
+    var wasmResp = await fetch(wasmUrl);
+    var wasmBinary = await wasmResp.arrayBuffer();
+
+    // Create source from mic track
+    var source = rnnoiseCtx.createMediaStreamSource(new MediaStream([mediaTrack]));
+
+    // Create the RNNoise worklet node
+    rnnoiseNode = new AudioWorkletNode(rnnoiseCtx, "@sapphi-red/web-noise-suppressor/rnnoise", {
+      processorOptions: { wasmBinary: wasmBinary, maxChannels: 1 }
+    });
+
+    // Wire: source → rnnoise → gate (gain) → destination
+    var dest = rnnoiseCtx.createMediaStreamDestination();
+
+    // Create noise gate: analyser monitors level, gain node mutes when below threshold
+    ncGateNode = rnnoiseCtx.createGain();
+    ncGateNode.gain.value = 1.0;
+    ncAnalyser = rnnoiseCtx.createAnalyser();
+    ncAnalyser.fftSize = 256;
+
+    source.connect(rnnoiseNode);
+    rnnoiseNode.connect(ncAnalyser);
+    rnnoiseNode.connect(ncGateNode);
+    ncGateNode.connect(dest);
+
+    // Start gate monitoring loop (checks audio level every 20ms)
+    startNoiseGate();
+
+    // Save original track and swap in the processed one
+    rnnoiseOriginalTrack = mediaTrack;
+    var processedTrack = dest.stream.getAudioTracks()[0];
+
+    // Replace the track in LiveKit's RTCRtpSender
+    var sender = micPub.track.sender;
+    if (sender) {
+      await sender.replaceTrack(processedTrack);
+    }
+
+    debugLog("[noise-cancel] RNNoise enabled" + (simd ? " (SIMD)" : " (no SIMD)") + ", gate level=" + ncSuppressionLevel);
+  } catch (err) {
+    debugLog("[noise-cancel] Failed to enable: " + (err.message || err));
+    disableNoiseCancellation();
+    throw err;
+  }
+}
+
+// Noise gate thresholds: [light, medium, strong]
+// Light = no gate (RNNoise only), Medium = gentle gate, Strong = aggressive gate
+var NC_GATE_THRESHOLDS = [0, 0.006, 0.012];
+
+function startNoiseGate() {
+  stopNoiseGate();
+  if (ncSuppressionLevel === 0 || !ncAnalyser || !ncGateNode) return; // light = no gate
+  var dataArray = new Float32Array(ncAnalyser.fftSize);
+  ncGateInterval = setInterval(function() {
+    if (!ncAnalyser || !ncGateNode) return;
+    ncAnalyser.getFloatTimeDomainData(dataArray);
+    // Compute RMS level
+    var sum = 0;
+    for (var i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i];
+    var rms = Math.sqrt(sum / dataArray.length);
+    var threshold = NC_GATE_THRESHOLDS[ncSuppressionLevel] || 0.008;
+    // Smooth gate: ramp gain up/down to avoid clicks
+    var target = rms > threshold ? 1.0 : 0.0;
+    ncGateNode.gain.setTargetAtTime(target, ncGateNode.context.currentTime, target > 0.5 ? 0.01 : 0.05);
+  }, 20);
+}
+
+function stopNoiseGate() {
+  if (ncGateInterval) { clearInterval(ncGateInterval); ncGateInterval = null; }
+  if (ncGateNode) ncGateNode.gain.value = 1.0;
+}
+
+function updateNoiseGateLevel(level) {
+  ncSuppressionLevel = level;
+  localStorage.setItem("echo-nc-level", String(level));
+  debugLog("[noise-cancel] Suppression level changed to " + ["Light", "Medium", "Strong"][level]);
+  if (noiseCancelEnabled && ncGateNode) {
+    if (level === 0) { stopNoiseGate(); ncGateNode.gain.value = 1.0; }
+    else startNoiseGate();
+  }
+}
+
+function disableNoiseCancellation() {
+  stopNoiseGate();
+  if (rnnoiseNode) {
+    try { rnnoiseNode.port.postMessage("destroy"); } catch (e) {}
+    rnnoiseNode.disconnect();
+    rnnoiseNode = null;
+  }
+  ncGateNode = null;
+  ncAnalyser = null;
+
+  // Restore original track if we have one
+  if (rnnoiseOriginalTrack && room) {
+    var LK = getLiveKitClient();
+    var micPub = LK ? room.localParticipant.getTrackPublication(LK.Track.Source.Microphone) : null;
+    if (micPub && micPub.track && micPub.track.sender) {
+      micPub.track.sender.replaceTrack(rnnoiseOriginalTrack).catch(function() {});
+    }
+    rnnoiseOriginalTrack = null;
+  }
+
+  if (rnnoiseCtx) {
+    rnnoiseCtx.close().catch(function() {});
+    rnnoiseCtx = null;
+  }
+
+  debugLog("[noise-cancel] RNNoise disabled");
+}
+
+function updateNoiseCancelUI() {
+  var btn = document.getElementById("nc-toggle-btn");
+  if (btn) {
+    btn.textContent = noiseCancelEnabled ? "ON" : "OFF";
+    btn.classList.toggle("is-on", noiseCancelEnabled);
+  }
+}
+
 const openChatButton = document.getElementById("open-chat");
 const closeChatButton = document.getElementById("close-chat");
 const chatPanel = document.getElementById("chat-panel");
@@ -90,6 +305,14 @@ let room = null;
 let micEnabled = false;
 let camEnabled = false;
 let screenEnabled = false;
+let noiseCancelEnabled = localStorage.getItem("echo-noise-cancel") === "true";
+let ncSuppressionLevel = parseInt(localStorage.getItem("echo-nc-level") || "1", 10); // 0=light, 1=medium, 2=strong
+let rnnoiseNode = null;
+let rnnoiseCtx = null;
+let rnnoiseOriginalTrack = null;
+let ncGateNode = null;
+let ncAnalyser = null;
+let ncGateInterval = null;
 const screenTileBySid = new Map();
 const screenTrackMeta = new Map();
 let screenWatchdogTimer = null;
@@ -462,26 +685,66 @@ let _screenShareVideoTrack = null;
 let _screenShareAudioTrack = null;
 let _screenShareStatsInterval = null;
 
+// Native per-process audio capture (Tauri client only)
+var _nativeAudioCtx = null;        // AudioContext for worklet
+var _nativeAudioWorklet = null;     // AudioWorkletNode
+var _nativeAudioDest = null;        // MediaStreamDestination
+var _nativeAudioTrack = null;       // Published LiveKit track
+var _nativeAudioUnlisten = null;    // Tauri event unlisten function
+var _nativeAudioActive = false;
+var _echoServerUrl = ""; // Server URL for API calls (set by Tauri get_control_url on native client)
+
+// Tauri IPC — viewer loaded locally so window.__TAURI__ is available natively
+function tauriInvoke(cmd, args) {
+  if (window.__TAURI__ && window.__TAURI__.core) {
+    return window.__TAURI__.core.invoke(cmd, args);
+  }
+  return Promise.reject(new Error("Tauri IPC not available"));
+}
+function tauriListen(eventName, callback) {
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    return window.__TAURI__.event.listen(eventName, callback);
+  }
+  return Promise.reject(new Error("Tauri event system not available"));
+}
+function hasTauriIPC() {
+  return !!(window.__TAURI__ && window.__TAURI__.core);
+}
+
+// Build absolute URL for API calls. Native client uses the configured server URL
+// since the page is loaded locally (tauri://). Browser uses relative paths.
+function apiUrl(path) {
+  if (window.__ECHO_NATIVE__ && _echoServerUrl) {
+    return _echoServerUrl + path;
+  }
+  return path;
+}
+
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
 
   // Call getDisplayMedia ourselves — no fixed width/height so ultrawides
   // capture at native aspect ratio instead of being forced to 16:9
-  const stream = await navigator.mediaDevices.getDisplayMedia({
+  var isNativeClient = !!window.__ECHO_NATIVE__;
+  var gdmConstraints = {
     video: {
       width: { max: 3840 },
       height: { max: 2160 },
       frameRate: { ideal: 60 },
     },
-    audio: {
-      autoGainControl: false,
-      echoCancellation: false,
-      noiseSuppression: false,
-    },
     surfaceSwitching: "exclude",
     selfBrowserSurface: "exclude",
     preferCurrentTab: false,
-  });
+  };
+  // Always request audio from getDisplayMedia — works as baseline for all clients
+  // Native client will additionally try WASAPI per-process capture for better quality
+  gdmConstraints.audio = {
+    autoGainControl: false,
+    echoCancellation: false,
+    noiseSuppression: false,
+  };
+  gdmConstraints.systemAudio = "include";
+  const stream = await navigator.mediaDevices.getDisplayMedia(gdmConstraints);
 
   // Log the actual capture frame rate
   const videoMst = stream.getVideoTracks()[0];
@@ -505,8 +768,16 @@ async function startScreenShareManual() {
       _offVideo.playsInline = true;
       await _offVideo.play();
 
-      // Use actual video dimensions to preserve aspect ratio (critical for ultrawides)
-      // _offVideo.videoWidth/Height are the TRUE frame dimensions from the capture
+      // Wait for actual video dimensions (first frame decode) — critical for ultrawides
+      // videoWidth/Height may be 0 immediately after play() if frame hasn't decoded yet
+      if (!_offVideo.videoWidth || !_offVideo.videoHeight) {
+        await new Promise((resolve) => {
+          const onResize = () => { _offVideo.removeEventListener("resize", onResize); resolve(); };
+          _offVideo.addEventListener("resize", onResize);
+          // Timeout fallback in case resize never fires
+          setTimeout(resolve, 500);
+        });
+      }
       let cw = _offVideo.videoWidth || settings.width || 1920;
       let ch = _offVideo.videoHeight || settings.height || 1080;
       debugLog("Canvas pipeline: source dimensions " + cw + "x" + ch + " (ratio " + (cw/ch).toFixed(2) + ")");
@@ -689,16 +960,33 @@ async function startScreenShareManual() {
   }
 
   // Publish audio track if available
-  const audioMst = stream.getAudioTracks()[0];
+  const audioTracks = stream.getAudioTracks();
+  debugLog("Screen share audio tracks: " + audioTracks.length);
+  const audioMst = audioTracks[0];
   if (audioMst) {
+    debugLog("Screen share audio track: label=" + audioMst.label + " enabled=" + audioMst.enabled + " muted=" + audioMst.muted);
     _screenShareAudioTrack = new LK.LocalAudioTrack(audioMst, undefined, false);
     await room.localParticipant.publishTrack(_screenShareAudioTrack, {
       source: LK.Track.Source.ScreenShareAudio,
+      dtx: false,        // DTX kills non-voice audio (games, music) — must be off
+      red: false,         // No redundant encoding needed for continuous audio
+      audioBitrate: 128000, // 128kbps for high quality screen audio
     });
+    debugLog("Screen share audio published via LiveKit");
+  } else {
+    debugLog("No screen share audio track available (user may not have checked 'Share audio' or sharing a window)");
+  }
+
+  // In native client, auto-detect and capture per-process audio via WASAPI
+  if (isNativeClient && hasTauriIPC()) {
+    var shareTrackLabel = videoMst ? videoMst.label : "";
+    autoDetectNativeAudio(shareTrackLabel);
   }
 }
 
 async function stopScreenShareManual() {
+  // Stop native per-process audio capture if active
+  await stopNativeAudioCapture();
   // Clean up canvas pipeline
   if (window._canvasFrameLoop) { clearTimeout(window._canvasFrameLoop); window._canvasFrameLoop = null; }
   if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
@@ -725,7 +1013,293 @@ async function stopScreenShareManual() {
   } catch (e) {
     debugLog("stopScreenShareManual error: " + e.message);
   }
+  // Native audio capture stopped in stopNativeAudioCapture() above
 }
+
+// ---------- Native per-process audio capture (Tauri client only) ----------
+
+var _nativeAudioWorkletCode = [
+  "class NativeAudioProcessor extends AudioWorkletProcessor {",
+  "  constructor() {",
+  "    super();",
+  "    this.buf = new Float32Array(96000);", // ~1s at 48kHz stereo
+  "    this.wr = 0; this.rd = 0; this.len = 96000;",
+  "    this.port.onmessage = (e) => {",
+  "      var samples = e.data;",
+  "      for (var i = 0; i < samples.length; i++) {",
+  "        this.buf[this.wr] = samples[i];",
+  "        this.wr = (this.wr + 1) % this.len;",
+  "      }",
+  "    };",
+  "  }",
+  "  process(inputs, outputs) {",
+  "    var out = outputs[0];",
+  "    var ch = out.length;",
+  "    for (var i = 0; i < out[0].length; i++) {",
+  "      for (var c = 0; c < ch; c++) {",
+  "        if (this.rd !== this.wr) {",
+  "          out[c][i] = this.buf[this.rd];",
+  "          this.rd = (this.rd + 1) % this.len;",
+  "        } else { out[c][i] = 0; }",
+  "      }",
+  "    }",
+  "    return true;",
+  "  }",
+  "}",
+  "registerProcessor('native-audio-proc', NativeAudioProcessor);",
+].join("\n");
+
+async function autoDetectNativeAudio(trackLabel) {
+  if (!hasTauriIPC()) {
+    debugLog("[native-audio] No Tauri IPC — skipping auto-detect");
+    return;
+  }
+  try {
+    var windows = await tauriInvoke("list_capturable_windows");
+    debugLog("[native-audio] auto-detect: track label='" + trackLabel + "', " + windows.length + " capturable windows");
+
+    // Try to match the screen share track label against windows
+    var matched = null;
+    var trackLower = (trackLabel || "").toLowerCase();
+
+    // Strategy 1: Match by HWND from track label "window:HWND:monitor"
+    var hwndMatch = trackLabel.match(/^window:(\d+):/);
+    if (hwndMatch) {
+      var targetHwnd = parseInt(hwndMatch[1], 10);
+      debugLog("[native-audio] track label contains HWND: " + targetHwnd);
+      for (var i = 0; i < windows.length; i++) {
+        if (windows[i].hwnd === targetHwnd) {
+          matched = windows[i];
+          debugLog("[native-audio] matched by HWND: '" + matched.title + "' pid=" + matched.pid);
+          break;
+        }
+      }
+    }
+
+    // Strategy 2: Track label contains window title or vice versa
+    if (!matched) {
+      for (var i = 0; i < windows.length; i++) {
+        var w = windows[i];
+        var titleLower = w.title.toLowerCase();
+        if (titleLower.indexOf("echo chamber") !== -1) continue;
+        if (trackLower.indexOf(titleLower) !== -1 || titleLower.indexOf(trackLower) !== -1) {
+          matched = w;
+          debugLog("[native-audio] matched by title: '" + w.title + "' pid=" + w.pid);
+          break;
+        }
+      }
+    }
+
+    // Strategy 3: Partial word match
+    if (!matched && trackLower.length > 3) {
+      for (var i = 0; i < windows.length; i++) {
+        var w = windows[i];
+        var titleLower = w.title.toLowerCase();
+        if (titleLower.indexOf("echo chamber") !== -1) continue;
+        var words = trackLower.split(/[\s\-\_\.\|]+/).filter(function(word) { return word.length >= 3; });
+        for (var j = 0; j < words.length; j++) {
+          if (titleLower.indexOf(words[j]) !== -1) {
+            matched = w;
+            debugLog("[native-audio] matched by word '" + words[j] + "': '" + w.title + "' pid=" + w.pid);
+            break;
+          }
+        }
+        if (matched) break;
+      }
+    }
+
+    if (matched) {
+      debugLog("[native-audio] auto-starting capture for '" + matched.title + "' (pid " + matched.pid + ")");
+      try {
+        await startNativeAudioCapture(matched.pid);
+        debugLog("[native-audio] auto-capture started successfully");
+        // WASAPI per-process audio is now active — remove the system-wide audio
+        // from getDisplayMedia to prevent echo (it captures ALL system audio including voices)
+        if (_screenShareAudioTrack) {
+          debugLog("[native-audio] replacing system audio with per-process audio");
+          await room.localParticipant.unpublishTrack(_screenShareAudioTrack, true);
+          _screenShareAudioTrack.mediaStreamTrack?.stop();
+          _screenShareAudioTrack = null;
+        }
+      } catch (err) {
+        var errStr = String(err);
+        debugLog("[native-audio] auto-capture failed: " + errStr);
+        if (errStr.indexOf("build") !== -1) {
+          debugLog("[native-audio] This Windows version doesn't support per-process audio capture");
+          debugLog("[native-audio] Tip: Share entire screen with 'Share system audio' checked instead");
+        } else {
+          debugLog("[native-audio] keeping system audio fallback if available");
+        }
+      }
+    } else {
+      debugLog("[native-audio] no matching window found for track label '" + trackLabel + "'");
+      // Log available windows for debugging
+      for (var i = 0; i < Math.min(windows.length, 10); i++) {
+        debugLog("[native-audio]   available: '" + windows[i].title + "' (" + windows[i].exe_name + ") hwnd=" + windows[i].hwnd);
+      }
+    }
+  } catch (err) {
+    debugLog("[native-audio] auto-detect error: " + err);
+  }
+}
+
+async function startNativeAudioCapture(pid) {
+  // Stop existing capture first
+  await stopNativeAudioCapture();
+
+  if (!hasTauriIPC()) throw new Error("Tauri IPC not available");
+
+  var LK = getLiveKitClient();
+
+  // Create AudioContext — DON'T hardcode sample rate, let it match system default
+  // WASAPI will report its actual format and we adapt
+  _nativeAudioCtx = new AudioContext();
+  // Resume immediately — Chrome suspends new AudioContexts by default
+  if (_nativeAudioCtx.state === "suspended") {
+    await _nativeAudioCtx.resume();
+  }
+  debugLog("[native-audio] AudioContext state=" + _nativeAudioCtx.state + " sampleRate=" + _nativeAudioCtx.sampleRate);
+
+  var blob = new Blob([_nativeAudioWorkletCode], { type: "application/javascript" });
+  var url = URL.createObjectURL(blob);
+  await _nativeAudioCtx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  _nativeAudioWorklet = new AudioWorkletNode(_nativeAudioCtx, "native-audio-proc", {
+    outputChannelCount: [2],
+  });
+  _nativeAudioDest = _nativeAudioCtx.createMediaStreamDestination();
+  _nativeAudioWorklet.connect(_nativeAudioDest);
+
+  // Debug: track data flow
+  var _dataChunkCount = 0;
+  var _dataSampleCount = 0;
+
+  // Listen for audio data from Rust via Tauri events
+  var captureFormat = null;
+  var formatUn = await tauriListen("audio-capture-format", function (ev) {
+    captureFormat = ev.payload;
+    debugLog("[native-audio] WASAPI format: " + JSON.stringify(captureFormat));
+  });
+
+  _nativeAudioUnlisten = await tauriListen("audio-capture-data", function (ev) {
+    try {
+      // Decode base64 → ArrayBuffer → Float32Array
+      var b64 = ev.payload;
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var floats = new Float32Array(bytes.buffer);
+
+      _dataChunkCount++;
+      _dataSampleCount += floats.length;
+
+      // Log first few chunks and then every 50th for diagnostics
+      if (_dataChunkCount <= 3 || _dataChunkCount % 50 === 0) {
+        // Check if audio has non-zero samples
+        var maxVal = 0;
+        for (var j = 0; j < Math.min(floats.length, 200); j++) {
+          var abs = Math.abs(floats[j]);
+          if (abs > maxVal) maxVal = abs;
+        }
+        debugLog("[native-audio] chunk #" + _dataChunkCount + " samples=" + floats.length +
+          " totalSamples=" + _dataSampleCount + " peak=" + maxVal.toFixed(4));
+      }
+
+      // Send to AudioWorklet
+      if (_nativeAudioWorklet) {
+        _nativeAudioWorklet.port.postMessage(floats);
+      }
+    } catch (e) {
+      debugLog("[native-audio] decode error: " + e);
+    }
+  });
+
+  // Also listen for errors/stopped
+  var errorUn = await tauriListen("audio-capture-error", function (ev) {
+    debugLog("[native-audio] capture error: " + ev.payload);
+    var st = document.getElementById("native-audio-status");
+    if (st) { st.textContent = "Error: " + ev.payload; st.classList.remove("active"); }
+  });
+
+  var stoppedUn = await tauriListen("audio-capture-stopped", function () {
+    debugLog("[native-audio] capture stopped by Rust");
+  });
+
+  // Store unlisteners for cleanup
+  var origUnlisten = _nativeAudioUnlisten;
+  _nativeAudioUnlisten = function () {
+    origUnlisten(); formatUn(); errorUn(); stoppedUn();
+  };
+
+  // Start the WASAPI capture on Rust side
+  await tauriInvoke("start_audio_capture", { pid: pid });
+  debugLog("[native-audio] WASAPI started for PID " + pid);
+
+  // Publish the audio track via LiveKit
+  var audioTrack = _nativeAudioDest.stream.getAudioTracks()[0];
+  debugLog("[native-audio] MediaStream track: " + (audioTrack ? "exists, enabled=" + audioTrack.enabled + " muted=" + audioTrack.muted + " state=" + audioTrack.readyState : "MISSING"));
+  if (audioTrack) {
+    _nativeAudioTrack = new LK.LocalAudioTrack(audioTrack, undefined, false);
+    await room.localParticipant.publishTrack(_nativeAudioTrack, {
+      source: LK.Track.Source.ScreenShareAudio,
+      dtx: false,
+      red: false,
+      audioBitrate: 128000,
+    });
+    debugLog("[native-audio] published to LiveKit as ScreenShareAudio");
+  } else {
+    debugLog("[native-audio] ERROR: no audio track from MediaStreamDestination!");
+  }
+
+  _nativeAudioActive = true;
+}
+
+async function stopNativeAudioCapture() {
+  if (!_nativeAudioActive) return;
+  _nativeAudioActive = false;
+  debugLog("[native-audio] stopping capture");
+
+  // Tell Rust to stop
+  try {
+    if (hasTauriIPC()) {
+      await tauriInvoke("stop_audio_capture");
+    }
+  } catch (e) {
+    debugLog("[native-audio] stop_audio_capture error: " + e);
+  }
+
+  // Unlisten Tauri events
+  if (_nativeAudioUnlisten) {
+    try { _nativeAudioUnlisten(); } catch (e) {}
+    _nativeAudioUnlisten = null;
+  }
+
+  // Unpublish LiveKit track
+  if (_nativeAudioTrack && room) {
+    try {
+      await room.localParticipant.unpublishTrack(_nativeAudioTrack, true);
+      _nativeAudioTrack.mediaStreamTrack?.stop();
+    } catch (e) {}
+    _nativeAudioTrack = null;
+  }
+
+  // Close AudioContext
+  if (_nativeAudioWorklet) {
+    try { _nativeAudioWorklet.disconnect(); } catch (e) {}
+    _nativeAudioWorklet = null;
+  }
+  _nativeAudioDest = null;
+  if (_nativeAudioCtx) {
+    try { _nativeAudioCtx.close(); } catch (e) {}
+    _nativeAudioCtx = null;
+  }
+
+  var st = document.getElementById("native-audio-status");
+  if (st) { st.textContent = ""; st.classList.remove("active"); }
+}
+
+// ---------- End native audio capture ----------
 
 document.addEventListener(
   "pointerdown",
@@ -747,25 +1321,45 @@ function setRoomAudioMutedState(next) {
 }
 
 function setDefaultUrls() {
-  if (!controlUrlInput.value) {
-    controlUrlInput.value = `${window.location.protocol}//${window.location.host}`;
-  }
-  if (!sfuUrlInput.value) {
-    if (window.location.protocol === "https:") {
-      sfuUrlInput.value = `wss://${window.location.host}`;
-    } else {
-      sfuUrlInput.value = `ws://${window.location.hostname}:7880`;
+  if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+    // Native client: get server URL from Tauri config
+    tauriInvoke("get_control_url").then(function(url) {
+      _echoServerUrl = url;
+      if (!controlUrlInput.value) controlUrlInput.value = url;
+      if (!sfuUrlInput.value) {
+        // SFU is proxied through the control plane — same host:port, just wss://
+        sfuUrlInput.value = url.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+      }
+      debugLog("[native] server URL from Tauri config: " + url);
+    }).catch(function(e) {
+      debugLog("[native] get_control_url failed: " + e);
+      // Fallback to defaults
+      if (!controlUrlInput.value) controlUrlInput.value = "https://99.111.153.69:9443";
+      if (!sfuUrlInput.value) sfuUrlInput.value = "wss://99.111.153.69:9443";
+    });
+  } else {
+    if (!controlUrlInput.value) {
+      controlUrlInput.value = window.location.protocol + "//" + window.location.host;
+    }
+    if (!sfuUrlInput.value) {
+      if (window.location.protocol === "https:") {
+        sfuUrlInput.value = "wss://" + window.location.host;
+      } else {
+        sfuUrlInput.value = "ws://" + window.location.hostname + ":7880";
+      }
     }
   }
 }
 
 function normalizeUrls() {
+  // For native client, URLs are set by setDefaultUrls via Tauri IPC
+  if (window.__ECHO_NATIVE__) return;
   if (window.location.protocol !== "https:") return;
   if (!controlUrlInput.value) {
-    controlUrlInput.value = `https://${window.location.host}`;
+    controlUrlInput.value = "https://" + window.location.host;
   }
   if (!sfuUrlInput.value) {
-    sfuUrlInput.value = `wss://${window.location.host}`;
+    sfuUrlInput.value = "wss://" + window.location.host;
   }
 }
 
@@ -848,6 +1442,7 @@ async function fetchRoomStatus(baseUrl, adminToken) {
 
 // ---- Room chime sounds (Web Audio API) ----
 let chimeAudioCtx = null;
+const chimeBufferCache = new Map(); // "identityBase-enter" or "identityBase-exit" -> AudioBuffer
 function getChimeCtx() {
   if (!chimeAudioCtx) chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return chimeAudioCtx;
@@ -923,6 +1518,47 @@ function playSwitchChime() {
   } catch {}
 }
 
+async function fetchChimeBuffer(identityBase, kind) {
+  const cacheKey = identityBase + "-" + kind;
+  if (chimeBufferCache.has(cacheKey)) return chimeBufferCache.get(cacheKey);
+  try {
+    const res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind));
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    const ctx = getChimeCtx();
+    const decoded = await ctx.decodeAudioData(buf.slice(0));
+    chimeBufferCache.set(cacheKey, decoded);
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function playCustomChime(buffer) {
+  try {
+    const ctx = getChimeCtx();
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.5;
+    source.connect(gain).connect(ctx.destination);
+    source.start(0);
+  } catch {}
+}
+
+async function playChimeForIdentities(identities, kind) {
+  for (const id of identities) {
+    const identityBase = getIdentityBase(id);
+    const buffer = await fetchChimeBuffer(identityBase, kind);
+    if (buffer) {
+      playCustomChime(buffer);
+      return;
+    }
+  }
+  if (kind === "enter") playJoinChime();
+  else playLeaveChime();
+}
+
 function detectRoomChanges(statusMap) {
   const currentIds = {};
   FIXED_ROOMS.forEach((roomId) => {
@@ -945,28 +1581,28 @@ function detectRoomChanges(statusMap) {
     currentIds[roomId].forEach((id) => { currByUser[id] = roomId; });
   });
   // Perspective-based: only care about people entering/leaving MY room
-  let someoneEnteredMyRoom = false;
+  const enteredIds = [];
+  const leftIds = [];
   let someoneSwitchedAway = false;
-  let someoneLeftEntirely = false;
   const prevMyRoom = previousRoomParticipants[myRoom] || new Set();
   const currMyRoom = currentIds[myRoom] || new Set();
   // Someone appeared in my room (join or switch — either way, welcome them)
   for (const id of currMyRoom) {
     if (id === myIdentity) continue;
-    if (!prevMyRoom.has(id)) someoneEnteredMyRoom = true;
+    if (!prevMyRoom.has(id)) enteredIds.push(id);
   }
   // Someone disappeared from my room
   for (const id of prevMyRoom) {
     if (id === myIdentity) continue;
     if (!currMyRoom.has(id)) {
       if (currByUser[id]) someoneSwitchedAway = true;
-      else someoneLeftEntirely = true;
+      else leftIds.push(id);
     }
   }
   previousRoomParticipants = currentIds;
-  if (someoneEnteredMyRoom) playJoinChime();
+  if (enteredIds.length > 0) playChimeForIdentities(enteredIds, "enter");
   else if (someoneSwitchedAway) playSwitchChime();
-  else if (someoneLeftEntirely) playLeaveChime();
+  else if (leftIds.length > 0) playChimeForIdentities(leftIds, "exit");
 }
 
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
@@ -1396,6 +2032,11 @@ function configureVideoElement(element, muted = true) {
   element.playsInline = true;
   element.muted = muted;
   element.controls = false;
+  // Force contain on ALL video elements — prevents stretching regardless of
+  // what the LiveKit SDK sets via inline styles after attach()
+  if (element.tagName === "VIDEO") {
+    element.style.objectFit = "contain";
+  }
   element._attachedAt = performance.now();
   const tryPlay = async () => {
     try {
@@ -1537,8 +2178,17 @@ function ensureAudioPlays(element) {
 
 function ensureVideoPlays(track, element) {
   if (!track || !element) return;
+  // Cancel any previous ensureVideoPlays chain for this element
+  if (element._ensurePlayId) {
+    element._ensurePlayId++;
+  }
+  const playId = (element._ensurePlayId || 0) + 1;
+  element._ensurePlayId = playId;
+
   let attempts = 0;
   const check = () => {
+    // Abort if a newer chain was started
+    if (element._ensurePlayId !== playId) return;
     attempts += 1;
     if (!element.isConnected) return;
     if (element.videoWidth > 0 || element.videoHeight > 0) return;
@@ -1994,10 +2644,22 @@ function ensureParticipantCard(participant, isLocal = false) {
     avatar.style.cursor = "pointer";
     avatar.title = "Click to upload avatar";
     avatar.addEventListener("click", (e) => {
-      // Don't trigger if camera video is playing
+      // If camera video is playing, go fullscreen
       const video = avatar.querySelector("video");
-      if (video && video.videoWidth > 0) return;
+      if (video && video.videoWidth > 0) {
+        enterVideoFullscreen(video);
+        return;
+      }
       avatarFileInput.click();
+    });
+  } else {
+    // Remote users: click avatar video to fullscreen
+    avatar.style.cursor = "pointer";
+    avatar.addEventListener("click", () => {
+      const video = avatar.querySelector("video");
+      if (video && video.videoWidth > 0) {
+        enterVideoFullscreen(video);
+      }
     });
   }
   const meta = document.createElement("div");
@@ -2320,7 +2982,7 @@ async function uploadAvatar(file) {
   }
 
   try {
-    const res = await fetch(`/api/avatar/upload?identity=${encodeURIComponent(identityBase)}`, {
+    const res = await fetch(apiUrl(`/api/avatar/upload?identity=${encodeURIComponent(identityBase)}`), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${adminToken}`,
@@ -2331,7 +2993,7 @@ async function uploadAvatar(file) {
     const data = await res.json().catch(() => ({}));
     debugLog("Avatar upload response: " + JSON.stringify(data));
     if (data?.ok && data?.url) {
-      const avatarUrl = data.url + "?t=" + Date.now(); // cache bust
+      const avatarUrl = apiUrl(data.url) + "?t=" + Date.now(); // cache bust
       avatarUrls.set(identityBase, avatarUrl);
       localStorage.setItem("echo-avatar-" + identityBase, avatarUrl);
 
@@ -2689,9 +3351,9 @@ function handleTrackSubscribed(track, publication, participant) {
       const existingTile = screenTileByIdentity.get(participant.identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
       if (existingTile) {
         const videoEl = existingTile.querySelector("video");
-        // Consider it displayed ONLY if video exists, is connected, has the right track, AND is actually playing
-        // If video is paused (autoplay failed), we need to retry
-        isActuallyDisplayed = !!(videoEl && videoEl.isConnected && videoEl._lkTrack === track && !videoEl.paused && videoEl.readyState >= 2);
+        // Consider displayed if: video exists + connected + right track + (playing OR attached very recently)
+        const recentlyAttached = videoEl?._attachedAt && (performance.now() - videoEl._attachedAt) < 2000;
+        isActuallyDisplayed = !!(videoEl && videoEl.isConnected && videoEl._lkTrack === track && (recentlyAttached || (!videoEl.paused && videoEl.readyState >= 2)));
       }
     }
     // For camera tracks, check if the track is actually rendering
@@ -2699,9 +3361,9 @@ function handleTrackSubscribed(track, publication, participant) {
       const camTrackSid = publication?.trackSid || track?.sid || null;
       if (camTrackSid && cameraVideoBySid.has(camTrackSid)) {
         const videoEl = cameraVideoBySid.get(camTrackSid);
-        // Consider it displayed ONLY if video exists, is connected, has the right track, AND is actually playing
-        // If video is paused (autoplay failed), we need to retry
-        isActuallyDisplayed = !!(videoEl && videoEl.isConnected && videoEl._lkTrack === track && !videoEl.paused && videoEl.readyState >= 2);
+        // Consider displayed if: video exists + connected + right track + (playing OR attached very recently)
+        const recentlyAttached = videoEl?._attachedAt && (performance.now() - videoEl._attachedAt) < 2000;
+        isActuallyDisplayed = !!(videoEl && videoEl.isConnected && videoEl._lkTrack === track && (recentlyAttached || (!videoEl.paused && videoEl.readyState >= 2)));
       }
     }
     // For audio tracks, check if audio element actually exists
@@ -2741,18 +3403,21 @@ function handleTrackSubscribed(track, publication, participant) {
     const identity = participant.identity;
     const screenTrackSid = publication?.trackSid || track?.sid || null;
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
-    if (existingTile) {
+    if (existingTile && existingTile.isConnected) {
       const existingVideo = existingTile.querySelector("video");
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = hiddenScreens.has(identity) ? "Start Watching" : "Stop Watching";
       }
-      if (existingVideo && existingVideo._lkTrack === track && existingVideo.videoWidth > 0) {
+      // If same track and has frames OR was attached recently, just ensure it plays
+      const recentlyAttached = existingVideo?._attachedAt && (performance.now() - existingVideo._attachedAt) < 3000;
+      if (existingVideo && existingVideo._lkTrack === track && (existingVideo.videoWidth > 0 || recentlyAttached)) {
         ensureVideoPlays(track, existingVideo);
         ensureVideoSubscribed(publication, existingVideo);
         forceVideoLayer(publication, existingVideo);
         return;
       }
+      // Different track or stale — replace video element in existing tile (don't recreate tile)
       replaceScreenVideoElement(existingTile, track, publication);
       if (screenTrackSid) {
         existingTile.dataset.trackSid = screenTrackSid;
@@ -2760,6 +3425,11 @@ function handleTrackSubscribed(track, publication, participant) {
       }
       screenTileByIdentity.set(identity, existingTile);
       return;
+    }
+    // Clean up stale references if tile was removed from DOM
+    if (existingTile && !existingTile.isConnected) {
+      screenTileByIdentity.delete(identity);
+      if (screenTrackSid) screenTileBySid.delete(screenTrackSid);
     }
     clearScreenTracksForIdentity(participant.identity, screenTrackSid);
     const label = `${participant.name || "Guest"} (Screen)`;
@@ -2954,6 +3624,34 @@ function handleTrackUnsubscribed(track, publication, participant) {
     }
   } else if (track.kind === "audio") {
     const audioEl = audioElBySid.get(trackSid);
+    // Grace period for screen share audio: delay removal to survive SDP renegotiations
+    if (source === LK.Track.Source.ScreenShareAudio && audioEl && participant) {
+      debugLog(`screen share audio unsubscribe ${participant.identity} sid=${trackSid} — delaying removal`);
+      const identity = participant.identity;
+      setTimeout(() => {
+        // Check if a new audio element was created for this track in the meantime
+        const currentEl = audioElBySid.get(trackSid);
+        if (currentEl === audioEl) {
+          // Still the same element — check if participant still has screen share audio
+          const pState = participantState.get(identity);
+          const pubs = participant.trackPublications ? Array.from(participant.trackPublications.values()) : [];
+          const hasScreenAudio = pubs.some((pub) => pub?.source === LK.Track.Source.ScreenShareAudio && pub.track && pub.isSubscribed);
+          if (!hasScreenAudio) {
+            debugLog(`screen share audio removed after grace period: ${identity} sid=${trackSid}`);
+            audioEl.remove();
+            audioElBySid.delete(trackSid);
+            if (pState) {
+              pState.screenAudioEls.delete(audioEl);
+              if (pState.screenAnalyser?.cleanup) pState.screenAnalyser.cleanup();
+              pState.screenAnalyser = null;
+            }
+          } else {
+            debugLog(`screen share audio kept (track returned): ${identity} sid=${trackSid}`);
+          }
+        }
+      }, 2000);
+      return; // Don't remove yet
+    }
     if (audioEl) {
       audioEl.remove();
       audioElBySid.delete(trackSid);
@@ -3106,7 +3804,15 @@ async function switchMic(deviceId) {
   selectedMicId = deviceId || "";
   try { localStorage.setItem("echo-device-mic", selectedMicId); } catch (_) {}
   if (!room || !micEnabled) return;
+  // Tear down existing noise cancellation before switching
+  disableNoiseCancellation();
   await room.localParticipant.setMicrophoneEnabled(true, { deviceId: selectedMicId || undefined });
+  // Re-apply noise cancellation to new mic track
+  if (noiseCancelEnabled) {
+    try { await enableNoiseCancellation(); } catch (e) {
+      debugLog("[noise-cancel] Could not re-apply after mic switch: " + (e.message || e));
+    }
+  }
 }
 
 async function switchCam(deviceId) {
@@ -3228,7 +3934,7 @@ async function fetchSoundboardBuffer(soundId) {
   }
   const ctx = getSoundboardContext();
   if (!ctx || !currentAccessToken) return null;
-  const res = await fetch(`/api/soundboard/file/${encodeURIComponent(soundId)}`, {
+  const res = await fetch(apiUrl(`/api/soundboard/file/${encodeURIComponent(soundId)}`), {
     headers: {
       Authorization: `Bearer ${currentAccessToken}`
     }
@@ -3411,8 +4117,10 @@ function renderSoundboardCompact() {
     btn.dataset.soundId = sound.id;
     btn.draggable = true;
     btn.setAttribute("draggable", "true");
-    btn.title = sound.name || "Sound";
+    btn.dataset.soundName = sound.name || "Sound";
     btn.textContent = sound.icon || "\u{1F50A}";
+    btn.addEventListener("mouseenter", function() { showSoundTooltip(btn, btn.dataset.soundName); });
+    btn.addEventListener("mouseleave", hideSoundTooltip);
     if (favSet.has(sound.id)) {
       btn.classList.add("is-favorite");
     }
@@ -3743,7 +4451,7 @@ async function loadSoundboardList() {
   const roomId = currentRoomName;
   soundboardLoadedRoomId = roomId;
   try {
-    const res = await fetch(`/api/soundboard/list?roomId=${encodeURIComponent(roomId)}`, {
+    const res = await fetch(apiUrl(`/api/soundboard/list?roomId=${encodeURIComponent(roomId)}`), {
       headers: {
         Authorization: `Bearer ${currentAccessToken}`
       }
@@ -3802,7 +4510,7 @@ async function uploadSoundboardSound() {
       icon,
       volume: String(volume)
     });
-    const res = await fetch(`/api/soundboard/upload?${qs.toString()}`, {
+    const res = await fetch(apiUrl(`/api/soundboard/upload?${qs.toString()}`), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${currentAccessToken}`,
@@ -3844,7 +4552,7 @@ async function updateSoundboardSound() {
 
   setSoundboardHint("Saving...");
   try {
-    const res = await fetch("/api/soundboard/update", {
+    const res = await fetch(apiUrl("/api/soundboard/update"), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${currentAccessToken}`,
@@ -3966,7 +4674,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         const re = new RegExp(`(a=fmtp:${pt} [^\\r\\n]*)`, "g");
         if (re.test(sdp)) {
           sdp = sdp.replace(new RegExp(`(a=fmtp:${pt} [^\\r\\n]*)`, "g"),
-            "$1;x-google-start-bitrate=5000;x-google-min-bitrate=3000;x-google-max-bitrate=8000;max-fr=60");
+            "$1;x-google-start-bitrate=6000;x-google-min-bitrate=4000;x-google-max-bitrate=8000;max-fr=60");
         }
       }
       return sdp;
@@ -4043,8 +4751,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       videoCodec: "h264",
       videoEncoding: { maxBitrate: 5_000_000, maxFramerate: 60 },
       videoSimulcastLayers: [
-        { width: 960, height: 540, encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
-        { width: 480, height: 270, encoding: { maxBitrate: 400_000, maxFramerate: 15 } },
+        { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
       ],
       screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 60 },
       dtx: true,
@@ -4400,6 +5107,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     settingsDevicePanel.appendChild(deviceActionsEl);
     if (deviceStatusEl) settingsDevicePanel.appendChild(deviceStatusEl);
   }
+  buildChimeSettingsUI();
   primeSoundboardAudio();
   initializeEmojiPicker();
   loadChatHistory(roomId);
@@ -4408,7 +5116,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     const identityBase = getIdentityBase(identity);
     const savedAvatar = localStorage.getItem("echo-avatar-" + identityBase);
     if (savedAvatar) {
-      avatarUrls.set(identityBase, savedAvatar);
+      // Resolve relative URLs (may be stored from a previous browser session)
+      const resolvedAvatar = savedAvatar.startsWith("/") ? apiUrl(savedAvatar) : savedAvatar;
+      avatarUrls.set(identityBase, resolvedAvatar);
       updateAvatarDisplay(identity);
       // Broadcast to room after a short delay (let others join first)
       setTimeout(() => broadcastAvatar(identityBase, savedAvatar), 2000);
@@ -4555,6 +5265,7 @@ async function disconnect() {
   _screenShareAudioTrack?.mediaStreamTrack?.stop();
   _screenShareVideoTrack = null;
   _screenShareAudioTrack = null;
+  disableNoiseCancellation();
   room.disconnect();
   room = null;
   clearMedia();
@@ -4615,6 +5326,28 @@ function linkifyText(text) {
   const urlRegex = /(https?:\/\/[^\s]+)/g;
   return text.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
 }
+
+// Open external links in system browser
+document.addEventListener("click", function(e) {
+  var link = e.target.closest("a[href]");
+  if (!link) return;
+  var href = link.getAttribute("href");
+  if (!href || !/^https?:\/\//.test(href)) return;
+  if (href.startsWith(window.location.origin)) return; // skip internal links
+  e.preventDefault();
+  debugLog("[link] clicked: " + href);
+  // Try window.open first (works in regular browsers)
+  var w = window.open(href, "_blank");
+  if (!w && adminToken) {
+    // Popup blocked (Tauri/WebView2) + user is admin — ask server to open in system browser
+    debugLog("[link] window.open blocked, using server /api/open-url (admin)");
+    fetch(apiUrl("/api/open-url"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + adminToken },
+      body: JSON.stringify({ url: href })
+    }).catch(function(err) { debugLog("[link] open-url failed: " + err); });
+  }
+});
 
 function formatTime(timestamp) {
   const date = new Date(timestamp);
@@ -4704,7 +5437,8 @@ function renderChatMessage(message) {
         // Open image in new tab by fetching with auth
         try {
           const token = currentAccessToken || adminToken;
-          const response = await fetch(message.fileUrl, {
+          const clickUrl = message.fileUrl.startsWith('http') ? message.fileUrl : apiUrl(message.fileUrl);
+          const response = await fetch(clickUrl, {
             headers: { "Authorization": `Bearer ${token}` }
           });
           const blob = await response.blob();
@@ -4729,7 +5463,8 @@ function renderChatMessage(message) {
         // Download file with auth
         try {
           const token = currentAccessToken || adminToken;
-          const response = await fetch(message.fileUrl, {
+          const dlUrl = message.fileUrl.startsWith('http') ? message.fileUrl : apiUrl(message.fileUrl);
+          const response = await fetch(dlUrl, {
             headers: { "Authorization": `Bearer ${token}` }
           });
           const blob = await response.blob();
@@ -5099,6 +5834,16 @@ async function toggleMic() {
       deviceId: selectedMicId || undefined,
     });
     micEnabled = desired;
+
+    // Apply or remove noise cancellation
+    if (desired && noiseCancelEnabled) {
+      try { await enableNoiseCancellation(); } catch (e) {
+        debugLog("[noise-cancel] Could not enable on mic toggle: " + (e.message || e));
+      }
+    } else if (!desired) {
+      disableNoiseCancellation();
+    }
+
     renderPublishButtons();
     if (room?.localParticipant) {
       const cardRef = ensureParticipantCard(room.localParticipant, true);
@@ -5520,6 +6265,235 @@ if (closeSettingsButton && settingsPanel) {
   closeSettingsButton.addEventListener("click", () => {
     settingsPanel.classList.add("hidden");
   });
+}
+
+function buildChimeSettingsUI() {
+  debugLog("[settings] buildChimeSettingsUI called, panel exists: " + !!settingsDevicePanel);
+  if (!settingsDevicePanel) { debugLog("[settings] NO settingsDevicePanel - aborting"); return; }
+
+  // --- Noise Cancellation toggle ---
+  var existingNc = document.getElementById("nc-settings-section");
+  if (existingNc) existingNc.remove();
+
+  var ncSection = document.createElement("div");
+  ncSection.id = "nc-settings-section";
+  ncSection.className = "chime-settings-section";
+
+  var ncTitle = document.createElement("div");
+  ncTitle.className = "chime-settings-title";
+  ncTitle.textContent = "Noise Cancellation";
+  ncSection.appendChild(ncTitle);
+
+  var ncRow = document.createElement("div");
+  ncRow.className = "nc-toggle-row";
+
+  var ncLabel = document.createElement("span");
+  ncLabel.className = "nc-toggle-label";
+  ncLabel.textContent = "Enable Noise Cancellation";
+
+  var ncBtn = document.createElement("button");
+  ncBtn.type = "button";
+  ncBtn.id = "nc-toggle-btn";
+  ncBtn.className = "nc-toggle-btn" + (noiseCancelEnabled ? " is-on" : "");
+  ncBtn.textContent = noiseCancelEnabled ? "ON" : "OFF";
+
+  ncBtn.addEventListener("click", async function() {
+    debugLog("[noise-cancel] Button clicked, was: " + noiseCancelEnabled + ", micEnabled: " + micEnabled + ", room: " + !!room);
+    noiseCancelEnabled = !noiseCancelEnabled;
+    debugLog("[noise-cancel] Now: " + noiseCancelEnabled);
+    localStorage.setItem("echo-noise-cancel", noiseCancelEnabled ? "true" : "false");
+    ncBtn.textContent = noiseCancelEnabled ? "ON" : "OFF";
+    ncBtn.classList.toggle("is-on", noiseCancelEnabled);
+
+    if (noiseCancelEnabled && micEnabled && room) {
+      debugLog("[noise-cancel] Enabling RNNoise...");
+      try {
+        await enableNoiseCancellation();
+        debugLog("[noise-cancel] RNNoise enable completed OK");
+      } catch (err) {
+        debugLog("[noise-cancel] RNNoise enable failed: " + (err.message || err));
+        noiseCancelEnabled = false;
+        localStorage.setItem("echo-noise-cancel", "false");
+        ncBtn.textContent = "OFF";
+        ncBtn.classList.remove("is-on");
+        setStatus("Noise cancellation failed: " + (err.message || err), true);
+      }
+    } else if (!noiseCancelEnabled) {
+      debugLog("[noise-cancel] Disabling RNNoise...");
+      disableNoiseCancellation();
+    } else {
+      debugLog("[noise-cancel] Toggled ON but mic not active or no room - will activate when mic is enabled");
+    }
+  });
+
+  ncRow.append(ncLabel, ncBtn);
+  ncSection.appendChild(ncRow);
+
+  var ncDesc = document.createElement("div");
+  ncDesc.className = "nc-description";
+  ncDesc.textContent = "Reduces background noise like fans, AC, and keyboard sounds.";
+  ncSection.appendChild(ncDesc);
+
+  // Suppression strength selector
+  var ncLevelRow = document.createElement("div");
+  ncLevelRow.className = "nc-level-row";
+  var ncLevelLabel = document.createElement("span");
+  ncLevelLabel.className = "nc-toggle-label";
+  ncLevelLabel.textContent = "Suppression strength";
+  var ncLevelBtns = document.createElement("div");
+  ncLevelBtns.className = "nc-level-btns";
+  ["Light", "Medium", "Strong"].forEach(function(label, idx) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "nc-level-btn" + (ncSuppressionLevel === idx ? " is-active" : "");
+    btn.textContent = label;
+    btn.addEventListener("click", function() {
+      updateNoiseGateLevel(idx);
+      ncLevelBtns.querySelectorAll(".nc-level-btn").forEach(function(b, i) {
+        b.classList.toggle("is-active", i === idx);
+      });
+    });
+    ncLevelBtns.appendChild(btn);
+  });
+  ncLevelRow.append(ncLevelLabel, ncLevelBtns);
+  ncSection.appendChild(ncLevelRow);
+
+  var ncLevelDesc = document.createElement("div");
+  ncLevelDesc.className = "nc-description";
+  ncLevelDesc.textContent = "Light = AI denoise only. Medium/Strong adds a noise gate that mutes silence.";
+  ncSection.appendChild(ncLevelDesc);
+
+  settingsDevicePanel.appendChild(ncSection);
+  debugLog("[settings] NC section appended, button id: " + ncBtn.id + ", button in DOM: " + ncBtn.isConnected);
+
+  // --- Custom Sounds section ---
+  var existing = document.getElementById("chime-settings-section");
+  if (existing) existing.remove();
+
+  var section = document.createElement("div");
+  section.id = "chime-settings-section";
+  section.className = "chime-settings-section";
+
+  var title = document.createElement("div");
+  title.className = "chime-settings-title";
+  title.textContent = "Custom Sounds";
+  section.appendChild(title);
+
+  ["enter", "exit"].forEach(function(kind) {
+    var row = document.createElement("div");
+    row.className = "chime-upload-row";
+
+    var label = document.createElement("label");
+    label.className = "chime-label";
+    label.textContent = kind === "enter" ? "Enter Sound" : "Exit Sound";
+
+    var controls = document.createElement("div");
+    controls.className = "chime-controls";
+
+    var fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = "audio/mpeg,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm";
+    fileInput.className = "hidden";
+
+    var uploadBtn = document.createElement("button");
+    uploadBtn.type = "button";
+    uploadBtn.className = "chime-btn";
+    uploadBtn.textContent = "Upload";
+
+    var previewBtn = document.createElement("button");
+    previewBtn.type = "button";
+    previewBtn.className = "chime-btn chime-preview hidden";
+    previewBtn.textContent = "Play";
+
+    var removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "chime-btn chime-remove hidden";
+    removeBtn.textContent = "Remove";
+
+    var statusEl = document.createElement("span");
+    statusEl.className = "chime-status";
+
+    controls.append(fileInput, uploadBtn, previewBtn, removeBtn, statusEl);
+    row.append(label, controls);
+    section.appendChild(row);
+
+    uploadBtn.addEventListener("click", function() { fileInput.click(); });
+
+    fileInput.addEventListener("change", async function() {
+      var file = fileInput.files[0];
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        statusEl.textContent = "Too large (max 2MB)";
+        return;
+      }
+      statusEl.textContent = "Uploading...";
+      try {
+        var identityBase = getIdentityBase(room.localParticipant.identity);
+        // Infer MIME from extension if browser doesn't provide one
+        var mime = file.type;
+        if (!mime || mime === "application/octet-stream") {
+          var ext = (file.name || "").split(".").pop().toLowerCase();
+          var mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", webm: "audio/webm", m4a: "audio/mp4", aac: "audio/aac", flac: "audio/flac", opus: "audio/ogg" };
+          mime = mimeMap[ext] || "audio/mpeg";
+        }
+        var res = await fetch(apiUrl("/api/chime/upload?identity=" + encodeURIComponent(identityBase) + "&kind=" + kind), {
+          method: "POST",
+          headers: { Authorization: "Bearer " + adminToken, "Content-Type": mime },
+          body: file
+        });
+        var data = await res.json().catch(function() { return {}; });
+        if (data && data.ok) {
+          statusEl.textContent = file.name;
+          previewBtn.classList.remove("hidden");
+          removeBtn.classList.remove("hidden");
+          chimeBufferCache.delete(identityBase + "-" + kind);
+        } else {
+          statusEl.textContent = (data && data.error) || "Upload failed";
+        }
+      } catch (e) {
+        statusEl.textContent = "Upload error";
+      }
+      fileInput.value = "";
+    });
+
+    previewBtn.addEventListener("click", async function() {
+      var identityBase = getIdentityBase(room.localParticipant.identity);
+      chimeBufferCache.delete(identityBase + "-" + kind);
+      var buf = await fetchChimeBuffer(identityBase, kind);
+      if (buf) playCustomChime(buf);
+    });
+
+    removeBtn.addEventListener("click", async function() {
+      var identityBase = getIdentityBase(room.localParticipant.identity);
+      try {
+        await fetch(apiUrl("/api/chime/delete"), {
+          method: "POST",
+          headers: { Authorization: "Bearer " + adminToken, "Content-Type": "application/json" },
+          body: JSON.stringify({ identity: identityBase, kind: kind })
+        });
+        chimeBufferCache.delete(identityBase + "-" + kind);
+        previewBtn.classList.add("hidden");
+        removeBtn.classList.add("hidden");
+        statusEl.textContent = "";
+      } catch (e) {}
+    });
+
+    // Check if chime already exists
+    (async function() {
+      if (!room || !room.localParticipant) return;
+      var identityBase = getIdentityBase(room.localParticipant.identity);
+      try {
+        var res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind), { method: "HEAD" });
+        if (res.ok) {
+          previewBtn.classList.remove("hidden");
+          removeBtn.classList.remove("hidden");
+          statusEl.textContent = "Custom sound set";
+        }
+      } catch (e) {}
+    })();
+  });
+
+  settingsDevicePanel.appendChild(section);
 }
 
 renderPublishButtons();

@@ -220,7 +220,8 @@ while ($listener.IsListening) {
                 $body = $reader.ReadToEnd()
                 $reader.Dispose()
                 $configPath = Join-Path $InstallDir "config.json"
-                Set-Content -Path $configPath -Value $body -Encoding UTF8
+                # Write without BOM — serde_json can't parse UTF-8 BOM
+                [System.IO.File]::WriteAllText($configPath, $body, (New-Object System.Text.UTF8Encoding($false)))
                 Write-Log "Config written to $configPath"
                 Send-Response $context 200 '{"status":"config updated"}'
             }

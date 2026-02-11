@@ -2,6 +2,13 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
+  "remote": {
+    "urls": [
+      "https://127.0.0.1:*/*",
+      "https://99.111.153.69:*/*",
+      "https://192.168.5.70:*/*"
+    ]
+  },
   "permissions": [
     "core:default",
     "updater:default"

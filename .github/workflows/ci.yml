@@ -1,0 +1,117 @@
+name: CI - Build & Release
+
+on:
+  push:
+    branches: [main]
+
+# Cancel in-progress runs on the same branch
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & Check (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Tauri needs these system deps on Windows
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+        working-directory: core
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: core
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+        working-directory: core
+        continue-on-error: true  # Don't block releases on warnings for now
+
+      - name: Build workspace (control plane + client)
+        run: cargo build --workspace --release
+        working-directory: core
+
+  release:
+    name: Tag & Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
+
+      - name: Read version from tauri.conf.json
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(jq -r '.version' core/client/tauri.conf.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Build number from short SHA
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "tag=v${VERSION}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Release version: v${VERSION}+${SHORT_SHA}"
+
+      - name: Check if tag already exists
+        id: check_tag
+        shell: bash
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate changelog
+        if: steps.check_tag.outputs.exists == 'false'
+        id: changelog
+        shell: bash
+        run: |
+          # Get commits since last tag (or last 20 if no tags)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges | head -30)
+          else
+            LOG=$(git log --pretty=format:"- %s" --no-merges -20)
+          fi
+          # Write to file to avoid escaping issues
+          echo "$LOG" > changelog.txt
+          echo "Generated changelog with $(echo "$LOG" | wc -l) entries"
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Echo Chamber ${{ steps.version.outputs.tag }}
+          body_path: changelog.txt
+          draft: false
+          prerelease: false
+          generate_release_notes: false

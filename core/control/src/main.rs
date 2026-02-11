@@ -39,6 +39,8 @@ struct AppState {
     chat: Arc<Mutex<ChatState>>,
     avatars: Arc<Mutex<HashMap<String, String>>>,  // identity_base -> filename
     avatars_dir: PathBuf,
+    chimes: Arc<Mutex<HashMap<String, ChimeEntry>>>,  // key: "identityBase-enter" or "identityBase-exit"
+    chimes_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -146,6 +148,24 @@ struct ChatUploadQuery {
 #[derive(Deserialize)]
 struct AvatarUploadQuery {
     identity: String,
+}
+
+#[derive(Clone)]
+struct ChimeEntry {
+    file_name: String,
+    mime: String,
+}
+
+#[derive(Deserialize)]
+struct ChimeUploadQuery {
+    identity: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct ChimeDeleteRequest {
+    identity: String,
+    kind: String,
 }
 
 #[derive(Serialize)]
@@ -316,6 +336,29 @@ async fn main() {
         }
     }
 
+    // ── Chimes directory + scan existing files ────────────────────────
+    let chimes_dir = avatars_dir.parent().unwrap_or(std::path::Path::new(".")).join("chimes");
+    fs::create_dir_all(&chimes_dir).ok();
+    let mut existing_chimes: HashMap<String, ChimeEntry> = HashMap::new();
+    if let Ok(entries) = fs::read_dir(&chimes_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            // Expected format: chime-{identityBase}-{enter|exit}.{ext}
+            if fname.starts_with("chime-") {
+                if let Some(dot_pos) = fname.rfind('.') {
+                    let stem = &fname[6..dot_pos]; // skip "chime-"
+                    // stem = "identityBase-enter" or "identityBase-exit"
+                    if stem.ends_with("-enter") || stem.ends_with("-exit") {
+                        let key = stem.to_string();
+                        let mime = chime_mime_from_ext(&fname);
+                        info!("loaded existing chime: {} -> {}", key, fname);
+                        existing_chimes.insert(key, ChimeEntry { file_name: fname, mime });
+                    }
+                }
+            }
+        }
+    }
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -324,6 +367,8 @@ async fn main() {
         chat: Arc::new(Mutex::new(chat_state)),
         avatars: Arc::new(Mutex::new(existing_avatars)),
         avatars_dir,
+        chimes: Arc::new(Mutex::new(existing_chimes)),
+        chimes_dir,
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -373,6 +418,10 @@ async fn main() {
         .route("/api/online", get(online_users))
         .route("/api/avatar/upload", post(avatar_upload))
         .route("/api/avatar/:identity", get(avatar_get))
+        .route("/api/chime/upload", post(chime_upload))
+        .route("/api/chime/:identity/:kind", get(chime_get))
+        .route("/api/chime/delete", post(chime_delete))
+        .route("/api/open-url", post(open_url))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -589,6 +638,27 @@ async fn generate_self_signed() -> RustlsConfig {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true, ts: now_ts() })
+}
+
+/// Open a URL in the system's default browser (admin-only, for Tauri client)
+async fn open_url(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> StatusCode {
+    if ensure_admin(&state, &headers).is_err() {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let url = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(v) => v.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return StatusCode::BAD_REQUEST;
+    }
+    eprintln!("[open-url] opening: {}", url);
+    let _ = std::process::Command::new("explorer").arg(&url).spawn();
+    StatusCode::OK
 }
 
 async fn online_users(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -1358,6 +1428,190 @@ async fn avatar_get(
     );
 
     Ok(response)
+}
+
+// ── Chime endpoints ─────────────────────────────────────────────────
+
+fn chime_mime_from_ext(fname: &str) -> String {
+    if fname.ends_with(".mp3") { "audio/mpeg".into() }
+    else if fname.ends_with(".wav") { "audio/wav".into() }
+    else if fname.ends_with(".ogg") { "audio/ogg".into() }
+    else if fname.ends_with(".webm") { "audio/webm".into() }
+    else if fname.ends_with(".m4a") { "audio/mp4".into() }
+    else if fname.ends_with(".aac") { "audio/aac".into() }
+    else if fname.ends_with(".flac") { "audio/flac".into() }
+    else { "application/octet-stream".into() }
+}
+
+async fn chime_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChimeUploadQuery>,
+    body: Bytes,
+) -> Result<Json<ChatUploadResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    if body.is_empty() {
+        return Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some("Empty file".into()),
+        }));
+    }
+
+    // 2 MB limit for chimes
+    if body.len() > 2 * 1024 * 1024 {
+        return Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some("Chime too large (max 2MB)".into()),
+        }));
+    }
+
+    // Validate kind
+    if query.kind != "enter" && query.kind != "exit" {
+        return Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some("kind must be 'enter' or 'exit'".into()),
+        }));
+    }
+
+    // Determine extension from content-type
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let ext = match content_type {
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/ogg" | "audio/vorbis" => "ogg",
+        "audio/webm" => "webm",
+        "audio/mp4" | "audio/x-m4a" | "audio/m4a" | "audio/aac" => "m4a",
+        "audio/flac" | "audio/x-flac" => "flac",
+        ct if ct.starts_with("audio/") => {
+            // Accept any audio/* type, guess extension from the content-type
+            ct.strip_prefix("audio/").unwrap_or("bin")
+        }
+        _ => {
+            return Ok(Json(ChatUploadResponse {
+                ok: false,
+                url: None,
+                error: Some(format!("Unsupported type: {}. Upload an audio file (mp3, wav, ogg, m4a, etc.)", content_type)),
+            }));
+        }
+    };
+
+    // Strip -XXXX numeric suffix to get identity base
+    let identity_base = query
+        .identity
+        .rsplitn(2, '-')
+        .last()
+        .unwrap_or(&query.identity)
+        .to_string();
+
+    let key = format!("{}-{}", identity_base, query.kind);
+    let file_name = format!("chime-{}.{}", key, ext);
+    let file_path = state.chimes_dir.join(&file_name);
+
+    // Remove any old chime for this key (might have a different extension)
+    {
+        let chimes = state.chimes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old_entry) = chimes.get(&key) {
+            if old_entry.file_name != file_name {
+                let old_path = state.chimes_dir.join(&old_entry.file_name);
+                let _ = fs::remove_file(old_path);
+            }
+        }
+    }
+
+    let _ = fs::create_dir_all(&state.chimes_dir);
+    match fs::write(&file_path, &body) {
+        Ok(_) => {
+            let mime = chime_mime_from_ext(&file_name);
+            let mut chimes = state.chimes.lock().unwrap_or_else(|e| e.into_inner());
+            chimes.insert(key.clone(), ChimeEntry { file_name, mime });
+            let url = format!("/api/chime/{}/{}", identity_base, query.kind);
+            info!("chime uploaded: key={}", key);
+            Ok(Json(ChatUploadResponse {
+                ok: true,
+                url: Some(url),
+                error: None,
+            }))
+        }
+        Err(err) => Ok(Json(ChatUploadResponse {
+            ok: false,
+            url: None,
+            error: Some(format!("Chime upload failed: {}", err)),
+        })),
+    }
+}
+
+async fn chime_get(
+    State(state): State<AppState>,
+    Path((identity, kind)): Path<(String, String)>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Strip -XXXX suffix in case caller passes full identity
+    let identity_base = identity
+        .rsplitn(2, '-')
+        .last()
+        .unwrap_or(&identity)
+        .to_string();
+
+    let key = format!("{}-{}", identity_base, kind);
+
+    let entry = {
+        let chimes = state.chimes.lock().unwrap_or_else(|e| e.into_inner());
+        chimes.get(&key).cloned()
+    };
+
+    let entry = entry.ok_or(StatusCode::NOT_FOUND)?;
+    let file_path = state.chimes_dir.join(&entry.file_name);
+    let bytes = fs::read(&file_path).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_str(&entry.mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    // Cache chimes for 5 minutes
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=300"),
+    );
+
+    Ok(response)
+}
+
+async fn chime_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChimeDeleteRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    // Strip -XXXX suffix
+    let identity_base = body
+        .identity
+        .rsplitn(2, '-')
+        .last()
+        .unwrap_or(&body.identity)
+        .to_string();
+
+    let key = format!("{}-{}", identity_base, body.kind);
+
+    let removed = {
+        let mut chimes = state.chimes.lock().unwrap_or_else(|e| e.into_inner());
+        chimes.remove(&key)
+    };
+
+    if let Some(entry) = removed {
+        let file_path = state.chimes_dir.join(&entry.file_name);
+        let _ = fs::remove_file(file_path);
+        info!("chime deleted: key={}", key);
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 fn load_config() -> Config {

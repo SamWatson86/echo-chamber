@@ -3,14 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Echo Chamber Core Viewer</title>
-    <link rel="stylesheet" href="/viewer/style.css" />
+    <title>Echo Chamber</title>
+    <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <main class="app">
       <header>
-        <h1>Echo Chamber Core Viewer</h1>
-        <p>Test viewer for the full-stack SFU pipeline.</p>
+        <div class="header-brand">
+          <img src="badge.jpg" alt="Fellowship Badge" class="header-badge" />
+          <div>
+            <h1>Echo Chamber</h1>
+            <p>The Fellowship of the Boatrace</p>
+          </div>
+        </div>
       </header>
 
       <section id="connect-panel" class="panel">
@@ -264,7 +269,7 @@
       <pre id="debug-log"></pre>
     </div>
 
-    <script src="/viewer/livekit-client.umd.js"></script>
-    <script src="/viewer/app.js"></script>
+    <script src="livekit-client.umd.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>
