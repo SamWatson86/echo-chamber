@@ -244,16 +244,29 @@ fn main() {
             // Check for updates in the background
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let updater = handle.updater_builder().build().unwrap();
+                // Small delay so the window is visible before any update dialog
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let updater = match handle.updater_builder().build() {
+                    Ok(u) => u,
+                    Err(e) => { eprintln!("[updater] build failed: {}", e); return; }
+                };
                 match updater.check().await {
                     Ok(Some(update)) => {
-                        eprintln!("[updater] update available: v{}", update.version);
-                        if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
-                            eprintln!("[updater] install failed: {}", e);
+                        eprintln!("[updater] update available: v{} -> v{}", env!("CARGO_PKG_VERSION"), update.version);
+                        match update.download_and_install(|ev, _| {
+                            eprintln!("[updater] download progress: {:?}", ev);
+                        }, || {
+                            eprintln!("[updater] ready to install, app will restart...");
+                        }).await {
+                            Ok(_) => {
+                                eprintln!("[updater] install complete, restarting...");
+                                handle.restart();
+                            }
+                            Err(e) => eprintln!("[updater] install failed: {}", e),
                         }
                     }
-                    Ok(None) => eprintln!("[updater] up to date"),
-                    Err(e) => eprintln!("[updater] check failed (ok if offline): {}", e),
+                    Ok(None) => eprintln!("[updater] up to date (v{})", env!("CARGO_PKG_VERSION")),
+                    Err(e) => eprintln!("[updater] check failed: {}", e),
                 }
             });
 

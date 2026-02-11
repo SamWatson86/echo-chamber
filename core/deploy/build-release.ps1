@@ -92,7 +92,9 @@ if ($setupExe -and $setupSig) {
     } | ConvertTo-Json -Depth 4
 
     $manifestPath = Join-Path $bundleDir "latest.json"
-    Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8
+    # IMPORTANT: Use WriteAllText to avoid UTF-8 BOM that PowerShell 5.1 adds with -Encoding UTF8
+    # Tauri updater (serde_json) cannot parse JSON with a BOM prefix
+    [System.IO.File]::WriteAllText($manifestPath, $manifest)
     Write-Status "Update manifest written to latest.json" Green
     Write-Status "  URL: https://github.com/SamWatson86/echo-chamber/releases/download/v$version/$ghFileName"
 } else {
