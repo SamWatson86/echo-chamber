@@ -1932,7 +1932,8 @@ function registerScreenTrack(trackSid, publication, tile, identity) {
     lastFix: 0,
     lastKeyframe: 0,
     retryCount: 0,
-    identity: identity || ""
+    identity: identity || "",
+    createdAt: performance.now()
   });
   if (ENABLE_SCREEN_WATCHDOG) startScreenWatchdog();
 }
@@ -1986,6 +1987,10 @@ function startScreenWatchdog() {
       const track = publication?.track;
 
       if (hasFrames && !isBlack && age < 4500) return;
+      // Grace period: don't run recovery on tiles less than 8 seconds old.
+      // New tiles need time to receive first frames before recovery kicks in.
+      var tileAge = now - (meta.createdAt || 0);
+      if (tileAge < 8000) return;
       if (isBlack && blackFor > 1200 && track) {
         if (!meta.lastSwap || now - meta.lastSwap > 2500) {
           meta.lastSwap = now;
