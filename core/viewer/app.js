@@ -5049,6 +5049,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
 
+  // Extract server hostname for TURN — window.location.hostname is wrong in Tauri (tauri.localhost)
+  var turnHost = window.location.hostname;
+  try {
+    var _u = new URL(sfuUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:"));
+    turnHost = _u.hostname;
+  } catch(e) {}
+
   await room.connect(sfuUrl, accessToken, {
     autoSubscribe: true,
     rtcConfig: {
@@ -5056,7 +5063,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
         {
-          urls: `turn:${window.location.hostname}:3478?transport=udp`,
+          urls: "turn:" + turnHost + ":3478?transport=udp",
           username: "echo",
           credential: "chamber",
         },

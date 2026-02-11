@@ -48,6 +48,32 @@ fn load_config() -> String {
     DEFAULT_SERVER.to_string()
 }
 
+/// Clear WebView2 cache when the app version changes (prevents stale content after update)
+fn clear_cache_on_upgrade(app: &tauri::App) {
+    let version = env!("CARGO_PKG_VERSION");
+    let Ok(data_dir) = app.path().app_data_dir() else { return };
+    let _ = std::fs::create_dir_all(&data_dir);
+    let version_file = data_dir.join(".last-version");
+
+    let stored = std::fs::read_to_string(&version_file).unwrap_or_default();
+    if stored.trim() == version {
+        return; // Same version, no cache clear needed
+    }
+
+    eprintln!("[cache] Version upgrade detected ({} -> {}) — clearing WebView2 cache", stored.trim(), version);
+
+    // Delete WebView2 cache subdirectories (keeps cookies/local storage)
+    let webview_dir = data_dir.join("EBWebView").join("Default");
+    for dir_name in ["Cache", "Code Cache", "GPUCache"] {
+        let dir = webview_dir.join(dir_name);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    let _ = std::fs::write(&version_file, version);
+}
+
 #[tauri::command]
 fn get_app_info(server: tauri::State<'_, String>) -> AppInfo {
     AppInfo {
@@ -139,6 +165,9 @@ fn main() {
             stop_audio_capture,
         ])
         .setup(move |app| {
+            // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
+            clear_cache_on_upgrade(app);
+
             // Load viewer from local bundled files (frontendDist = "../viewer")
             // This makes Tauri IPC available natively — no remote URL ACL issues
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

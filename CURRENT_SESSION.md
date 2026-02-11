@@ -64,18 +64,32 @@
 - **SAM-PC limitation**: Per-process audio capture won't work. For window shares, SAM-PC must share entire screen with "Share system audio" checked instead.
 - **Files**: `core/client/src/audio_capture.rs`, `core/client/Cargo.toml`, `core/viewer/app.js`
 
+### 44. External User Connection Fix (Jeff's "engine not connected" error)
+- **Symptom**: Jeff (external, over internet) could see participants but mic publishing failed with "publishing rejected as engine not connected within timeout"
+- **Root cause 1**: LiveKit config had `use_external_ip: false` — SFU advertised LAN IP `192.168.5.70` in ICE candidates, unreachable from internet
+- **Root cause 2**: TURN URL in app.js used `window.location.hostname` which resolves to `tauri.localhost` in the native Tauri client — TURN was unreachable
+- **Fix 1**: `core/sfu/livekit.yaml` — changed `use_external_ip: false` to `use_external_ip: true` (LiveKit now uses STUN to detect and advertise public IP)
+- **Fix 2**: `core/viewer/app.js` — Extract hostname from `sfuUrl` (the actual server URL) instead of `window.location.hostname` for TURN URL construction
+- **Files**: `core/sfu/livekit.yaml`, `core/viewer/app.js`
+
+### 45. WebView2 Cache Clear on Upgrade
+- **Symptom**: Jeff had to Ctrl+Shift+R after installing v0.2.0 over v0.1.0 — stale cached content from the old remote-loading version persisted
+- **Fix**: Added `clear_cache_on_upgrade()` in `core/client/src/main.rs` — checks stored version against current version, clears WebView2 Cache/Code Cache/GPUCache directories on mismatch
+- **Impact**: Future updates will auto-clear stale cache, no manual refresh needed
+- **Files**: `core/client/src/main.rs`
+
 ### What Needs Testing
-1. **Main PC**: Launch client, connect, screen share a window → verify WASAPI works (build should be high enough)
-2. **SAM-PC**: Deploy new build, screen share → should see clear "requires build 20348" message in debug log instead of cryptic error
-3. **SAM-PC workaround**: Share entire screen with "Share system audio" checked — audio should come through
+1. **Jeff/external friends**: Re-download v0.2.0 or wait for auto-update, verify mic/camera publishing works
+2. **Main PC**: Verify everything still works locally (LAN)
+3. **Port forwarding check**: Ports 9443 TCP, 7881 TCP, 3478 UDP, 40000-40099 UDP must be forwarded on Eero
 
 ## Current Status
 
-**Debug client rebuilt** on Main PC. SAM-PC needs new release build deployed.
+**All services rebuilt and running** (control plane, SFU, client).
 
-**Control plane running.** Restarted with updated viewer files.
+**v0.2.0 release on GitHub** — friends need to re-run installer or wait for auto-update.
 
-**Key finding**: WASAPI per-process audio capture is a Windows 10 build 20348+ feature. SAM-PC (build 19045) cannot use it. Main PC should work if running a newer build. For SAM-PC, the workaround is sharing entire screen instead of a window.
+**Key fixes this session**: External users couldn't publish media because (1) LiveKit advertised LAN IP and (2) TURN URL was broken in Tauri client. Both fixed. Also added WebView2 cache clearing on upgrade.
 
 ## Previous Session Work (2026-02-09)
 See git log and previous session notes for: screen share codec fixes, noise cancellation, custom chime sounds, soundboard, avatar system, device selection, screen grid fixes, and more.
