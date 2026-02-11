@@ -6754,7 +6754,7 @@ function buildVersionSection() {
     }
   })();
 
-  // Check for updates button
+  // Check for updates button — calls Rust IPC command
   updateBtn.addEventListener("click", async function() {
     if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) {
       updateStatus.textContent = "Updates only available in native client";
@@ -6763,28 +6763,15 @@ function buildVersionSection() {
     updateBtn.disabled = true;
     updateStatus.textContent = "Checking...";
     try {
-      // Use the Tauri updater plugin JS API
-      var updaterMod = window.__TAURI__?.updater || await window.__TAURI_INTERNALS__?.invoke?.("plugin:updater|check");
-      // Fallback: invoke the Rust-side check directly
-      var check = window.__TAURI__?.updater?.check;
-      if (check) {
-        var update = await check();
-        if (update) {
-          updateStatus.textContent = "Downloading v" + update.version + "...";
-          await update.downloadAndInstall();
-          updateStatus.textContent = "Installed! Restarting...";
-          setTimeout(function() {
-            try { window.__TAURI__?.process?.relaunch(); } catch(e) {}
-          }, 1500);
-        } else {
-          updateStatus.textContent = "Up to date!";
-        }
+      var result = await tauriInvoke("check_for_updates");
+      if (result === "up_to_date") {
+        updateStatus.textContent = "You're on the latest version!";
       } else {
-        // If JS updater API not available, tell user the app checks on startup
-        updateStatus.textContent = "Auto-checks on startup. Restart app to update.";
+        // If we get here, update was found and installed — app will restart
+        updateStatus.textContent = "Installing... app will restart.";
       }
     } catch (e) {
-      updateStatus.textContent = "Error: " + (e.message || e);
+      updateStatus.textContent = "Error: " + (e.message || String(e));
     }
     updateBtn.disabled = false;
   });

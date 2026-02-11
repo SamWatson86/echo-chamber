@@ -107,6 +107,28 @@ fn get_control_url(server: tauri::State<'_, String>) -> String {
 }
 
 #[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> Result<String, String> {
+    let updater = app.updater_builder().build().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            eprintln!("[updater] manual check: update available v{}", version);
+            match update.download_and_install(|_, _| {}, || {}).await {
+                Ok(_) => {
+                    eprintln!("[updater] manual update installed, restarting...");
+                    app.restart();
+                    #[allow(unreachable_code)]
+                    Ok(format!("Updated to v{}", version))
+                }
+                Err(e) => Err(format!("Install failed: {}", e)),
+            }
+        }
+        Ok(None) => Ok("up_to_date".to_string()),
+        Err(e) => Err(format!("Check failed: {}", e)),
+    }
+}
+
+#[tauri::command]
 fn toggle_fullscreen(app: tauri::AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("window not found")?;
     let is_fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
@@ -227,6 +249,7 @@ fn main() {
             list_capturable_windows,
             start_audio_capture,
             stop_audio_capture,
+            check_for_updates,
         ])
         .setup(move |app| {
             // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
