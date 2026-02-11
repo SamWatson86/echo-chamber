@@ -68,12 +68,16 @@ Get-ChildItem $bundleDir | ForEach-Object {
 }
 
 # Generate latest.json for the Tauri updater (v2 format: .exe + .exe.sig)
-$setupExe = Get-ChildItem $bundleDir -Filter "*-setup.exe" | Select-Object -First 1
-$setupSig = Get-ChildItem $bundleDir -Filter "*-setup.exe.sig" | Select-Object -First 1
+# IMPORTANT: Filter by EXACT version to avoid picking up old installers from previous builds
+$setupExe = Get-ChildItem $bundleDir -Filter "*_${version}_*-setup.exe" | Select-Object -First 1
+$setupSig = Get-ChildItem $bundleDir -Filter "*_${version}_*-setup.exe.sig" | Select-Object -First 1
 
 if ($setupExe -and $setupSig) {
     $sig = Get-Content $setupSig.FullName -Raw
     $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    # GitHub converts spaces to dots in asset filenames
+    $ghFileName = $setupExe.Name -replace ' ', '.'
 
     $manifest = @{
         version = $version
@@ -82,7 +86,7 @@ if ($setupExe -and $setupSig) {
         platforms = @{
             "windows-x86_64" = @{
                 signature = $sig.Trim()
-                url = "https://github.com/SamWatson86/echo-chamber/releases/download/v$version/$($setupExe.Name)"
+                url = "https://github.com/SamWatson86/echo-chamber/releases/download/v$version/$ghFileName"
             }
         }
     } | ConvertTo-Json -Depth 4
@@ -90,8 +94,10 @@ if ($setupExe -and $setupSig) {
     $manifestPath = Join-Path $bundleDir "latest.json"
     Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8
     Write-Status "Update manifest written to latest.json" Green
+    Write-Status "  URL: https://github.com/SamWatson86/echo-chamber/releases/download/v$version/$ghFileName"
 } else {
-    Write-Status "Warning: Could not find .exe or .sig file for update manifest" Yellow
+    Write-Status "Warning: Could not find .exe or .sig file for version $version in $bundleDir" Yellow
+    Write-Status "  Looked for: *_${version}_*-setup.exe" Yellow
 }
 
 Write-Status ""
