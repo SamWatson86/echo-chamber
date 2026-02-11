@@ -149,11 +149,11 @@ async function enableNoiseCancellation() {
     rnnoiseCtx = new AudioContext({ sampleRate: sampleRate });
 
     // Register the RNNoise worklet
-    await rnnoiseCtx.audioWorklet.addModule("/viewer/rnnoise-processor.js");
+    await rnnoiseCtx.audioWorklet.addModule("rnnoise-processor.js");
 
     // Fetch the WASM binary (SIMD if supported)
     var simd = await detectSimdSupport();
-    var wasmUrl = simd ? "/viewer/rnnoise_simd.wasm" : "/viewer/rnnoise.wasm";
+    var wasmUrl = simd ? "rnnoise_simd.wasm" : "rnnoise.wasm";
     var wasmResp = await fetch(wasmUrl);
     var wasmBinary = await wasmResp.arrayBuffer();
 
@@ -1239,15 +1239,15 @@ async function autoDetectNativeAudio(trackLabel) {
       } catch (err) {
         var errStr = String(err);
         debugLog("[native-audio] auto-capture failed: " + errStr);
-        if (errStr.indexOf("build") !== -1) {
-          debugLog("[native-audio] This Windows version doesn't support per-process audio capture");
-          debugLog("[native-audio] Tip: Share entire screen with 'Share system audio' checked instead");
+        if (errStr.indexOf("build") !== -1 || errStr.indexOf("20348") !== -1) {
+          setStatus("Window audio requires Windows 11 — share full screen with system audio instead", true);
         } else {
-          debugLog("[native-audio] keeping system audio fallback if available");
+          setStatus("Window audio capture failed: " + errStr, true);
         }
       }
     } else {
       debugLog("[native-audio] no matching window found for track label '" + trackLabel + "'");
+      setStatus("Could not detect window audio — share full screen with system audio for best results", true);
       // Log available windows for debugging
       for (var i = 0; i < Math.min(windows.length, 10); i++) {
         debugLog("[native-audio]   available: '" + windows[i].title + "' (" + windows[i].exe_name + ") hwnd=" + windows[i].hwnd);

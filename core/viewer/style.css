@@ -682,6 +682,8 @@ video {
   top: 120px;
   right: 24px;
   width: min(340px, calc(100vw - 48px));
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
   z-index: 30;
   background: linear-gradient(168deg, rgba(30, 41, 59, calc(0.92 * var(--ui-bg-alpha, 1))) 0%, rgba(15, 23, 42, calc(0.98 * var(--ui-bg-alpha, 1))) 100%);
   backdrop-filter: blur(24px);

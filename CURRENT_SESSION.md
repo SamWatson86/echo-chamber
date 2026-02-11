@@ -130,6 +130,19 @@
 - Updated `memory/MEMORY.md` with 7 new Key Lesson bullets linking to the topic file
 - Topics: localStorage origin scoping, CSS asset URLs, adaptive bitrate, LiveKit config fields, Windows paths with spaces, NSIS settings survival, WebView2 cache persistence
 
+### 52. macOS Cross-Platform Support
+- **Goal**: Allow Sam's Mac friends to use Echo Chamber via a native macOS DMG installer
+- **Approach**: Platform guards (`#[cfg(target_os)]`) + stub module + GitHub Actions CI
+- **Changes to `core/client/src/main.rs`**:
+  - Windows-only: WebView2 browser args (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`), WebView2 cache clearing, `cmd /c start` for URL opening
+  - macOS: WKWebView cache clearing, `open` command for URLs
+  - Conditional module: `audio_capture` on Windows, `audio_capture_stub` on non-Windows
+- **New file: `core/client/src/audio_capture_stub.rs`** — No-op implementations of `list_capturable_windows`, `start_capture`, `stop_capture` for non-Windows platforms. Mac users use screen share with "Share system audio" instead.
+- **`core/client/Cargo.toml`** — Already had Windows deps gated with `[target.'cfg(windows)'.dependencies]`
+- **`core/client/tauri.conf.json`** — No changes needed. Workflow overrides with `--bundles dmg`
+- **`.github/workflows/build-macos.yml`** — New workflow: manual dispatch + tag push, builds on macOS-latest (Apple Silicon), auto-disables updater artifacts if signing key not configured
+- **Commit**: `6770f3f` — pushed to main, macOS CI workflow triggered
+
 ### What Needs Testing
 1. **Settings persistence**: Change theme, close client, reopen → theme should persist
 2. **Soundboard favorites**: Verify favorites/order persist across restarts
@@ -139,20 +152,20 @@
 
 ## Current Status
 
-**All changes are UNCOMMITTED.** Massive amount of work needs a git commit.
+**macOS support committed and CI running.** Waiting for GitHub Actions macOS build to complete.
 
-**Rust client needs rebuild** — `cargo build --workspace` in `core/` then restart control plane + client.
+**Commit `6770f3f`**: Platform guards + stub audio + macOS CI workflow pushed.
 
-**Key fixes this session**: WASAPI process loopback, persistent settings (echoGet/echoSet), ultrawide grid fix, Ultra Instinct GIF fix, upgrade lessons documented.
+**Key remaining**: Verify CI produces DMG, set up GitHub secrets for signing key (optional), test DMG on a real Mac.
 
 ## Previous Session Work (2026-02-09)
 See git log and previous session notes for: screen share codec fixes, noise cancellation, custom chime sounds, soundboard, avatar system, device selection, screen grid fixes, and more.
 
 ## Next Steps
-1. **Rebuild and test** — `cargo build --workspace` in `core/`, restart control plane + client, verify settings persist
-2. **Git commit all changes** — massive amount of uncommitted work
-3. **Reconfigure noise cancellation** — Re-enable in settings, will now persist via echoGet/echoSet
-4. **Test external user audio** — Confirm friends over WAN hear per-process window audio
+1. **Verify macOS CI** — Check that GitHub Actions produces a working DMG
+2. **Test on real Mac** — Have a Mac friend download and test the DMG
+3. **Optional: Add signing key secret** — Enables auto-updater for macOS
+4. **Optional: Apple code signing** — Removes "unidentified developer" warning ($99/year Apple Developer account)
 5. **Split app.js into modules** — currently ~6800+ lines
 
 ## Network Setup
@@ -187,4 +200,5 @@ See git log and previous session notes for: screen share codec fixes, noise canc
 4. Native audio capture auto-detects shared window — no manual selection needed
 5. WASAPI per-process audio capture is NOW WORKING (LOOPBACK flag + GetMixFormat fallback fixed)
 6. Settings now persist via `echoGet`/`echoSet` → `settings.json` in `%APPDATA%` (survives origin changes + upgrades)
-7. Next priority: rebuild, test settings persistence, git commit
+7. macOS cross-platform support added — platform guards in main.rs, stub audio module, GitHub Actions CI for DMG builds (commit `6770f3f`)
+8. Next priority: verify macOS CI produces DMG, test on a real Mac
