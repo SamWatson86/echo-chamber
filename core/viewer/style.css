@@ -3248,18 +3248,11 @@ body[data-theme="ultra-instinct"] {
   --border-hover: rgba(200, 206, 216, 0.28);
   --glass: rgba(10, 12, 18, calc(0.70 * var(--ui-bg-alpha, 1)));
   --glass-hover: rgba(14, 16, 24, calc(0.88 * var(--ui-bg-alpha, 1)));
-  background: #080a12;
-}
-
-/* Animated GIF background */
-body[data-theme="ultra-instinct"]::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: -1;
-  background: url('ultrainstinct.gif') center center / cover no-repeat;
-  opacity: 0.45;
+  /* GIF layered directly on body — dark overlay (55% opacity) dims the GIF to ~45% visibility */
+  background:
+    linear-gradient(rgba(8, 10, 18, 0.55), rgba(8, 10, 18, 0.55)),
+    url('ultrainstinct.gif') center center / cover no-repeat,
+    #080a12;
 }
 
 /* Sparkle particle overlay canvas */
