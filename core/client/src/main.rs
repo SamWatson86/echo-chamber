@@ -1,7 +1,12 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "windows")]
 mod audio_capture;
+#[cfg(not(target_os = "windows"))]
+mod audio_capture_stub;
+#[cfg(not(target_os = "windows"))]
+use audio_capture_stub as audio_capture;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -48,7 +53,7 @@ fn load_config() -> String {
     DEFAULT_SERVER.to_string()
 }
 
-/// Clear WebView2 cache when the app version changes (prevents stale content after update)
+/// Clear webview cache when the app version changes (prevents stale content after update)
 fn clear_cache_on_upgrade(app: &tauri::App) {
     let version = env!("CARGO_PKG_VERSION");
     let Ok(data_dir) = app.path().app_data_dir() else { return };
@@ -60,14 +65,26 @@ fn clear_cache_on_upgrade(app: &tauri::App) {
         return; // Same version, no cache clear needed
     }
 
-    eprintln!("[cache] Version upgrade detected ({} -> {}) — clearing WebView2 cache", stored.trim(), version);
+    eprintln!("[cache] Version upgrade detected ({} -> {}) — clearing webview cache", stored.trim(), version);
 
-    // Delete WebView2 cache subdirectories (keeps cookies/local storage)
-    let webview_dir = data_dir.join("EBWebView").join("Default");
-    for dir_name in ["Cache", "Code Cache", "GPUCache"] {
-        let dir = webview_dir.join(dir_name);
-        if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+    // Windows: WebView2 stores cache under EBWebView/Default/
+    #[cfg(target_os = "windows")]
+    {
+        let webview_dir = data_dir.join("EBWebView").join("Default");
+        for dir_name in ["Cache", "Code Cache", "GPUCache"] {
+            let dir = webview_dir.join(dir_name);
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    // macOS: WKWebView stores cache under WebKit/
+    #[cfg(target_os = "macos")]
+    {
+        let webkit_dir = data_dir.join("WebKit");
+        if webkit_dir.exists() {
+            let _ = std::fs::remove_dir_all(&webkit_dir);
         }
     }
 
@@ -160,20 +177,33 @@ fn open_external_url(url: String) -> Result<(), String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Only http/https URLs allowed".to_string());
     }
-    std::process::Command::new("cmd")
-        .args(["/c", "start", "", &url])
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
 fn main() {
-    // WebView2 browser arguments:
-    // --ignore-certificate-errors: Accept self-signed TLS cert
-    // --enable-features=AcceleratedVideoEncoder: Enable GPU hardware video encoding (NVENC on NVIDIA)
-    // --ignore-gpu-blocklist: Force GPU acceleration even if driver is blocklisted
-    // --webrtc-max-cpu-consumption-percentage=100: Allow WebRTC full CPU for encoding
-    // --force-fieldtrials: Tune WebRTC BWE for faster ramp-up
+    // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
+    #[cfg(target_os = "windows")]
     unsafe {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
