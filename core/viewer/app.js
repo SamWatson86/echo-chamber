@@ -1012,6 +1012,7 @@ async function startScreenShareManual() {
         // Get BWE + ICE candidate info from sender stats
         let bwe = "?";
         let iceInfo = "";
+        let lType = "?", rType = "?";
         const stats = await sender.getStats();
         const candidateMap = new Map();
         stats.forEach((report) => {
@@ -1024,8 +1025,8 @@ async function startScreenShareManual() {
             bwe = Math.round((report.availableOutgoingBitrate || 0) / 1000);
             const local = candidateMap.get(report.localCandidateId);
             const remote = candidateMap.get(report.remoteCandidateId);
-            const lType = local?.candidateType || "?";
-            const rType = remote?.candidateType || "?";
+            lType = local?.candidateType || "?";
+            rType = remote?.candidateType || "?";
             const lAddr = local ? `${local.address}:${local.port}` : "?";
             const rAddr = remote ? `${remote.address}:${remote.port}` : "?";
             iceInfo = `ice=${lType}->${rType} ${lAddr}->${rAddr}`;
@@ -1046,6 +1047,25 @@ async function startScreenShareManual() {
             const codec = report.encoderImplementation || "unknown";
             const limit = report.qualityLimitationReason || "none";
             debugLog(`Screen: ${fps}fps ${w}x${h} ${kbps}kbps bwe=${bwe}kbps codec=${codec} limit=${limit} ${iceInfo}`);
+
+            // Report stats to admin dashboard
+            if (adminToken && _echoServerUrl) {
+              fetch(apiUrl("/admin/api/stats"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
+                body: JSON.stringify({
+                  identity: room?.localParticipant?.identity || "",
+                  name: room?.localParticipant?.name || "",
+                  room: currentRoomName || "",
+                  screen_fps: fps, screen_width: w, screen_height: h,
+                  screen_bitrate_kbps: kbps,
+                  bwe_kbps: typeof bwe === "number" ? bwe : null,
+                  quality_limitation: limit, encoder: codec,
+                  ice_local_type: lType !== "?" ? lType : null,
+                  ice_remote_type: rType !== "?" ? rType : null,
+                }),
+              }).catch(() => {});
+            }
 
             // Adaptive camera quality: reduce camera when bandwidth-constrained during screen share
             if (limit === "bandwidth" || fps === 0) {

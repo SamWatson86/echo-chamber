@@ -41,6 +41,9 @@ struct AppState {
     avatars_dir: PathBuf,
     chimes: Arc<Mutex<HashMap<String, ChimeEntry>>>,  // key: "identityBase-enter" or "identityBase-exit"
     chimes_dir: PathBuf,
+    client_stats: Arc<Mutex<HashMap<String, ClientStats>>>,
+    joined_at: Arc<Mutex<HashMap<String, u64>>>,       // identity -> join timestamp
+    session_log_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -49,6 +52,51 @@ struct ParticipantEntry {
     name: String,
     room_id: String,
     last_seen: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SessionEvent {
+    event_type: String,      // "join" or "leave"
+    identity: String,
+    name: String,
+    room_id: String,
+    timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct ClientStats {
+    identity: String,
+    name: String,
+    room: String,
+    updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_bitrate_kbps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bwe_kbps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quality_limitation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ice_local_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ice_remote_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    camera_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -359,6 +407,15 @@ async fn main() {
         }
     }
 
+    let session_log_dir = std::env::var("CORE_SESSION_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let base = avatars_dir.parent().unwrap_or(std::path::Path::new("."));
+            base.parent().unwrap_or(base).join("logs").join("sessions")
+        });
+    fs::create_dir_all(&session_log_dir).ok();
+    info!("session log dir: {:?}", session_log_dir);
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -369,21 +426,59 @@ async fn main() {
         avatars_dir,
         chimes: Arc::new(Mutex::new(existing_chimes)),
         chimes_dir,
+        client_stats: Arc::new(Mutex::new(HashMap::new())),
+        joined_at: Arc::new(Mutex::new(HashMap::new())),
+        session_log_dir: session_log_dir.clone(),
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
     {
         let participants = state.participants.clone();
+        let joined_at = state.joined_at.clone();
+        let client_stats = state.client_stats.clone();
+        let session_log_dir = state.session_log_dir.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                let mut map = participants.lock().unwrap_or_else(|e| e.into_inner());
-                let before = map.len();
-                map.retain(|_, p| now.saturating_sub(p.last_seen) < 20);
-                let removed = before - map.len();
-                if removed > 0 {
-                    info!("cleaned up {} stale participant(s)", removed);
+                let removed_entries: Vec<ParticipantEntry>;
+                {
+                    let mut map = participants.lock().unwrap_or_else(|e| e.into_inner());
+                    let before = map.len();
+                    let mut removed = Vec::new();
+                    map.retain(|_, p| {
+                        if now.saturating_sub(p.last_seen) >= 20 {
+                            removed.push(p.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    removed_entries = removed;
+                    if before - map.len() > 0 {
+                        info!("cleaned up {} stale participant(s)", before - map.len());
+                    }
+                }
+                // Log leave events for cleaned-up participants
+                for entry in &removed_entries {
+                    let join_time = {
+                        let mut ja = joined_at.lock().unwrap_or_else(|e| e.into_inner());
+                        ja.remove(&entry.identity)
+                    };
+                    {
+                        let mut cs = client_stats.lock().unwrap_or_else(|e| e.into_inner());
+                        cs.remove(&entry.identity);
+                    }
+                    let duration = join_time.map(|jt| now.saturating_sub(jt));
+                    let event = SessionEvent {
+                        event_type: "leave".to_string(),
+                        identity: entry.identity.clone(),
+                        name: entry.name.clone(),
+                        room_id: entry.room_id.clone(),
+                        timestamp: now,
+                        duration_secs: duration,
+                    };
+                    append_session_event(&session_log_dir, &event);
                 }
             }
         });
@@ -392,9 +487,16 @@ async fn main() {
     let viewer_dir = resolve_viewer_dir();
     info!("viewer dir: {:?}", viewer_dir);
 
+    let admin_dir = resolve_admin_dir();
+    info!("admin dir: {:?}", admin_dir);
+
     let app = Router::new()
         .route("/", get(root_route))
         .nest_service("/viewer", ServeDir::new(viewer_dir))
+        .route("/admin/api/dashboard", get(admin_dashboard))
+        .route("/admin/api/sessions", get(admin_sessions))
+        .route("/admin/api/stats", post(admin_report_stats))
+        .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
         .route("/sfu/rtc", get(sfu_proxy))
@@ -527,6 +629,26 @@ fn resolve_viewer_dir() -> PathBuf {
         return current.join("core").join("viewer");
     }
     PathBuf::from("viewer")
+}
+
+fn resolve_admin_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ECHO_CORE_ADMIN_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(current) = std::env::current_dir() {
+        if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
+            if name.eq_ignore_ascii_case("control") {
+                if let Some(parent) = current.parent() {
+                    return parent.join("admin");
+                }
+            }
+            if name.eq_ignore_ascii_case("core") {
+                return current.join("admin");
+            }
+        }
+        return current.join("core").join("admin");
+    }
+    PathBuf::from("admin")
 }
 
 async fn sfu_proxy(ws: WebSocketUpgrade, uri: OriginalUri, headers: HeaderMap) -> impl IntoResponse {
@@ -848,6 +970,26 @@ async fn participant_heartbeat(
             last_seen: now,
         });
     }
+    drop(participants);
+
+    // Detect first heartbeat = join event
+    {
+        let mut ja = state.joined_at.lock().unwrap_or_else(|e| e.into_inner());
+        if !ja.contains_key(&payload.identity) {
+            ja.insert(payload.identity.clone(), now);
+            let event = SessionEvent {
+                event_type: "join".to_string(),
+                identity: payload.identity.clone(),
+                name: payload.name.clone().unwrap_or_default(),
+                room_id: payload.room.clone(),
+                timestamp: now,
+                duration_secs: None,
+            };
+            append_session_event(&state.session_log_dir, &event);
+            info!("session: {} ({}) joined {}", payload.identity, payload.name.clone().unwrap_or_default(), payload.room);
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -857,6 +999,35 @@ async fn participant_leave(
     Json(payload): Json<ParticipantLeaveRequest>,
 ) -> Result<StatusCode, StatusCode> {
     ensure_admin(&state, &headers)?;
+
+    // Log leave event
+    let now = now_ts();
+    {
+        let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = participants.get(&payload.identity) {
+            let join_time = {
+                let mut ja = state.joined_at.lock().unwrap_or_else(|e| e.into_inner());
+                ja.remove(&payload.identity)
+            };
+            let duration = join_time.map(|jt| now.saturating_sub(jt));
+            let event = SessionEvent {
+                event_type: "leave".to_string(),
+                identity: entry.identity.clone(),
+                name: entry.name.clone(),
+                room_id: entry.room_id.clone(),
+                timestamp: now,
+                duration_secs: duration,
+            };
+            append_session_event(&state.session_log_dir, &event);
+            info!("session: {} ({}) left {}", entry.identity, entry.name, entry.room_id);
+        }
+    }
+    // Also remove client stats
+    {
+        let mut cs = state.client_stats.lock().unwrap_or_else(|e| e.into_inner());
+        cs.remove(&payload.identity);
+    }
+
     let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     participants.remove(&payload.identity);
     Ok(StatusCode::NO_CONTENT)
@@ -869,6 +1040,114 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Result<Js
         rooms: rooms.len() as u64,
         ts: now_ts(),
     }))
+}
+
+// ---- Admin Dashboard API ----
+
+#[derive(Serialize)]
+struct AdminDashboardResponse {
+    ts: u64,
+    rooms: Vec<AdminRoomInfo>,
+    total_online: usize,
+}
+
+#[derive(Serialize)]
+struct AdminRoomInfo {
+    room_id: String,
+    participants: Vec<AdminParticipantInfo>,
+}
+
+#[derive(Serialize)]
+struct AdminParticipantInfo {
+    identity: String,
+    name: String,
+    online_seconds: u64,
+    stats: Option<ClientStats>,
+}
+
+async fn admin_dashboard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminDashboardResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let now = now_ts();
+    let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+    let joined_at = state.joined_at.lock().unwrap_or_else(|e| e.into_inner());
+    let client_stats = state.client_stats.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Group participants by room
+    let mut room_map: HashMap<String, Vec<AdminParticipantInfo>> = HashMap::new();
+    for (_, p) in participants.iter() {
+        let join_time = joined_at.get(&p.identity).copied().unwrap_or(p.last_seen);
+        let online_secs = now.saturating_sub(join_time);
+        let stats = client_stats.get(&p.identity).cloned();
+        let info = AdminParticipantInfo {
+            identity: p.identity.clone(),
+            name: p.name.clone(),
+            online_seconds: online_secs,
+            stats,
+        };
+        room_map.entry(p.room_id.clone()).or_default().push(info);
+    }
+
+    let total = participants.len();
+    let rooms: Vec<AdminRoomInfo> = room_map.into_iter()
+        .map(|(room_id, participants)| AdminRoomInfo { room_id, participants })
+        .collect();
+
+    Ok(Json(AdminDashboardResponse {
+        ts: now,
+        rooms,
+        total_online: total,
+    }))
+}
+
+#[derive(Serialize)]
+struct AdminSessionsResponse {
+    events: Vec<SessionEvent>,
+}
+
+async fn admin_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminSessionsResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    // Read today's and yesterday's session logs
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let today_days = now / 86400;
+    let mut all_events = Vec::new();
+
+    for offset in [0, 1] {
+        let days = today_days - offset;
+        let (year, month, day) = epoch_days_to_date(days);
+        let file_name = format!("sessions-{:04}-{:02}-{:02}.json", year, month, day);
+        let file_path = state.session_log_dir.join(&file_name);
+        if let Ok(data) = fs::read_to_string(&file_path) {
+            if let Ok(events) = serde_json::from_str::<Vec<SessionEvent>>(&data) {
+                all_events.extend(events);
+            }
+        }
+    }
+
+    // Sort by timestamp descending (most recent first), limit to 200
+    all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    all_events.truncate(200);
+
+    Ok(Json(AdminSessionsResponse { events: all_events }))
+}
+
+async fn admin_report_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ClientStats>,
+) -> Result<StatusCode, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let mut stats = state.client_stats.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entry = payload;
+    entry.updated_at = now_ts();
+    stats.insert(entry.identity.clone(), entry);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn soundboard_list(
@@ -1677,4 +1956,58 @@ fn default_soundboard_icon() -> String {
 
 fn default_soundboard_volume() -> u16 {
     100
+}
+
+fn append_session_event(dir: &std::path::Path, event: &SessionEvent) {
+    // File per day: sessions-YYYY-MM-DD.json
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let days_since_epoch = now / 86400;
+    // Calculate date from epoch days
+    let (year, month, day) = epoch_days_to_date(days_since_epoch);
+    let file_name = format!("sessions-{:04}-{:02}-{:02}.json", year, month, day);
+    let file_path = dir.join(&file_name);
+
+    // Read existing events, append, write back
+    let mut events: Vec<SessionEvent> = if let Ok(data) = fs::read_to_string(&file_path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    events.push(event.clone());
+
+    if let Ok(json) = serde_json::to_string_pretty(&events) {
+        let _ = fs::write(&file_path, json);
+    }
+}
+
+fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
+    // Simplified date calculation from Unix epoch days
+    let mut y: i64 = 1970;
+    let mut remaining = days as i64;
+    loop {
+        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let month_days = if is_leap_year(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 0;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining < md as i64 {
+            m = i;
+            break;
+        }
+        remaining -= md as i64;
+    }
+    (y as u64, (m + 1) as u64, (remaining + 1) as u64)
+}
+
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Echo Chamber Admin</title>
+  <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+
+  <!-- Login -->
+  <section id="login-section" class="login-section">
+    <div class="login-card">
+      <h1 class="login-title">ECHO CHAMBER</h1>
+      <p class="login-subtitle">Admin Dashboard</p>
+      <form id="login-form" autocomplete="off">
+        <input type="password" id="password-input" placeholder="Enter admin password" autocomplete="current-password">
+        <button type="submit" id="login-btn">Login</button>
+        <p id="login-error" class="login-error"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- Dashboard -->
+  <section id="dashboard-section" class="dashboard-section" style="display:none;">
+    <header class="dash-header">
+      <h1 class="dash-title">ECHO CHAMBER ADMIN</h1>
+      <div class="dash-meta">
+        <span id="online-count" class="online-badge">0 online</span>
+        <span id="refresh-indicator" class="refresh-indicator" title="Auto-refreshing every 3s">&#9679; LIVE</span>
+        <span id="conn-status" class="conn-status"></span>
+      </div>
+    </header>
+
+    <h2 class="section-title">LIVE</h2>
+    <div id="rooms-container" class="rooms-container"></div>
+
+    <h2 class="section-title">SESSION HISTORY</h2>
+    <div class="history-wrap">
+      <table id="history-table" class="history-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Event</th>
+            <th>User</th>
+            <th>Room</th>
+            <th>Duration</th>
+          </tr>
+        </thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <script src="/admin/admin.js"></script>
+</body>
+</html>
