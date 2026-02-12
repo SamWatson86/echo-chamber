@@ -896,14 +896,6 @@ async function startScreenShareManual() {
       let cw = _offVideo.videoWidth || settings.width || 1920;
       let ch = _offVideo.videoHeight || settings.height || 1080;
       debugLog("Canvas pipeline: source dimensions " + cw + "x" + ch + " (ratio " + (cw/ch).toFixed(2) + ")");
-      // Cap resolution to 1920px wide — ultrawides (3440x1392) need too much bandwidth
-      const MAX_SCREEN_WIDTH = 1920;
-      if (cw > MAX_SCREEN_WIDTH) {
-        const scale = MAX_SCREEN_WIDTH / cw;
-        cw = MAX_SCREEN_WIDTH;
-        ch = Math.round(ch * scale);
-        debugLog("Canvas pipeline: downscaled to " + cw + "x" + ch + " to reduce bandwidth");
-      }
       const _offCanvas = document.createElement("canvas");
       _offCanvas.width = cw;
       _offCanvas.height = ch;
