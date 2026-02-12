@@ -18,6 +18,7 @@
 - **Admin Dashboard built and deployed** — Local-only admin page at `/admin` with login, live room/participant stats, and persistent session history
 - **Average streaming metrics** — Per-user trending (avg fps, bitrate, % bandwidth/CPU limited) in admin dashboard
 - **Bug report system** — "Report Bug" button in Tauri client, auto-captures WebRTC stats, persists to daily JSON logs
+- **Jam Session feature** — Communal Spotify music listening with search, queue, and opt-in listeners via WASAPI audio capture
 - **Previous work (v0.2.5 through v0.2.9)**: Avatar URL fix, screen share bitrate tuning, Jeff/Brad quality diagnostics
 
 ### 62. Admin Dashboard (commit `04c8927`)
@@ -50,6 +51,20 @@
 - **Admin dashboard**: New BUG REPORTS section shows reports with inline stats chips (fps, bitrate, quality badges, ICE type)
 - **Requires client rebuild** for bug report button (friends get it on next version bump)
 
+### 65. Jam Session Feature (commit `209685e`)
+- **Feature**: Communal Spotify music listening — Sam's Spotify plays, WASAPI captures audio, LiveKit streams to all opted-in listeners
+- **Architecture**: Spotify Web API (PKCE auth) for search/queue/playback control, WASAPI per-process capture for Spotify.exe audio
+- **Spotify OAuth**: Server-side PKCE flow with auto token refresh. Redirect to `https://127.0.0.1:9443/api/jam/spotify-callback`
+- **12 new API endpoints**: `spotify-init`, `spotify-callback`, `spotify-code`, `spotify-token`, `start`, `stop`, `state`, `search`, `queue`, `skip`, `join`, `leave` — all under `/api/jam/`
+- **Jam panel UI**: "Jam" button in sidebar, opens frosted glass panel with Spotify connect, Start/End Jam, Now Playing bar (album art + track info + progress), Search with results, Queue, Join/Leave toggle, Volume slider
+- **WASAPI conflict guard**: Jam takes priority — screen share falls back to getDisplayMedia audio while Jam is active
+- **Receiver routing**: Jam audio published with `name: "jam-audio"`, intercepted in `handleTrackSubscribed` and routed to separate audio element with independent volume control
+- **Data channel notifications**: "Sam started a Jam Session!" / "Jam Session ended" toasts via LiveKit data channel
+- **New files**: `core/viewer/jam.js` (~450 lines), `core/viewer/jam.css` (~280 lines)
+- **Modified files**: `core/control/src/main.rs` (+562 lines), `core/viewer/app.js` (+42 lines), `core/viewer/index.html` (+46 lines), `core/control/Cargo.toml` (+reqwest)
+- **One-time setup needed**: Sam must create Spotify Developer App, add `SPOTIFY_CLIENT_ID` to `.env`
+- **Requires client rebuild** for Jam button (friends get it on next version bump)
+
 ### Previous Work (v0.2.5 through v0.2.9)
 - **Auto-updater BOM fix** (v0.2.4) — PowerShell BOM breaking JSON parse
 - **Brad's 0fps diagnosis** — Discord bandwidth split + TURN relay overhead
@@ -64,13 +79,22 @@
 
 **All code committed and pushed to main.**
 
-Admin dashboard is live at `https://127.0.0.1:9443/admin` with 4 sections: LIVE, METRICS, SESSION HISTORY, BUG REPORTS. All API endpoints verified working (200s, zero console errors).
+Jam Session feature built and verified. Jam panel opens in browser viewer with frosted glass styling. All 12 Jam API endpoints return 200. Zero console errors. Requires Spotify Developer App setup before live testing.
 
 ## What Needs Testing
-1. **Metrics with live users**: Screen share for 30+ seconds → verify METRICS table populates with avg fps, bitrate, % limited
-2. **Bug report from client**: Click "Report Bug" in Tauri client → verify report appears in admin dashboard BUG REPORTS section
-3. **Bug report persistence**: Check `core/logs/bugs/` for daily JSON file after submitting a report
-3. **Stats reporting from multiple users**: Have a friend join → verify their stats also appear (requires friends to be on latest client with stats reporting code)
+1. **Spotify OAuth flow**: Create Spotify Developer App → add Client ID to `.env` → click "Connect Spotify" → authorize → verify "Connected" status
+2. **Spotify search**: Type song name → results appear with album art, title, artist
+3. **Start Jam + WASAPI capture**: Open Spotify, play music → click "Start Jam" → verify audio captured and published
+4. **Listener opt-in**: Second client clicks "Join Jam" → hears music → "Leave Jam" → music stops
+5. **Queue management**: Add songs → queue displays → Skip advances
+6. **Screen share coexistence**: Start Jam → start screen share → verify screen share uses getDisplayMedia audio (not WASAPI)
+7. **Data channel toasts**: Start Jam → all clients see "Sam started a Jam Session!" notification
+
+## Setup Required for Jam Session
+1. Go to https://developer.spotify.com/dashboard
+2. Create app (name: "Echo Chamber", redirect URI: `https://127.0.0.1:9443/api/jam/spotify-callback`)
+3. Copy Client ID → add to `core/control/.env`: `SPOTIFY_CLIENT_ID=your_client_id_here`
+4. Restart control plane to pick up new env var
 
 ## Architecture Reference
 
