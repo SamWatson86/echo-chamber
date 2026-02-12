@@ -12,9 +12,13 @@ const onlineCount = $('online-count');
 const connStatus = $('conn-status');
 const roomsContainer = $('rooms-container');
 const historyBody = $('history-body');
+const metricsBody = $('metrics-body');
+const bugsBody = $('bugs-body');
 
 let dashTimer = null;
 let histTimer = null;
+let metricsTimer = null;
+let bugsTimer = null;
 
 // ── Helpers ──
 
@@ -102,12 +106,18 @@ function showDashboard() {
   fetchHistory();
   dashTimer = setInterval(fetchDashboard, 3000);
   histTimer = setInterval(fetchHistory, 30000);
+  fetchMetrics();
+  fetchBugs();
+  metricsTimer = setInterval(fetchMetrics, 30000);
+  bugsTimer = setInterval(fetchBugs, 30000);
 }
 
 function showLogin() {
   clearToken();
   clearInterval(dashTimer);
   clearInterval(histTimer);
+  clearInterval(metricsTimer);
+  clearInterval(bugsTimer);
   dashSection.style.display = 'none';
   loginSection.style.display = 'flex';
   passInput.value = '';
@@ -221,6 +231,82 @@ function renderHistory(data) {
       <td>${esc(ev.name || ev.identity)}</td>
       <td>${esc(ev.room_id)}</td>
       <td>${dur}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Metrics ──
+
+async function fetchMetrics() {
+  try {
+    const res = await fetch(apiUrl('/admin/api/metrics'), { headers: authHeaders() });
+    if (res.status === 401) { showLogin(); return; }
+    if (!res.ok) throw new Error(res.status);
+    renderMetrics(await res.json());
+  } catch { /* silent */ }
+}
+
+function renderMetrics(data) {
+  const users = data.users || [];
+  if (users.length === 0) {
+    metricsBody.innerHTML = '<tr class="metrics-empty"><td colspan="6">No metrics data yet</td></tr>';
+    return;
+  }
+  metricsBody.innerHTML = users.map(u => {
+    const bwClass = u.pct_bandwidth_limited > 20 ? 'metric-bad' : u.pct_bandwidth_limited > 5 ? 'metric-warn' : '';
+    const cpuClass = u.pct_cpu_limited > 20 ? 'metric-bad' : u.pct_cpu_limited > 5 ? 'metric-warn' : '';
+    const fpsClass = u.avg_fps > 0 && u.avg_fps < 30 ? 'metric-warn' : '';
+    return `<tr>
+      <td>${esc(u.name || u.identity)}</td>
+      <td class="${fpsClass}">${u.avg_fps}</td>
+      <td>${(u.avg_bitrate_kbps / 1000).toFixed(1)} Mbps</td>
+      <td>${u.total_minutes.toFixed(1)}m</td>
+      <td class="${bwClass}">${u.pct_bandwidth_limited}%</td>
+      <td class="${cpuClass}">${u.pct_cpu_limited}%</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Bug Reports ──
+
+async function fetchBugs() {
+  try {
+    const res = await fetch(apiUrl('/admin/api/bugs'), { headers: authHeaders() });
+    if (res.status === 401) { showLogin(); return; }
+    if (!res.ok) throw new Error(res.status);
+    renderBugs(await res.json());
+  } catch { /* silent */ }
+}
+
+function renderBugs(data) {
+  const reports = data.reports || [];
+  if (reports.length === 0) {
+    bugsBody.innerHTML = '<tr class="bugs-empty"><td colspan="4">No bug reports</td></tr>';
+    return;
+  }
+  bugsBody.innerHTML = reports.map(r => {
+    let statsChips = '';
+    if (r.screen_fps != null) {
+      statsChips += `<span class="stat-chip">${r.screen_fps}fps</span> `;
+    }
+    if (r.screen_bitrate_kbps != null) {
+      statsChips += `<span class="stat-chip">${(r.screen_bitrate_kbps / 1000).toFixed(1)}Mbps</span> `;
+    }
+    if (r.quality_limitation && r.quality_limitation !== 'none') {
+      statsChips += qualBadge(r.quality_limitation) + ' ';
+    }
+    if (r.encoder) {
+      statsChips += `<span class="stat-chip encoder">${esc(r.encoder)}</span> `;
+    }
+    if (r.ice_remote_type) {
+      statsChips += `<span class="badge ${iceClass(r.ice_remote_type)}">${r.ice_remote_type}</span>`;
+    }
+    if (!statsChips) statsChips = '<span class="no-media">No stats</span>';
+    return `<tr>
+      <td>${formatTime(r.timestamp)}</td>
+      <td>${esc(r.name || r.identity)}</td>
+      <td class="bug-desc">${esc(r.description)}</td>
+      <td class="bug-stats">${statsChips}</td>
     </tr>`;
   }).join('');
 }

@@ -324,6 +324,7 @@ let selectedMicId = "";
 let selectedCamId = "";
 let selectedSpeakerId = "";
 let adminToken = "";
+let _latestScreenStats = null;
 let currentRoomName = "main";
 let currentAccessToken = "";
 const IDENTITY_SUFFIX_KEY = "echo-core-identity-suffix";
@@ -1047,6 +1048,15 @@ async function startScreenShareManual() {
             const codec = report.encoderImplementation || "unknown";
             const limit = report.qualityLimitationReason || "none";
             debugLog(`Screen: ${fps}fps ${w}x${h} ${kbps}kbps bwe=${bwe}kbps codec=${codec} limit=${limit} ${iceInfo}`);
+
+            _latestScreenStats = {
+              screen_fps: fps, screen_width: w, screen_height: h,
+              screen_bitrate_kbps: kbps,
+              bwe_kbps: typeof bwe === "number" ? bwe : null,
+              quality_limitation: limit, encoder: codec,
+              ice_local_type: lType !== "?" ? lType : null,
+              ice_remote_type: rType !== "?" ? rType : null,
+            };
 
             // Report stats to admin dashboard
             if (adminToken && _echoServerUrl) {
@@ -5308,6 +5318,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (openSoundboardButton) openSoundboardButton.disabled = false;
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = false;
   if (openChatButton) openChatButton.disabled = false;
+  if (bugReportBtn) bugReportBtn.disabled = false;
   if (toggleRoomAudioButton) {
     toggleRoomAudioButton.disabled = false;
     setRoomAudioMutedState(false);
@@ -5487,6 +5498,8 @@ async function disconnect() {
   if (openSoundboardButton) openSoundboardButton.disabled = true;
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = true;
   if (openChatButton) openChatButton.disabled = true;
+  if (bugReportBtn) bugReportBtn.disabled = true;
+  _latestScreenStats = null;
   if (toggleRoomAudioButton) toggleRoomAudioButton.disabled = true;
   if (openSettingsButton) openSettingsButton.disabled = true;
   if (deviceActionsEl && deviceActionsHome) {
@@ -7111,6 +7124,97 @@ applyUiOpacity(parseInt(echoGet(UI_OPACITY_KEY) || "100", 10));
 if (uiOpacitySlider) {
   uiOpacitySlider.addEventListener("input", (e) => {
     applyUiOpacity(parseInt(e.target.value, 10));
+  });
+}
+
+// ── Bug Report ──
+
+var bugReportBtn = document.getElementById("open-bug-report");
+var bugReportModal = document.getElementById("bug-report-modal");
+var bugReportDesc = document.getElementById("bug-report-desc");
+var bugReportStatsEl = document.getElementById("bug-report-stats");
+var bugReportStatusEl = document.getElementById("bug-report-status");
+var submitBugReportBtn = document.getElementById("submit-bug-report");
+var closeBugReportBtn = document.getElementById("close-bug-report");
+
+function openBugReport() {
+  if (!bugReportModal) return;
+  bugReportModal.classList.remove("hidden");
+  if (bugReportDesc) bugReportDesc.value = "";
+  if (bugReportStatusEl) bugReportStatusEl.textContent = "";
+  if (bugReportStatsEl) {
+    if (_latestScreenStats) {
+      var s = _latestScreenStats;
+      bugReportStatsEl.innerHTML =
+        '<div class="bug-stats-preview">Auto-captured: ' + (s.screen_fps || 0) + 'fps ' +
+        (s.screen_width || 0) + 'x' + (s.screen_height || 0) + ' ' +
+        ((s.screen_bitrate_kbps || 0) / 1000).toFixed(1) + 'Mbps ' +
+        'BWE=' + ((s.bwe_kbps || 0) / 1000).toFixed(1) + 'Mbps ' +
+        (s.encoder || '?') + ' ' + (s.quality_limitation || 'none') + '</div>';
+    } else {
+      bugReportStatsEl.innerHTML = '<div class="bug-stats-preview">No active screen share stats</div>';
+    }
+  }
+  if (bugReportDesc) bugReportDesc.focus();
+}
+
+function closeBugReportModal() {
+  if (bugReportModal) bugReportModal.classList.add("hidden");
+}
+
+async function sendBugReport() {
+  if (!bugReportDesc) return;
+  var desc = bugReportDesc.value.trim();
+  if (!desc) {
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Please describe the issue.";
+    return;
+  }
+  var token = adminToken;
+  if (!token) {
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Not connected.";
+    return;
+  }
+  var payload = { description: desc, room: currentRoomName || "" };
+  if (_latestScreenStats) {
+    Object.assign(payload, _latestScreenStats);
+  }
+  try {
+    if (submitBugReportBtn) submitBugReportBtn.disabled = true;
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Sending...";
+    var res = await fetch(apiUrl("/api/bug-report"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Report sent! Thank you.";
+      bugReportDesc.value = "";
+      setTimeout(closeBugReportModal, 1500);
+    } else {
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Failed (status " + res.status + ")";
+    }
+  } catch (e) {
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Error: " + e.message;
+  } finally {
+    if (submitBugReportBtn) submitBugReportBtn.disabled = false;
+  }
+}
+
+if (bugReportBtn) {
+  bugReportBtn.addEventListener("click", openBugReport);
+}
+if (closeBugReportBtn) {
+  closeBugReportBtn.addEventListener("click", closeBugReportModal);
+}
+if (submitBugReportBtn) {
+  submitBugReportBtn.addEventListener("click", sendBugReport);
+}
+if (bugReportDesc) {
+  bugReportDesc.addEventListener("keydown", function(e) {
+    if (e.key === "Enter" && e.ctrlKey) {
+      e.preventDefault();
+      sendBugReport();
+    }
   });
 }
 

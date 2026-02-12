@@ -100,6 +100,7 @@
                   <button id="open-soundboard" type="button" disabled>Soundboard</button>
                   <button id="open-camera-lobby" type="button" disabled>Camera Lobby</button>
                   <button id="open-theme" type="button">Theme</button>
+  <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Report Bug</button>
                 </div>
               </div>
             </div>
@@ -256,6 +257,22 @@
           </div>
         </div>
       </div>
+  <div id="bug-report-modal" class="bug-report-modal hidden" role="dialog" aria-label="Bug Report">
+    <div class="bug-report-content">
+      <div class="bug-report-header">
+        <h3>Report a Bug</h3>
+        <button id="close-bug-report" type="button">Close</button>
+      </div>
+      <div class="bug-report-body">
+        <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Describe what happened..." rows="4" maxlength="1000"></textarea>
+        <div id="bug-report-stats" class="bug-report-stats"></div>
+        <div class="bug-report-actions">
+          <button id="submit-bug-report" type="button">Send Report</button>
+        </div>
+        <div id="bug-report-status" class="bug-report-status"></div>
+      </div>
+    </div>
+  </div>
     </main>
     <div id="debug-panel" class="debug-panel hidden">
       <div class="debug-panel-header">

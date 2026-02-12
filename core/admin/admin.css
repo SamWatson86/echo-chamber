@@ -376,6 +376,119 @@ body {
   font-style: italic;
 }
 
+/* ── Metrics ── */
+.metrics-wrap {
+  background: var(--panel);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.metrics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.metrics-table th {
+  text-align: left;
+  padding: 12px 16px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--muted);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+
+.metrics-table td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.metrics-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.metrics-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.metric-warn {
+  color: #eab308;
+}
+
+.metric-bad {
+  color: #ef4444;
+}
+
+.metrics-empty td {
+  text-align: center;
+  color: var(--muted);
+  padding: 24px;
+  font-style: italic;
+}
+
+/* ── Bug Reports ── */
+.bugs-wrap {
+  background: var(--panel);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.bugs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.bugs-table th {
+  text-align: left;
+  padding: 12px 16px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--muted);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+}
+
+.bugs-table td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.bugs-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.bugs-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.bug-desc {
+  max-width: 400px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bug-stats {
+  white-space: nowrap;
+}
+
+.bugs-empty td {
+  text-align: center;
+  color: var(--muted);
+  padding: 24px;
+  font-style: italic;
+}
+
 /* ── Responsive ── */
 @media (max-width: 640px) {
   .dashboard-section {

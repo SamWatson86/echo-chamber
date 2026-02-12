@@ -44,6 +44,9 @@ struct AppState {
     client_stats: Arc<Mutex<HashMap<String, ClientStats>>>,
     joined_at: Arc<Mutex<HashMap<String, u64>>>,       // identity -> join timestamp
     session_log_dir: PathBuf,
+    stats_history: Arc<Mutex<Vec<StatsSnapshot>>>,
+    bug_reports: Arc<Mutex<Vec<BugReport>>>,
+    bug_log_dir: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -97,6 +100,61 @@ struct ClientStats {
     camera_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     camera_bitrate_kbps: Option<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct StatsSnapshot {
+    identity: String,
+    name: String,
+    timestamp: u64,
+    screen_fps: Option<f64>,
+    screen_bitrate_kbps: Option<u32>,
+    quality_limitation: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct BugReport {
+    id: u64,
+    identity: String,
+    name: String,
+    room: String,
+    description: String,
+    timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screen_bitrate_kbps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bwe_kbps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quality_limitation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ice_local_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ice_remote_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BugReportRequest {
+    description: String,
+    #[serde(default)]
+    room: Option<String>,
+    #[serde(default)]
+    screen_fps: Option<f64>,
+    #[serde(default)]
+    screen_bitrate_kbps: Option<u32>,
+    #[serde(default)]
+    bwe_kbps: Option<u32>,
+    #[serde(default)]
+    quality_limitation: Option<String>,
+    #[serde(default)]
+    encoder: Option<String>,
+    #[serde(default)]
+    ice_local_type: Option<String>,
+    #[serde(default)]
+    ice_remote_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -416,6 +474,9 @@ async fn main() {
     fs::create_dir_all(&session_log_dir).ok();
     info!("session log dir: {:?}", session_log_dir);
 
+    let bug_log_dir = session_log_dir.parent().unwrap_or(std::path::Path::new(".")).join("bugs");
+    fs::create_dir_all(&bug_log_dir).ok();
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -429,6 +490,9 @@ async fn main() {
         client_stats: Arc::new(Mutex::new(HashMap::new())),
         joined_at: Arc::new(Mutex::new(HashMap::new())),
         session_log_dir: session_log_dir.clone(),
+        stats_history: Arc::new(Mutex::new(Vec::new())),
+        bug_reports: Arc::new(Mutex::new(Vec::new())),
+        bug_log_dir,
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -496,6 +560,8 @@ async fn main() {
         .route("/admin/api/dashboard", get(admin_dashboard))
         .route("/admin/api/sessions", get(admin_sessions))
         .route("/admin/api/stats", post(admin_report_stats))
+        .route("/admin/api/metrics", get(admin_metrics))
+        .route("/admin/api/bugs", get(admin_bug_reports))
         .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
@@ -523,6 +589,7 @@ async fn main() {
         .route("/api/chime/upload", post(chime_upload))
         .route("/api/chime/:identity/:kind", get(chime_get))
         .route("/api/chime/delete", post(chime_delete))
+        .route("/api/bug-report", post(submit_bug_report))
         .route("/api/open-url", post(open_url))
         .layer(
             CorsLayer::new()
@@ -1107,6 +1174,28 @@ struct AdminSessionsResponse {
     events: Vec<SessionEvent>,
 }
 
+#[derive(Serialize)]
+struct AdminMetricsResponse {
+    users: Vec<UserMetrics>,
+}
+
+#[derive(Serialize)]
+struct UserMetrics {
+    identity: String,
+    name: String,
+    sample_count: usize,
+    avg_fps: f64,
+    avg_bitrate_kbps: f64,
+    pct_bandwidth_limited: f64,
+    pct_cpu_limited: f64,
+    total_minutes: f64,
+}
+
+#[derive(Serialize)]
+struct BugReportsResponse {
+    reports: Vec<BugReport>,
+}
+
 async fn admin_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1146,8 +1235,146 @@ async fn admin_report_stats(
     let mut stats = state.client_stats.lock().unwrap_or_else(|e| e.into_inner());
     let mut entry = payload;
     entry.updated_at = now_ts();
+
+    // Capture snapshot before insert moves entry
+    let snapshot = StatsSnapshot {
+        identity: entry.identity.clone(),
+        name: entry.name.clone(),
+        timestamp: entry.updated_at,
+        screen_fps: entry.screen_fps,
+        screen_bitrate_kbps: entry.screen_bitrate_kbps,
+        quality_limitation: entry.quality_limitation.clone(),
+    };
+
     stats.insert(entry.identity.clone(), entry);
+
+    {
+        let mut history = state.stats_history.lock().unwrap_or_else(|e| e.into_inner());
+        history.push(snapshot);
+        if history.len() > 1000 {
+            let excess = history.len() - 1000;
+            history.drain(0..excess);
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminMetricsResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let history = state.stats_history.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut grouped: HashMap<String, Vec<&StatsSnapshot>> = HashMap::new();
+    for snap in history.iter() {
+        grouped.entry(snap.identity.clone()).or_default().push(snap);
+    }
+
+    let mut users: Vec<UserMetrics> = Vec::new();
+    for (identity, snaps) in &grouped {
+        let name = snaps.last().map(|s| s.name.clone()).unwrap_or_default();
+        let count = snaps.len();
+        let fps_vals: Vec<f64> = snaps.iter().filter_map(|s| s.screen_fps).collect();
+        let bitrate_vals: Vec<f64> = snaps.iter().filter_map(|s| s.screen_bitrate_kbps.map(|v| v as f64)).collect();
+        let avg_fps = if fps_vals.is_empty() { 0.0 } else { fps_vals.iter().sum::<f64>() / fps_vals.len() as f64 };
+        let avg_bitrate = if bitrate_vals.is_empty() { 0.0 } else { bitrate_vals.iter().sum::<f64>() / bitrate_vals.len() as f64 };
+        let bw_limited = snaps.iter().filter(|s| s.quality_limitation.as_deref() == Some("bandwidth")).count();
+        let cpu_limited = snaps.iter().filter(|s| s.quality_limitation.as_deref() == Some("cpu")).count();
+        let pct_bw = if count > 0 { (bw_limited as f64 / count as f64) * 100.0 } else { 0.0 };
+        let pct_cpu = if count > 0 { (cpu_limited as f64 / count as f64) * 100.0 } else { 0.0 };
+        let total_minutes = (count as f64 * 2.0) / 60.0;
+
+        users.push(UserMetrics {
+            identity: identity.clone(),
+            name,
+            sample_count: count,
+            avg_fps: (avg_fps * 10.0).round() / 10.0,
+            avg_bitrate_kbps: avg_bitrate.round(),
+            pct_bandwidth_limited: (pct_bw * 10.0).round() / 10.0,
+            pct_cpu_limited: (pct_cpu * 10.0).round() / 10.0,
+            total_minutes: (total_minutes * 10.0).round() / 10.0,
+        });
+    }
+
+    users.sort_by(|a, b| b.total_minutes.partial_cmp(&a.total_minutes).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(Json(AdminMetricsResponse { users }))
+}
+
+async fn submit_bug_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BugReportRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let now = now_ts();
+    info!("Bug report received (len={})", payload.description.len());
+
+    let report = BugReport {
+        id: now,
+        identity: "user".to_string(),
+        name: "User".to_string(),
+        room: payload.room.unwrap_or_default(),
+        description: payload.description,
+        timestamp: now,
+        screen_fps: payload.screen_fps,
+        screen_bitrate_kbps: payload.screen_bitrate_kbps,
+        bwe_kbps: payload.bwe_kbps,
+        quality_limitation: payload.quality_limitation,
+        encoder: payload.encoder,
+        ice_local_type: payload.ice_local_type,
+        ice_remote_type: payload.ice_remote_type,
+    };
+
+    append_bug_report(&state.bug_log_dir, &report);
+
+    {
+        let mut reports = state.bug_reports.lock().unwrap_or_else(|e| e.into_inner());
+        reports.push(report);
+        if reports.len() > 200 {
+            let excess = reports.len() - 200;
+            reports.drain(0..excess);
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn admin_bug_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<BugReportsResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let in_mem = state.bug_reports.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all: Vec<BugReport> = in_mem.clone();
+    drop(in_mem);
+
+    // Also load from disk for persistence across restarts
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let today_days = now / 86400;
+    for offset in [0, 1] {
+        let days = today_days - offset;
+        let (year, month, day) = epoch_days_to_date(days);
+        let file_name = format!("bugs-{:04}-{:02}-{:02}.json", year, month, day);
+        let file_path = state.bug_log_dir.join(&file_name);
+        if let Ok(data) = fs::read_to_string(&file_path) {
+            if let Ok(disk_reports) = serde_json::from_str::<Vec<BugReport>>(&data) {
+                for dr in disk_reports {
+                    if !all.iter().any(|r| r.id == dr.id) {
+                        all.push(dr);
+                    }
+                }
+            }
+        }
+    }
+
+    all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    all.truncate(200);
+
+    Ok(Json(BugReportsResponse { reports: all }))
 }
 
 async fn soundboard_list(
@@ -1976,6 +2203,25 @@ fn append_session_event(dir: &std::path::Path, event: &SessionEvent) {
     events.push(event.clone());
 
     if let Ok(json) = serde_json::to_string_pretty(&events) {
+        let _ = fs::write(&file_path, json);
+    }
+}
+
+fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let days_since_epoch = now / 86400;
+    let (year, month, day) = epoch_days_to_date(days_since_epoch);
+    let file_name = format!("bugs-{:04}-{:02}-{:02}.json", year, month, day);
+    let file_path = dir.join(&file_name);
+
+    let mut reports: Vec<BugReport> = if let Ok(data) = fs::read_to_string(&file_path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    reports.push(report.clone());
+
+    if let Ok(json) = serde_json::to_string_pretty(&reports) {
         let _ = fs::write(&file_path, json);
     }
 }

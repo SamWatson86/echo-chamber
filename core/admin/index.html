@@ -35,6 +35,23 @@
     <h2 class="section-title">LIVE</h2>
     <div id="rooms-container" class="rooms-container"></div>
 
+    <h2 class="section-title">METRICS</h2>
+    <div class="metrics-wrap">
+      <table id="metrics-table" class="metrics-table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Avg FPS</th>
+            <th>Avg Bitrate</th>
+            <th>Time Online</th>
+            <th>% BW Limited</th>
+            <th>% CPU Limited</th>
+          </tr>
+        </thead>
+        <tbody id="metrics-body"></tbody>
+      </table>
+    </div>
+
     <h2 class="section-title">SESSION HISTORY</h2>
     <div class="history-wrap">
       <table id="history-table" class="history-table">
@@ -48,6 +65,21 @@
           </tr>
         </thead>
         <tbody id="history-body"></tbody>
+      </table>
+    </div>
+
+    <h2 class="section-title">BUG REPORTS</h2>
+    <div class="bugs-wrap">
+      <table id="bugs-table" class="bugs-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>User</th>
+            <th>Description</th>
+            <th>Stats</th>
+          </tr>
+        </thead>
+        <tbody id="bugs-body"></tbody>
       </table>
     </div>
   </section>
