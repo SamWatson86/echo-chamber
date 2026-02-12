@@ -19,3 +19,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
 rcgen = { version = "0.13", features = ["pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

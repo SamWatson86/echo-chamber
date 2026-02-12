@@ -811,6 +811,7 @@ var _nativeAudioDest = null;        // MediaStreamDestination
 var _nativeAudioTrack = null;       // Published LiveKit track
 var _nativeAudioUnlisten = null;    // Tauri event unlisten function
 var _nativeAudioActive = false;
+var _nativeAudioTrackName = null;   // "jam-audio" when Jam is capturing
 var _echoServerUrl = ""; // Server URL for API calls (set by Tauri get_control_url on native client)
 
 // Tauri IPC — viewer loaded locally so window.__TAURI__ is available natively
@@ -1284,6 +1285,10 @@ async function autoDetectNativeAudio(trackLabel) {
       }
     }
 
+    if (matched && _nativeAudioActive && _nativeAudioTrackName === "jam-audio") {
+      debugLog("[native-audio] Jam Session is using WASAPI — skipping screen share native audio, using getDisplayMedia audio instead");
+      matched = null;
+    }
     if (matched) {
       debugLog("[native-audio] auto-starting capture for '" + matched.title + "' (pid " + matched.pid + ")");
       try {
@@ -1319,13 +1324,16 @@ async function autoDetectNativeAudio(trackLabel) {
   }
 }
 
-async function startNativeAudioCapture(pid) {
+async function startNativeAudioCapture(pid, opts) {
+  opts = opts || {};
   // Stop existing capture first
   await stopNativeAudioCapture();
 
   if (!hasTauriIPC()) throw new Error("Tauri IPC not available");
 
   var LK = getLiveKitClient();
+  var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
+  var trackName = opts.name || undefined;
 
   // Create AudioContext — DON'T hardcode sample rate, let it match system default
   // WASAPI will report its actual format and we adapt
@@ -1427,13 +1435,16 @@ async function startNativeAudioCapture(pid) {
   debugLog("[native-audio] MediaStream track: " + (audioTrack ? "exists, enabled=" + audioTrack.enabled + " muted=" + audioTrack.muted + " state=" + audioTrack.readyState : "MISSING"));
   if (audioTrack) {
     _nativeAudioTrack = new LK.LocalAudioTrack(audioTrack, undefined, false);
-    await room.localParticipant.publishTrack(_nativeAudioTrack, {
-      source: LK.Track.Source.ScreenShareAudio,
+    var publishOpts = {
+      source: trackSource,
       dtx: false,
       red: false,
       audioBitrate: 128000,
-    });
-    debugLog("[native-audio] published to LiveKit as ScreenShareAudio");
+    };
+    if (trackName) publishOpts.name = trackName;
+    await room.localParticipant.publishTrack(_nativeAudioTrack, publishOpts);
+    _nativeAudioTrackName = trackName || null;
+    debugLog("[native-audio] published to LiveKit as " + (trackName || "ScreenShareAudio"));
   } else {
     debugLog("[native-audio] ERROR: no audio track from MediaStreamDestination!");
   }
@@ -1455,6 +1466,7 @@ async function startNativeAudioCapture(pid) {
 async function stopNativeAudioCapture() {
   if (!_nativeAudioActive) return;
   _nativeAudioActive = false;
+  _nativeAudioTrackName = null;
   debugLog("[native-audio] stopping capture");
 
   // Hide native audio indicator
@@ -3709,6 +3721,13 @@ function handleTrackSubscribed(track, publication, participant) {
     }, 900);
     return;
   }
+  if (track.kind === "audio" && publication?.trackName === "jam-audio") {
+    debugLog("[jam] received jam-audio track from " + (participant?.identity || "unknown"));
+    if (typeof handleJamAudioSubscribed === "function") {
+      handleJamAudioSubscribed(track, publication, participant);
+    }
+    return;
+  }
   if (track.kind === "audio") {
     const audioSid = getTrackSid(publication, track, `${participant.identity}-${source || "audio"}`);
     if (audioSid && audioElBySid.has(audioSid)) {
@@ -5169,6 +5188,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           // We handle black frames locally via resubscribe + keyframe.
         } else if (msg.type === CHAT_MESSAGE_TYPE || msg.type === CHAT_FILE_TYPE) {
           handleIncomingChatData(payload, participant);
+        } else if (msg.type === "jam-started" && msg.host) {
+          if (typeof showJamToast === "function") showJamToast(msg.host + " started a Jam Session!");
+        } else if (msg.type === "jam-stopped") {
+          if (typeof showJamToast === "function") showJamToast("Jam Session ended");
+          if (typeof handleJamAudioUnsubscribed === "function") handleJamAudioUnsubscribed();
         } else if (msg.type === "avatar-update" && msg.identityBase && msg.avatarUrl) {
           // Resolve relative paths through our own server URL
           var resolved = msg.avatarUrl.startsWith("/") ? apiUrl(msg.avatarUrl) : msg.avatarUrl;
@@ -5319,6 +5343,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = false;
   if (openChatButton) openChatButton.disabled = false;
   if (bugReportBtn) bugReportBtn.disabled = false;
+  if (openJamButton) openJamButton.disabled = false;
   if (toggleRoomAudioButton) {
     toggleRoomAudioButton.disabled = false;
     setRoomAudioMutedState(false);
@@ -5499,6 +5524,8 @@ async function disconnect() {
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = true;
   if (openChatButton) openChatButton.disabled = true;
   if (bugReportBtn) bugReportBtn.disabled = true;
+  if (openJamButton) openJamButton.disabled = true;
+  if (typeof cleanupJam === "function") cleanupJam();
   _latestScreenStats = null;
   if (toggleRoomAudioButton) toggleRoomAudioButton.disabled = true;
   if (openSettingsButton) openSettingsButton.disabled = true;
@@ -7126,6 +7153,11 @@ if (uiOpacitySlider) {
     applyUiOpacity(parseInt(e.target.value, 10));
   });
 }
+
+// ── Jam Session ──
+
+var openJamButton = document.getElementById("open-jam");
+if (openJamButton) openJamButton.addEventListener("click", function() { openJamPanel(); });
 
 // ── Bug Report ──
 

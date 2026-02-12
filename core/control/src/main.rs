@@ -2,7 +2,7 @@ use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Json, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect},
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
 };
@@ -15,7 +15,7 @@ use jsonwebtoken::{encode, decode, DecodingKey, EncodingKey, Header, Validation}
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     net::SocketAddr,
     path::PathBuf,
@@ -47,6 +47,11 @@ struct AppState {
     stats_history: Arc<Mutex<Vec<StatsSnapshot>>>,
     bug_reports: Arc<Mutex<Vec<BugReport>>>,
     bug_log_dir: PathBuf,
+    // Jam Session (Spotify)
+    jam: Arc<Mutex<JamState>>,
+    spotify_client_id: String,
+    spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
+    http_client: reqwest::Client,
 }
 
 #[derive(Clone, Serialize)]
@@ -278,6 +283,56 @@ struct ChimeDeleteRequest {
     kind: String,
 }
 
+// ── Jam Session (Spotify integration) structs ──────────────────────────
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SpotifyToken {
+    access_token: String,
+    refresh_token: String,
+    expires_at: u64, // unix timestamp
+}
+
+#[allow(dead_code)]
+struct SpotifyPending {
+    state: String,
+    verifier: String,
+    code: Option<String>,
+}
+
+#[derive(Default)]
+struct JamState {
+    active: bool,
+    host_identity: String,
+    spotify_token: Option<SpotifyToken>,
+    queue: Vec<QueuedTrack>,
+    now_playing: Option<NowPlayingInfo>,
+    listeners: HashSet<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct QueuedTrack {
+    spotify_uri: String,
+    name: String,
+    artist: String,
+    album_art_url: String,
+    duration_ms: u64,
+    added_by: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NowPlayingInfo {
+    name: String,
+    artist: String,
+    album_art_url: String,
+    duration_ms: u64,
+    progress_ms: u64,
+    is_playing: bool,
+    #[serde(skip)]
+    fetched_at: Option<std::time::Instant>,
+}
+
+// ────────────────────────────────────────────────────────────────────────
+
 #[derive(Serialize)]
 struct HealthResponse {
     ok: bool,
@@ -497,6 +552,11 @@ async fn main() {
         stats_history: Arc::new(Mutex::new(Vec::new())),
         bug_reports: Arc::new(Mutex::new(Vec::new())),
         bug_log_dir,
+        // Jam Session (Spotify)
+        spotify_client_id: std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_default(),
+        spotify_pending: Arc::new(Mutex::new(None)),
+        jam: Arc::new(Mutex::new(JamState::default())),
+        http_client: reqwest::Client::new(),
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -595,6 +655,19 @@ async fn main() {
         .route("/api/chime/delete", post(chime_delete))
         .route("/api/bug-report", post(submit_bug_report))
         .route("/api/open-url", post(open_url))
+        // Jam Session (Spotify integration)
+        .route("/api/jam/spotify-init", post(jam_spotify_init))
+        .route("/api/jam/spotify-callback", get(jam_spotify_callback))
+        .route("/api/jam/spotify-code", get(jam_spotify_code))
+        .route("/api/jam/spotify-token", post(jam_spotify_token))
+        .route("/api/jam/start", post(jam_start))
+        .route("/api/jam/stop", post(jam_stop))
+        .route("/api/jam/state", get(jam_state))
+        .route("/api/jam/search", post(jam_search))
+        .route("/api/jam/queue", post(jam_queue_add))
+        .route("/api/jam/skip", post(jam_skip))
+        .route("/api/jam/join", post(jam_join))
+        .route("/api/jam/leave", post(jam_leave))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -1529,6 +1602,491 @@ struct MetricsResponse {
     rooms: u64,
     ts: u64,
 }
+
+// ── Jam Session (Spotify integration) endpoints ────────────────────────
+
+#[derive(Deserialize)]
+struct SpotifyInitRequest {
+    state: String,
+    verifier: String,
+}
+
+#[derive(Deserialize)]
+struct SpotifyCallbackQuery {
+    code: String,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct SpotifyCodeQuery {
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct SpotifyTokenRequest {
+    code: String,
+    verifier: String,
+}
+
+#[derive(Deserialize)]
+struct JamStartRequest {
+    identity: String,
+}
+
+#[derive(Deserialize)]
+struct JamSearchRequest {
+    query: String,
+}
+
+#[derive(Deserialize)]
+struct JamQueueRequest {
+    spotify_uri: String,
+    name: String,
+    artist: String,
+    album_art_url: String,
+    duration_ms: u64,
+    added_by: String,
+}
+
+#[derive(Deserialize)]
+struct JamIdentityRequest {
+    identity: String,
+}
+
+async fn jam_spotify_init(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SpotifyInitRequest>,
+) -> Result<StatusCode, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+    *pending = Some(SpotifyPending {
+        state: payload.state,
+        verifier: payload.verifier,
+        code: None,
+    });
+    Ok(StatusCode::OK)
+}
+
+async fn jam_spotify_callback(
+    State(state): State<AppState>,
+    Query(params): Query<SpotifyCallbackQuery>,
+) -> Result<Html<String>, StatusCode> {
+    let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+    let p = pending.as_mut().ok_or(StatusCode::BAD_REQUEST)?;
+    if p.state != params.state {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    p.code = Some(params.code);
+    Ok(Html("<html><body><h1>Spotify Connected!</h1><p>You can close this tab and return to Echo Chamber.</p></body></html>".to_string()))
+}
+
+async fn jam_spotify_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<SpotifyCodeQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = pending.as_ref() {
+        if p.state == params.state {
+            if let Some(code) = &p.code {
+                return Ok(Json(serde_json::json!({ "code": code })));
+            }
+        }
+    }
+    Err(StatusCode::NOT_FOUND)
+}
+
+async fn jam_spotify_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SpotifyTokenRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let client_id = state.spotify_client_id.clone();
+    if client_id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let resp = state.http_client
+        .post("https://accounts.spotify.com/api/token")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &payload.code),
+            ("redirect_uri", "https://127.0.0.1:9443/api/jam/spotify-callback"),
+            ("client_id", &client_id),
+            ("code_verifier", &payload.verifier),
+        ])
+        .send()
+        .await
+        .map_err(|e| {
+            warn!("Spotify token exchange failed: {}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        warn!("Spotify token response parse failed: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    let access_token = data["access_token"].as_str()
+        .ok_or(StatusCode::BAD_GATEWAY)?.to_string();
+    let refresh_token = data["refresh_token"].as_str()
+        .ok_or(StatusCode::BAD_GATEWAY)?.to_string();
+    let expires_in = data["expires_in"].as_u64().unwrap_or(3600);
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let token = SpotifyToken {
+        access_token,
+        refresh_token,
+        expires_at: now_secs + expires_in,
+    };
+
+    {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        jam.spotify_token = Some(token);
+    }
+    {
+        let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+        *pending = None;
+    }
+
+    info!("Spotify token stored successfully");
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Spotify API proxy helper ───────────────────────────────────────────
+
+async fn spotify_api_request(
+    state: &AppState,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<serde_json::Value>,
+) -> Result<reqwest::Response, (StatusCode, String)> {
+    let token = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        jam.spotify_token.clone()
+            .ok_or((StatusCode::BAD_REQUEST, "Spotify not connected".to_string()))?
+    };
+
+    let mut req = state.http_client.request(method.clone(), url)
+        .header("Authorization", format!("Bearer {}", token.access_token));
+
+    if let Some(b) = &body {
+        req = req.json(b);
+    }
+
+    let resp = req.send().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        // Try refresh
+        if let Some(new_token) = refresh_spotify_token(state, &token).await {
+            let mut retry = state.http_client.request(method, url)
+                .header("Authorization", format!("Bearer {}", new_token.access_token));
+            if let Some(b) = body {
+                retry = retry.json(&b);
+            }
+            return retry.send().await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()));
+        }
+    }
+
+    Ok(resp)
+}
+
+async fn refresh_spotify_token(state: &AppState, old: &SpotifyToken) -> Option<SpotifyToken> {
+    let resp = state.http_client.post("https://accounts.spotify.com/api/token")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &old.refresh_token),
+            ("client_id", &state.spotify_client_id),
+        ])
+        .send().await.ok()?;
+
+    let data: serde_json::Value = resp.json().await.ok()?;
+    let new_token = SpotifyToken {
+        access_token: data["access_token"].as_str()?.to_string(),
+        refresh_token: data.get("refresh_token")
+            .and_then(|r| r.as_str())
+            .unwrap_or(&old.refresh_token)
+            .to_string(),
+        expires_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH).ok()?
+            .as_secs() + data["expires_in"].as_u64().unwrap_or(3600),
+    };
+
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    jam.spotify_token = Some(new_token.clone());
+    info!("Spotify token refreshed successfully");
+    Some(new_token)
+}
+
+// ── Jam Session endpoints ──────────────────────────────────────────────
+
+async fn jam_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamStartRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    if jam.spotify_token.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    jam.active = true;
+    jam.host_identity = payload.identity;
+    info!("Jam session started by {}", jam.host_identity);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn jam_stop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    jam.active = false;
+    jam.queue.clear();
+    jam.listeners.clear();
+    jam.now_playing = None;
+    info!("Jam session stopped");
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn jam_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    // Check if we need to refresh now_playing from Spotify
+    let should_fetch = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !jam.active || jam.spotify_token.is_none() {
+            false
+        } else {
+            match &jam.now_playing {
+                None => true,
+                Some(np) => match np.fetched_at {
+                    None => true,
+                    Some(t) => t.elapsed() > Duration::from_secs(5),
+                },
+            }
+        }
+    };
+
+    if should_fetch {
+        let resp_result = spotify_api_request(
+            &state,
+            reqwest::Method::GET,
+            "https://api.spotify.com/v1/me/player/currently-playing",
+            None,
+        ).await;
+
+        if let Ok(resp) = resp_result {
+            if resp.status().is_success() {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    let item = &data["item"];
+                    let np = NowPlayingInfo {
+                        name: item["name"].as_str().unwrap_or("").to_string(),
+                        artist: item["artists"].as_array()
+                            .and_then(|a| a.first())
+                            .and_then(|a| a["name"].as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        album_art_url: item["album"]["images"].as_array()
+                            .and_then(|imgs| imgs.first())
+                            .and_then(|img| img["url"].as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        duration_ms: item["duration_ms"].as_u64().unwrap_or(0),
+                        progress_ms: data["progress_ms"].as_u64().unwrap_or(0),
+                        is_playing: data["is_playing"].as_bool().unwrap_or(false),
+                        fetched_at: Some(std::time::Instant::now()),
+                    };
+                    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+                    jam.now_playing = Some(np);
+                }
+            }
+        }
+    }
+
+    // Build response
+    let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    let spotify_connected = jam.spotify_token.is_some();
+    let listeners: Vec<String> = jam.listeners.iter().cloned().collect();
+    let listener_count = listeners.len();
+
+    Ok(Json(serde_json::json!({
+        "active": jam.active,
+        "host_identity": jam.host_identity,
+        "queue": jam.queue,
+        "now_playing": jam.now_playing,
+        "listeners": listeners,
+        "listener_count": listener_count,
+        "spotify_connected": spotify_connected,
+    })))
+}
+
+async fn jam_search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamSearchRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let url = format!(
+        "https://api.spotify.com/v1/search?q={}&type=track&limit=10",
+        urlencoded(&payload.query)
+    );
+
+    let resp = spotify_api_request(&state, reqwest::Method::GET, &url, None)
+        .await
+        .map_err(|(_status, msg)| {
+            warn!("Spotify search failed: {}", msg);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        warn!("Spotify search parse failed: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    let tracks = data["tracks"]["items"].as_array()
+        .map(|items| {
+            items.iter().map(|item| {
+                serde_json::json!({
+                    "spotify_uri": item["uri"].as_str().unwrap_or(""),
+                    "name": item["name"].as_str().unwrap_or(""),
+                    "artist": item["artists"].as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|a| a["name"].as_str())
+                        .unwrap_or(""),
+                    "album_art_url": item["album"]["images"].as_array()
+                        .and_then(|imgs| imgs.first())
+                        .and_then(|img| img["url"].as_str())
+                        .unwrap_or(""),
+                    "duration_ms": item["duration_ms"].as_u64().unwrap_or(0),
+                })
+            }).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(serde_json::json!(tracks)))
+}
+
+async fn jam_queue_add(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamQueueRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let track = QueuedTrack {
+        spotify_uri: payload.spotify_uri.clone(),
+        name: payload.name,
+        artist: payload.artist,
+        album_art_url: payload.album_art_url,
+        duration_ms: payload.duration_ms,
+        added_by: payload.added_by,
+    };
+
+    {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        jam.queue.push(track);
+    }
+
+    // Add to Spotify's queue
+    let queue_url = format!(
+        "https://api.spotify.com/v1/me/player/queue?uri={}",
+        urlencoded(&payload.spotify_uri)
+    );
+    let _ = spotify_api_request(&state, reqwest::Method::POST, &queue_url, None).await;
+
+    info!("Track queued: {}", payload.spotify_uri);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn jam_skip(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    // Skip on Spotify
+    let _ = spotify_api_request(
+        &state,
+        reqwest::Method::POST,
+        "https://api.spotify.com/v1/me/player/next",
+        None,
+    ).await;
+
+    // Remove first item from queue
+    {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !jam.queue.is_empty() {
+            jam.queue.remove(0);
+        }
+        // Clear now_playing so it gets re-fetched
+        jam.now_playing = None;
+    }
+
+    info!("Jam: skipped track");
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn jam_join(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamIdentityRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    jam.listeners.insert(payload.identity.clone());
+    info!("Jam: {} joined", payload.identity);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn jam_leave(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamIdentityRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    jam.listeners.remove(&payload.identity);
+    info!("Jam: {} left", payload.identity);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Simple URL encoding for query parameters
+fn urlencoded(s: &str) -> String {
+    let mut result = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(b as char);
+            }
+            _ => {
+                result.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    result
+}
+
+// ── End Jam Session endpoints ──────────────────────────────────────────
 
 fn ensure_admin(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
     let Some(auth) = headers.get("authorization") else {
