@@ -16,6 +16,8 @@
 
 ### Summary
 - **Admin Dashboard built and deployed** — Local-only admin page at `/admin` with login, live room/participant stats, and persistent session history
+- **Average streaming metrics** — Per-user trending (avg fps, bitrate, % bandwidth/CPU limited) in admin dashboard
+- **Bug report system** — "Report Bug" button in Tauri client, auto-captures WebRTC stats, persists to daily JSON logs
 - **Previous work (v0.2.5 through v0.2.9)**: Avatar URL fix, screen share bitrate tuning, Jeff/Brad quality diagnostics
 
 ### 62. Admin Dashboard (commit `04c8927`)
@@ -34,6 +36,20 @@
 - **Verified in Edge**: Login works, all API endpoints return 200, auto-polling active, frosted glass styling renders correctly, zero console errors
 - **Does NOT affect friends**: Admin is a separate browser page, no Tauri client rebuild needed for friends
 
+### 63. Average Streaming Metrics (commit `9c33c97`)
+- **Feature**: Per-user historical streaming performance shown in admin dashboard METRICS section
+- **Backend**: `StatsSnapshot` struct, `stats_history` circular buffer (1000 entries), `GET /admin/api/metrics` endpoint
+- **Metrics**: Avg FPS, avg bitrate, % bandwidth limited, % CPU limited, total streaming minutes
+- **Frontend**: New METRICS table in admin dashboard, polled every 30s, color-coded thresholds (yellow >5%, red >20% limited)
+- **In-memory only**: Lost on server restart — acceptable for session-level trending
+
+### 64. Bug Report System (commit `9c33c97`)
+- **Feature**: Friends can click "Report Bug" in Tauri client to submit issues with auto-captured WebRTC stats
+- **Viewer UI**: New button in sidebar, opens frosted glass modal with textarea + auto-captured stats preview + Ctrl+Enter submit
+- **Backend**: `BugReport` struct, `POST /api/bug-report` (any authenticated user), `GET /admin/api/bugs` (admin-only), daily JSON persistence in `core/logs/bugs/`
+- **Admin dashboard**: New BUG REPORTS section shows reports with inline stats chips (fps, bitrate, quality badges, ICE type)
+- **Requires client rebuild** for bug report button (friends get it on next version bump)
+
 ### Previous Work (v0.2.5 through v0.2.9)
 - **Auto-updater BOM fix** (v0.2.4) — PowerShell BOM breaking JSON parse
 - **Brad's 0fps diagnosis** — Discord bandwidth split + TURN relay overhead
@@ -48,11 +64,12 @@
 
 **All code committed and pushed to main.**
 
-Admin dashboard is live at `https://127.0.0.1:9443/admin` — will populate with data when users join rooms. No new version bump needed (admin is server-side only, no client rebuild for friends).
+Admin dashboard is live at `https://127.0.0.1:9443/admin` with 4 sections: LIVE, METRICS, SESSION HISTORY, BUG REPORTS. All API endpoints verified working (200s, zero console errors).
 
 ## What Needs Testing
-1. **Admin dashboard with live users**: Connect via Tauri client, join a room, start screen share → verify live stats appear in dashboard (fps, bitrate, encoder, ICE type)
-2. **Session history**: Join and leave a room → verify events appear in session history table and in `core/logs/sessions/` JSON files
+1. **Metrics with live users**: Screen share for 30+ seconds → verify METRICS table populates with avg fps, bitrate, % limited
+2. **Bug report from client**: Click "Report Bug" in Tauri client → verify report appears in admin dashboard BUG REPORTS section
+3. **Bug report persistence**: Check `core/logs/bugs/` for daily JSON file after submitting a report
 3. **Stats reporting from multiple users**: Have a friend join → verify their stats also appear (requires friends to be on latest client with stats reporting code)
 
 ## Architecture Reference
