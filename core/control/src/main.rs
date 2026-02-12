@@ -140,6 +140,10 @@ struct BugReport {
 struct BugReportRequest {
     description: String,
     #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     room: Option<String>,
     #[serde(default)]
     screen_fps: Option<f64>,
@@ -1314,8 +1318,8 @@ async fn submit_bug_report(
 
     let report = BugReport {
         id: now,
-        identity: "user".to_string(),
-        name: "User".to_string(),
+        identity: payload.identity.clone().unwrap_or_else(|| "unknown".to_string()),
+        name: payload.name.clone().unwrap_or_else(|| "Unknown".to_string()),
         room: payload.room.unwrap_or_default(),
         description: payload.description,
         timestamp: now,

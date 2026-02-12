@@ -7174,7 +7174,12 @@ async function sendBugReport() {
     if (bugReportStatusEl) bugReportStatusEl.textContent = "Not connected.";
     return;
   }
-  var payload = { description: desc, room: currentRoomName || "" };
+  var payload = {
+    description: desc,
+    identity: room?.localParticipant?.identity || "",
+    name: room?.localParticipant?.name || "",
+    room: currentRoomName || "",
+  };
   if (_latestScreenStats) {
     Object.assign(payload, _latestScreenStats);
   }
