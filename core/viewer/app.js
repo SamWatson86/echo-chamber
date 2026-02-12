@@ -790,8 +790,11 @@ function getScreenSharePublishOptions() {
   return {
     videoCodec: "h264",
     simulcast: false,
-    screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
-    degradationPreference: "maintain-framerate",
+    // Start at 4 Mbps — lets congestion control ramp up gradually instead of
+    // bursting 10 Mbps which overwhelms Hyper-V vSwitch / Docker network adapters.
+    // WebRTC will increase bitrate if the path can handle it.
+    screenShareEncoding: { maxBitrate: 4_000_000, maxFramerate: 60 },
+    degradationPreference: "balanced",
   };
 }
 
@@ -4927,7 +4930,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       videoSimulcastLayers: [
         { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
       ],
-      screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
+      screenShareEncoding: { maxBitrate: 4_000_000, maxFramerate: 60 },
       dtx: true,
       degradationPreference: "maintain-resolution",
     },
