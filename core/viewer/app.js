@@ -3166,15 +3166,16 @@ async function uploadAvatar(file) {
     const data = await res.json().catch(() => ({}));
     debugLog("Avatar upload response: " + JSON.stringify(data));
     if (data?.ok && data?.url) {
-      const avatarUrl = apiUrl(data.url) + "?t=" + Date.now(); // cache bust
+      const relativePath = data.url + "?t=" + Date.now(); // relative path for storage/broadcast
+      const avatarUrl = apiUrl(data.url) + "?t=" + Date.now(); // full URL for local rendering
       avatarUrls.set(identityBase, avatarUrl);
-      echoSet("echo-avatar-" + identityBase, avatarUrl);
+      echoSet("echo-avatar-" + identityBase, relativePath); // store relative, not absolute
 
       // Update own card
       updateAvatarDisplay(room.localParticipant.identity);
 
-      // Broadcast to other participants
-      broadcastAvatar(identityBase, avatarUrl);
+      // Broadcast relative path so remote users resolve via their own server
+      broadcastAvatar(identityBase, relativePath);
 
       debugLog("Avatar uploaded for " + identityBase + ", url=" + avatarUrl);
     } else {
@@ -5036,11 +5037,15 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       }
     }, 200);
     scheduleReconcileWaves("participant-connected");
-    // Re-broadcast own avatar so new participant receives it
+    // Re-broadcast own avatar so new participant receives it (relative path)
     setTimeout(() => {
       const identityBase = getIdentityBase(room.localParticipant.identity);
-      const avatarUrl = avatarUrls.get(identityBase);
-      if (avatarUrl) broadcastAvatar(identityBase, avatarUrl);
+      const savedAvatar = echoGet("echo-avatar-" + identityBase);
+      if (savedAvatar) {
+        const relativePath = savedAvatar.startsWith("/") ? savedAvatar
+          : savedAvatar.replace(/^https?:\/\/[^/]+/, "");
+        broadcastAvatar(identityBase, relativePath);
+      }
     }, 1000);
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
@@ -5132,7 +5137,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         } else if (msg.type === CHAT_MESSAGE_TYPE || msg.type === CHAT_FILE_TYPE) {
           handleIncomingChatData(payload, participant);
         } else if (msg.type === "avatar-update" && msg.identityBase && msg.avatarUrl) {
-          avatarUrls.set(msg.identityBase, msg.avatarUrl);
+          // Resolve relative paths through our own server URL
+          var resolved = msg.avatarUrl.startsWith("/") ? apiUrl(msg.avatarUrl) : msg.avatarUrl;
+          avatarUrls.set(msg.identityBase, resolved);
           // Update all cards that match this identity base
           participantCards.forEach((cardRef, ident) => {
             if (getIdentityBase(ident) === msg.identityBase) {
@@ -5297,12 +5304,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     const identityBase = getIdentityBase(identity);
     const savedAvatar = echoGet("echo-avatar-" + identityBase);
     if (savedAvatar) {
-      // Resolve relative URLs (may be stored from a previous browser session)
-      const resolvedAvatar = savedAvatar.startsWith("/") ? apiUrl(savedAvatar) : savedAvatar;
+      // Normalize: strip server origin if stored as absolute URL (legacy)
+      const relativePath = savedAvatar.startsWith("/") ? savedAvatar
+        : savedAvatar.replace(/^https?:\/\/[^/]+/, "");
+      const resolvedAvatar = apiUrl(relativePath);
       avatarUrls.set(identityBase, resolvedAvatar);
       updateAvatarDisplay(identity);
-      // Broadcast to room after a short delay (let others join first)
-      setTimeout(() => broadcastAvatar(identityBase, savedAvatar), 2000);
+      // Broadcast relative path so remote users resolve via their own server
+      setTimeout(() => broadcastAvatar(identityBase, relativePath), 2000);
     }
   }
   stopOnlineUsersPolling();
