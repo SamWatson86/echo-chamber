@@ -25,7 +25,8 @@
     ],
     "macOS": {
       "signingIdentity": "-",
-      "infoPlist": "./Info.plist"
+      "infoPlist": "./Info.plist",
+      "entitlements": "./Entitlements.plist"
     },
     "windows": {
       "webviewInstallMode": {
