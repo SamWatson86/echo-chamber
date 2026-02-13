@@ -2851,6 +2851,7 @@ function ensureParticipantCard(participant, isLocal = false) {
   avatar.className = "user-avatar";
   avatar.textContent = getInitials(participant.name || participant.identity);
   if (isLocal) {
+    avatar.classList.add("user-avatar-local");
     const avatarFileInput = document.createElement("input");
     avatarFileInput.type = "file";
     avatarFileInput.accept = "image/*";

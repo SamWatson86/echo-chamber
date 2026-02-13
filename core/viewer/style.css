@@ -1030,7 +1030,7 @@ video {
   display: block;
 }
 
-.user-avatar[style*="cursor: pointer"]:hover::after {
+.user-avatar-local:hover::after {
   content: "Upload";
   position: absolute;
   bottom: 0;
