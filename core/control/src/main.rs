@@ -1,6 +1,10 @@
 mod audio_capture;
 mod jam_bot;
 
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::OriginalUri;
+use axum::http::HeaderValue;
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Json, Path, Query, State},
@@ -9,13 +13,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
-use axum::http::HeaderValue;
-use axum::extract::OriginalUri;
 use axum_server::tls_rustls::RustlsConfig;
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
-use jsonwebtoken::{encode, decode, DecodingKey, EncodingKey, Header, Validation};
+use futures_util::{SinkExt, StreamExt};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use rand::RngCore;
+use rcgen::generate_simple_self_signed;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -25,15 +27,13 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{info, warn};
-use tower_http::services::ServeDir;
-use tower_http::cors::{CorsLayer, Any};
-use tower_http::set_header::SetResponseHeaderLayer;
-use tower::Layer;
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use rcgen::generate_simple_self_signed;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tower::Layer;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 struct AppState {
@@ -42,12 +42,12 @@ struct AppState {
     participants: Arc<Mutex<HashMap<String, ParticipantEntry>>>,
     soundboard: Arc<Mutex<SoundboardState>>,
     chat: Arc<Mutex<ChatState>>,
-    avatars: Arc<Mutex<HashMap<String, String>>>,  // identity_base -> filename
+    avatars: Arc<Mutex<HashMap<String, String>>>, // identity_base -> filename
     avatars_dir: PathBuf,
-    chimes: Arc<Mutex<HashMap<String, ChimeEntry>>>,  // key: "identityBase-enter" or "identityBase-exit"
+    chimes: Arc<Mutex<HashMap<String, ChimeEntry>>>, // key: "identityBase-enter" or "identityBase-exit"
     chimes_dir: PathBuf,
     client_stats: Arc<Mutex<HashMap<String, ClientStats>>>,
-    joined_at: Arc<Mutex<HashMap<String, u64>>>,       // identity -> join timestamp
+    joined_at: Arc<Mutex<HashMap<String, u64>>>, // identity -> join timestamp
     session_log_dir: PathBuf,
     stats_history: Arc<Mutex<Vec<StatsSnapshot>>>,
     bug_reports: Arc<Mutex<Vec<BugReport>>>,
@@ -71,7 +71,7 @@ struct ParticipantEntry {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SessionEvent {
-    event_type: String,      // "join" or "leave"
+    event_type: String, // "join" or "leave"
     identity: String,
     name: String,
     room_id: String,
@@ -465,13 +465,13 @@ async fn main() {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     load_dotenv();
     let config = Arc::new(load_config());
-    let max_body = config.soundboard_max_bytes.max(config.chat_max_upload_bytes);
+    let max_body = config
+        .soundboard_max_bytes
+        .max(config.chat_max_upload_bytes);
     let mut soundboard_state = SoundboardState {
         dir: config.soundboard_dir.clone(),
         max_bytes: config.soundboard_max_bytes,
@@ -487,7 +487,11 @@ async fn main() {
     };
     fs::create_dir_all(&chat_state.dir).ok();
     fs::create_dir_all(&chat_state.uploads_dir).ok();
-    let avatars_dir = chat_state.uploads_dir.parent().unwrap_or(std::path::Path::new(".")).join("avatars");
+    let avatars_dir = chat_state
+        .uploads_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("avatars");
     fs::create_dir_all(&avatars_dir).ok();
 
     // Scan existing avatar files on startup so GET works after restarts
@@ -507,7 +511,10 @@ async fn main() {
     }
 
     // ── Chimes directory + scan existing files ────────────────────────
-    let chimes_dir = avatars_dir.parent().unwrap_or(std::path::Path::new(".")).join("chimes");
+    let chimes_dir = avatars_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("chimes");
     fs::create_dir_all(&chimes_dir).ok();
     let mut existing_chimes: HashMap<String, ChimeEntry> = HashMap::new();
     if let Ok(entries) = fs::read_dir(&chimes_dir) {
@@ -517,12 +524,18 @@ async fn main() {
             if fname.starts_with("chime-") {
                 if let Some(dot_pos) = fname.rfind('.') {
                     let stem = &fname[6..dot_pos]; // skip "chime-"
-                    // stem = "identityBase-enter" or "identityBase-exit"
+                                                   // stem = "identityBase-enter" or "identityBase-exit"
                     if stem.ends_with("-enter") || stem.ends_with("-exit") {
                         let key = stem.to_string();
                         let mime = chime_mime_from_ext(&fname);
                         info!("loaded existing chime: {} -> {}", key, fname);
-                        existing_chimes.insert(key, ChimeEntry { file_name: fname, mime });
+                        existing_chimes.insert(
+                            key,
+                            ChimeEntry {
+                                file_name: fname,
+                                mime,
+                            },
+                        );
                     }
                 }
             }
@@ -538,21 +551,36 @@ async fn main() {
     fs::create_dir_all(&session_log_dir).ok();
     info!("session log dir: {:?}", session_log_dir);
 
-    let bug_log_dir = session_log_dir.parent().unwrap_or(std::path::Path::new(".")).join("bugs");
+    let bug_log_dir = session_log_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("bugs");
     fs::create_dir_all(&bug_log_dir).ok();
 
     // Load persisted Spotify token if available
-    let spotify_token_file = session_log_dir.parent().unwrap_or(std::path::Path::new(".")).join("spotify-token.json");
+    let spotify_token_file = session_log_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("spotify-token.json");
     let persisted_spotify_token = if spotify_token_file.exists() {
         match fs::read_to_string(&spotify_token_file) {
             Ok(contents) => match serde_json::from_str::<SpotifyToken>(&contents) {
                 Ok(token) => {
-                    info!("Loaded persisted Spotify token (expires_at={})", token.expires_at);
+                    info!(
+                        "Loaded persisted Spotify token (expires_at={})",
+                        token.expires_at
+                    );
                     Some(token)
                 }
-                Err(e) => { warn!("Failed to parse spotify-token.json: {}", e); None }
+                Err(e) => {
+                    warn!("Failed to parse spotify-token.json: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("Failed to read spotify-token.json: {}", e);
+                None
             }
-            Err(e) => { warn!("Failed to read spotify-token.json: {}", e); None }
         }
     } else {
         None
@@ -599,7 +627,10 @@ async fn main() {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
                 let removed_entries: Vec<ParticipantEntry>;
                 {
                     let mut map = participants.lock().unwrap_or_else(|e| e.into_inner());
@@ -675,10 +706,14 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(root_route))
-        .nest_service("/viewer", SetResponseHeaderLayer::overriding(
+        .nest_service(
+            "/viewer",
+            SetResponseHeaderLayer::overriding(
                 axum::http::header::CACHE_CONTROL,
                 HeaderValue::from_static("no-cache, no-store, must-revalidate"),
-            ).layer(ServeDir::new(viewer_dir)))
+            )
+            .layer(ServeDir::new(viewer_dir)),
+        )
         .route("/admin/api/dashboard", get(admin_dashboard))
         .route("/admin/api/sessions", get(admin_sessions))
         .route("/admin/api/stats", post(admin_report_stats))
@@ -732,7 +767,7 @@ async fn main() {
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods(Any)
-                .allow_headers(Any)
+                .allow_headers(Any),
         )
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body));
@@ -754,7 +789,10 @@ async fn main() {
             match RustlsConfig::from_pem_file(cert_path, key_path).await {
                 Ok(config) => config,
                 Err(err) => {
-                    warn!("failed to load TLS cert/key ({}), generating self-signed", err);
+                    warn!(
+                        "failed to load TLS cert/key ({}), generating self-signed",
+                        err
+                    );
                     generate_self_signed().await
                 }
             }
@@ -855,7 +893,11 @@ fn resolve_admin_dir() -> PathBuf {
     PathBuf::from("admin")
 }
 
-async fn sfu_proxy(ws: WebSocketUpgrade, uri: OriginalUri, headers: HeaderMap) -> impl IntoResponse {
+async fn sfu_proxy(
+    ws: WebSocketUpgrade,
+    uri: OriginalUri,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let subprotocol = headers
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok())
@@ -873,8 +915,8 @@ async fn sfu_proxy(ws: WebSocketUpgrade, uri: OriginalUri, headers: HeaderMap) -
 }
 
 async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri) {
-    let upstream_base = std::env::var("CORE_SFU_PROXY")
-        .unwrap_or_else(|_| "ws://127.0.0.1:7880".to_string());
+    let upstream_base =
+        std::env::var("CORE_SFU_PROXY").unwrap_or_else(|_| "ws://127.0.0.1:7880".to_string());
     let query = uri.query().unwrap_or("");
     let trimmed = upstream_base.trim_end_matches('/');
     let needs_rtc = !trimmed.ends_with("/rtc");
@@ -896,9 +938,10 @@ async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri) {
             return;
         }
     };
-    request
-        .headers_mut()
-        .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("livekit"));
+    request.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_static("livekit"),
+    );
     let (upstream_ws, _) = match tokio_tungstenite::connect_async(request).await {
         Ok(pair) => pair,
         Err(err) => {
@@ -963,7 +1006,10 @@ async fn generate_self_signed() -> RustlsConfig {
 }
 
 async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { ok: true, ts: now_ts() })
+    Json(HealthResponse {
+        ok: true,
+        ts: now_ts(),
+    })
 }
 
 /// Open a URL in the system's default browser (admin-only, for Tauri client)
@@ -976,7 +1022,11 @@ async fn open_url(
         return StatusCode::UNAUTHORIZED;
     }
     let url = match serde_json::from_slice::<serde_json::Value>(&body) {
-        Ok(v) => v.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+        Ok(v) => v
+            .get("url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
         Err(_) => return StatusCode::BAD_REQUEST,
     };
     if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -989,9 +1039,10 @@ async fn open_url(
 
 async fn online_users(State(state): State<AppState>) -> Json<serde_json::Value> {
     let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-    let users: Vec<serde_json::Value> = participants.values().map(|p| {
-        serde_json::json!({ "name": p.name, "room": p.room_id })
-    }).collect();
+    let users: Vec<serde_json::Value> = participants
+        .values()
+        .map(|p| serde_json::json!({ "name": p.name, "room": p.room_id }))
+        .collect();
     Json(serde_json::json!(users))
 }
 
@@ -1034,7 +1085,8 @@ async fn login(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(state.config.admin_jwt_secret.as_bytes()),
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(LoginResponse {
         ok: true,
@@ -1048,7 +1100,10 @@ async fn issue_token(
     headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<TokenResponse>, StatusCode> {
-    info!("issue token for room={} identity={}", payload.room, payload.identity);
+    info!(
+        "issue token for room={} identity={}",
+        payload.room, payload.identity
+    );
     ensure_admin(&state, &headers)?;
 
     let now = now_ts();
@@ -1072,29 +1127,41 @@ async fn issue_token(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Track participant in room (dedup: remove old entries with the same name base)
     {
         let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-        let name_base = payload.identity.rsplitn(2, '-').last().unwrap_or(&payload.identity).to_string();
-        let stale_keys: Vec<String> = participants.iter()
+        let name_base = payload
+            .identity
+            .rsplitn(2, '-')
+            .last()
+            .unwrap_or(&payload.identity)
+            .to_string();
+        let stale_keys: Vec<String> = participants
+            .iter()
             .filter(|(k, _)| {
-                *k != &payload.identity &&
-                k.rsplitn(2, '-').last().unwrap_or(k) == name_base
+                *k != &payload.identity && k.rsplitn(2, '-').last().unwrap_or(k) == name_base
             })
             .map(|(k, _)| k.clone())
             .collect();
         for key in stale_keys {
-            info!("dedup: removing old identity {} (replaced by {})", key, payload.identity);
+            info!(
+                "dedup: removing old identity {} (replaced by {})",
+                key, payload.identity
+            );
             participants.remove(&key);
         }
-        participants.insert(payload.identity.clone(), ParticipantEntry {
-            identity: payload.identity.clone(),
-            name: payload.name.clone().unwrap_or_default(),
-            room_id: payload.room.clone(),
-            last_seen: now,
-        });
+        participants.insert(
+            payload.identity.clone(),
+            ParticipantEntry {
+                identity: payload.identity.clone(),
+                name: payload.name.clone().unwrap_or_default(),
+                room_id: payload.room.clone(),
+                last_seen: now,
+            },
+        );
     }
 
     Ok(Json(TokenResponse {
@@ -1103,13 +1170,20 @@ async fn issue_token(
     }))
 }
 
-async fn list_rooms(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<RoomInfo>>, StatusCode> {
+async fn list_rooms(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RoomInfo>>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(rooms.values().cloned().collect()))
 }
 
-async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(payload): Json<CreateRoomRequest>) -> Result<Json<RoomInfo>, StatusCode> {
+async fn create_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateRoomRequest>,
+) -> Result<Json<RoomInfo>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let mut rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     let entry = rooms.entry(payload.room_id.clone()).or_insert(RoomInfo {
@@ -1119,7 +1193,11 @@ async fn create_room(State(state): State<AppState>, headers: HeaderMap, Json(pay
     Ok(Json(entry.clone()))
 }
 
-async fn get_room(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(room_id): axum::extract::Path<String>) -> Result<Json<RoomInfo>, StatusCode> {
+async fn get_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(room_id): axum::extract::Path<String>,
+) -> Result<Json<RoomInfo>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     match rooms.get(&room_id) {
@@ -1128,27 +1206,41 @@ async fn get_room(State(state): State<AppState>, headers: HeaderMap, axum::extra
     }
 }
 
-async fn delete_room(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(room_id): axum::extract::Path<String>) -> Result<impl IntoResponse, StatusCode> {
+async fn delete_room(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(room_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
     ensure_admin(&state, &headers)?;
     let mut rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     rooms.remove(&room_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn rooms_status(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<RoomStatusEntry>>, StatusCode> {
+async fn rooms_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RoomStatusEntry>>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     // Group participants by room
     let mut room_map: HashMap<String, Vec<RoomStatusParticipant>> = HashMap::new();
     for p in participants.values() {
-        room_map.entry(p.room_id.clone()).or_default().push(RoomStatusParticipant {
-            identity: p.identity.clone(),
-            name: p.name.clone(),
-        });
+        room_map
+            .entry(p.room_id.clone())
+            .or_default()
+            .push(RoomStatusParticipant {
+                identity: p.identity.clone(),
+                name: p.name.clone(),
+            });
     }
-    let result: Vec<RoomStatusEntry> = room_map.into_iter().map(|(room_id, participants)| {
-        RoomStatusEntry { room_id, participants }
-    }).collect();
+    let result: Vec<RoomStatusEntry> = room_map
+        .into_iter()
+        .map(|(room_id, participants)| RoomStatusEntry {
+            room_id,
+            participants,
+        })
+        .collect();
     Ok(Json(result))
 }
 
@@ -1167,12 +1259,15 @@ async fn participant_heartbeat(
             entry.name = name.clone();
         }
     } else {
-        participants.insert(payload.identity.clone(), ParticipantEntry {
-            identity: payload.identity.clone(),
-            name: payload.name.clone().unwrap_or_default(),
-            room_id: payload.room.clone(),
-            last_seen: now,
-        });
+        participants.insert(
+            payload.identity.clone(),
+            ParticipantEntry {
+                identity: payload.identity.clone(),
+                name: payload.name.clone().unwrap_or_default(),
+                room_id: payload.room.clone(),
+                last_seen: now,
+            },
+        );
     }
     drop(participants);
 
@@ -1190,7 +1285,12 @@ async fn participant_heartbeat(
                 duration_secs: None,
             };
             append_session_event(&state.session_log_dir, &event);
-            info!("session: {} ({}) joined {}", payload.identity, payload.name.clone().unwrap_or_default(), payload.room);
+            info!(
+                "session: {} ({}) joined {}",
+                payload.identity,
+                payload.name.clone().unwrap_or_default(),
+                payload.room
+            );
         }
     }
 
@@ -1223,7 +1323,10 @@ async fn participant_leave(
                 duration_secs: duration,
             };
             append_session_event(&state.session_log_dir, &event);
-            info!("session: {} ({}) left {}", entry.identity, entry.name, entry.room_id);
+            info!(
+                "session: {} ({}) left {}",
+                entry.identity, entry.name, entry.room_id
+            );
         }
     }
     // Also remove client stats
@@ -1243,7 +1346,10 @@ async fn participant_leave(
             let before = jam.listeners.len();
             jam.listeners.retain(|l| identity_base(l) != base);
             if jam.listeners.len() < before {
-                info!("Jam: removed leaving participant {} from listeners", payload.identity);
+                info!(
+                    "Jam: removed leaving participant {} from listeners",
+                    payload.identity
+                );
             }
         }
         jam.active && jam.listeners.is_empty()
@@ -1255,7 +1361,10 @@ async fn participant_leave(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MetricsResponse>, StatusCode> {
+async fn metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<MetricsResponse>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(MetricsResponse {
@@ -1313,8 +1422,12 @@ async fn admin_dashboard(
     }
 
     let total = participants.len();
-    let rooms: Vec<AdminRoomInfo> = room_map.into_iter()
-        .map(|(room_id, participants)| AdminRoomInfo { room_id, participants })
+    let rooms: Vec<AdminRoomInfo> = room_map
+        .into_iter()
+        .map(|(room_id, participants)| AdminRoomInfo {
+            room_id,
+            participants,
+        })
         .collect();
 
     Ok(Json(AdminDashboardResponse {
@@ -1358,7 +1471,10 @@ async fn admin_sessions(
     ensure_admin(&state, &headers)?;
 
     // Read today's and yesterday's session logs
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let today_days = now / 86400;
     let mut all_events = Vec::new();
 
@@ -1404,7 +1520,10 @@ async fn admin_report_stats(
     stats.insert(entry.identity.clone(), entry);
 
     {
-        let mut history = state.stats_history.lock().unwrap_or_else(|e| e.into_inner());
+        let mut history = state
+            .stats_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         history.push(snapshot);
         if history.len() > 1000 {
             let excess = history.len() - 1000;
@@ -1420,7 +1539,10 @@ async fn admin_metrics(
     headers: HeaderMap,
 ) -> Result<Json<AdminMetricsResponse>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let history = state.stats_history.lock().unwrap_or_else(|e| e.into_inner());
+    let history = state
+        .stats_history
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let mut grouped: HashMap<String, Vec<&StatsSnapshot>> = HashMap::new();
     for snap in history.iter() {
@@ -1432,13 +1554,38 @@ async fn admin_metrics(
         let name = snaps.last().map(|s| s.name.clone()).unwrap_or_default();
         let count = snaps.len();
         let fps_vals: Vec<f64> = snaps.iter().filter_map(|s| s.screen_fps).collect();
-        let bitrate_vals: Vec<f64> = snaps.iter().filter_map(|s| s.screen_bitrate_kbps.map(|v| v as f64)).collect();
-        let avg_fps = if fps_vals.is_empty() { 0.0 } else { fps_vals.iter().sum::<f64>() / fps_vals.len() as f64 };
-        let avg_bitrate = if bitrate_vals.is_empty() { 0.0 } else { bitrate_vals.iter().sum::<f64>() / bitrate_vals.len() as f64 };
-        let bw_limited = snaps.iter().filter(|s| s.quality_limitation.as_deref() == Some("bandwidth")).count();
-        let cpu_limited = snaps.iter().filter(|s| s.quality_limitation.as_deref() == Some("cpu")).count();
-        let pct_bw = if count > 0 { (bw_limited as f64 / count as f64) * 100.0 } else { 0.0 };
-        let pct_cpu = if count > 0 { (cpu_limited as f64 / count as f64) * 100.0 } else { 0.0 };
+        let bitrate_vals: Vec<f64> = snaps
+            .iter()
+            .filter_map(|s| s.screen_bitrate_kbps.map(|v| v as f64))
+            .collect();
+        let avg_fps = if fps_vals.is_empty() {
+            0.0
+        } else {
+            fps_vals.iter().sum::<f64>() / fps_vals.len() as f64
+        };
+        let avg_bitrate = if bitrate_vals.is_empty() {
+            0.0
+        } else {
+            bitrate_vals.iter().sum::<f64>() / bitrate_vals.len() as f64
+        };
+        let bw_limited = snaps
+            .iter()
+            .filter(|s| s.quality_limitation.as_deref() == Some("bandwidth"))
+            .count();
+        let cpu_limited = snaps
+            .iter()
+            .filter(|s| s.quality_limitation.as_deref() == Some("cpu"))
+            .count();
+        let pct_bw = if count > 0 {
+            (bw_limited as f64 / count as f64) * 100.0
+        } else {
+            0.0
+        };
+        let pct_cpu = if count > 0 {
+            (cpu_limited as f64 / count as f64) * 100.0
+        } else {
+            0.0
+        };
         let total_minutes = (count as f64 * 2.0) / 60.0;
 
         users.push(UserMetrics {
@@ -1453,7 +1600,11 @@ async fn admin_metrics(
         });
     }
 
-    users.sort_by(|a, b| b.total_minutes.partial_cmp(&a.total_minutes).unwrap_or(std::cmp::Ordering::Equal));
+    users.sort_by(|a, b| {
+        b.total_minutes
+            .partial_cmp(&a.total_minutes)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(Json(AdminMetricsResponse { users }))
 }
 
@@ -1469,8 +1620,14 @@ async fn submit_bug_report(
 
     let report = BugReport {
         id: now,
-        identity: payload.identity.clone().unwrap_or_else(|| "unknown".to_string()),
-        name: payload.name.clone().unwrap_or_else(|| "Unknown".to_string()),
+        identity: payload
+            .identity
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        name: payload
+            .name
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string()),
         room: payload.room.unwrap_or_default(),
         description: payload.description,
         timestamp: now,
@@ -1508,7 +1665,10 @@ async fn admin_bug_reports(
     drop(in_mem);
 
     // Also load from disk for persistence across restarts
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let today_days = now / 86400;
     for offset in [0, 1] {
         let days = today_days - offset;
@@ -1564,10 +1724,14 @@ async fn soundboard_file(
     let path = soundboard_file_path(&board.dir, &sound.room_id, &sound.file_name);
     let bytes = fs::read(path).map_err(|_| StatusCode::NOT_FOUND)?;
     let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
-    let mime = sound.mime.clone().unwrap_or_else(|| "application/octet-stream".to_string());
+    let mime = sound
+        .mime
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_str(&mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&mime)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     Ok(response)
 }
@@ -1580,21 +1744,40 @@ async fn soundboard_upload(
 ) -> Result<Json<SoundboardSoundResponse>, StatusCode> {
     ensure_livekit(&state, &headers)?;
     if query.room_id.trim().is_empty() {
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Missing roomId".into()) }));
+        return Ok(Json(SoundboardSoundResponse {
+            ok: false,
+            sound: None,
+            error: Some("Missing roomId".into()),
+        }));
     }
     if body.is_empty() {
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Empty audio payload".into()) }));
+        return Ok(Json(SoundboardSoundResponse {
+            ok: false,
+            sound: None,
+            error: Some("Empty audio payload".into()),
+        }));
     }
     let mut board = state.soundboard.lock().unwrap_or_else(|e| e.into_inner());
     if body.len() > board.max_bytes {
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Audio file too large".into()) }));
+        return Ok(Json(SoundboardSoundResponse {
+            ok: false,
+            sound: None,
+            error: Some("Audio file too large".into()),
+        }));
     }
     let max_sounds = board.max_sounds_per_room;
     let room_id = query.room_id.clone();
     let board_dir = board.dir.clone();
-    let room = board.rooms.entry(room_id.clone()).or_insert_with(HashMap::new);
+    let room = board
+        .rooms
+        .entry(room_id.clone())
+        .or_insert_with(HashMap::new);
     if room.len() >= max_sounds {
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Soundboard is full for this room".into()) }));
+        return Ok(Json(SoundboardSoundResponse {
+            ok: false,
+            sound: None,
+            error: Some("Soundboard is full for this room".into()),
+        }));
     }
 
     let id = random_secret();
@@ -1619,7 +1802,11 @@ async fn soundboard_upload(
     let file_path = room_dir.join(&file_name);
     if let Err(err) = fs::write(&file_path, &body) {
         warn!("soundboard upload failed: {}", err);
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Unable to save audio".into()) }));
+        return Ok(Json(SoundboardSoundResponse {
+            ok: false,
+            sound: None,
+            error: Some("Unable to save audio".into()),
+        }));
     }
     let sound = SoundboardSound {
         id: id.clone(),
@@ -1634,7 +1821,11 @@ async fn soundboard_upload(
     room.insert(id.clone(), sound.clone());
     board.index.insert(id.clone(), sound.clone());
     persist_soundboard(&board);
-    Ok(Json(SoundboardSoundResponse { ok: true, sound: Some(soundboard_public(&sound)), error: None }))
+    Ok(Json(SoundboardSoundResponse {
+        ok: true,
+        sound: Some(soundboard_public(&sound)),
+        error: None,
+    }))
 }
 
 async fn soundboard_update(
@@ -1647,10 +1838,20 @@ async fn soundboard_update(
     let sound_id = payload.sound_id.clone();
     let sound = match board.index.get_mut(&sound_id) {
         Some(sound) => sound,
-        None => return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Sound not found".into()) })),
+        None => {
+            return Ok(Json(SoundboardSoundResponse {
+                ok: false,
+                sound: None,
+                error: Some("Sound not found".into()),
+            }))
+        }
     };
     if sound.room_id != payload.room_id {
-        return Ok(Json(SoundboardSoundResponse { ok: false, sound: None, error: Some("Room mismatch".into()) }));
+        return Ok(Json(SoundboardSoundResponse {
+            ok: false,
+            sound: None,
+            error: Some("Room mismatch".into()),
+        }));
     }
     if let Some(name) = payload.name {
         sound.name = name.trim().chars().take(60).collect();
@@ -1667,7 +1868,11 @@ async fn soundboard_update(
         room.insert(updated.id.clone(), updated.clone());
     }
     persist_soundboard(&board);
-    Ok(Json(SoundboardSoundResponse { ok: true, sound: Some(soundboard_public(&updated)), error: None }))
+    Ok(Json(SoundboardSoundResponse {
+        ok: true,
+        sound: Some(soundboard_public(&updated)),
+        error: None,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1743,7 +1948,10 @@ async fn jam_spotify_init(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let redirect_uri = format!("https://127.0.0.1:{}/api/jam/spotify-callback", state.config.port);
+    let redirect_uri = format!(
+        "https://127.0.0.1:{}/api/jam/spotify-callback",
+        state.config.port
+    );
     let scopes = "user-read-private user-modify-playback-state user-read-currently-playing user-read-playback-state";
     let auth_url = format!(
         "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
@@ -1754,7 +1962,10 @@ async fn jam_spotify_init(
         urlencoded(&payload.challenge),
     );
 
-    let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = state
+        .spotify_pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *pending = Some(SpotifyPending {
         state: payload.state,
         code: None,
@@ -1767,7 +1978,10 @@ async fn jam_spotify_callback(
     State(state): State<AppState>,
     Query(params): Query<SpotifyCallbackQuery>,
 ) -> Result<Html<String>, StatusCode> {
-    let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = state
+        .spotify_pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let p = pending.as_mut().ok_or(StatusCode::BAD_REQUEST)?;
     if p.state != params.state {
         return Err(StatusCode::BAD_REQUEST);
@@ -1782,7 +1996,10 @@ async fn jam_spotify_code(
     Query(params): Query<SpotifyCodeQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+    let pending = state
+        .spotify_pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(p) = pending.as_ref() {
         if p.state == params.state {
             if let Some(code) = &p.code {
@@ -1805,8 +2022,12 @@ async fn jam_spotify_token(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let redirect_uri = format!("https://127.0.0.1:{}/api/jam/spotify-callback", state.config.port);
-    let resp = state.http_client
+    let redirect_uri = format!(
+        "https://127.0.0.1:{}/api/jam/spotify-callback",
+        state.config.port
+    );
+    let resp = state
+        .http_client
         .post("https://accounts.spotify.com/api/token")
         .form(&[
             ("grant_type", "authorization_code"),
@@ -1827,10 +2048,14 @@ async fn jam_spotify_token(
         StatusCode::BAD_GATEWAY
     })?;
 
-    let access_token = data["access_token"].as_str()
-        .ok_or(StatusCode::BAD_GATEWAY)?.to_string();
-    let refresh_token = data["refresh_token"].as_str()
-        .ok_or(StatusCode::BAD_GATEWAY)?.to_string();
+    let access_token = data["access_token"]
+        .as_str()
+        .ok_or(StatusCode::BAD_GATEWAY)?
+        .to_string();
+    let refresh_token = data["refresh_token"]
+        .as_str()
+        .ok_or(StatusCode::BAD_GATEWAY)?
+        .to_string();
     let expires_in = data["expires_in"].as_u64().unwrap_or(3600);
 
     let now_secs = SystemTime::now()
@@ -1849,7 +2074,10 @@ async fn jam_spotify_token(
         jam.spotify_token = Some(token.clone());
     }
     {
-        let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = state
+            .spotify_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *pending = None;
     }
 
@@ -1881,11 +2109,14 @@ async fn spotify_api_request(
 ) -> Result<reqwest::Response, (StatusCode, String)> {
     let token = {
         let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        jam.spotify_token.clone()
+        jam.spotify_token
+            .clone()
             .ok_or((StatusCode::BAD_REQUEST, "Spotify not connected".to_string()))?
     };
 
-    let mut req = state.http_client.request(method.clone(), url)
+    let mut req = state
+        .http_client
+        .request(method.clone(), url)
         .header("Authorization", format!("Bearer {}", token.access_token));
 
     if let Some(b) = &body {
@@ -1895,20 +2126,26 @@ async fn spotify_api_request(
         req = req.header("Content-Length", "0");
     }
 
-    let resp = req.send().await
+    let resp = req
+        .send()
+        .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // Try refresh
         if let Some(new_token) = refresh_spotify_token(state, &token).await {
-            let mut retry = state.http_client.request(method.clone(), url)
-                .header("Authorization", format!("Bearer {}", new_token.access_token));
+            let mut retry = state.http_client.request(method.clone(), url).header(
+                "Authorization",
+                format!("Bearer {}", new_token.access_token),
+            );
             if let Some(b) = body {
                 retry = retry.json(&b);
             } else if method == reqwest::Method::POST || method == reqwest::Method::PUT {
                 retry = retry.header("Content-Length", "0");
             }
-            return retry.send().await
+            return retry
+                .send()
+                .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()));
         }
     }
@@ -1917,24 +2154,28 @@ async fn spotify_api_request(
 }
 
 async fn refresh_spotify_token(state: &AppState, old: &SpotifyToken) -> Option<SpotifyToken> {
-    let resp = state.http_client.post("https://accounts.spotify.com/api/token")
+    let resp = state
+        .http_client
+        .post("https://accounts.spotify.com/api/token")
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", &old.refresh_token),
             ("client_id", &state.spotify_client_id),
         ])
-        .send().await.ok()?;
+        .send()
+        .await
+        .ok()?;
 
     let data: serde_json::Value = resp.json().await.ok()?;
     let new_token = SpotifyToken {
         access_token: data["access_token"].as_str()?.to_string(),
-        refresh_token: data.get("refresh_token")
+        refresh_token: data
+            .get("refresh_token")
             .and_then(|r| r.as_str())
             .unwrap_or(&old.refresh_token)
             .to_string(),
-        expires_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH).ok()?
-            .as_secs() + data["expires_in"].as_u64().unwrap_or(3600),
+        expires_at: SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs()
+            + data["expires_in"].as_u64().unwrap_or(3600),
     };
 
     let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
@@ -1974,7 +2215,10 @@ fn schedule_jam_auto_end(
                 info!("Jam auto-ended ({}): no listeners for 30s", reason);
                 true
             } else {
-                info!("Jam auto-end cancelled: {} listeners now", jam.listeners.len());
+                info!(
+                    "Jam auto-end cancelled: {} listeners now",
+                    jam.listeners.len()
+                );
                 false
             }
         };
@@ -2001,7 +2245,10 @@ async fn jam_start(
         jam.active = true;
         jam.host_identity = payload.identity.clone();
         jam.listeners.insert(payload.identity);
-        info!("Jam session started by {} (auto-joined as listener)", jam.host_identity);
+        info!(
+            "Jam session started by {} (auto-joined as listener)",
+            jam.host_identity
+        );
     }
 
     // Spawn the audio bot in background (don't block the response)
@@ -2033,8 +2280,13 @@ async fn jam_stop(
 
         // Only the host (or auto-end) can stop the jam
         // Compare base identities (strip -XXXX suffix) since reconnects change the suffix
-        if !payload.identity.is_empty() && identity_base(&payload.identity) != identity_base(&jam.host_identity) {
-            info!("Jam stop denied: {} is not host {}", payload.identity, jam.host_identity);
+        if !payload.identity.is_empty()
+            && identity_base(&payload.identity) != identity_base(&jam.host_identity)
+        {
+            info!(
+                "Jam stop denied: {} is not host {}",
+                payload.identity, jam.host_identity
+            );
             return Err(StatusCode::FORBIDDEN);
         }
 
@@ -2042,7 +2294,14 @@ async fn jam_stop(
         jam.queue.clear();
         jam.listeners.clear();
         jam.now_playing = None;
-        info!("Jam session stopped by {}", if payload.identity.is_empty() { "auto-end" } else { &payload.identity });
+        info!(
+            "Jam session stopped by {}",
+            if payload.identity.is_empty() {
+                "auto-end"
+            } else {
+                &payload.identity
+            }
+        );
     }
 
     // Stop the audio bot
@@ -2079,7 +2338,8 @@ async fn jam_state(
             reqwest::Method::GET,
             "https://api.spotify.com/v1/me/player/currently-playing",
             None,
-        ).await;
+        )
+        .await;
 
         if let Ok(resp) = resp_result {
             if resp.status().is_success() {
@@ -2087,12 +2347,14 @@ async fn jam_state(
                     let item = &data["item"];
                     let np = NowPlayingInfo {
                         name: item["name"].as_str().unwrap_or("").to_string(),
-                        artist: item["artists"].as_array()
+                        artist: item["artists"]
+                            .as_array()
                             .and_then(|a| a.first())
                             .and_then(|a| a["name"].as_str())
                             .unwrap_or("")
                             .to_string(),
-                        album_art_url: item["album"]["images"].as_array()
+                        album_art_url: item["album"]["images"]
+                            .as_array()
                             .and_then(|imgs| imgs.first())
                             .and_then(|img| img["url"].as_str())
                             .unwrap_or("")
@@ -2160,23 +2422,27 @@ async fn jam_search(
         StatusCode::BAD_GATEWAY
     })?;
 
-    let tracks = data["tracks"]["items"].as_array()
+    let tracks = data["tracks"]["items"]
+        .as_array()
         .map(|items| {
-            items.iter().map(|item| {
-                serde_json::json!({
-                    "spotify_uri": item["uri"].as_str().unwrap_or(""),
-                    "name": item["name"].as_str().unwrap_or(""),
-                    "artist": item["artists"].as_array()
-                        .and_then(|a| a.first())
-                        .and_then(|a| a["name"].as_str())
-                        .unwrap_or(""),
-                    "album_art_url": item["album"]["images"].as_array()
-                        .and_then(|imgs| imgs.first())
-                        .and_then(|img| img["url"].as_str())
-                        .unwrap_or(""),
-                    "duration_ms": item["duration_ms"].as_u64().unwrap_or(0),
+            items
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "spotify_uri": item["uri"].as_str().unwrap_or(""),
+                        "name": item["name"].as_str().unwrap_or(""),
+                        "artist": item["artists"].as_array()
+                            .and_then(|a| a.first())
+                            .and_then(|a| a["name"].as_str())
+                            .unwrap_or(""),
+                        "album_art_url": item["album"]["images"].as_array()
+                            .and_then(|imgs| imgs.first())
+                            .and_then(|img| img["url"].as_str())
+                            .unwrap_or(""),
+                        "duration_ms": item["duration_ms"].as_u64().unwrap_or(0),
+                    })
                 })
-            }).collect::<Vec<_>>()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
@@ -2211,12 +2477,15 @@ async fn jam_queue_add(
             reqwest::Method::GET,
             "https://api.spotify.com/v1/me/player/currently-playing",
             None,
-        ).await;
+        )
+        .await;
         match resp {
             Ok(r) if r.status().is_success() => {
                 if let Ok(data) = r.json::<serde_json::Value>().await {
                     data["is_playing"].as_bool().unwrap_or(false)
-                } else { false }
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -2232,10 +2501,16 @@ async fn jam_queue_add(
             Ok(r) => {
                 let status = r.status();
                 if status.is_success() || status.as_u16() == 204 {
-                    info!("Track queued to Spotify ({}): {}", status, payload.spotify_uri);
+                    info!(
+                        "Track queued to Spotify ({}): {}",
+                        status, payload.spotify_uri
+                    );
                 } else {
                     let body = r.text().await.unwrap_or_default();
-                    warn!("Queue to Spotify failed ({}) {}: {}", status, payload.spotify_uri, body);
+                    warn!(
+                        "Queue to Spotify failed ({}) {}: {}",
+                        status, payload.spotify_uri, body
+                    );
                 }
             }
             Err(e) => warn!("Queue request failed: {:?}", e),
@@ -2248,23 +2523,40 @@ async fn jam_queue_add(
             reqwest::Method::GET,
             "https://api.spotify.com/v1/me/player/devices",
             None,
-        ).await {
+        )
+        .await
+        {
             Ok(r) if r.status().is_success() => {
                 if let Ok(data) = r.json::<serde_json::Value>().await {
                     info!("Spotify devices response: {}", data);
-                    data["devices"].as_array()
-                        .and_then(|devs| devs.iter().find(|d| d["is_active"].as_bool().unwrap_or(false)))
+                    data["devices"]
+                        .as_array()
+                        .and_then(|devs| {
+                            devs.iter()
+                                .find(|d| d["is_active"].as_bool().unwrap_or(false))
+                        })
                         .or_else(|| data["devices"].as_array().and_then(|devs| devs.first()))
                         .and_then(|d| d["id"].as_str())
                         .map(|s| s.to_string())
-                } else { None }
+                } else {
+                    None
+                }
             }
-            Ok(r) => { warn!("Spotify devices request failed: {}", r.status()); None }
-            Err(e) => { warn!("Spotify devices error: {:?}", e); None },
+            Ok(r) => {
+                warn!("Spotify devices request failed: {}", r.status());
+                None
+            }
+            Err(e) => {
+                warn!("Spotify devices error: {:?}", e);
+                None
+            }
         };
 
         let play_url = if let Some(ref did) = device_id {
-            format!("https://api.spotify.com/v1/me/player/play?device_id={}", did)
+            format!(
+                "https://api.spotify.com/v1/me/player/play?device_id={}",
+                did
+            )
         } else {
             "https://api.spotify.com/v1/me/player/play".to_string()
         };
@@ -2297,7 +2589,10 @@ async fn jam_queue_remove(
     let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
     if index < jam.queue.len() {
         let removed = jam.queue.remove(index);
-        info!("Removed from queue: {} by {}", removed.name, removed.added_by);
+        info!(
+            "Removed from queue: {} by {}",
+            removed.name, removed.added_by
+        );
         Ok(Json(serde_json::json!({ "ok": true })))
     } else {
         Err(StatusCode::NOT_FOUND)
@@ -2316,7 +2611,9 @@ async fn jam_skip(
         reqwest::Method::POST,
         "https://api.spotify.com/v1/me/player/next",
         None,
-    ).await {
+    )
+    .await
+    {
         Ok(r) => {
             let status = r.status();
             if status.is_success() || status.as_u16() == 204 {
@@ -2367,7 +2664,11 @@ async fn jam_leave(
     let should_auto_end = {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
         jam.listeners.remove(&payload.identity);
-        info!("Jam: {} left ({} listeners remain)", payload.identity, jam.listeners.len());
+        info!(
+            "Jam: {} left ({} listeners remain)",
+            payload.identity,
+            jam.listeners.len()
+        );
         jam.active && jam.listeners.is_empty()
     };
 
@@ -2393,7 +2694,8 @@ async fn jam_audio_ws(
         token,
         &DecodingKey::from_secret(state.config.admin_jwt_secret.as_bytes()),
         &validation,
-    ).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;
     if decoded.claims.role != "admin" {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -2493,13 +2795,16 @@ fn ensure_admin(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode>
         return Err(StatusCode::UNAUTHORIZED);
     };
     let auth = auth.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let token = auth.strip_prefix("Bearer ").ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = auth
+        .strip_prefix("Bearer ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
     let validation = Validation::default();
     let decoded = decode::<AdminClaims>(
         token,
         &DecodingKey::from_secret(state.config.admin_jwt_secret.as_bytes()),
         &validation,
-    ).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;
     if decoded.claims.role != "admin" {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -2526,13 +2831,16 @@ fn ensure_livekit(state: &AppState, headers: &HeaderMap) -> Result<LiveKitClaims
         return Err(StatusCode::UNAUTHORIZED);
     };
     let auth = auth.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let token = auth.strip_prefix("Bearer ").ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = auth
+        .strip_prefix("Bearer ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
     let validation = Validation::default();
     let decoded = decode::<LiveKitClaims>(
         token,
         &DecodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
         &validation,
-    ).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;
     if decoded.claims.iss != state.config.livekit_api_key {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -2724,10 +3032,19 @@ async fn chat_get_upload(
     headers: HeaderMap,
     Path(file_name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    info!("chat_get_upload: file_name={}, auth_header={:?}", file_name, headers.get("authorization").map(|h| h.to_str().unwrap_or("invalid")));
+    info!(
+        "chat_get_upload: file_name={}, auth_header={:?}",
+        file_name,
+        headers
+            .get("authorization")
+            .map(|h| h.to_str().unwrap_or("invalid"))
+    );
 
     match ensure_livekit(&state, &headers) {
-        Ok(claims) => info!("chat_get_upload: auth successful for identity={}", claims.sub),
+        Ok(claims) => info!(
+            "chat_get_upload: auth successful for identity={}",
+            claims.sub
+        ),
         Err(e) => {
             info!("chat_get_upload: auth failed with status={}", e.as_u16());
             return Err(e);
@@ -2887,7 +3204,8 @@ async fn avatar_get(
     let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_str(content_type).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     // Cache avatars for 5 minutes
     response.headers_mut().insert(
@@ -2901,14 +3219,23 @@ async fn avatar_get(
 // ── Chime endpoints ─────────────────────────────────────────────────
 
 fn chime_mime_from_ext(fname: &str) -> String {
-    if fname.ends_with(".mp3") { "audio/mpeg".into() }
-    else if fname.ends_with(".wav") { "audio/wav".into() }
-    else if fname.ends_with(".ogg") { "audio/ogg".into() }
-    else if fname.ends_with(".webm") { "audio/webm".into() }
-    else if fname.ends_with(".m4a") { "audio/mp4".into() }
-    else if fname.ends_with(".aac") { "audio/aac".into() }
-    else if fname.ends_with(".flac") { "audio/flac".into() }
-    else { "application/octet-stream".into() }
+    if fname.ends_with(".mp3") {
+        "audio/mpeg".into()
+    } else if fname.ends_with(".wav") {
+        "audio/wav".into()
+    } else if fname.ends_with(".ogg") {
+        "audio/ogg".into()
+    } else if fname.ends_with(".webm") {
+        "audio/webm".into()
+    } else if fname.ends_with(".m4a") {
+        "audio/mp4".into()
+    } else if fname.ends_with(".aac") {
+        "audio/aac".into()
+    } else if fname.ends_with(".flac") {
+        "audio/flac".into()
+    } else {
+        "application/octet-stream".into()
+    }
 }
 
 async fn chime_upload(
@@ -2965,7 +3292,10 @@ async fn chime_upload(
             return Ok(Json(ChatUploadResponse {
                 ok: false,
                 url: None,
-                error: Some(format!("Unsupported type: {}. Upload an audio file (mp3, wav, ogg, m4a, etc.)", content_type)),
+                error: Some(format!(
+                    "Unsupported type: {}. Upload an audio file (mp3, wav, ogg, m4a, etc.)",
+                    content_type
+                )),
             }));
         }
     };
@@ -3040,7 +3370,8 @@ async fn chime_get(
     let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_str(&entry.mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&entry.mime)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     // Cache chimes for 5 minutes
     response.headers_mut().insert(
@@ -3084,23 +3415,45 @@ async fn chime_delete(
 
 fn load_config() -> Config {
     let host = std::env::var("CORE_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = std::env::var("CORE_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9090);
+    let port = std::env::var("CORE_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9090);
     let admin_password_hash = std::env::var("CORE_ADMIN_PASSWORD_HASH").ok();
     let admin_password = std::env::var("CORE_ADMIN_PASSWORD").ok();
-    let admin_jwt_secret = std::env::var("CORE_ADMIN_JWT_SECRET").unwrap_or_else(|_| random_secret());
-    let admin_token_ttl_secs = std::env::var("CORE_ADMIN_TOKEN_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(43200);
+    let admin_jwt_secret =
+        std::env::var("CORE_ADMIN_JWT_SECRET").unwrap_or_else(|_| random_secret());
+    let admin_token_ttl_secs = std::env::var("CORE_ADMIN_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(43200);
 
     let livekit_api_key = std::env::var("LK_API_KEY").unwrap_or_else(|_| "LK_API_KEY".to_string());
-    let livekit_api_secret = std::env::var("LK_API_SECRET").unwrap_or_else(|_| "LK_API_SECRET".to_string());
-    let livekit_token_ttl_secs = std::env::var("LK_TOKEN_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(14400);
-    let soundboard_dir = std::env::var("CORE_SOUNDBOARD_DIR").unwrap_or_else(|_| "../logs/soundboard".to_string());
-    let soundboard_max_mb = std::env::var("CORE_SOUNDBOARD_MAX_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(8);
+    let livekit_api_secret =
+        std::env::var("LK_API_SECRET").unwrap_or_else(|_| "LK_API_SECRET".to_string());
+    let livekit_token_ttl_secs = std::env::var("LK_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(14400);
+    let soundboard_dir =
+        std::env::var("CORE_SOUNDBOARD_DIR").unwrap_or_else(|_| "../logs/soundboard".to_string());
+    let soundboard_max_mb = std::env::var("CORE_SOUNDBOARD_MAX_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(8);
     let soundboard_max_bytes = soundboard_max_mb.max(1) * 1024 * 1024;
-    let soundboard_max_sounds_per_room = std::env::var("CORE_SOUNDBOARD_MAX_SOUNDS_PER_ROOM").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let soundboard_max_sounds_per_room = std::env::var("CORE_SOUNDBOARD_MAX_SOUNDS_PER_ROOM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
 
     let chat_dir = std::env::var("CORE_CHAT_DIR").unwrap_or_else(|_| "../logs/chat".to_string());
-    let chat_uploads_dir = std::env::var("CORE_CHAT_UPLOADS_DIR").unwrap_or_else(|_| "../logs/chat-uploads".to_string());
-    let chat_max_upload_mb = std::env::var("CORE_CHAT_MAX_UPLOAD_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
+    let chat_uploads_dir = std::env::var("CORE_CHAT_UPLOADS_DIR")
+        .unwrap_or_else(|_| "../logs/chat-uploads".to_string());
+    let chat_max_upload_mb = std::env::var("CORE_CHAT_MAX_UPLOAD_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10);
     let chat_max_upload_bytes = chat_max_upload_mb.max(1) * 1024 * 1024;
 
     Config {
@@ -3129,7 +3482,10 @@ fn random_secret() -> String {
 }
 
 fn now_ts() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs()
 }
 
 fn now_ts_ms() -> u64 {
@@ -3149,7 +3505,10 @@ fn default_soundboard_volume() -> u16 {
 
 fn append_session_event(dir: &std::path::Path, event: &SessionEvent) {
     // File per day: sessions-YYYY-MM-DD.json
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let days_since_epoch = now / 86400;
     // Calculate date from epoch days
     let (year, month, day) = epoch_days_to_date(days_since_epoch);
@@ -3170,7 +3529,10 @@ fn append_session_event(dir: &std::path::Path, event: &SessionEvent) {
 }
 
 fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let days_since_epoch = now / 86400;
     let (year, month, day) = epoch_days_to_date(days_since_epoch);
     let file_name = format!("bugs-{:04}-{:02}-{:02}.json", year, month, day);
