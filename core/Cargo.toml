@@ -1,6 +1,11 @@
 [workspace]
 members = [
   "control",
+  "client",
+  "admin-client"
+]
+default-members = [
+  "control",
   "client"
 ]
 resolver = "2"

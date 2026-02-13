@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Capability for the admin window","remote":{"urls":["https://127.0.0.1:*/*","https://192.168.5.70:*/*","https://echo.fellowshipoftheboatrace.party:*/*"]},"local":true,"windows":["main"],"permissions":["core:default"]}}

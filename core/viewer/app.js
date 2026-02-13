@@ -829,6 +829,9 @@ function tauriListen(eventName, callback) {
 function hasTauriIPC() {
   return !!(window.__TAURI__ && window.__TAURI__.core);
 }
+function isAdminMode() {
+  return !!window.__ECHO_ADMIN__;
+}
 
 // Build absolute URL for API calls. Native client uses the configured server URL
 // since the page is loaded locally (tauri://). Browser uses relative paths.
@@ -1544,8 +1547,8 @@ function setDefaultUrls() {
     }).catch(function(e) {
       debugLog("[native] get_control_url failed: " + e);
       // Fallback to defaults
-      if (!controlUrlInput.value) controlUrlInput.value = "https://99.111.153.69:9443";
-      if (!sfuUrlInput.value) sfuUrlInput.value = "wss://99.111.153.69:9443";
+      if (!controlUrlInput.value) controlUrlInput.value = "https://echo.fellowshipoftheboatrace.party:9443";
+      if (!sfuUrlInput.value) sfuUrlInput.value = "wss://echo.fellowshipoftheboatrace.party:9443";
     });
   } else {
     if (!controlUrlInput.value) {
@@ -2939,6 +2942,29 @@ function ensureParticipantCard(participant, isLocal = false) {
       }
     });
     screenIndicatorRow.append(watchToggleBtn);
+    // Admin-only: kick & mute buttons
+    if (isAdminMode()) {
+      var adminRow = document.createElement("div");
+      adminRow.className = "admin-controls admin-only";
+      var kickBtn = document.createElement("button");
+      kickBtn.type = "button";
+      kickBtn.className = "admin-kick-btn";
+      kickBtn.textContent = "Kick";
+      kickBtn.addEventListener("click", function(e) {
+        e.stopPropagation();
+        adminKickParticipant(participant.identity);
+      });
+      var muteBtn = document.createElement("button");
+      muteBtn.type = "button";
+      muteBtn.className = "admin-mute-btn";
+      muteBtn.textContent = "Server Mute";
+      muteBtn.addEventListener("click", function(e) {
+        e.stopPropagation();
+        adminMuteParticipant(participant.identity);
+      });
+      adminRow.append(muteBtn, kickBtn);
+      indicators.append(adminRow);
+    }
     indicators.append(micIndicatorRow, screenIndicatorRow);
     const audioControls = document.createElement("div");
     audioControls.className = "audio-controls";
@@ -6847,6 +6873,26 @@ function buildVersionSection() {
 renderPublishButtons();
 setPublishButtonsEnabled(false);
 setDefaultUrls();
+// Admin mode initialization
+if (isAdminMode()) {
+  document.body.classList.add("admin-mode");
+  // Show admin-only elements
+  document.querySelectorAll(".admin-only").forEach(function(el) {
+    el.classList.remove("hidden");
+  });
+  // Auto-login: fetch password from Tauri config and auto-connect
+  if (hasTauriIPC()) {
+    tauriInvoke("get_admin_password").then(function(pw) {
+      if (pw && passwordInput) {
+        passwordInput.value = pw;
+        setTimeout(function() {
+          var btn = document.getElementById("connect-button");
+          if (btn) btn.click();
+        }, 800);
+      }
+    }).catch(function() {});
+  }
+}
 setRoomAudioMutedState(false);
 ensureDevicePermissions().then(() => refreshDevices()).then(() => {
   micSelect.disabled = false;
@@ -7252,3 +7298,196 @@ if (bugReportDesc) {
 
 // Start Who's Online polling on page load (only while not connected)
 startOnlineUsersPolling();
+
+// ═══════════════════════════════════════════
+// ADMIN PANEL
+// ═══════════════════════════════════════════
+
+var _adminDashTimer = null;
+var _adminDashOpen = false;
+
+function adminKickParticipant(identity) {
+  if (!confirm("Kick " + identity + " from the room?")) return;
+  var roomId = currentRoomId;
+  if (!roomId) return;
+  fetch(apiUrl("/v1/rooms/" + encodeURIComponent(roomId) + "/kick/" + encodeURIComponent(identity)), {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + adminToken }
+  }).then(function(res) {
+    if (res.ok) {
+      setStatus("Kicked " + identity);
+    } else {
+      setStatus("Kick failed: " + res.status, true);
+    }
+  }).catch(function(e) {
+    setStatus("Kick error: " + e.message, true);
+  });
+}
+
+function adminMuteParticipant(identity) {
+  var roomId = currentRoomId;
+  if (!roomId) return;
+  fetch(apiUrl("/v1/rooms/" + encodeURIComponent(roomId) + "/mute/" + encodeURIComponent(identity)), {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + adminToken }
+  }).then(function(res) {
+    if (res.ok) {
+      setStatus("Server-muted " + identity);
+    } else {
+      setStatus("Mute failed: " + res.status, true);
+    }
+  }).catch(function(e) {
+    setStatus("Mute error: " + e.message, true);
+  });
+}
+
+function toggleAdminDash() {
+  var panel = document.getElementById("admin-dash-panel");
+  if (!panel) return;
+  _adminDashOpen = !_adminDashOpen;
+  if (_adminDashOpen) {
+    panel.classList.remove("hidden");
+    fetchAdminDashboard();
+    fetchAdminHistory();
+    fetchAdminMetrics();
+    fetchAdminBugs();
+    _adminDashTimer = setInterval(function() {
+      fetchAdminDashboard();
+    }, 3000);
+  } else {
+    panel.classList.add("hidden");
+    if (_adminDashTimer) {
+      clearInterval(_adminDashTimer);
+      _adminDashTimer = null;
+    }
+  }
+}
+
+function switchAdminTab(btn, tabId) {
+  document.querySelectorAll(".admin-dash-content").forEach(function(el) { el.classList.add("hidden"); });
+  document.querySelectorAll(".adm-tab").forEach(function(el) { el.classList.remove("active"); });
+  var tab = document.getElementById(tabId);
+  if (tab) tab.classList.remove("hidden");
+  btn.classList.add("active");
+}
+
+function escAdm(s) {
+  var d = document.createElement("div");
+  d.textContent = s || "";
+  return d.innerHTML;
+}
+
+function fmtDur(secs) {
+  if (secs == null) return "";
+  var h = Math.floor(secs / 3600);
+  var m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return h + "h " + m + "m";
+  if (m > 0) return m + "m";
+  return Math.max(1, Math.floor(secs)) + "s";
+}
+
+function fmtTime(ts) {
+  var d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+async function fetchAdminDashboard() {
+  try {
+    var res = await fetch(apiUrl("/admin/api/dashboard"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!res.ok) return;
+    var data = await res.json();
+    var el = document.getElementById("admin-dash-live");
+    if (!el) return;
+    var total = data.total_online || 0;
+    var html = '<div class="adm-stat-row"><span class="adm-stat-label">Online</span><span class="adm-stat-value">' + total + '</span></div>';
+    if (data.rooms && data.rooms.length > 0) {
+      data.rooms.forEach(function(room) {
+        var pCount = room.participants ? room.participants.length : 0;
+        html += '<div class="adm-room-card"><div class="adm-room-header">' + escAdm(room.room_id) + ' <span class="adm-room-count">' + pCount + '</span></div>';
+        (room.participants || []).forEach(function(p) {
+          var s = p.stats || {};
+          var chips = "";
+          if (s.ice_remote_type) chips += '<span class="adm-badge adm-ice-' + s.ice_remote_type + '">' + s.ice_remote_type + '</span>';
+          if (s.screen_fps != null) chips += '<span class="adm-chip">' + s.screen_fps + 'fps ' + s.screen_width + 'x' + s.screen_height + '</span>';
+          if (s.quality_limitation && s.quality_limitation !== "none") chips += '<span class="adm-badge adm-badge-warn">' + s.quality_limitation + '</span>';
+          html += '<div class="adm-participant"><span>' + escAdm(p.name || p.identity) + '</span><span class="adm-time">' + fmtDur(p.online_seconds) + '</span>' + chips + '</div>';
+        });
+        html += '</div>';
+      });
+    } else {
+      html += '<div class="adm-empty">No active rooms</div>';
+    }
+    el.innerHTML = html;
+  } catch (e) {}
+}
+
+async function fetchAdminHistory() {
+  try {
+    var res = await fetch(apiUrl("/admin/api/sessions"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!res.ok) return;
+    var data = await res.json();
+    var el = document.getElementById("admin-dash-history");
+    if (!el) return;
+    var events = data.events || [];
+    if (events.length === 0) {
+      el.innerHTML = '<div class="adm-empty">No session history</div>';
+      return;
+    }
+    var html = '<table class="adm-table"><thead><tr><th>Time</th><th>Event</th><th>User</th><th>Room</th><th>Duration</th></tr></thead><tbody>';
+    events.forEach(function(ev) {
+      var isJoin = ev.event_type === "join";
+      html += '<tr><td>' + fmtTime(ev.timestamp) + '</td><td><span class="adm-badge ' + (isJoin ? 'adm-join' : 'adm-leave') + '">' + (isJoin ? 'JOIN' : 'LEAVE') + '</span></td><td>' + escAdm(ev.name || ev.identity) + '</td><td>' + escAdm(ev.room_id) + '</td><td>' + (ev.duration_secs != null ? fmtDur(ev.duration_secs) : '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (e) {}
+}
+
+async function fetchAdminMetrics() {
+  try {
+    var res = await fetch(apiUrl("/admin/api/metrics"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!res.ok) return;
+    var data = await res.json();
+    var el = document.getElementById("admin-dash-metrics");
+    if (!el) return;
+    var users = data.users || [];
+    if (users.length === 0) {
+      el.innerHTML = '<div class="adm-empty">No metrics data</div>';
+      return;
+    }
+    var html = '<table class="adm-table"><thead><tr><th>User</th><th>Avg FPS</th><th>Avg Bitrate</th><th>Time</th><th>BW Limited</th><th>CPU Limited</th></tr></thead><tbody>';
+    users.forEach(function(u) {
+      html += '<tr><td>' + escAdm(u.name || u.identity) + '</td><td>' + u.avg_fps + '</td><td>' + (u.avg_bitrate_kbps / 1000).toFixed(1) + ' Mbps</td><td>' + u.total_minutes.toFixed(1) + 'm</td><td>' + u.pct_bandwidth_limited + '%</td><td>' + u.pct_cpu_limited + '%</td></tr>';
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (e) {}
+}
+
+async function fetchAdminBugs() {
+  try {
+    var res = await fetch(apiUrl("/admin/api/bugs"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!res.ok) return;
+    var data = await res.json();
+    var el = document.getElementById("admin-dash-bugs");
+    if (!el) return;
+    var reports = data.reports || [];
+    if (reports.length === 0) {
+      el.innerHTML = '<div class="adm-empty">No bug reports</div>';
+      return;
+    }
+    var html = "";
+    reports.forEach(function(r) {
+      html += '<div class="adm-bug"><div class="adm-bug-header"><strong>' + escAdm(r.reporter || r.identity) + '</strong><span class="adm-time">' + fmtTime(r.timestamp) + '</span></div><div class="adm-bug-desc">' + escAdm(r.description) + '</div></div>';
+    });
+    el.innerHTML = html;
+  } catch (e) {}
+}

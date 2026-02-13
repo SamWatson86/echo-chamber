@@ -11,13 +11,13 @@ use audio_capture_stub as audio_capture;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_updater::UpdaterExt;
 
-const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
+const DEFAULT_SERVER: &str = "https://127.0.0.1:9443";
 
 #[derive(Deserialize)]
 struct Config {
     server: Option<String>,
+    admin_password: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -30,7 +30,7 @@ struct AppInfo {
 
 /// Load config.json from next to the executable.
 /// Falls back to defaults if missing or invalid.
-fn load_config() -> String {
+fn load_config() -> (String, Option<String>) {
     let config_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("config.json")))
@@ -40,20 +40,24 @@ fn load_config() -> String {
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
             let contents = contents.trim_start_matches('\u{FEFF}');
             if let Ok(cfg) = serde_json::from_str::<Config>(contents) {
-                if let Some(server) = cfg.server {
-                    let server = server.trim_end_matches('/').to_string();
-                    eprintln!("[config] server = {}", server);
-                    return server;
+                let server = cfg
+                    .server
+                    .map(|s| s.trim_end_matches('/').to_string())
+                    .unwrap_or_else(|| DEFAULT_SERVER.to_string());
+                eprintln!("[admin-config] server = {}", server);
+                if cfg.admin_password.is_some() {
+                    eprintln!("[admin-config] admin_password = (set)");
                 }
+                return (server, cfg.admin_password);
             }
         }
     }
 
     eprintln!(
-        "[config] no config.json found, using default: {}",
+        "[admin-config] no config.json found, using default: {}",
         DEFAULT_SERVER
     );
-    DEFAULT_SERVER.to_string()
+    (DEFAULT_SERVER.to_string(), None)
 }
 
 /// Clear webview cache when the app version changes (prevents stale content after update)
@@ -67,7 +71,7 @@ fn clear_cache_on_upgrade(app: &tauri::App) {
 
     let stored = std::fs::read_to_string(&version_file).unwrap_or_default();
     if stored.trim() == version {
-        return; // Same version, no cache clear needed
+        return;
     }
 
     eprintln!(
@@ -76,7 +80,6 @@ fn clear_cache_on_upgrade(app: &tauri::App) {
         version
     );
 
-    // Windows: WebView2 stores cache under EBWebView/Default/
     #[cfg(target_os = "windows")]
     {
         let webview_dir = data_dir.join("EBWebView").join("Default");
@@ -88,7 +91,6 @@ fn clear_cache_on_upgrade(app: &tauri::App) {
         }
     }
 
-    // macOS: WKWebView stores cache under WebKit/
     #[cfg(target_os = "macos")]
     {
         let webkit_dir = data_dir.join("WebKit");
@@ -115,26 +117,10 @@ fn get_control_url(server: tauri::State<'_, String>) -> String {
     server.to_string()
 }
 
+/// Admin-only: read the admin password from config.json for auto-login
 #[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle) -> Result<String, String> {
-    let updater = app.updater_builder().build().map_err(|e| e.to_string())?;
-    match updater.check().await {
-        Ok(Some(update)) => {
-            let version = update.version.clone();
-            eprintln!("[updater] manual check: update available v{}", version);
-            match update.download_and_install(|_, _| {}, || {}).await {
-                Ok(_) => {
-                    eprintln!("[updater] manual update installed, restarting...");
-                    app.restart();
-                    #[allow(unreachable_code)]
-                    Ok(format!("Updated to v{}", version))
-                }
-                Err(e) => Err(format!("Install failed: {}", e)),
-            }
-        }
-        Ok(None) => Ok("up_to_date".to_string()),
-        Err(e) => Err(format!("Check failed: {}", e)),
-    }
+fn get_admin_password(password: tauri::State<'_, Option<String>>) -> Option<String> {
+    password.inner().clone()
 }
 
 #[tauri::command]
@@ -202,7 +188,6 @@ fn load_settings(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    // Validate URL scheme to prevent command injection
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Only http/https URLs allowed".to_string());
     }
@@ -240,14 +225,15 @@ fn main() {
         );
     }
 
-    let server = load_config();
+    let (server, admin_password) = load_config();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(server)
+        .manage(admin_password)
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_control_url,
+            get_admin_password,
             toggle_fullscreen,
             set_always_on_top,
             open_external_url,
@@ -256,65 +242,20 @@ fn main() {
             list_capturable_windows,
             start_audio_capture,
             stop_audio_capture,
-            check_for_updates,
         ])
         .setup(move |app| {
-            // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
             clear_cache_on_upgrade(app);
 
-            // Load viewer from local bundled files (frontendDist = "../viewer")
-            // This makes Tauri IPC available natively — no remote URL ACL issues
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("Echo Chamber")
-                .inner_size(1280.0, 800.0)
+                .title("Echo Chamber Admin")
+                .inner_size(1440.0, 900.0)
                 .min_inner_size(800.0, 600.0)
                 .initialization_script("window.__ECHO_NATIVE__ = true;")
+                .initialization_script("window.__ECHO_ADMIN__ = true;")
                 .build()?;
-
-            // Check for updates in the background
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                // Small delay so the window is visible before any update dialog
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                let updater = match handle.updater_builder().build() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        eprintln!("[updater] build failed: {}", e);
-                        return;
-                    }
-                };
-                match updater.check().await {
-                    Ok(Some(update)) => {
-                        eprintln!(
-                            "[updater] update available: v{} -> v{}",
-                            env!("CARGO_PKG_VERSION"),
-                            update.version
-                        );
-                        match update
-                            .download_and_install(
-                                |ev, _| {
-                                    eprintln!("[updater] download progress: {:?}", ev);
-                                },
-                                || {
-                                    eprintln!("[updater] ready to install, app will restart...");
-                                },
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                eprintln!("[updater] install complete, restarting...");
-                                handle.restart();
-                            }
-                            Err(e) => eprintln!("[updater] install failed: {}", e),
-                        }
-                    }
-                    Ok(None) => eprintln!("[updater] up to date (v{})", env!("CARGO_PKG_VERSION")),
-                    Err(e) => eprintln!("[updater] check failed: {}", e),
-                }
-            });
 
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("Error while running Echo Chamber");
+        .expect("Error while running Echo Chamber Admin");
 }

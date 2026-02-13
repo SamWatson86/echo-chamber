@@ -33,7 +33,7 @@ use tower::Layer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 struct AppState {
@@ -763,6 +763,15 @@ async fn main() {
         .route("/api/jam/join", post(jam_join))
         .route("/api/jam/leave", post(jam_leave))
         .route("/api/jam/audio", get(jam_audio_ws))
+        // Admin: participant management
+        .route(
+            "/v1/rooms/:room_id/kick/:identity",
+            post(admin_kick_participant),
+        )
+        .route(
+            "/v1/rooms/:room_id/mute/:identity",
+            post(admin_mute_participant),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -993,6 +1002,7 @@ fn resolve_path(value: String) -> PathBuf {
 
 async fn generate_self_signed() -> RustlsConfig {
     let rcgen::CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec![
+        "echo.fellowshipoftheboatrace.party".into(),
         "echo-core.local".into(),
         "localhost".into(),
         "127.0.0.1".into(),
@@ -2789,6 +2799,195 @@ fn identity_base(identity: &str) -> &str {
 }
 
 // ── End Jam Session endpoints ──────────────────────────────────────────
+
+// ── Admin: kick / mute participants via LiveKit SFU REST API ─────────
+
+/// Generate a short-lived LiveKit service JWT for SFU admin API calls.
+fn livekit_service_token(api_key: &str, api_secret: &str) -> Result<String, StatusCode> {
+    #[derive(Serialize)]
+    struct ServiceClaims {
+        iss: String,
+        sub: String,
+        iat: usize,
+        exp: usize,
+        video: ServiceGrant,
+    }
+    #[derive(Serialize)]
+    #[allow(non_snake_case)]
+    struct ServiceGrant {
+        roomAdmin: bool,
+        room: String,
+    }
+    let now = now_ts();
+    let claims = ServiceClaims {
+        iss: api_key.to_string(),
+        sub: String::new(),
+        iat: now as usize,
+        exp: (now + 60) as usize,
+        video: ServiceGrant {
+            roomAdmin: true,
+            room: String::new(),
+        },
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(api_secret.as_bytes()),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// POST /v1/rooms/:room_id/kick/:identity — Remove a participant from a room
+async fn admin_kick_participant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((room_id, identity)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    info!("ADMIN KICK: room={} identity={}", room_id, identity);
+
+    let sfu_url =
+        std::env::var("CORE_SFU_HTTP").unwrap_or_else(|_| "http://127.0.0.1:7880".to_string());
+    let token = livekit_service_token(
+        &state.config.livekit_api_key,
+        &state.config.livekit_api_secret,
+    )?;
+
+    // Call LiveKit RemoveParticipant API
+    let resp = state
+        .http_client
+        .post(format!(
+            "{}/twirp/livekit.RoomService/RemoveParticipant",
+            sfu_url
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "room": room_id,
+            "identity": identity,
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("kick SFU call failed: {}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        error!("SFU RemoveParticipant failed ({}): {}", status, body);
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    // Also remove from our local participant tracking
+    {
+        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+        participants.retain(|_, p| p.identity != identity);
+    }
+
+    info!("ADMIN KICK success: {} from {}", identity, room_id);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST /v1/rooms/:room_id/mute/:identity — Mute all published tracks for a participant
+async fn admin_mute_participant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((room_id, identity)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    info!("ADMIN MUTE: room={} identity={}", room_id, identity);
+
+    let sfu_url =
+        std::env::var("CORE_SFU_HTTP").unwrap_or_else(|_| "http://127.0.0.1:7880".to_string());
+    let token = livekit_service_token(
+        &state.config.livekit_api_key,
+        &state.config.livekit_api_secret,
+    )?;
+
+    // First, get participant info to find their track SIDs
+    let resp = state
+        .http_client
+        .post(format!(
+            "{}/twirp/livekit.RoomService/GetParticipant",
+            sfu_url
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "room": room_id,
+            "identity": identity,
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("get participant SFU call failed: {}", e);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        error!("SFU GetParticipant failed ({}): {}", status, body);
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    let participant_data: serde_json::Value = resp.json().await.map_err(|e| {
+        error!("parse participant response: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    // Mute each published track (audio tracks)
+    let tracks = participant_data["tracks"].as_array();
+    let mut muted_count = 0u32;
+    if let Some(tracks) = tracks {
+        for track in tracks {
+            let track_sid = track["sid"].as_str().unwrap_or("");
+            let track_type = track["type"].as_str().unwrap_or("");
+            // Mute audio tracks (AUDIO = mic)
+            if track_type == "AUDIO" && !track_sid.is_empty() {
+                let mute_token = livekit_service_token(
+                    &state.config.livekit_api_key,
+                    &state.config.livekit_api_secret,
+                )?;
+                let mute_resp = state
+                    .http_client
+                    .post(format!(
+                        "{}/twirp/livekit.RoomService/MutePublishedTrack",
+                        sfu_url
+                    ))
+                    .header("Authorization", format!("Bearer {}", mute_token))
+                    .header("Content-Type", "application/json")
+                    .json(&serde_json::json!({
+                        "room": room_id,
+                        "identity": identity,
+                        "track_sid": track_sid,
+                        "muted": true,
+                    }))
+                    .send()
+                    .await;
+                match mute_resp {
+                    Ok(r) if r.status().is_success() => muted_count += 1,
+                    Ok(r) => {
+                        error!("mute track {} failed: {}", track_sid, r.status());
+                    }
+                    Err(e) => {
+                        error!("mute track {} error: {}", track_sid, e);
+                    }
+                }
+            }
+        }
+    }
+
+    info!(
+        "ADMIN MUTE success: {} in {} — muted {} tracks",
+        identity, room_id, muted_count
+    );
+    Ok(Json(
+        serde_json::json!({ "ok": true, "muted_tracks": muted_count }),
+    ))
+}
 
 fn ensure_admin(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
     let Some(auth) = headers.get("authorization") else {
