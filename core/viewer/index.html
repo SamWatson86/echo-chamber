@@ -75,8 +75,10 @@
             <div class="room-title">Rooms</div>
             <div id="room-list" class="room-list hidden"></div>
           </div>
+          <div id="jam-banner" class="jam-banner hidden"></div>
           <div class="room-actions">
             <button id="open-settings" type="button" disabled>Settings</button>
+            <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Report Bug</button>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
           </div>
         </div>
@@ -101,8 +103,7 @@
                   <button id="open-soundboard" type="button" disabled>Soundboard</button>
                   <button id="open-camera-lobby" type="button" disabled>Camera Lobby</button>
                   <button id="open-theme" type="button">Theme</button>
-  <button id="open-jam" type="button" disabled>Jam</button>
-  <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Report Bug</button>
+                  <button id="open-jam" type="button" disabled>Jam</button>
                 </div>
               </div>
             </div>
@@ -301,8 +302,8 @@
           <div class="jam-volume-section">
             <label class="jam-volume-label">Jam Volume</label>
             <div class="jam-volume-row">
-              <input id="jam-volume-slider" type="range" min="0" max="100" value="100" />
-              <span id="jam-volume-value" class="jam-volume-value">100%</span>
+              <input id="jam-volume-slider" type="range" min="0" max="100" value="50" />
+              <span id="jam-volume-value" class="jam-volume-value">50%</span>
             </div>
           </div>
           <div id="jam-search-section" class="jam-search-section" style="display:none">
