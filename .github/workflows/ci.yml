@@ -14,12 +14,16 @@ env:
 
 jobs:
   build:
-    name: Build & Check (Windows)
+    name: Build & Bundle (Windows)
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,7 +41,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # Tauri needs these system deps on Windows
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
         working-directory: core
@@ -51,31 +54,32 @@ jobs:
         working-directory: core
         continue-on-error: true  # Don't block releases on warnings for now
 
-      - name: Build workspace (control plane + client)
-        run: cargo build --workspace --release
+      # Build control plane separately (not part of Tauri bundle)
+      - name: Build control plane
+        run: cargo build -p echo-core-control --release
         working-directory: core
 
-  release:
-    name: Tag & Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+      # Build Tauri client — produces NSIS installer + updater artifacts
+      - name: Build Tauri client
+        working-directory: core/client
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CI: 'true'
+        run: cargo tauri build --bundles nsis
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for changelog
+      - name: List bundle output
+        shell: bash
+        run: ls -la core/target/release/bundle/nsis/
 
-      - name: Read version from tauri.conf.json
+      # Determine version and tag
+      - name: Read version
         id: version
         shell: bash
         run: |
           VERSION=$(jq -r '.version' core/client/tauri.conf.json)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # Build number from short SHA
           SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "Release version: v${VERSION}+${SHORT_SHA}"
 
@@ -91,19 +95,42 @@ jobs:
 
       - name: Generate changelog
         if: steps.check_tag.outputs.exists == 'false'
-        id: changelog
         shell: bash
         run: |
-          # Get commits since last tag (or last 20 if no tags)
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -n "$LAST_TAG" ]; then
             LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges | head -30)
           else
             LOG=$(git log --pretty=format:"- %s" --no-merges -20)
           fi
-          # Write to file to avoid escaping issues
           echo "$LOG" > changelog.txt
           echo "Generated changelog with $(echo "$LOG" | wc -l) entries"
+
+      # Generate latest.json for the Tauri updater endpoint
+      - name: Generate latest.json
+        if: steps.check_tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          SIG=$(cat "core/target/release/bundle/nsis/Echo Chamber_${VERSION}_x64-setup.nsis.zip.sig")
+          DOWNLOAD_URL="https://github.com/SamWatson86/echo-chamber/releases/download/${TAG}/Echo.Chamber_${VERSION}_x64-setup.nsis.zip"
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          cat > latest.json <<ENDJSON
+          {
+            "version": "${VERSION}",
+            "notes": "Echo Chamber ${TAG}",
+            "pub_date": "${DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${SIG}",
+                "url": "${DOWNLOAD_URL}"
+              }
+            }
+          }
+          ENDJSON
+          echo "Generated latest.json for version ${VERSION}"
+          cat latest.json
 
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists == 'false'
@@ -115,3 +142,8 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: false
+          files: |
+            core/target/release/bundle/nsis/*.exe
+            core/target/release/bundle/nsis/*.nsis.zip
+            core/target/release/bundle/nsis/*.nsis.zip.sig
+            latest.json
