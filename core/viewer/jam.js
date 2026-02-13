@@ -446,7 +446,7 @@ function renderJamPanel() {
 function renderNowPlaying(np) {
   var container = document.getElementById("jam-now-playing");
   if (!container) return;
-  if (!np || !np.name) {
+  if (!np || !np.name || !np.is_playing) {
     container.innerHTML = '<div class="jam-now-playing-empty">No music playing</div>';
     return;
   }
@@ -730,7 +730,7 @@ function updateNowPlayingBanner(state) {
   var banner = document.getElementById("jam-banner");
   if (!banner) return;
 
-  if (!state || !state.active || !state.now_playing || !state.now_playing.name) {
+  if (!state || !state.active || !state.now_playing || !state.now_playing.name || !state.now_playing.is_playing) {
     banner.classList.add("hidden");
     return;
   }
@@ -744,6 +744,13 @@ function updateNowPlayingBanner(state) {
     '</div>' +
     '<span class="jam-banner-live">JAM</span>';
   banner.classList.remove("hidden");
+
+  // Click banner to open jam panel
+  if (!banner._jamClickBound) {
+    banner.style.cursor = "pointer";
+    banner.addEventListener("click", function() { openJamPanel(); });
+    banner._jamClickBound = true;
+  }
 }
 
 // Lightweight poll for banner — runs independently of the Jam panel

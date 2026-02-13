@@ -2927,10 +2927,15 @@ function ensureParticipantCard(participant, isLocal = false) {
     watchToggleBtn.addEventListener("click", function(e) {
       e.stopPropagation();
       var identity = participant.identity;
+      var pState = participantState.get(identity);
       if (hiddenScreens.has(identity)) {
         hiddenScreens.delete(identity);
         var tile = screenTileByIdentity.get(identity);
         if (tile) tile.style.display = "";
+        // Unmute screen share audio
+        if (pState && pState.screenAudioEls) {
+          pState.screenAudioEls.forEach(function(el) { el.muted = false; });
+        }
         watchToggleBtn.textContent = "Stop Watching";
       } else {
         hiddenScreens.add(identity);
@@ -2941,6 +2946,10 @@ function ensureParticipantCard(participant, isLocal = false) {
             screenGridEl.classList.remove("is-focused");
           }
           tile.style.display = "none";
+        }
+        // Mute screen share audio
+        if (pState && pState.screenAudioEls) {
+          pState.screenAudioEls.forEach(function(el) { el.muted = true; });
         }
         watchToggleBtn.textContent = "Start Watching";
       }
@@ -3039,10 +3048,14 @@ function ensureParticipantCard(participant, isLocal = false) {
     watchToggleBtn.addEventListener("click", function(e) {
       e.stopPropagation();
       var identity = participant.identity;
+      var pState = participantState.get(identity);
       if (hiddenScreens.has(identity)) {
         hiddenScreens.delete(identity);
         var tile = screenTileByIdentity.get(identity);
         if (tile) tile.style.display = "";
+        if (pState && pState.screenAudioEls) {
+          pState.screenAudioEls.forEach(function(el) { el.muted = false; });
+        }
         watchToggleBtn.textContent = "Stop Watching";
       } else {
         hiddenScreens.add(identity);
@@ -3053,6 +3066,9 @@ function ensureParticipantCard(participant, isLocal = false) {
             screenGridEl.classList.remove("is-focused");
           }
           tile.style.display = "none";
+        }
+        if (pState && pState.screenAudioEls) {
+          pState.screenAudioEls.forEach(function(el) { el.muted = true; });
         }
         watchToggleBtn.textContent = "Start Watching";
       }
@@ -3701,6 +3717,12 @@ function handleTrackSubscribed(track, publication, participant) {
       screenResubscribeIntent.delete(screenTrackSid);
     }
     screenTileByIdentity.set(participant.identity, tile);
+    // Screen share is opt-in: hide by default for remote participants
+    var isLocal = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    if (!isLocal && !hiddenScreens.has(participant.identity)) {
+      // First time seeing this screen — default to hidden (opt-in)
+      hiddenScreens.add(participant.identity);
+    }
     if (hiddenScreens.has(participant.identity)) {
       tile.style.display = "none";
     }
@@ -3784,6 +3806,10 @@ function handleTrackSubscribed(track, publication, participant) {
     if (source === LK.Track.Source.ScreenShareAudio) {
       state.screenAudioSid = getTrackSid(publication, track, `${participant.identity}-screen-audio`);
       state.screenAudioEls.add(element);
+      // Mute screen audio if user has unwatched this screen share
+      if (hiddenScreens.has(participant.identity)) {
+        element.muted = true;
+      }
       if (!state.screenAnalyser && LK?.createAudioAnalyser) {
         state.screenAnalyser = LK.createAudioAnalyser(track);
         resumeAnalyser(state.screenAnalyser);
