@@ -120,6 +120,24 @@ jobs:
           echo "Found installer: $EXE"
           echo "Found signature: $SIG"
 
+      # Read release notes from CHANGELOG.md for this version
+      - name: Extract release notes
+        if: steps.check_tag.outputs.exists == 'false'
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Extract the section for this version from CHANGELOG.md
+          # Grabs everything between "## $VERSION" and the next "## " heading
+          NOTES=$(sed -n "/^## ${VERSION}$/,/^## /{/^## ${VERSION}$/d;/^## /d;p;}" CHANGELOG.md | sed '/^$/d')
+          if [ -z "$NOTES" ]; then
+            NOTES="Update to v${VERSION}"
+          fi
+          # Write to file to avoid escaping issues
+          echo "$NOTES" > release-notes.txt
+          echo "Release notes:"
+          cat release-notes.txt
+
       # Generate latest.json for the Tauri updater endpoint
       - name: Generate latest.json
         if: steps.check_tag.outputs.exists == 'false'
@@ -133,10 +151,12 @@ jobs:
           EXE_URL_NAME=$(echo "$EXE_BASENAME" | sed 's/ /./g')
           DOWNLOAD_URL="https://github.com/SamWatson86/echo-chamber/releases/download/${TAG}/${EXE_URL_NAME}"
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          # Read release notes and escape for JSON
+          NOTES=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read().strip()))" < release-notes.txt)
           cat > latest.json <<ENDJSON
           {
             "version": "${VERSION}",
-            "notes": "Echo Chamber ${TAG}",
+            "notes": ${NOTES},
             "pub_date": "${DATE}",
             "platforms": {
               "windows-x86_64": {
@@ -155,7 +175,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Echo Chamber ${{ steps.version.outputs.tag }}
-          body_path: changelog.txt
+          body_path: release-notes.txt
           draft: false
           prerelease: false
           generate_release_notes: false

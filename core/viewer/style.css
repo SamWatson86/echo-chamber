@@ -3569,3 +3569,133 @@ body[data-theme="ultra-instinct"] .theme-card.is-active {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* --- What's New Panel --- */
+.whats-new-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: whatsNewFadeIn 0.3s ease;
+}
+
+.whats-new-overlay.whats-new-closing {
+  animation: whatsNewFadeOut 0.3s ease forwards;
+}
+
+.whats-new-panel {
+  width: min(440px, calc(100vw - 48px));
+  max-height: calc(100vh - 120px);
+  background: linear-gradient(168deg, rgba(17, 24, 39, 0.98) 0%, rgba(8, 14, 26, 0.99) 100%);
+  backdrop-filter: blur(32px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  overflow-y: auto;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  animation: whatsNewSlideIn 0.3s ease;
+}
+
+.whats-new-closing .whats-new-panel {
+  animation: whatsNewSlideOut 0.3s ease forwards;
+}
+
+.whats-new-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.whats-new-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.whats-new-badge {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #0b1220;
+  background: var(--accent);
+  padding: 3px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.whats-new-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.whats-new-list li {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.5;
+  padding-left: 20px;
+  position: relative;
+}
+
+.whats-new-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+.whats-new-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.whats-new-close {
+  padding: 8px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0b1220;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.whats-new-close:hover {
+  background: #7dd3fc;
+}
+
+@keyframes whatsNewFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes whatsNewFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes whatsNewSlideIn {
+  from { opacity: 0; transform: scale(0.95) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes whatsNewSlideOut {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.95) translateY(10px); }
+}
