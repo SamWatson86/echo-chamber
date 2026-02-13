@@ -49,14 +49,19 @@ fn load_config() -> String {
         }
     }
 
-    eprintln!("[config] no config.json found, using default: {}", DEFAULT_SERVER);
+    eprintln!(
+        "[config] no config.json found, using default: {}",
+        DEFAULT_SERVER
+    );
     DEFAULT_SERVER.to_string()
 }
 
 /// Clear webview cache when the app version changes (prevents stale content after update)
 fn clear_cache_on_upgrade(app: &tauri::App) {
     let version = env!("CARGO_PKG_VERSION");
-    let Ok(data_dir) = app.path().app_data_dir() else { return };
+    let Ok(data_dir) = app.path().app_data_dir() else {
+        return;
+    };
     let _ = std::fs::create_dir_all(&data_dir);
     let version_file = data_dir.join(".last-version");
 
@@ -65,7 +70,11 @@ fn clear_cache_on_upgrade(app: &tauri::App) {
         return; // Same version, no cache clear needed
     }
 
-    eprintln!("[cache] Version upgrade detected ({} -> {}) — clearing webview cache", stored.trim(), version);
+    eprintln!(
+        "[cache] Version upgrade detected ({} -> {}) — clearing webview cache",
+        stored.trim(),
+        version
+    );
 
     // Windows: WebView2 stores cache under EBWebView/Default/
     #[cfg(target_os = "windows")]
@@ -140,9 +149,7 @@ fn toggle_fullscreen(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn set_always_on_top(app: tauri::AppHandle, on_top: bool) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("window not found")?;
-    window
-        .set_always_on_top(on_top)
-        .map_err(|e| e.to_string())
+    window.set_always_on_top(on_top).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -271,16 +278,29 @@ fn main() {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 let updater = match handle.updater_builder().build() {
                     Ok(u) => u,
-                    Err(e) => { eprintln!("[updater] build failed: {}", e); return; }
+                    Err(e) => {
+                        eprintln!("[updater] build failed: {}", e);
+                        return;
+                    }
                 };
                 match updater.check().await {
                     Ok(Some(update)) => {
-                        eprintln!("[updater] update available: v{} -> v{}", env!("CARGO_PKG_VERSION"), update.version);
-                        match update.download_and_install(|ev, _| {
-                            eprintln!("[updater] download progress: {:?}", ev);
-                        }, || {
-                            eprintln!("[updater] ready to install, app will restart...");
-                        }).await {
+                        eprintln!(
+                            "[updater] update available: v{} -> v{}",
+                            env!("CARGO_PKG_VERSION"),
+                            update.version
+                        );
+                        match update
+                            .download_and_install(
+                                |ev, _| {
+                                    eprintln!("[updater] download progress: {:?}", ev);
+                                },
+                                || {
+                                    eprintln!("[updater] ready to install, app will restart...");
+                                },
+                            )
+                            .await
+                        {
                             Ok(_) => {
                                 eprintln!("[updater] install complete, restarting...");
                                 handle.restart();

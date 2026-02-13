@@ -84,10 +84,7 @@ impl JamBot {
 
 /// Async loop: read AudioChunks from WASAPI, convert to 48 kHz stereo 20 ms frames,
 /// broadcast to all WebSocket subscribers.
-async fn broadcast_loop(
-    tx: broadcast::Sender<AudioFrame>,
-    mut rx: mpsc::Receiver<AudioChunk>,
-) {
+async fn broadcast_loop(tx: broadcast::Sender<AudioFrame>, mut rx: mpsc::Receiver<AudioChunk>) {
     let mut accum: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 4);
     let mut frame_count: u64 = 0;
 

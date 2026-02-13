@@ -333,8 +333,7 @@ mod platform {
                         let ext_ptr = ptr as *const u8;
                         let sub_format_offset = std::mem::size_of::<WAVEFORMATEX>();
                         let guid_offset = sub_format_offset + 2 + 4;
-                        let guid_bytes =
-                            std::slice::from_raw_parts(ext_ptr.add(guid_offset), 16);
+                        let guid_bytes = std::slice::from_raw_parts(ext_ptr.add(guid_offset), 16);
                         let first_u32 = u32::from_le_bytes([
                             guid_bytes[0],
                             guid_bytes[1],
@@ -419,13 +418,7 @@ mod platform {
                     let mut frames: u32 = 0;
                     let mut flags: u32 = 0;
 
-                    let hr = capture.GetBuffer(
-                        &mut buf_ptr,
-                        &mut frames,
-                        &mut flags,
-                        None,
-                        None,
-                    );
+                    let hr = capture.GetBuffer(&mut buf_ptr, &mut frames, &mut flags, None, None);
 
                     if hr.is_err() || frames == 0 {
                         break;
@@ -442,24 +435,22 @@ mod platform {
                             let preview = std::cmp::min(slice.len(), 32);
                             eprintln!(
                                 "[audio-capture] frame #{} len={} first_bytes={:?}",
-                                frame_count, data_len, &slice[..preview]
+                                frame_count,
+                                data_len,
+                                &slice[..preview]
                             );
                         }
 
                         // Convert to float32 samples
                         let float_samples: Vec<f32> = if is_float {
                             // Already float32 — reinterpret bytes
-                            let f32_slice = std::slice::from_raw_parts(
-                                buf_ptr as *const f32,
-                                data_len / 4,
-                            );
+                            let f32_slice =
+                                std::slice::from_raw_parts(buf_ptr as *const f32, data_len / 4);
                             f32_slice.to_vec()
                         } else if bits == 16 {
                             let sample_count = data_len / 2;
-                            let samples = std::slice::from_raw_parts(
-                                buf_ptr as *const i16,
-                                sample_count,
-                            );
+                            let samples =
+                                std::slice::from_raw_parts(buf_ptr as *const i16, sample_count);
                             samples.iter().map(|&s| s as f32 / 32768.0).collect()
                         } else if bits == 24 {
                             let sample_count = data_len / 3;
@@ -479,10 +470,8 @@ mod platform {
                             out
                         } else {
                             // Unknown — interpret as float32 anyway
-                            let f32_slice = std::slice::from_raw_parts(
-                                buf_ptr as *const f32,
-                                data_len / 4,
-                            );
+                            let f32_slice =
+                                std::slice::from_raw_parts(buf_ptr as *const f32, data_len / 4);
                             f32_slice.to_vec()
                         };
 
@@ -520,7 +509,7 @@ mod platform {
 
 // Re-export platform types
 #[cfg(windows)]
-pub use platform::{AudioChunk, CaptureHandle, find_spotify_pid, start_capture, stop_capture};
+pub use platform::{find_spotify_pid, start_capture, stop_capture, AudioChunk, CaptureHandle};
 
 // Stub for non-Windows (won't be used, but allows compilation)
 #[cfg(not(windows))]
@@ -534,7 +523,9 @@ pub struct AudioChunk {
 pub struct CaptureHandle;
 
 #[cfg(not(windows))]
-pub fn find_spotify_pid() -> Option<u32> { None }
+pub fn find_spotify_pid() -> Option<u32> {
+    None
+}
 
 #[cfg(not(windows))]
 pub fn start_capture(

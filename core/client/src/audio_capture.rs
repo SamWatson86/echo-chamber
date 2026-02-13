@@ -121,8 +121,12 @@ fn get_exe_name(pid: u32) -> Option<String> {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 260];
         let mut size = buf.len() as u32;
-        let ok =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut size);
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
         let _ = CloseHandle(handle);
         ok.ok()?;
         let path = String::from_utf16_lossy(&buf[..size as usize]);
@@ -164,10 +168,15 @@ fn check_process_loopback_support() -> std::result::Result<(), String> {
         // Value is REG_SZ (UTF-16 null-terminated string)
         let chars = buf_size as usize / 2;
         let wide = std::slice::from_raw_parts(buf.as_ptr() as *const u16, chars);
-        let build_str = String::from_utf16_lossy(wide).trim_matches('\0').to_string();
+        let build_str = String::from_utf16_lossy(wide)
+            .trim_matches('\0')
+            .to_string();
 
         let build_num: u32 = build_str.parse().unwrap_or(0);
-        eprintln!("[audio-capture] Windows build: {} ({})", build_str, build_num);
+        eprintln!(
+            "[audio-capture] Windows build: {} ({})",
+            build_str, build_num
+        );
 
         if build_num < 20348 {
             return Err(format!(
@@ -299,19 +308,23 @@ fn capture_loop(
 
         // Completion handler
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let handler: IActivateAudioInterfaceCompletionHandler =
-            ActivationHandler { tx }.into();
+        let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler { tx }.into();
 
         // Activate audio interface for process loopback
         // VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback"
-        eprintln!("[audio-capture] calling ActivateAudioInterfaceAsync for PID {} (params_size={})", pid, params_size);
+        eprintln!(
+            "[audio-capture] calling ActivateAudioInterfaceAsync for PID {} (params_size={})",
+            pid, params_size
+        );
         let _operation = ActivateAudioInterfaceAsync(
             w!("VAD\\Process_Loopback"),
             &IAudioClient::IID,
             Some(propvariant),
             &handler,
         )?;
-        eprintln!("[audio-capture] ActivateAudioInterfaceAsync call succeeded, waiting for completion...");
+        eprintln!(
+            "[audio-capture] ActivateAudioInterfaceAsync call succeeded, waiting for completion..."
+        );
 
         // Wait for activation (5 second timeout)
         let client = rx
@@ -342,7 +355,12 @@ fn capture_loop(
                     let sub_format_offset = std::mem::size_of::<WAVEFORMATEX>();
                     let guid_offset = sub_format_offset + 2 + 4;
                     let guid_bytes = std::slice::from_raw_parts(ext_ptr.add(guid_offset), 16);
-                    let first_u32 = u32::from_le_bytes([guid_bytes[0], guid_bytes[1], guid_bytes[2], guid_bytes[3]]);
+                    let first_u32 = u32::from_le_bytes([
+                        guid_bytes[0],
+                        guid_bytes[1],
+                        guid_bytes[2],
+                        guid_bytes[3],
+                    ]);
                     first_u32 == 3
                 } else {
                     false
@@ -413,7 +431,9 @@ fn capture_loop(
                 );
 
                 // Initialize with default format + LOOPBACK flag
-                eprintln!("[audio-capture] initializing audio client with default format + LOOPBACK flag");
+                eprintln!(
+                    "[audio-capture] initializing audio client with default format + LOOPBACK flag"
+                );
                 let buffer_duration: i64 = 200_000;
                 let fmt_ref = fmt_ptr_owned.as_ref().unwrap() as *const WAVEFORMATEX;
                 client.Initialize(
@@ -453,13 +473,7 @@ fn capture_loop(
                 let mut frames: u32 = 0;
                 let mut flags: u32 = 0;
 
-                let hr = capture.GetBuffer(
-                    &mut buf_ptr,
-                    &mut frames,
-                    &mut flags,
-                    None,
-                    None,
-                );
+                let hr = capture.GetBuffer(&mut buf_ptr, &mut frames, &mut flags, None, None);
 
                 if hr.is_err() || frames == 0 {
                     break;
@@ -479,7 +493,9 @@ fn capture_loop(
                         let preview_bytes = std::cmp::min(slice.len(), 32);
                         eprintln!(
                             "[audio-capture] frame #{} len={} first_bytes={:?}",
-                            frame_count, data_len, &slice[..preview_bytes]
+                            frame_count,
+                            data_len,
+                            &slice[..preview_bytes]
                         );
                     }
 
@@ -490,10 +506,8 @@ fn capture_loop(
                         // Int16 PCM → Float32 conversion
                         let sample_count = data_len / 2;
                         let mut float_buf = Vec::with_capacity(sample_count * 4);
-                        let samples = std::slice::from_raw_parts(
-                            buf_ptr as *const i16,
-                            sample_count,
-                        );
+                        let samples =
+                            std::slice::from_raw_parts(buf_ptr as *const i16, sample_count);
                         for &s in samples {
                             let f = s as f32 / 32768.0;
                             float_buf.extend_from_slice(&f.to_le_bytes());
