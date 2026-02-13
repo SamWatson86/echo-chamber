@@ -3572,10 +3572,10 @@ async fn chime_get(
         HeaderValue::from_str(&entry.mime)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
-    // Cache chimes for 5 minutes
+    // Don't cache chimes — users can update them at any time
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=300"),
+        HeaderValue::from_static("no-cache"),
     );
 
     Ok(response)

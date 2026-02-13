@@ -1655,7 +1655,8 @@ async function fetchRoomStatus(baseUrl, adminToken) {
 
 // ---- Room chime sounds (Web Audio API) ----
 let chimeAudioCtx = null;
-const chimeBufferCache = new Map(); // "identityBase-enter" or "identityBase-exit" -> AudioBuffer
+const chimeBufferCache = new Map(); // "identityBase-enter" or "identityBase-exit" -> { buffer, ts }
+const CHIME_CACHE_TTL_MS = 60000; // Re-fetch chimes after 60 seconds so updates are picked up
 function getChimeCtx() {
   if (!chimeAudioCtx) chimeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return chimeAudioCtx;
@@ -1733,14 +1734,16 @@ function playSwitchChime() {
 
 async function fetchChimeBuffer(identityBase, kind) {
   const cacheKey = identityBase + "-" + kind;
-  if (chimeBufferCache.has(cacheKey)) return chimeBufferCache.get(cacheKey);
+  const cached = chimeBufferCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < CHIME_CACHE_TTL_MS) return cached.buffer;
   try {
-    const res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind));
+    // Add cache-buster to bypass browser cache — chimes may be updated at any time
+    const res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind + "?v=" + Date.now()));
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     const ctx = getChimeCtx();
     const decoded = await ctx.decodeAudioData(buf.slice(0));
-    chimeBufferCache.set(cacheKey, decoded);
+    chimeBufferCache.set(cacheKey, { buffer: decoded, ts: Date.now() });
     return decoded;
   } catch {
     return null;
@@ -3945,10 +3948,11 @@ function setSelectOptions(select, items, placeholder) {
   empty.value = "";
   empty.textContent = placeholder;
   select.appendChild(empty);
-  items.forEach((item) => {
+  const kindLabels = { audioinput: "Microphone", videoinput: "Camera", audiooutput: "Speaker" };
+  items.forEach((item, i) => {
     const option = document.createElement("option");
     option.value = item.deviceId;
-    option.textContent = item.label || `${item.kind}`;
+    option.textContent = item.label || `${kindLabels[item.kind] || item.kind} ${i + 1}`;
     select.appendChild(option);
   });
 }
@@ -4007,6 +4011,13 @@ async function refreshDevices() {
   const mics = devices.filter((d) => d.kind === "audioinput");
   const cams = devices.filter((d) => d.kind === "videoinput");
   const speakers = devices.filter((d) => d.kind === "audiooutput");
+
+  // Detect macOS permission-denied scenario: devices exist but all have empty labels
+  const allLabelsEmpty = devices.length > 0 && devices.every((d) => !d.label);
+  if (allLabelsEmpty) {
+    debugLog("[devices] enumerateDevices returned " + devices.length + " devices but all labels are empty (permissions not granted)");
+  }
+
   setSelectOptions(micSelect, mics, "Default mic");
   setSelectOptions(camSelect, cams, "Default camera");
   setSelectOptions(speakerSelect, speakers, "Default output");
@@ -4036,7 +4047,9 @@ async function refreshDevices() {
     if (opt) speakerSelect.value = selectedSpeakerId;
     else selectedSpeakerId = "";
   }
-  if (!mics.length && !cams.length) {
+  if (allLabelsEmpty) {
+    setDeviceStatus("Devices detected but permissions not granted. On Mac: System Settings \u2192 Privacy & Security \u2192 Microphone/Camera, then restart the app.", true);
+  } else if (!mics.length && !cams.length) {
     setDeviceStatus("No audio or video devices found. Check permissions.");
   } else if (!mics.length) {
     setDeviceStatus("No microphones found — check permissions or connection.");
@@ -6921,7 +6934,10 @@ function buildVersionSection() {
         updateStatus.textContent = "Installing... app will restart.";
       }
     } catch (e) {
-      updateStatus.textContent = "Error: " + (e.message || String(e));
+      var errStr = e.message || String(e);
+      debugLog("[updater] check failed: " + errStr);
+      // macOS doesn't support auto-update yet (no code signing), provide download link
+      updateStatus.innerHTML = 'Update check failed. <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Download latest from GitHub</a>';
     }
     updateBtn.disabled = false;
   });
