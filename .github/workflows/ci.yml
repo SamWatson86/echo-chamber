@@ -1,4 +1,4 @@
-name: CI - Build & Release
+name: CI - Build & Check
 
 on:
   push:
@@ -14,16 +14,12 @@ env:
 
 jobs:
   build:
-    name: Build & Bundle (Windows)
+    name: Build & Check (Windows)
     runs-on: windows-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for changelog
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -52,14 +48,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
         working-directory: core
-        continue-on-error: true  # Don't block releases on warnings for now
+        continue-on-error: true
 
-      # Build control plane separately (not part of Tauri bundle)
       - name: Build control plane
         run: cargo build -p echo-core-control --release
         working-directory: core
 
-      # Build Tauri client — produces NSIS installer + updater artifacts
       - name: Build Tauri client
         working-directory: core/client
         env:
@@ -68,117 +62,9 @@ jobs:
           CI: 'true'
         run: cargo tauri build --bundles nsis
 
-      - name: List bundle output
-        shell: bash
-        run: ls -la core/target/release/bundle/nsis/
-
-      # Determine version and tag
-      - name: Read version
-        id: version
-        shell: bash
-        run: |
-          VERSION=$(jq -r '.version' core/client/tauri.conf.json)
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VERSION}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Release version: v${VERSION}+${SHORT_SHA}"
-
-      - name: Check if tag already exists
-        id: check_tag
-        shell: bash
-        run: |
-          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Generate changelog
-        if: steps.check_tag.outputs.exists == 'false'
-        shell: bash
-        run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$LAST_TAG" ]; then
-            LOG=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges | head -30)
-          else
-            LOG=$(git log --pretty=format:"- %s" --no-merges -20)
-          fi
-          echo "$LOG" > changelog.txt
-          echo "Generated changelog with $(echo "$LOG" | wc -l) entries"
-
-      # Find the actual bundle filenames (spaces in names, varies by Tauri version)
-      - name: Identify bundle files
-        if: steps.check_tag.outputs.exists == 'false'
-        id: bundle
-        shell: bash
-        run: |
-          NSIS_DIR="core/target/release/bundle/nsis"
-          EXE=$(ls "$NSIS_DIR"/*.exe 2>/dev/null | head -1)
-          SIG=$(ls "$NSIS_DIR"/*.sig 2>/dev/null | head -1)
-          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
-          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
-          echo "Found installer: $EXE"
-          echo "Found signature: $SIG"
-
-      # Read release notes from CHANGELOG.md for this version
-      - name: Extract release notes
-        if: steps.check_tag.outputs.exists == 'false'
-        id: notes
-        shell: bash
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Extract the section for this version from CHANGELOG.md
-          # Grabs everything between "## $VERSION" and the next "## " heading
-          NOTES=$(sed -n "/^## ${VERSION}$/,/^## /{/^## ${VERSION}$/d;/^## /d;p;}" CHANGELOG.md | sed '/^$/d')
-          if [ -z "$NOTES" ]; then
-            NOTES="Update to v${VERSION}"
-          fi
-          # Write to file to avoid escaping issues
-          echo "$NOTES" > release-notes.txt
-          echo "Release notes:"
-          cat release-notes.txt
-
-      # Generate latest.json for the Tauri updater endpoint
-      - name: Generate latest.json
-        if: steps.check_tag.outputs.exists == 'false'
-        shell: bash
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          SIG_CONTENT=$(cat "${{ steps.bundle.outputs.sig }}")
-          EXE_BASENAME=$(basename "${{ steps.bundle.outputs.exe }}")
-          # GitHub replaces spaces with dots in download URLs
-          EXE_URL_NAME=$(echo "$EXE_BASENAME" | sed 's/ /./g')
-          DOWNLOAD_URL="https://github.com/SamWatson86/echo-chamber/releases/download/${TAG}/${EXE_URL_NAME}"
-          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          # Read release notes and escape for JSON
-          NOTES=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read().strip()))" < release-notes.txt)
-          cat > latest.json <<ENDJSON
-          {
-            "version": "${VERSION}",
-            "notes": ${NOTES},
-            "pub_date": "${DATE}",
-            "platforms": {
-              "windows-x86_64": {
-                "signature": "${SIG_CONTENT}",
-                "url": "${DOWNLOAD_URL}"
-              }
-            }
-          }
-          ENDJSON
-          echo "Generated latest.json:"
-          cat latest.json
-
-      - name: Create GitHub Release
-        if: steps.check_tag.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Echo Chamber ${{ steps.version.outputs.tag }}
-          body_path: release-notes.txt
-          draft: false
-          prerelease: false
-          generate_release_notes: false
-          files: |
-            core/target/release/bundle/nsis/*
-            latest.json
+          name: echo-chamber-windows-installer
+          path: core/target/release/bundle/nsis/*
+          if-no-files-found: error

@@ -1,0 +1,168 @@
+name: Release
+
+# Only runs when you push a version tag: git tag v0.3.1 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+        working-directory: core
+
+      - name: Build Tauri client
+        working-directory: core/client
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CI: 'true'
+        run: cargo tauri build --bundles nsis
+
+      - name: Identify bundle files
+        id: bundle
+        shell: bash
+        run: |
+          NSIS_DIR="core/target/release/bundle/nsis"
+          EXE=$(ls "$NSIS_DIR"/*.exe 2>/dev/null | head -1)
+          SIG=$(ls "$NSIS_DIR"/*.sig 2>/dev/null | head -1)
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(jq -r '.version' core/client/tauri.conf.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes
+        id: notes
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES=$(sed -n "/^## ${VERSION}$/,/^## /{/^## ${VERSION}$/d;/^## /d;p;}" CHANGELOG.md | sed '/^$/d')
+          if [ -z "$NOTES" ]; then
+            NOTES="Update to v${VERSION}"
+          fi
+          echo "$NOTES" > release-notes.txt
+
+      - name: Generate latest.json
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ github.ref_name }}"
+          SIG_CONTENT=$(cat "${{ steps.bundle.outputs.sig }}")
+          EXE_BASENAME=$(basename "${{ steps.bundle.outputs.exe }}")
+          EXE_URL_NAME=$(echo "$EXE_BASENAME" | sed 's/ /./g')
+          DOWNLOAD_URL="https://github.com/SamWatson86/echo-chamber/releases/download/${TAG}/${EXE_URL_NAME}"
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          NOTES=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read().strip()))" < release-notes.txt)
+          cat > latest.json <<ENDJSON
+          {
+            "version": "${VERSION}",
+            "notes": ${NOTES},
+            "pub_date": "${DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${SIG_CONTENT}",
+                "url": "${DOWNLOAD_URL}"
+              }
+            }
+          }
+          ENDJSON
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Echo Chamber ${{ github.ref_name }}
+          body_path: release-notes.txt
+          draft: false
+          prerelease: false
+          files: |
+            core/target/release/bundle/nsis/*
+            latest.json
+
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    needs: build-windows  # Wait for release to be created first
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: macos-cargo-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Configure updater artifacts
+        shell: bash
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "No signing key — disabling updater artifacts for this build"
+            jq '.bundle.createUpdaterArtifacts = false' core/client/tauri.conf.json > tmp.json
+            mv tmp.json core/client/tauri.conf.json
+          fi
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      - name: Build DMG
+        working-directory: core/client
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CI: 'true'
+        run: cargo tauri build --bundles dmg
+
+      - name: Upload DMG to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: core/target/release/bundle/dmg/*.dmg
