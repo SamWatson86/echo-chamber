@@ -201,8 +201,8 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &url])
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
             .spawn()
             .map_err(|e| e.to_string())?;
     }

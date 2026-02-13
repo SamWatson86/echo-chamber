@@ -1,3 +1,6 @@
+mod audio_capture;
+mod jam_bot;
+
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Json, Path, Query, State},
@@ -25,6 +28,8 @@ use std::{
 use tracing::{info, warn};
 use tower_http::services::ServeDir;
 use tower_http::cors::{CorsLayer, Any};
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower::Layer;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -49,8 +54,10 @@ struct AppState {
     bug_log_dir: PathBuf,
     // Jam Session (Spotify)
     jam: Arc<Mutex<JamState>>,
+    jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
     spotify_client_id: String,
     spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
+    spotify_token_file: PathBuf,
     http_client: reqwest::Client,
 }
 
@@ -292,10 +299,8 @@ struct SpotifyToken {
     expires_at: u64, // unix timestamp
 }
 
-#[allow(dead_code)]
 struct SpotifyPending {
     state: String,
-    verifier: String,
     code: Option<String>,
 }
 
@@ -536,6 +541,28 @@ async fn main() {
     let bug_log_dir = session_log_dir.parent().unwrap_or(std::path::Path::new(".")).join("bugs");
     fs::create_dir_all(&bug_log_dir).ok();
 
+    // Load persisted Spotify token if available
+    let spotify_token_file = session_log_dir.parent().unwrap_or(std::path::Path::new(".")).join("spotify-token.json");
+    let persisted_spotify_token = if spotify_token_file.exists() {
+        match fs::read_to_string(&spotify_token_file) {
+            Ok(contents) => match serde_json::from_str::<SpotifyToken>(&contents) {
+                Ok(token) => {
+                    info!("Loaded persisted Spotify token (expires_at={})", token.expires_at);
+                    Some(token)
+                }
+                Err(e) => { warn!("Failed to parse spotify-token.json: {}", e); None }
+            }
+            Err(e) => { warn!("Failed to read spotify-token.json: {}", e); None }
+        }
+    } else {
+        None
+    };
+
+    let mut initial_jam = JamState::default();
+    if let Some(token) = persisted_spotify_token {
+        initial_jam.spotify_token = Some(token);
+    }
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -555,7 +582,9 @@ async fn main() {
         // Jam Session (Spotify)
         spotify_client_id: std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_default(),
         spotify_pending: Arc::new(Mutex::new(None)),
-        jam: Arc::new(Mutex::new(JamState::default())),
+        jam: Arc::new(Mutex::new(initial_jam)),
+        jam_bot: Arc::new(tokio::sync::Mutex::new(None)),
+        spotify_token_file,
         http_client: reqwest::Client::new(),
     };
 
@@ -565,6 +594,8 @@ async fn main() {
         let joined_at = state.joined_at.clone();
         let client_stats = state.client_stats.clone();
         let session_log_dir = state.session_log_dir.clone();
+        let jam_for_cleanup = state.jam.clone();
+        let jam_bot_for_cleanup = state.jam_bot.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -608,6 +639,30 @@ async fn main() {
                     };
                     append_session_event(&session_log_dir, &event);
                 }
+                // Remove stale participants from jam listeners
+                if !removed_entries.is_empty() {
+                    let should_auto_end = {
+                        let mut jam = jam_for_cleanup.lock().unwrap_or_else(|e| e.into_inner());
+                        if jam.active {
+                            for entry in &removed_entries {
+                                let base = identity_base(&entry.identity);
+                                let before = jam.listeners.len();
+                                jam.listeners.retain(|l| identity_base(l) != base);
+                                if jam.listeners.len() < before {
+                                    info!("Jam: removed stale listener {}", entry.identity);
+                                }
+                            }
+                        }
+                        jam.active && jam.listeners.is_empty()
+                    };
+                    if should_auto_end {
+                        schedule_jam_auto_end(
+                            jam_for_cleanup.clone(),
+                            jam_bot_for_cleanup.clone(),
+                            "stale cleanup",
+                        );
+                    }
+                }
             }
         });
     }
@@ -620,7 +675,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(root_route))
-        .nest_service("/viewer", ServeDir::new(viewer_dir))
+        .nest_service("/viewer", SetResponseHeaderLayer::overriding(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+            ).layer(ServeDir::new(viewer_dir)))
         .route("/admin/api/dashboard", get(admin_dashboard))
         .route("/admin/api/sessions", get(admin_sessions))
         .route("/admin/api/stats", post(admin_report_stats))
@@ -665,9 +723,11 @@ async fn main() {
         .route("/api/jam/state", get(jam_state))
         .route("/api/jam/search", post(jam_search))
         .route("/api/jam/queue", post(jam_queue_add))
+        .route("/api/jam/queue-remove", post(jam_queue_remove))
         .route("/api/jam/skip", post(jam_skip))
         .route("/api/jam/join", post(jam_join))
         .route("/api/jam/leave", post(jam_leave))
+        .route("/api/jam/audio", get(jam_audio_ws))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -1174,6 +1234,24 @@ async fn participant_leave(
 
     let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     participants.remove(&payload.identity);
+
+    // Also remove from jam listeners
+    let should_auto_end = {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if jam.active {
+            let base = identity_base(&payload.identity);
+            let before = jam.listeners.len();
+            jam.listeners.retain(|l| identity_base(l) != base);
+            if jam.listeners.len() < before {
+                info!("Jam: removed leaving participant {} from listeners", payload.identity);
+            }
+        }
+        jam.active && jam.listeners.is_empty()
+    };
+    if should_auto_end {
+        schedule_jam_auto_end(state.jam.clone(), state.jam_bot.clone(), "participant left");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1608,7 +1686,7 @@ struct MetricsResponse {
 #[derive(Deserialize)]
 struct SpotifyInitRequest {
     state: String,
-    verifier: String,
+    challenge: String,
 }
 
 #[derive(Deserialize)]
@@ -1657,15 +1735,32 @@ async fn jam_spotify_init(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<SpotifyInitRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
+
+    let client_id = state.spotify_client_id.clone();
+    if client_id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let redirect_uri = format!("https://127.0.0.1:{}/api/jam/spotify-callback", state.config.port);
+    let scopes = "user-read-private user-modify-playback-state user-read-currently-playing user-read-playback-state";
+    let auth_url = format!(
+        "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        urlencoded(&client_id),
+        urlencoded(&redirect_uri),
+        urlencoded(scopes),
+        urlencoded(&payload.state),
+        urlencoded(&payload.challenge),
+    );
+
     let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
     *pending = Some(SpotifyPending {
         state: payload.state,
-        verifier: payload.verifier,
         code: None,
     });
-    Ok(StatusCode::OK)
+
+    Ok(Json(serde_json::json!({ "auth_url": auth_url })))
 }
 
 async fn jam_spotify_callback(
@@ -1710,12 +1805,13 @@ async fn jam_spotify_token(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    let redirect_uri = format!("https://127.0.0.1:{}/api/jam/spotify-callback", state.config.port);
     let resp = state.http_client
         .post("https://accounts.spotify.com/api/token")
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", &payload.code),
-            ("redirect_uri", "https://127.0.0.1:9443/api/jam/spotify-callback"),
+            ("redirect_uri", redirect_uri.as_str()),
             ("client_id", &client_id),
             ("code_verifier", &payload.verifier),
         ])
@@ -1750,15 +1846,29 @@ async fn jam_spotify_token(
 
     {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        jam.spotify_token = Some(token);
+        jam.spotify_token = Some(token.clone());
     }
     {
         let mut pending = state.spotify_pending.lock().unwrap_or_else(|e| e.into_inner());
         *pending = None;
     }
 
-    info!("Spotify token stored successfully");
+    persist_spotify_token(&state.spotify_token_file, &token);
+    info!("Spotify token stored and persisted to disk");
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn persist_spotify_token(path: &std::path::Path, token: &SpotifyToken) {
+    match serde_json::to_string_pretty(token) {
+        Ok(json) => {
+            if let Err(e) = fs::write(path, &json) {
+                warn!("Failed to persist Spotify token: {}", e);
+            } else {
+                info!("Spotify token persisted to {:?}", path);
+            }
+        }
+        Err(e) => warn!("Failed to serialize Spotify token: {}", e),
+    }
 }
 
 // ── Spotify API proxy helper ───────────────────────────────────────────
@@ -1780,6 +1890,9 @@ async fn spotify_api_request(
 
     if let Some(b) = &body {
         req = req.json(b);
+    } else if method == reqwest::Method::POST || method == reqwest::Method::PUT {
+        // Spotify returns 411 Length Required for POST/PUT without Content-Length
+        req = req.header("Content-Length", "0");
     }
 
     let resp = req.send().await
@@ -1788,10 +1901,12 @@ async fn spotify_api_request(
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // Try refresh
         if let Some(new_token) = refresh_spotify_token(state, &token).await {
-            let mut retry = state.http_client.request(method, url)
+            let mut retry = state.http_client.request(method.clone(), url)
                 .header("Authorization", format!("Bearer {}", new_token.access_token));
             if let Some(b) = body {
                 retry = retry.json(&b);
+            } else if method == reqwest::Method::POST || method == reqwest::Method::PUT {
+                retry = retry.header("Content-Length", "0");
             }
             return retry.send().await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()));
@@ -1824,11 +1939,52 @@ async fn refresh_spotify_token(state: &AppState, old: &SpotifyToken) -> Option<S
 
     let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
     jam.spotify_token = Some(new_token.clone());
-    info!("Spotify token refreshed successfully");
+    persist_spotify_token(&state.spotify_token_file, &new_token);
+    info!("Spotify token refreshed and persisted");
     Some(new_token)
 }
 
 // ── Jam Session endpoints ──────────────────────────────────────────────
+
+/// Stop the jam audio bot if it's running.
+async fn stop_jam_bot(state: &AppState) {
+    let bot = state.jam_bot.lock().await.take();
+    if let Some(bot) = bot {
+        bot.stop().await;
+    }
+}
+
+/// Schedule a jam auto-end: if no listeners remain after 30 seconds, stop the jam.
+/// Called from jam_leave, participant disconnect, and stale participant cleanup.
+fn schedule_jam_auto_end(
+    jam_state: Arc<Mutex<JamState>>,
+    jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
+    reason: &'static str,
+) {
+    tokio::spawn(async move {
+        info!("Jam auto-end ({}): no listeners, waiting 30s...", reason);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let should_stop = {
+            let mut jam = jam_state.lock().unwrap_or_else(|e| e.into_inner());
+            if jam.active && jam.listeners.is_empty() {
+                jam.active = false;
+                jam.queue.clear();
+                jam.listeners.clear();
+                jam.now_playing = None;
+                info!("Jam auto-ended ({}): no listeners for 30s", reason);
+                true
+            } else {
+                info!("Jam auto-end cancelled: {} listeners now", jam.listeners.len());
+                false
+            }
+        };
+        if should_stop {
+            if let Some(bot) = jam_bot.lock().await.take() {
+                bot.stop().await;
+            }
+        }
+    });
+}
 
 async fn jam_start(
     State(state): State<AppState>,
@@ -1837,28 +1993,61 @@ async fn jam_start(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
 
-    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    if jam.spotify_token.is_none() {
-        return Err(StatusCode::BAD_REQUEST);
+    {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if jam.spotify_token.is_none() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        jam.active = true;
+        jam.host_identity = payload.identity.clone();
+        jam.listeners.insert(payload.identity);
+        info!("Jam session started by {} (auto-joined as listener)", jam.host_identity);
     }
-    jam.active = true;
-    jam.host_identity = payload.identity;
-    info!("Jam session started by {}", jam.host_identity);
+
+    // Spawn the audio bot in background (don't block the response)
+    let bot_state = state.clone();
+    tokio::spawn(async move {
+        match jam_bot::JamBot::start().await {
+            Ok(bot) => {
+                info!("Jam audio bot started successfully");
+                *bot_state.jam_bot.lock().await = Some(bot);
+            }
+            Err(e) => {
+                warn!("Jam audio bot failed to start: {}", e);
+            }
+        }
+    });
+
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn jam_stop(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Json(payload): Json<JamIdentityRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
 
-    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    jam.active = false;
-    jam.queue.clear();
-    jam.listeners.clear();
-    jam.now_playing = None;
-    info!("Jam session stopped");
+    {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Only the host (or auto-end) can stop the jam
+        // Compare base identities (strip -XXXX suffix) since reconnects change the suffix
+        if !payload.identity.is_empty() && identity_base(&payload.identity) != identity_base(&jam.host_identity) {
+            info!("Jam stop denied: {} is not host {}", payload.identity, jam.host_identity);
+            return Err(StatusCode::FORBIDDEN);
+        }
+
+        jam.active = false;
+        jam.queue.clear();
+        jam.listeners.clear();
+        jam.now_playing = None;
+        info!("Jam session stopped by {}", if payload.identity.is_empty() { "auto-end" } else { &payload.identity });
+    }
+
+    // Stop the audio bot
+    stop_jam_bot(&state).await;
+
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1920,20 +2109,30 @@ async fn jam_state(
         }
     }
 
-    // Build response
-    let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    let spotify_connected = jam.spotify_token.is_some();
-    let listeners: Vec<String> = jam.listeners.iter().cloned().collect();
+    // Build response (extract all data from std::sync::Mutex before awaiting)
+    let (active, host_identity, queue, now_playing, listeners, spotify_connected) = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            jam.active,
+            jam.host_identity.clone(),
+            jam.queue.clone(),
+            jam.now_playing.clone(),
+            jam.listeners.iter().cloned().collect::<Vec<String>>(),
+            jam.spotify_token.is_some(),
+        )
+    };
     let listener_count = listeners.len();
+    let bot_connected = state.jam_bot.lock().await.is_some();
 
     Ok(Json(serde_json::json!({
-        "active": jam.active,
-        "host_identity": jam.host_identity,
-        "queue": jam.queue,
-        "now_playing": jam.now_playing,
+        "active": active,
+        "host_identity": host_identity,
+        "queue": queue,
+        "now_playing": now_playing,
         "listeners": listeners,
         "listener_count": listener_count,
         "spotify_connected": spotify_connected,
+        "bot_connected": bot_connected,
     })))
 }
 
@@ -2005,15 +2204,104 @@ async fn jam_queue_add(
         jam.queue.push(track);
     }
 
-    // Add to Spotify's queue
-    let queue_url = format!(
-        "https://api.spotify.com/v1/me/player/queue?uri={}",
-        urlencoded(&payload.spotify_uri)
-    );
-    let _ = spotify_api_request(&state, reqwest::Method::POST, &queue_url, None).await;
+    // Check if Spotify is currently playing
+    let is_playing = {
+        let resp = spotify_api_request(
+            &state,
+            reqwest::Method::GET,
+            "https://api.spotify.com/v1/me/player/currently-playing",
+            None,
+        ).await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(data) = r.json::<serde_json::Value>().await {
+                    data["is_playing"].as_bool().unwrap_or(false)
+                } else { false }
+            }
+            _ => false,
+        }
+    };
 
-    info!("Track queued: {}", payload.spotify_uri);
+    if is_playing {
+        // Already playing — add to Spotify's queue so it auto-plays after current track
+        let queue_url = format!(
+            "https://api.spotify.com/v1/me/player/queue?uri={}",
+            urlencoded(&payload.spotify_uri)
+        );
+        match spotify_api_request(&state, reqwest::Method::POST, &queue_url, None).await {
+            Ok(r) => {
+                let status = r.status();
+                if status.is_success() || status.as_u16() == 204 {
+                    info!("Track queued to Spotify ({}): {}", status, payload.spotify_uri);
+                } else {
+                    let body = r.text().await.unwrap_or_default();
+                    warn!("Queue to Spotify failed ({}) {}: {}", status, payload.spotify_uri, body);
+                }
+            }
+            Err(e) => warn!("Queue request failed: {:?}", e),
+        }
+    } else {
+        // Nothing playing — find an active device first
+        info!("Spotify not playing — finding device to start playback");
+        let device_id = match spotify_api_request(
+            &state,
+            reqwest::Method::GET,
+            "https://api.spotify.com/v1/me/player/devices",
+            None,
+        ).await {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(data) = r.json::<serde_json::Value>().await {
+                    info!("Spotify devices response: {}", data);
+                    data["devices"].as_array()
+                        .and_then(|devs| devs.iter().find(|d| d["is_active"].as_bool().unwrap_or(false)))
+                        .or_else(|| data["devices"].as_array().and_then(|devs| devs.first()))
+                        .and_then(|d| d["id"].as_str())
+                        .map(|s| s.to_string())
+                } else { None }
+            }
+            Ok(r) => { warn!("Spotify devices request failed: {}", r.status()); None }
+            Err(e) => { warn!("Spotify devices error: {:?}", e); None },
+        };
+
+        let play_url = if let Some(ref did) = device_id {
+            format!("https://api.spotify.com/v1/me/player/play?device_id={}", did)
+        } else {
+            "https://api.spotify.com/v1/me/player/play".to_string()
+        };
+
+        let play_body = serde_json::json!({ "uris": [payload.spotify_uri] });
+        match spotify_api_request(&state, reqwest::Method::PUT, &play_url, Some(play_body)).await {
+            Ok(r) => {
+                let status = r.status();
+                if status.is_success() || status.as_u16() == 204 {
+                    info!("Track started playing: {}", payload.spotify_uri);
+                } else {
+                    let body = r.text().await.unwrap_or_default();
+                    warn!("Play failed ({}): {}", status, body);
+                }
+            }
+            Err(e) => warn!("Play request failed: {:?}", e),
+        }
+    }
+
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn jam_queue_remove(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let index = payload["index"].as_u64().ok_or(StatusCode::BAD_REQUEST)? as usize;
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    if index < jam.queue.len() {
+        let removed = jam.queue.remove(index);
+        info!("Removed from queue: {} by {}", removed.name, removed.added_by);
+        Ok(Json(serde_json::json!({ "ok": true })))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 async fn jam_skip(
@@ -2023,18 +2311,30 @@ async fn jam_skip(
     ensure_admin(&state, &headers)?;
 
     // Skip on Spotify
-    let _ = spotify_api_request(
+    match spotify_api_request(
         &state,
         reqwest::Method::POST,
         "https://api.spotify.com/v1/me/player/next",
         None,
-    ).await;
+    ).await {
+        Ok(r) => {
+            let status = r.status();
+            if status.is_success() || status.as_u16() == 204 {
+                info!("Jam: skip succeeded ({})", status);
+            } else {
+                let body = r.text().await.unwrap_or_default();
+                warn!("Jam: skip failed ({}) {}", status, body);
+            }
+        }
+        Err(e) => warn!("Jam: skip request error: {:?}", e),
+    }
 
-    // Remove first item from queue
+    // Remove first item from our queue
     {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
         if !jam.queue.is_empty() {
-            jam.queue.remove(0);
+            let removed = jam.queue.remove(0);
+            info!("Jam: removed '{}' from queue", removed.name);
         }
         // Clear now_playing so it gets re-fetched
         jam.now_playing = None;
@@ -2064,10 +2364,98 @@ async fn jam_leave(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
 
-    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    jam.listeners.remove(&payload.identity);
-    info!("Jam: {} left", payload.identity);
+    let should_auto_end = {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        jam.listeners.remove(&payload.identity);
+        info!("Jam: {} left ({} listeners remain)", payload.identity, jam.listeners.len());
+        jam.active && jam.listeners.is_empty()
+    };
+
+    if should_auto_end {
+        schedule_jam_auto_end(state.jam.clone(), state.jam_bot.clone(), "listener left");
+    }
+
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// WebSocket endpoint for streaming jam audio to viewers.
+/// Clients connect to wss://host:9443/api/jam/audio?token=JWT and receive
+/// binary messages containing raw f32 PCM (48 kHz stereo, 20 ms frames).
+async fn jam_audio_ws(
+    ws: WebSocketUpgrade,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Validate JWT from query param (WebSocket API doesn't support custom headers)
+    let token = params.get("token").ok_or(StatusCode::UNAUTHORIZED)?;
+    let validation = Validation::default();
+    let decoded = decode::<AdminClaims>(
+        token,
+        &DecodingKey::from_secret(state.config.admin_jwt_secret.as_bytes()),
+        &validation,
+    ).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if decoded.claims.role != "admin" {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(ws.on_upgrade(move |socket| jam_audio_ws_handler(socket, state)))
+}
+
+async fn jam_audio_ws_handler(mut socket: WebSocket, state: AppState) {
+    use axum::extract::ws::Message;
+
+    info!("[jam-audio-ws] client connected");
+
+    // Get a broadcast receiver from the running bot
+    let mut rx = {
+        let bot_guard = state.jam_bot.lock().await;
+        match &*bot_guard {
+            Some(bot) => bot.subscribe(),
+            None => {
+                // No bot running — close with a message
+                let _ = socket.send(Message::Close(None)).await;
+                info!("[jam-audio-ws] no jam bot running, closing");
+                return;
+            }
+        }
+    };
+
+    // Stream frames to the WebSocket client
+    loop {
+        tokio::select! {
+            // Receive audio frame from broadcast channel
+            frame_result = rx.recv() => {
+                match frame_result {
+                    Ok(frame) => {
+                        // Convert Vec<f32> to raw little-endian bytes
+                        let bytes: Vec<u8> = frame.data.iter()
+                            .flat_map(|s| s.to_le_bytes())
+                            .collect();
+                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                            break; // Client disconnected
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Client too slow, skip old frames
+                        warn!("[jam-audio-ws] client lagged, dropped {} frames", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Bot stopped — send close
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
+            }
+            // Check for incoming messages (client close, etc.)
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {} // Ignore other messages
+                }
+            }
+        }
+    }
+
+    info!("[jam-audio-ws] client disconnected");
 }
 
 /// Simple URL encoding for query parameters
@@ -2084,6 +2472,18 @@ fn urlencoded(s: &str) -> String {
         }
     }
     result
+}
+
+/// Strip the -XXXX numeric suffix from identities like "sam-1234" -> "sam"
+/// Reconnects change the suffix, so compare base identities for host checks.
+fn identity_base(identity: &str) -> &str {
+    if let Some(pos) = identity.rfind('-') {
+        let suffix = &identity[pos + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return &identity[..pos];
+        }
+    }
+    identity
 }
 
 // ── End Jam Session endpoints ──────────────────────────────────────────

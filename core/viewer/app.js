@@ -811,7 +811,6 @@ var _nativeAudioDest = null;        // MediaStreamDestination
 var _nativeAudioTrack = null;       // Published LiveKit track
 var _nativeAudioUnlisten = null;    // Tauri event unlisten function
 var _nativeAudioActive = false;
-var _nativeAudioTrackName = null;   // "jam-audio" when Jam is capturing
 var _echoServerUrl = ""; // Server URL for API calls (set by Tauri get_control_url on native client)
 
 // Tauri IPC — viewer loaded locally so window.__TAURI__ is available natively
@@ -1285,10 +1284,6 @@ async function autoDetectNativeAudio(trackLabel) {
       }
     }
 
-    if (matched && _nativeAudioActive && _nativeAudioTrackName === "jam-audio") {
-      debugLog("[native-audio] Jam Session is using WASAPI — skipping screen share native audio, using getDisplayMedia audio instead");
-      matched = null;
-    }
     if (matched) {
       debugLog("[native-audio] auto-starting capture for '" + matched.title + "' (pid " + matched.pid + ")");
       try {
@@ -1443,7 +1438,6 @@ async function startNativeAudioCapture(pid, opts) {
     };
     if (trackName) publishOpts.name = trackName;
     await room.localParticipant.publishTrack(_nativeAudioTrack, publishOpts);
-    _nativeAudioTrackName = trackName || null;
     debugLog("[native-audio] published to LiveKit as " + (trackName || "ScreenShareAudio"));
   } else {
     debugLog("[native-audio] ERROR: no audio track from MediaStreamDestination!");
@@ -1466,7 +1460,6 @@ async function startNativeAudioCapture(pid, opts) {
 async function stopNativeAudioCapture() {
   if (!_nativeAudioActive) return;
   _nativeAudioActive = false;
-  _nativeAudioTrackName = null;
   debugLog("[native-audio] stopping capture");
 
   // Hide native audio indicator
@@ -1531,6 +1524,10 @@ function setRoomAudioMutedState(next) {
     applyParticipantAudioVolumes(state);
   });
   updateSoundboardMasterGain();
+  // Mute/unmute Jam audio
+  if (typeof _jamGainNode !== "undefined" && _jamGainNode) {
+    _jamGainNode.gain.value = roomAudioMuted ? 0 : (_jamVolume / 100);
+  }
 }
 
 function setDefaultUrls() {
@@ -3721,13 +3718,6 @@ function handleTrackSubscribed(track, publication, participant) {
     }, 900);
     return;
   }
-  if (track.kind === "audio" && publication?.trackName === "jam-audio") {
-    debugLog("[jam] received jam-audio track from " + (participant?.identity || "unknown"));
-    if (typeof handleJamAudioSubscribed === "function") {
-      handleJamAudioSubscribed(track, publication, participant);
-    }
-    return;
-  }
   if (track.kind === "audio") {
     const audioSid = getTrackSid(publication, track, `${participant.identity}-${source || "audio"}`);
     if (audioSid && audioElBySid.has(audioSid)) {
@@ -5190,9 +5180,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           handleIncomingChatData(payload, participant);
         } else if (msg.type === "jam-started" && msg.host) {
           if (typeof showJamToast === "function") showJamToast(msg.host + " started a Jam Session!");
+          if (typeof handleJamDataMessage === "function") handleJamDataMessage(msg);
         } else if (msg.type === "jam-stopped") {
           if (typeof showJamToast === "function") showJamToast("Jam Session ended");
-          if (typeof handleJamAudioUnsubscribed === "function") handleJamAudioUnsubscribed();
+          if (typeof handleJamDataMessage === "function") handleJamDataMessage(msg);
+          if (typeof stopJamAudioStream === "function") stopJamAudioStream();
         } else if (msg.type === "avatar-update" && msg.identityBase && msg.avatarUrl) {
           // Resolve relative paths through our own server URL
           var resolved = msg.avatarUrl.startsWith("/") ? apiUrl(msg.avatarUrl) : msg.avatarUrl;
@@ -5314,6 +5306,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   } catch {}
   // Pre-load soundboard sounds so remote playback works even if user never opens the panel
   loadSoundboardList().catch(() => {});
+  // Check if a Jam is already running so the Now Playing banner appears
+  if (typeof startBannerPolling === "function") startBannerPolling();
   const remoteList = room.remoteParticipants
     ? (typeof room.remoteParticipants.forEach === "function"
         ? Array.from(room.remoteParticipants.values ? room.remoteParticipants.values() : room.remoteParticipants)
@@ -5386,6 +5380,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   startRoomStatusPolling();
   refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
   setStatus(`Connected to ${roomId}`);
+
 }
 
 async function connect() {

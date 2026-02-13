@@ -4,17 +4,22 @@
    ========================================================= */
 
 // === Globals ===
-var _jamPanel = null;
 var _jamState = null;
 var _jamPollTimer = null;
-var _jamAudioEl = null;       // <audio> element for received jam audio
-var _jamVolume = 100;
+var _jamVolume = 50;
 var _spotifyAuthState = null;
 var _spotifyVerifier = null;
 var _spotifyPollTimer = null;
 var _jamInited = false;       // lazy init -- don't poll until panel opened once
+var _bannerPollTimer = null;  // lightweight poll for now-playing banner (runs even if panel not open)
 
-// === HTML Escape (app.js doesn't have one) ===
+// WebSocket audio streaming
+var _jamAudioWs = null;        // WebSocket connection
+var _jamAudioCtx = null;       // AudioContext for playback
+var _jamGainNode = null;       // GainNode for volume control
+var _jamNextPlayTime = 0;      // next scheduled buffer start time
+
+// === HTML Escape ===
 function escapeHtml(str) {
   if (!str) return "";
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -89,7 +94,7 @@ async function connectSpotify() {
     // Open Spotify auth in external browser
     if (typeof tauriInvoke === "function" && hasTauriIPC()) {
       try {
-        await tauriInvoke("open_url", { url: authUrl });
+        await tauriInvoke("open_external_url", { url: authUrl });
       } catch (e) {
         window.open(authUrl, "_blank");
       }
@@ -150,43 +155,13 @@ async function connectSpotify() {
 }
 
 // ──────────────────────────────────────────
-// Jam Controls (Host)
+// Jam Controls
 // ──────────────────────────────────────────
 
 async function startJam() {
   try {
-    // Find Spotify process for WASAPI capture
-    if (typeof hasTauriIPC === "function" && hasTauriIPC()) {
-      try {
-        var windows = await tauriInvoke("list_capturable_windows");
-        var spotify = null;
-        if (windows && windows.length) {
-          for (var i = 0; i < windows.length; i++) {
-            if (windows[i].name && windows[i].name.toLowerCase().indexOf("spotify") !== -1) {
-              spotify = windows[i];
-              break;
-            }
-          }
-        }
-        if (!spotify) {
-          showJamError("Open Spotify first!");
-          return;
-        }
-        // Start WASAPI capture with jam-audio track name
-        var LK = getLiveKitClient();
-        await startNativeAudioCapture(spotify.pid, {
-          source: LK.Track.Source.ScreenShareAudio,
-          name: "jam-audio"
-        });
-      } catch (e) {
-        debugLog("[jam] WASAPI capture start failed: " + e);
-        showJamError("Could not capture Spotify audio: " + e.message);
-        return;
-      }
-    }
-
-    // Tell server to start the jam
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
+    debugLog("[jam] startJam called by " + identity);
     var resp = await fetch(apiUrl("/api/jam/start"), {
       method: "POST",
       headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
@@ -208,6 +183,9 @@ async function startJam() {
       debugLog("[jam] data broadcast error: " + e);
     }
 
+    // Host is auto-joined as listener — start audio stream
+    // Small delay to let the bot start capturing
+    setTimeout(function() { startJamAudioStream(); }, 2000);
     fetchJamState();
   } catch (e) {
     showJamError("Start jam error: " + e.message);
@@ -217,16 +195,23 @@ async function startJam() {
 
 async function stopJam() {
   try {
-    // Stop WASAPI capture if it's jam audio
-    if (typeof _nativeAudioActive !== "undefined" && _nativeAudioActive &&
-        typeof _nativeAudioTrackName !== "undefined" && _nativeAudioTrackName === "jam-audio") {
-      await stopNativeAudioCapture();
+    var identity = room && room.localParticipant ? room.localParticipant.identity : "";
+    var stopResp = await fetch(apiUrl("/api/jam/stop"), {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ identity: identity })
+    });
+    if (!stopResp.ok) {
+      if (stopResp.status === 403) {
+        showJamError("Only the host can end the Jam");
+        return;
+      }
+      showJamError("Stop failed: " + stopResp.status);
+      return;
     }
 
-    await fetch(apiUrl("/api/jam/stop"), {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken }
-    });
+    // Stop audio stream
+    stopJamAudioStream();
 
     // Broadcast jam-stopped
     try {
@@ -284,7 +269,7 @@ async function searchSpotify(query) {
       return;
     }
     var data = await resp.json();
-    renderSearchResults(data.tracks || []);
+    renderSearchResults(Array.isArray(data) ? data : (data.tracks || []));
   } catch (e) {
     debugLog("[jam] search error: " + e);
   }
@@ -351,11 +336,8 @@ async function joinJam() {
       headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
       body: JSON.stringify({ identity: identity })
     });
-    // Unmute jam audio
-    if (_jamAudioEl) {
-      _jamAudioEl.muted = false;
-      _jamAudioEl.volume = _jamVolume / 100;
-    }
+    // Start receiving audio via WebSocket
+    startJamAudioStream();
     fetchJamState();
   } catch (e) {
     showJamError("Join failed: " + e.message);
@@ -371,10 +353,8 @@ async function leaveJam() {
       headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
       body: JSON.stringify({ identity: identity })
     });
-    // Mute jam audio
-    if (_jamAudioEl) {
-      _jamAudioEl.muted = true;
-    }
+    // Stop receiving audio
+    stopJamAudioStream();
     fetchJamState();
   } catch (e) {
     showJamError("Leave failed: " + e.message);
@@ -394,6 +374,7 @@ async function fetchJamState() {
     if (!resp.ok) return;
     _jamState = await resp.json();
     renderJamPanel();
+    updateNowPlayingBanner(_jamState);
   } catch (e) {
     debugLog("[jam] state poll error: " + e);
   }
@@ -420,11 +401,16 @@ function renderJamPanel() {
     hostControls.style.display = _jamState.spotify_connected ? "" : "none";
   }
 
+  // Strip -XXXX reconnect suffixes for identity comparison
+  var idBase = typeof getIdentityBase === "function" ? getIdentityBase : function(id) { return id; };
+  var myBase = idBase(identity);
+
   var startBtn = document.getElementById("jam-start-btn");
   var stopBtn = document.getElementById("jam-stop-btn");
   var skipBtn = document.getElementById("jam-skip-btn");
   if (startBtn) startBtn.style.display = _jamState.active ? "none" : "";
-  if (stopBtn) stopBtn.style.display = _jamState.active ? "" : "none";
+  // End Jam is hidden — jam auto-ends when all listeners leave (30s timeout)
+  if (stopBtn) stopBtn.style.display = "none";
   if (skipBtn) skipBtn.style.display = _jamState.active ? "" : "none";
 
   // Now Playing
@@ -433,8 +419,12 @@ function renderJamPanel() {
   // Queue
   renderQueue(_jamState.queue || []);
 
-  // Join/Leave
-  var isListening = _jamState.listeners && _jamState.listeners.indexOf(identity) !== -1;
+  var isListening = false;
+  if (_jamState.listeners && myBase) {
+    for (var li = 0; li < _jamState.listeners.length; li++) {
+      if (idBase(_jamState.listeners[li]) === myBase) { isListening = true; break; }
+    }
+  }
   var joinBtn = document.getElementById("jam-join-btn");
   var leaveBtn = document.getElementById("jam-leave-btn");
   var listenCount = document.getElementById("jam-listener-count");
@@ -486,49 +476,133 @@ function renderQueue(queue) {
       '<div class="jam-result-info">' +
         '<div class="jam-result-name">' + escapeHtml(t.name) + '</div>' +
         '<div class="jam-result-artist">' + escapeHtml(t.artist) + ' \u00b7 Added by ' + escapeHtml(t.added_by) + '</div>' +
-      '</div>';
+      '</div>' +
+      '<button class="jam-queue-remove" data-index="' + i + '" title="Remove from queue">\u2715</button>';
+    item.querySelector(".jam-queue-remove").addEventListener("click", function() {
+      var idx = parseInt(this.getAttribute("data-index"), 10);
+      removeFromQueue(idx);
+    });
     container.appendChild(item);
   });
 }
 
-// ──────────────────────────────────────────
-// Jam Audio Handler (called from app.js)
-// ──────────────────────────────────────────
-
-function handleJamAudioSubscribed(track, publication, participant) {
-  debugLog("[jam] received jam-audio track from " + (participant && participant.identity ? participant.identity : "unknown"));
-  var el = track.attach();
-  if (!el.srcObject && track.mediaStreamTrack) {
-    el.srcObject = new MediaStream([track.mediaStreamTrack]);
-  }
-
-  // Check if user has joined the jam
-  var identity = room && room.localParticipant ? room.localParticipant.identity : "";
-  var isListening = _jamState && _jamState.listeners && _jamState.listeners.indexOf(identity) !== -1;
-
-  el.volume = isListening ? (_jamVolume / 100) : 0;
-  el.muted = !isListening;
-
-  var bucket = document.getElementById("audio-bucket");
-  if (bucket) bucket.appendChild(el);
-
-  // Apply speaker device
-  var speakerSelect = document.getElementById("speaker-select");
-  if (speakerSelect && speakerSelect.value && typeof el.setSinkId === "function") {
-    el.setSinkId(speakerSelect.value).catch(function() {});
-  }
-
-  el.play().catch(function() {});
-  _jamAudioEl = el;
+function removeFromQueue(index) {
+  fetch(apiUrl("/api/jam/queue-remove"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
+    body: JSON.stringify({ index: index }),
+  }).then(function(r) {
+    if (r.ok) { fetchJamState(); }
+    else { debugLog("[jam] remove failed: " + r.status); }
+  }).catch(function(e) { debugLog("[jam] remove error: " + e); });
 }
 
-function handleJamAudioUnsubscribed() {
-  if (_jamAudioEl) {
-    _jamAudioEl.pause();
-    _jamAudioEl.srcObject = null;
-    _jamAudioEl.remove();
-    _jamAudioEl = null;
+// ──────────────────────────────────────────
+// WebSocket Audio Streaming
+// ──────────────────────────────────────────
+
+function startJamAudioStream() {
+  if (_jamAudioWs) return; // already connected
+
+  try {
+    // Build WebSocket URL from current API base (wss for https, ws for http)
+    var base = apiUrl("/api/jam/audio");
+    var wsUrl;
+    if (base.indexOf("https://") === 0) {
+      wsUrl = "wss://" + base.substring(8);
+    } else if (base.indexOf("http://") === 0) {
+      wsUrl = "ws://" + base.substring(7);
+    } else {
+      var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl = proto + "//" + window.location.host + base;
+    }
+
+    // WebSocket API doesn't support custom headers, so pass token as query param
+    var sep = wsUrl.indexOf("?") >= 0 ? "&" : "?";
+    wsUrl += sep + "token=" + encodeURIComponent(adminToken);
+
+    debugLog("[jam] connecting audio WebSocket: " + wsUrl.split("?")[0] + "?token=...");
+
+    // Create AudioContext for playback (48 kHz stereo)
+    if (!_jamAudioCtx) {
+      _jamAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      _jamGainNode = _jamAudioCtx.createGain();
+      _jamGainNode.gain.value = _jamVolume / 100;
+
+      var speakerSelect = document.getElementById("speaker-select");
+      if (speakerSelect && speakerSelect.value && typeof _jamAudioCtx.setSinkId === "function") {
+        _jamAudioCtx.setSinkId(speakerSelect.value).catch(function() {});
+      }
+
+      _jamGainNode.connect(_jamAudioCtx.destination);
+    }
+
+    if (_jamAudioCtx.state === "suspended") {
+      _jamAudioCtx.resume();
+    }
+
+    _jamNextPlayTime = 0;
+
+    var ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+    _jamAudioWs = ws;
+
+    ws.onopen = function() {
+      debugLog("[jam] audio WebSocket connected");
+    };
+
+    ws.onmessage = function(e) {
+      if (!(e.data instanceof ArrayBuffer)) return;
+
+      var f32 = new Float32Array(e.data);
+      var samplesPerChannel = f32.length / 2;
+      if (samplesPerChannel <= 0) return;
+
+      var buffer = _jamAudioCtx.createBuffer(2, samplesPerChannel, 48000);
+      var left = buffer.getChannelData(0);
+      var right = buffer.getChannelData(1);
+      for (var i = 0; i < samplesPerChannel; i++) {
+        left[i] = f32[i * 2];
+        right[i] = f32[i * 2 + 1];
+      }
+
+      var now = _jamAudioCtx.currentTime;
+      if (_jamNextPlayTime < now) {
+        _jamNextPlayTime = now + 0.02;
+      }
+
+      var source = _jamAudioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(_jamGainNode);
+      source.start(_jamNextPlayTime);
+      _jamNextPlayTime += buffer.duration;
+    };
+
+    ws.onclose = function() {
+      debugLog("[jam] audio WebSocket closed");
+      _jamAudioWs = null;
+    };
+
+    ws.onerror = function(e) {
+      debugLog("[jam] audio WebSocket error: " + (e.message || e.type || "unknown"));
+      _jamAudioWs = null;
+    };
+  } catch (ex) {
+    debugLog("[jam] startJamAudioStream exception: " + ex.message);
   }
+}
+
+function stopJamAudioStream() {
+  if (_jamAudioWs) {
+    _jamAudioWs.close();
+    _jamAudioWs = null;
+  }
+  if (_jamAudioCtx) {
+    _jamAudioCtx.close().catch(function() {});
+    _jamAudioCtx = null;
+    _jamGainNode = null;
+  }
+  _jamNextPlayTime = 0;
 }
 
 // ──────────────────────────────────────────
@@ -539,8 +613,8 @@ function onJamVolumeChange(e) {
   _jamVolume = parseInt(e.target.value, 10);
   var label = document.getElementById("jam-volume-value");
   if (label) label.textContent = _jamVolume + "%";
-  if (_jamAudioEl && !_jamAudioEl.muted) {
-    _jamAudioEl.volume = _jamVolume / 100;
+  if (_jamGainNode) {
+    _jamGainNode.gain.value = _jamVolume / 100;
   }
 }
 
@@ -578,13 +652,13 @@ function showJamStatus(msg) {
 // ──────────────────────────────────────────
 
 function handleJamDataMessage(payload) {
-  // payload is already parsed JSON with { type: "jam-started"|"jam-stopped", host: ... }
   if (!payload || !payload.type) return;
   if (payload.type === "jam-started") {
-    showJamToast("Jam started by " + (payload.host || "someone") + "!");
+    startBannerPolling();
     fetchJamState();
   } else if (payload.type === "jam-stopped") {
-    showJamToast("Jam session ended");
+    stopBannerPolling();
+    updateNowPlayingBanner(null);
     fetchJamState();
   }
 }
@@ -640,8 +714,66 @@ function cleanupJam() {
     clearInterval(_spotifyPollTimer);
     _spotifyPollTimer = null;
   }
+  stopBannerPolling();
+  updateNowPlayingBanner(null);
   _jamState = null;
   _jamInited = false;
-  handleJamAudioUnsubscribed();
+  stopJamAudioStream();
   closeJamPanel();
+}
+
+// ──────────────────────────────────────────
+// Now Playing Banner (room-top bar)
+// ──────────────────────────────────────────
+
+function updateNowPlayingBanner(state) {
+  var banner = document.getElementById("jam-banner");
+  if (!banner) return;
+
+  if (!state || !state.active || !state.now_playing || !state.now_playing.name) {
+    banner.classList.add("hidden");
+    return;
+  }
+
+  var np = state.now_playing;
+  banner.innerHTML =
+    '<img class="jam-banner-art" src="' + escapeHtml(np.album_art_url || "") + '" alt="">' +
+    '<div class="jam-banner-info">' +
+      '<div class="jam-banner-title">' + escapeHtml(np.name) + '</div>' +
+      '<div class="jam-banner-artist">' + escapeHtml(np.artist) + '</div>' +
+    '</div>' +
+    '<span class="jam-banner-live">JAM</span>';
+  banner.classList.remove("hidden");
+}
+
+// Lightweight poll for banner — runs independently of the Jam panel
+async function fetchBannerState() {
+  try {
+    var resp = await fetch(apiUrl("/api/jam/state"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!resp.ok) return;
+    var state = await resp.json();
+    // Keep _jamState in sync if the panel hasn't initialized its own poll
+    if (!_jamPollTimer) _jamState = state;
+    updateNowPlayingBanner(state);
+    // If jam ended, stop polling
+    if (!state.active) stopBannerPolling();
+  } catch (e) {
+    // silent — banner is non-critical
+  }
+}
+
+function startBannerPolling() {
+  if (_bannerPollTimer) return;  // already running
+  if (_jamPollTimer) return;     // full poll already running, it updates the banner
+  fetchBannerState();
+  _bannerPollTimer = setInterval(fetchBannerState, 5000);
+}
+
+function stopBannerPolling() {
+  if (_bannerPollTimer) {
+    clearInterval(_bannerPollTimer);
+    _bannerPollTimer = null;
+  }
 }
