@@ -1,16 +1,7 @@
 name: Build macOS
 
 on:
-  workflow_dispatch:  # Manual trigger from GitHub UI
-  push:
-    branches: [main]
-    tags:
-      - 'v*'
-
-# Cancel in-progress runs on the same branch
-concurrency:
-  group: macos-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:  # Manual trigger from GitHub UI only (macOS runners cost 10x minutes)
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,19 +68,19 @@ jobs:
           path: core/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-      # Read version and find the matching release created by the Windows CI
-      - name: Read version
-        id: version
+      - name: Get latest release tag
+        id: latest
         shell: bash
         run: |
-          VERSION=$(jq -r '.version' core/client/tauri.conf.json)
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          echo "tag=v${VERSION}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Looking for release: v${VERSION}+${SHORT_SHA}"
+          TAG=$(gh release view --json tagName -q '.tagName' 2>/dev/null || echo "")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest release: $TAG"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload DMG to GitHub Release
+      - name: Upload DMG to latest release
+        if: steps.latest.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ steps.latest.outputs.tag }}
           files: core/target/release/bundle/dmg/*.dmg
-        continue-on-error: true  # Don't fail if Windows CI hasn't created the release yet
