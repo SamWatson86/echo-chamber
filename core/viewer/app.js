@@ -3954,14 +3954,38 @@ function setSelectOptions(select, items, placeholder) {
 }
 
 async function ensureDevicePermissions() {
+  let gotAudio = false;
+  let gotVideo = false;
+
+  // Request audio and video separately so one failing doesn't block the other.
+  // macOS WKWebView (Tauri on Mac) can reject combined requests if either
+  // device type is unavailable or permission is denied.
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    stream.getTracks().forEach((t) => t.stop());
-    return true;
+    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioStream.getTracks().forEach((t) => t.stop());
+    gotAudio = true;
   } catch (err) {
-    setDeviceStatus("Device permissions denied or blocked.", true);
+    debugLog("[devices] audio permission denied or unavailable: " + err.message);
+  }
+
+  try {
+    const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    videoStream.getTracks().forEach((t) => t.stop());
+    gotVideo = true;
+  } catch (err) {
+    debugLog("[devices] video permission denied or unavailable: " + err.message);
+  }
+
+  if (!gotAudio && !gotVideo) {
+    setDeviceStatus("Device permissions denied or no devices found.", true);
     return false;
   }
+  if (!gotAudio) {
+    setDeviceStatus("Microphone unavailable — check permissions or connection.");
+  } else if (!gotVideo) {
+    setDeviceStatus("Camera unavailable — audio devices loaded.");
+  }
+  return true;
 }
 
 async function refreshDevices() {
@@ -4012,8 +4036,13 @@ async function refreshDevices() {
     if (opt) speakerSelect.value = selectedSpeakerId;
     else selectedSpeakerId = "";
   }
-  if (!mics.length || !cams.length) {
-    setDeviceStatus("Device names may be hidden until permissions are granted.");
+  if (!mics.length && !cams.length) {
+    setDeviceStatus("No audio or video devices found. Check permissions.");
+  } else if (!mics.length) {
+    setDeviceStatus("No microphones found — check permissions or connection.");
+  } else if (!cams.length) {
+    // Camera-less is common (e.g. desktops without webcam) — not an error
+    setDeviceStatus("");
   } else {
     setDeviceStatus("");
   }
@@ -5400,8 +5429,17 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   roomListEl.classList.remove("hidden");
   connectPanel.classList.add("hidden");
   setPublishButtonsEnabled(true);
-  refreshDevices().catch(() => {});
-  toggleMicOn().catch(() => {});
+  // Refresh devices, then auto-enable mic. On macOS WKWebView, getUserMedia may
+  // need to be called first to unlock device labels, so we ensure permissions
+  // before toggling mic on.
+  ensureDevicePermissions().then(() => refreshDevices()).then(() => {
+    toggleMicOn().catch((err) => {
+      debugLog("[mic] auto-enable failed: " + (err.message || err));
+      setStatus("Mic failed to start — check permissions in System Settings", true);
+    });
+  }).catch((err) => {
+    debugLog("[devices] post-connect device setup failed: " + (err.message || err));
+  });
   startHeartbeat();
   startRoomStatusPolling();
   refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
@@ -6127,7 +6165,17 @@ async function toggleMic() {
     }
     updateActiveSpeakerUi();
   } catch (err) {
-    setStatus(err.message || "Mic failed", true);
+    debugLog("[mic] toggle error: " + (err.message || err) + " (name=" + err.name + ")");
+    // Provide actionable error messages for common Mac issues
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      setStatus("Mic permission denied — grant access in System Settings > Privacy > Microphone", true);
+    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      setStatus("No microphone found — check your audio input device", true);
+    } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+      setStatus("Mic is in use by another app or unavailable", true);
+    } else {
+      setStatus(err.message || "Mic failed", true);
+    }
   } finally {
     micBtn.disabled = false;
   }
@@ -6196,7 +6244,16 @@ async function toggleCam() {
       }
     }
   } catch (err) {
-    setStatus(err.message || "Camera failed", true);
+    debugLog("[cam] toggle error: " + (err.message || err) + " (name=" + err.name + ")");
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      setStatus("Camera permission denied — grant access in System Settings > Privacy > Camera", true);
+    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      setStatus("No camera found", true);
+    } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+      setStatus("Camera is in use by another app or unavailable", true);
+    } else {
+      setStatus(err.message || "Camera failed", true);
+    }
   } finally {
     camBtn.disabled = false;
   }
@@ -6894,12 +6951,15 @@ if (isAdminMode()) {
   }
 }
 setRoomAudioMutedState(false);
-ensureDevicePermissions().then(() => refreshDevices()).then(() => {
+// On page load, just try to enumerate devices without requesting permissions.
+// The real getUserMedia permission request happens when the user connects (post-connect flow).
+// This avoids premature permission prompts on macOS WKWebView.
+refreshDevices().catch(() => {}).then(() => {
   micSelect.disabled = false;
   camSelect.disabled = false;
   speakerSelect.disabled = false;
   refreshDevicesBtn.disabled = false;
-}).catch(() => {});
+});
 
 window.addEventListener("beforeunload", () => {
   sendLeaveNotification();
