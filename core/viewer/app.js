@@ -448,7 +448,9 @@ var _SETTINGS_KEYS = [
   "echo-core-soundboard-volume", "echo-core-soundboard-clip-volume",
   "echo-soundboard-favorites", "echo-soundboard-order",
   "echo-noise-cancel", "echo-nc-level",
-  "echo-device-mic", "echo-device-cam", "echo-device-speaker"
+  "echo-device-mic", "echo-device-cam", "echo-device-speaker",
+  "echo-core-remember-name", "echo-core-remember-pass",
+  "echo-core-identity-suffix"
 ];
 
 async function loadAllSettings() {
@@ -527,7 +529,7 @@ function _reapplySettingsAfterLoad() {
   var savedTheme = echoGet(THEME_STORAGE_KEY);
   if (savedTheme && savedTheme !== document.body.dataset.theme) {
     debugLog("[settings] reapplying theme: " + savedTheme);
-    applyTheme(savedTheme);
+    applyTheme(savedTheme, true);
   }
   // UI opacity
   var savedOpacity = echoGet(UI_OPACITY_KEY);
@@ -659,9 +661,14 @@ if (debugCopyBtn) {
 }
 
 function ensureIdentitySuffix() {
-  const existing = sessionStorage.getItem(IDENTITY_SUFFIX_KEY);
-  if (existing) return existing;
+  // Check persistent storage first so identity survives app restarts
+  const persisted = echoGet(IDENTITY_SUFFIX_KEY);
+  if (persisted) return persisted;
+  // Fall back to sessionStorage (legacy)
+  const session = sessionStorage.getItem(IDENTITY_SUFFIX_KEY);
+  if (session) { echoSet(IDENTITY_SUFFIX_KEY, session); return session; }
   const fresh = `${Math.floor(Math.random() * 9000 + 1000)}`;
+  echoSet(IDENTITY_SUFFIX_KEY, fresh);
   sessionStorage.setItem(IDENTITY_SUFFIX_KEY, fresh);
   return fresh;
 }
@@ -6955,7 +6962,7 @@ function buildVersionSection() {
     try {
       var result = await tauriInvoke("check_for_updates");
       if (result === "up_to_date") {
-        updateStatus.textContent = "You're on the latest version!";
+        updateStatus.innerHTML = 'You\'re on the latest version! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
       } else {
         // If we get here, update was found and installed — app will restart
         updateStatus.textContent = "Installing... app will restart.";
@@ -6963,8 +6970,7 @@ function buildVersionSection() {
     } catch (e) {
       var errStr = e.message || String(e);
       debugLog("[updater] check failed: " + errStr);
-      // macOS doesn't support auto-update yet (no code signing), provide download link
-      updateStatus.innerHTML = 'Update check failed. <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Download latest from GitHub</a>';
+      updateStatus.innerHTML = 'Auto-update unavailable. <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Download latest from GitHub</a>';
     }
     updateBtn.disabled = false;
   });
@@ -7224,9 +7230,9 @@ function stopUltraInstinctParticles() {
   }
 }
 
-function applyTheme(name) {
+function applyTheme(name, skipSave) {
   document.body.dataset.theme = name;
-  echoSet(THEME_STORAGE_KEY, name);
+  if (!skipSave) echoSet(THEME_STORAGE_KEY, name);
   // Toggle matrix rain
   if (name === "matrix") {
     startMatrixRain();
@@ -7249,7 +7255,8 @@ function applyTheme(name) {
 
 function initTheme() {
   const saved = echoGet(THEME_STORAGE_KEY) || "frost";
-  applyTheme(saved);
+  // skipSave=true: don't overwrite saved settings before loadAllSettings() finishes
+  applyTheme(saved, true);
 }
 
 // Theme panel open/close

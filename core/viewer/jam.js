@@ -458,6 +458,17 @@ function renderNowPlaying(np) {
       '<div class="jam-now-playing-artist">' + escapeHtml(np.artist) + '</div>' +
     '</div>' +
     '<div class="jam-progress"><div class="jam-progress-bar" style="width:' + progress.toFixed(1) + '%"></div></div>';
+
+  // Click now-playing card to join jam if not already listening
+  if (!_jamAudioWs && _jamState && _jamState.active) {
+    container.style.cursor = "pointer";
+    container.title = "Click to join the Jam";
+    container.onclick = function() { joinJam(); };
+  } else {
+    container.style.cursor = "";
+    container.title = "";
+    container.onclick = null;
+  }
 }
 
 function renderQueue(queue) {
@@ -648,12 +659,49 @@ function showJamStatus(msg) {
 }
 
 // ──────────────────────────────────────────
+// Jam notification chime (Web Audio API)
+// ──────────────────────────────────────────
+
+function playJamStartChime() {
+  try {
+    var AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    var ctx = new AudioCtx();
+    var now = ctx.currentTime;
+    // Fun ascending arpeggio — musical "something exciting is starting"
+    var notes = [
+      [523.25, 0],      // C5
+      [659.25, 0.1],    // E5
+      [783.99, 0.2],    // G5
+      [1046.5, 0.3]     // C6
+    ];
+    notes.forEach(function(pair) {
+      var freq = pair[0], offset = pair[1];
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.15, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.3);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.35);
+    });
+    // Close context after chime finishes
+    setTimeout(function() { ctx.close(); }, 1000);
+  } catch (e) {
+    // silent — chime is non-critical
+  }
+}
+
+// ──────────────────────────────────────────
 // Data Channel Handler (jam messages)
 // ──────────────────────────────────────────
 
 function handleJamDataMessage(payload) {
   if (!payload || !payload.type) return;
   if (payload.type === "jam-started") {
+    playJamStartChime();
     startBannerPolling();
     fetchJamState();
   } else if (payload.type === "jam-stopped") {
@@ -745,10 +793,14 @@ function updateNowPlayingBanner(state) {
     '<span class="jam-banner-live">JAM</span>';
   banner.classList.remove("hidden");
 
-  // Click banner to open jam panel
+  // Click banner to open jam panel and auto-join
   if (!banner._jamClickBound) {
     banner.style.cursor = "pointer";
-    banner.addEventListener("click", function() { openJamPanel(); });
+    banner.addEventListener("click", function() {
+      openJamPanel();
+      // Auto-join if not already listening
+      if (_jamState && _jamState.active && !_jamAudioWs) joinJam();
+    });
     banner._jamClickBound = true;
   }
 }
