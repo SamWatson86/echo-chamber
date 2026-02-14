@@ -589,14 +589,25 @@ const debugLogEl = document.getElementById("debug-log");
 const debugLines = [];
 const DEBUG_LIMIT = 180;
 
+var _debugDirty = false;
+var _debugRafPending = false;
 function debugLog(message) {
   if (!message) return;
   const ts = new Date().toLocaleTimeString();
   const line = `[${ts}] ${message}`;
   debugLines.push(line);
   while (debugLines.length > DEBUG_LIMIT) debugLines.shift();
-  if (debugLogEl) {
-    debugLogEl.textContent = debugLines.join("\n");
+  // Batch DOM updates — only repaint debug panel once per animation frame
+  if (debugLogEl && !_debugRafPending) {
+    _debugDirty = true;
+    _debugRafPending = true;
+    requestAnimationFrame(function() {
+      _debugRafPending = false;
+      if (_debugDirty && debugLogEl) {
+        debugLogEl.textContent = debugLines.join("\n");
+        _debugDirty = false;
+      }
+    });
   }
 }
 
@@ -1878,7 +1889,7 @@ function startRoomStatusPolling() {
   if (!controlUrl || !adminToken) return;
   roomStatusTimer = setInterval(() => {
     refreshRoomList(controlUrl, adminToken, currentRoomName).catch(() => {});
-  }, 2000);
+  }, 5000);
 }
 
 function stopRoomStatusPolling() {
@@ -2354,7 +2365,12 @@ function startBasicVideoMonitor(element) {
       element._reportedNoFrames = true;
       debugLog(`video no frames ${element._lkTrack?.sid || "unknown"} size=${element.videoWidth}x${element.videoHeight}`);
     }
-  }, 900);
+    // Stop monitoring once video is confirmed working (has frames and isn't black)
+    if (element._frameCount > 10 && !element._isBlack) {
+      clearInterval(element._monitorTimer);
+      element._monitorTimer = null;
+    }
+  }, 2000);
 }
 
 function configureAudioElement(element) {
