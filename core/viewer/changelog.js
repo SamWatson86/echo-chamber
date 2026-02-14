@@ -4,6 +4,15 @@
    ========================================================= */
 
 var ECHO_CHANGELOG = {
+  "0.3.1": [
+    "Security: Links now open on YOUR computer, not the server",
+    "Chat: Videos and audio play inline with download button",
+    "Soundboard: See who played each sound",
+    "Jam: Join/Leave is now instant, queue auto-clears finished songs",
+    "Bug reports: Attach screenshots",
+    "Auto-notification when a new update is available",
+    "12 bug fixes from your reports — keep them coming!"
+  ],
   "0.3.0": [
     "Jam Session: Listen to Spotify together in real-time with everyone in the room",
     "Now Playing banner shows the current track at the top of the screen",
