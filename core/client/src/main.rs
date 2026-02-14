@@ -263,7 +263,7 @@ fn main() {
             clear_cache_on_upgrade(app);
 
             // Load viewer from the server so JS/CSS updates are live without reinstalling
-            let viewer_url = format!("{}/viewer", app.state::<String>().inner());
+            let viewer_url = format!("{}/viewer/", app.state::<String>().inner());
             WebviewWindowBuilder::new(
                 app,
                 "main",

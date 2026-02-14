@@ -246,7 +246,7 @@ fn main() {
         .setup(move |app| {
             clear_cache_on_upgrade(app);
 
-            let viewer_url = format!("{}/viewer", app.state::<String>().inner());
+            let viewer_url = format!("{}/viewer/", app.state::<String>().inner());
             WebviewWindowBuilder::new(
                 app,
                 "main",
