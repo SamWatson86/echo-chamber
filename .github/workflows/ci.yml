@@ -1,8 +1,7 @@
 name: CI - Build & Check
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:  # Manual only — viewer loads from server, no need to build on every push
 
 # Cancel in-progress runs on the same branch
 concurrency:
