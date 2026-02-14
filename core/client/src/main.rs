@@ -264,12 +264,16 @@ fn main() {
 
             // Load viewer from the server so JS/CSS updates are live without reinstalling
             let viewer_url = format!("{}/viewer", app.state::<String>().inner());
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(viewer_url.parse().unwrap()))
-                .title("Echo Chamber")
-                .inner_size(1280.0, 800.0)
-                .min_inner_size(800.0, 600.0)
-                .initialization_script("window.__ECHO_NATIVE__ = true;")
-                .build()?;
+            WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::External(viewer_url.parse().unwrap()),
+            )
+            .title("Echo Chamber")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(800.0, 600.0)
+            .initialization_script("window.__ECHO_NATIVE__ = true;")
+            .build()?;
 
             // Check for updates in the background
             let handle = app.handle().clone();

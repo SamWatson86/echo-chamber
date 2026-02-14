@@ -247,13 +247,17 @@ fn main() {
             clear_cache_on_upgrade(app);
 
             let viewer_url = format!("{}/viewer", app.state::<String>().inner());
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(viewer_url.parse().unwrap()))
-                .title("Echo Chamber Admin")
-                .inner_size(1440.0, 900.0)
-                .min_inner_size(800.0, 600.0)
-                .initialization_script("window.__ECHO_NATIVE__ = true;")
-                .initialization_script("window.__ECHO_ADMIN__ = true;")
-                .build()?;
+            WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::External(viewer_url.parse().unwrap()),
+            )
+            .title("Echo Chamber Admin")
+            .inner_size(1440.0, 900.0)
+            .min_inner_size(800.0, 600.0)
+            .initialization_script("window.__ECHO_NATIVE__ = true;")
+            .initialization_script("window.__ECHO_ADMIN__ = true;")
+            .build()?;
 
             Ok(())
         })
