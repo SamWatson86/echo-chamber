@@ -1,0 +1,11 @@
+{
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjME14SFdYaGFsRkVTRW44MU96QUFzUUNnR3JjbmkyZlZrbm9PQTRxbUJGMmpYZGNtd2pGLzIveVk1NUNhbjdRQzhBUWxyWHk0b0wwSW5rNGdYNk1iaGdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzcwODQ5MDUwCWZpbGU6RWNobyBDaGFtYmVyXzAuMi4zX3g2NC1zZXR1cC5leGUKZU55L3hlL051aXA1TWlaSCtpV0RLalZ6VUNPVldRRFFOeHNRTVZkNXlnWHJ3clg5c3F3d0RIRVVORU1uZmlDeHVPTzJRVElRc2F1WWZjck5Sc1RzQWc9PQo=",
+                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.2.3/Echo.Chamber_0.2.3_x64-setup.exe"
+                                         }
+                  },
+    "pub_date":  "2026-02-11T22:30:52Z",
+    "version":  "0.2.3",
+    "notes":  "Echo Chamber v0.2.3"
+}

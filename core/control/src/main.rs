@@ -752,6 +752,8 @@ async fn main() {
         .route("/api/chime/:identity/:kind", get(chime_get))
         .route("/api/chime/delete", post(chime_delete))
         .route("/api/bug-report", post(submit_bug_report))
+        .route("/api/version", get(api_version))
+        .route("/api/update/latest.json", get(api_update_latest))
         .route("/api/open-url", post(open_url))
         // Jam Session (Spotify integration)
         .route("/api/jam/spotify-init", post(jam_spotify_init))
@@ -885,6 +887,26 @@ fn resolve_viewer_dir() -> PathBuf {
         return current.join("core").join("viewer");
     }
     PathBuf::from("viewer")
+}
+
+fn resolve_deploy_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ECHO_CORE_DEPLOY_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(current) = std::env::current_dir() {
+        if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
+            if name.eq_ignore_ascii_case("control") {
+                if let Some(parent) = current.parent() {
+                    return parent.join("deploy");
+                }
+            }
+            if name.eq_ignore_ascii_case("core") {
+                return current.join("deploy");
+            }
+        }
+        return current.join("core").join("deploy");
+    }
+    PathBuf::from("deploy")
 }
 
 fn resolve_admin_dir() -> PathBuf {
@@ -1025,6 +1047,42 @@ async fn health() -> Json<HealthResponse> {
         ok: true,
         ts: now_ts(),
     })
+}
+
+/// Returns server version and latest available client version from deploy/latest.json.
+async fn api_version() -> Json<serde_json::Value> {
+    let server_version = env!("CARGO_PKG_VERSION");
+    let mut latest_client = String::new();
+    if let Ok(data) = fs::read_to_string(resolve_deploy_dir().join("latest.json")) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(v) = parsed.get("version").and_then(|v| v.as_str()) {
+                latest_client = v.to_string();
+            }
+        }
+    }
+    Json(serde_json::json!({
+        "version": server_version,
+        "latest_client": latest_client,
+    }))
+}
+
+/// Serves the Tauri updater manifest (latest.json) from deploy dir.
+/// This lets the Tauri auto-updater check the server directly instead of GitHub.
+async fn api_update_latest() -> axum::response::Response {
+    let path = resolve_deploy_dir().join("latest.json");
+    match fs::read_to_string(&path) {
+        Ok(data) => (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            data,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            "latest.json not found — no update available",
+        )
+            .into_response(),
+    }
 }
 
 /// Open a URL in the system's default browser — DISABLED.

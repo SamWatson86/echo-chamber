@@ -1923,9 +1923,9 @@ var _updateCheckTimer = null;
 var _updateDismissed = false;
 function startUpdateCheckPolling() {
   if (_updateCheckTimer) return;
-  // Check once after 10s, then every 30 minutes
+  // Check once after 10s, then every 5 minutes
   setTimeout(checkForUpdateNotification, 10000);
-  _updateCheckTimer = setInterval(checkForUpdateNotification, 30 * 60 * 1000);
+  _updateCheckTimer = setInterval(checkForUpdateNotification, 5 * 60 * 1000);
 }
 async function checkForUpdateNotification() {
   if (_updateDismissed) return;
@@ -1938,12 +1938,14 @@ async function checkForUpdateNotification() {
       } catch (e) { /* ignore */ }
     }
     if (!currentVer) return; // browser viewer doesn't have a version to compare
-    var resp = await fetch("https://api.github.com/repos/SamWatson86/echo-chamber/releases/latest");
+    var cUrl = controlUrlInput ? controlUrlInput.value.trim() : "";
+    if (!cUrl) return;
+    var resp = await fetch(cUrl + "/api/version");
     if (!resp.ok) return;
     var data = await resp.json();
-    var latestTag = (data.tag_name || "").replace(/^v/, "");
-    if (latestTag && latestTag !== currentVer) {
-      showUpdateBanner(latestTag);
+    var latestClient = data.latest_client || "";
+    if (latestClient && latestClient !== currentVer) {
+      showUpdateBanner(latestClient);
     }
   } catch (e) {
     // silent
@@ -1954,7 +1956,7 @@ function showUpdateBanner(version) {
   var banner = document.createElement("div");
   banner.id = "update-banner";
   banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:500;background:linear-gradient(90deg,rgba(56,189,248,0.15),rgba(139,92,246,0.15));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid rgba(56,189,248,0.3);padding:8px 16px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--text,#e2e8f0);";
-  banner.innerHTML = '<span>Update available: <strong>v' + version + '</strong></span><a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent,#38bdf8);text-decoration:underline;">Download</a><button type="button" style="background:none;border:none;color:var(--muted,#94a3b8);cursor:pointer;font-size:16px;padding:2px 6px;" title="Dismiss">&times;</button>';
+  banner.innerHTML = '<span>Update available: <strong>v' + version + '</strong> — restart the app to update</span><button type="button" style="background:none;border:none;color:var(--muted,#94a3b8);cursor:pointer;font-size:16px;padding:2px 6px;" title="Dismiss">&times;</button>';
   banner.querySelector("button").addEventListener("click", function() {
     banner.remove();
     _updateDismissed = true;
@@ -7117,47 +7119,46 @@ function buildVersionSection() {
     }
   })();
 
-  // Check for updates — query GitHub releases API then try Tauri auto-update
+  // Check for updates — query server /api/version then try Tauri auto-update
   updateBtn.addEventListener("click", async function() {
     updateBtn.disabled = true;
     updateStatus.textContent = "Checking...";
     try {
-      // Fetch latest release from GitHub
-      var ghResp = await fetch("https://api.github.com/repos/SamWatson86/echo-chamber/releases/latest");
-      if (ghResp.ok) {
-        var ghData = await ghResp.json();
-        var latestTag = (ghData.tag_name || "").replace(/^v/, "");
-        var currentVer = versionLabel.textContent.replace(/^Version:\s*v?/, "").split(" ")[0];
-        if (latestTag && currentVer && latestTag !== currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "...") {
-          updateStatus.innerHTML = 'Update available: v' + latestTag + '! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Download from GitHub</a>';
-          // Try Tauri auto-update if available
-          if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
-            try {
-              var result = await tauriInvoke("check_for_updates");
-              if (result !== "up_to_date") {
-                updateStatus.textContent = "Installing v" + latestTag + "... app will restart.";
-              }
-            } catch (e2) { /* auto-update unavailable, GitHub link already shown */ }
-          }
-        } else {
-          updateStatus.innerHTML = 'You\'re on the latest version! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+      var cUrl = controlUrlInput ? controlUrlInput.value.trim() : "";
+      var currentVer = versionLabel.textContent.replace(/^Version:\s*v?/, "").split(" ")[0];
+      var latestClient = "";
+      if (cUrl) {
+        var verResp = await fetch(cUrl + "/api/version");
+        if (verResp.ok) {
+          var verData = await verResp.json();
+          latestClient = verData.latest_client || "";
         }
+      }
+      if (latestClient && currentVer && latestClient !== currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "...") {
+        updateStatus.textContent = "Update available: v" + latestClient + "!";
+        // Try Tauri auto-update if available
+        if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+          try {
+            var result = await tauriInvoke("check_for_updates");
+            if (result !== "up_to_date") {
+              updateStatus.textContent = "Installing v" + latestClient + "... app will restart.";
+            }
+          } catch (e2) { /* auto-update unavailable */ }
+        }
+      } else if (currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "...") {
+        updateStatus.textContent = "You're on the latest version!";
       } else {
-        // GitHub API failed, fall back to Tauri check
+        // Fallback for browser viewer or unknown version
         if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
           var result = await tauriInvoke("check_for_updates");
-          if (result === "up_to_date") {
-            updateStatus.innerHTML = 'You\'re on the latest version! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
-          } else {
-            updateStatus.textContent = "Installing... app will restart.";
-          }
+          updateStatus.textContent = result === "up_to_date" ? "You're on the latest version!" : "Installing... app will restart.";
         } else {
-          updateStatus.innerHTML = '<a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+          updateStatus.textContent = "Version check not available in browser.";
         }
       }
     } catch (e) {
       debugLog("[updater] check failed: " + (e.message || e));
-      updateStatus.innerHTML = '<a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+      updateStatus.textContent = "Update check failed.";
     }
     updateBtn.disabled = false;
   });

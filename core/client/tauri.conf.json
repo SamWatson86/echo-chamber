@@ -42,7 +42,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/SamWatson86/echo-chamber/releases/latest/download/latest.json"
+        "https://echo.fellowshipoftheboatrace.party:9443/api/update/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwNUNGNjlEMTFCRUE2NDIKUldSQ3ByNFJuZlpjMElna0FjaXNKYU1DcFZpRDVEbmk2Mms0bU5JcGFlTEh3Ujl0YUFPUWRrRlAK"
     }
