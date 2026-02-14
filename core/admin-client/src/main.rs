@@ -246,7 +246,8 @@ fn main() {
         .setup(move |app| {
             clear_cache_on_upgrade(app);
 
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let viewer_url = format!("{}/viewer", app.state::<String>().inner());
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(viewer_url.parse().unwrap()))
                 .title("Echo Chamber Admin")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(800.0, 600.0)

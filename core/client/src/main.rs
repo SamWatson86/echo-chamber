@@ -262,9 +262,9 @@ fn main() {
             // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
             clear_cache_on_upgrade(app);
 
-            // Load viewer from local bundled files (frontendDist = "../viewer")
-            // This makes Tauri IPC available natively — no remote URL ACL issues
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            // Load viewer from the server so JS/CSS updates are live without reinstalling
+            let viewer_url = format!("{}/viewer", app.state::<String>().inner());
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(viewer_url.parse().unwrap()))
                 .title("Echo Chamber")
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(800.0, 600.0)
