@@ -331,13 +331,23 @@ async function addToQueue(track) {
 async function joinJam() {
   try {
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
-    await fetch(apiUrl("/api/jam/join"), {
+    var resp = await fetch(apiUrl("/api/jam/join"), {
       method: "POST",
       headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
       body: JSON.stringify({ identity: identity })
     });
+    if (!resp.ok) {
+      showJamError("Join failed (status " + resp.status + ")");
+      debugLog("[jam] joinJam server error: " + resp.status);
+      return;
+    }
     // Start receiving audio via WebSocket
     startJamAudioStream();
+    // Immediately update button state so Leave is responsive
+    var joinBtn = document.getElementById("jam-join-btn");
+    var leaveBtn = document.getElementById("jam-leave-btn");
+    if (joinBtn) joinBtn.style.display = "none";
+    if (leaveBtn) leaveBtn.style.display = "";
     fetchJamState();
   } catch (e) {
     showJamError("Join failed: " + e.message);
@@ -348,13 +358,21 @@ async function joinJam() {
 async function leaveJam() {
   try {
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
-    await fetch(apiUrl("/api/jam/leave"), {
+    // Stop audio immediately so user gets instant feedback
+    stopJamAudioStream();
+    // Immediately update button state
+    var joinBtn = document.getElementById("jam-join-btn");
+    var leaveBtn = document.getElementById("jam-leave-btn");
+    if (joinBtn) joinBtn.style.display = "";
+    if (leaveBtn) leaveBtn.style.display = "none";
+    var resp = await fetch(apiUrl("/api/jam/leave"), {
       method: "POST",
       headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
       body: JSON.stringify({ identity: identity })
     });
-    // Stop receiving audio
-    stopJamAudioStream();
+    if (!resp.ok) {
+      debugLog("[jam] leaveJam server error: " + resp.status);
+    }
     fetchJamState();
   } catch (e) {
     showJamError("Leave failed: " + e.message);
@@ -597,6 +615,7 @@ function startJamAudioStream() {
     ws.onerror = function(e) {
       debugLog("[jam] audio WebSocket error: " + (e.message || e.type || "unknown"));
       _jamAudioWs = null;
+      if (typeof showToast === "function") showToast("Jam audio connection failed — try rejoining");
     };
   } catch (ex) {
     debugLog("[jam] startJamAudioStream exception: " + ex.message);

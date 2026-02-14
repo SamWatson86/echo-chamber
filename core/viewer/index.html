@@ -123,7 +123,7 @@
               <button id="chat-emoji-btn" type="button" class="chat-emoji-btn" title="Add emoji">😊</button>
               <input type="file" id="chat-file-input" class="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
               <div id="chat-emoji-picker" class="chat-emoji-picker hidden"></div>
-              <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
+              <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="2"></textarea>
               <button id="chat-send-btn" type="button" class="chat-send-btn">Send</button>
             </div>
           </div>
@@ -269,6 +269,12 @@
       </div>
       <div class="bug-report-body">
         <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Describe what happened..." rows="4" maxlength="1000"></textarea>
+        <div class="bug-report-screenshot-row">
+          <button id="bug-report-screenshot-btn" type="button" class="bug-report-screenshot-btn">Attach Screenshot</button>
+          <input type="file" id="bug-report-file" class="hidden" accept="image/*" />
+          <span id="bug-report-file-name" class="bug-report-file-name"></span>
+        </div>
+        <div id="bug-report-screenshot-preview" class="bug-report-screenshot-preview hidden"></div>
         <div id="bug-report-stats" class="bug-report-stats"></div>
         <div class="bug-report-actions">
           <button id="submit-bug-report" type="button">Send Report</button>

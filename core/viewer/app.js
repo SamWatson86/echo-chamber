@@ -611,6 +611,21 @@ function debugLog(message) {
   }
 }
 
+// ── General toast notification ──
+function showToast(message, durationMs) {
+  var existing = document.querySelector(".jam-toast");
+  if (existing) existing.remove();
+  var toast = document.createElement("div");
+  toast.className = "jam-toast";
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(function() { toast.classList.add("jam-toast-visible"); }, 10);
+  setTimeout(function() {
+    toast.classList.remove("jam-toast-visible");
+    setTimeout(function() { toast.remove(); }, 400);
+  }, durationMs || 4000);
+}
+
 // ── WebCodecs NVENC diagnostic ──
 // Test if hardware video encoding is available via WebCodecs API.
 (async function testHardwareEncoding() {
@@ -1633,6 +1648,7 @@ async function fetchRoomToken(baseUrl, adminToken, room, identity, name) {
     },
     body: JSON.stringify({ room, identity, name }),
   });
+  if (token.status === 409) throw new Error("Name is already in use by another connected user. Please choose a different name.");
   if (!token.ok) throw new Error(`Token failed (${token.status})`);
   const tokenData = await token.json();
   return tokenData.token;
@@ -1877,6 +1893,9 @@ async function refreshRoomList(baseUrl, adminToken, activeRoom) {
     }
     btn.addEventListener("click", () => {
       if (roomId === currentRoomName) return;
+      // Optimistic UI: immediately show this room as active
+      roomListEl.querySelectorAll(".room-status-btn").forEach(function(b) { b.classList.remove("is-active"); });
+      btn.classList.add("is-active");
       switchRoom(roomId).catch(() => {});
     });
     roomListEl.appendChild(btn);
@@ -1897,6 +1916,50 @@ function stopRoomStatusPolling() {
     clearInterval(roomStatusTimer);
     roomStatusTimer = null;
   }
+}
+
+// ── Auto update check ──
+var _updateCheckTimer = null;
+var _updateDismissed = false;
+function startUpdateCheckPolling() {
+  if (_updateCheckTimer) return;
+  // Check once after 10s, then every 30 minutes
+  setTimeout(checkForUpdateNotification, 10000);
+  _updateCheckTimer = setInterval(checkForUpdateNotification, 30 * 60 * 1000);
+}
+async function checkForUpdateNotification() {
+  if (_updateDismissed) return;
+  try {
+    var currentVer = "";
+    if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+      try {
+        var info = await tauriInvoke("get_app_info");
+        currentVer = info.version || "";
+      } catch (e) { /* ignore */ }
+    }
+    if (!currentVer) return; // browser viewer doesn't have a version to compare
+    var resp = await fetch("https://api.github.com/repos/SamWatson86/echo-chamber/releases/latest");
+    if (!resp.ok) return;
+    var data = await resp.json();
+    var latestTag = (data.tag_name || "").replace(/^v/, "");
+    if (latestTag && latestTag !== currentVer) {
+      showUpdateBanner(latestTag);
+    }
+  } catch (e) {
+    // silent
+  }
+}
+function showUpdateBanner(version) {
+  if (document.getElementById("update-banner")) return;
+  var banner = document.createElement("div");
+  banner.id = "update-banner";
+  banner.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:500;background:linear-gradient(90deg,rgba(56,189,248,0.15),rgba(139,92,246,0.15));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid rgba(56,189,248,0.3);padding:8px 16px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--text,#e2e8f0);";
+  banner.innerHTML = '<span>Update available: <strong>v' + version + '</strong></span><a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent,#38bdf8);text-decoration:underline;">Download</a><button type="button" style="background:none;border:none;color:var(--muted,#94a3b8);cursor:pointer;font-size:16px;padding:2px 6px;" title="Dismiss">&times;</button>';
+  banner.querySelector("button").addEventListener("click", function() {
+    banner.remove();
+    _updateDismissed = true;
+  });
+  document.body.appendChild(banner);
 }
 
 function startHeartbeat() {
@@ -3238,6 +3301,10 @@ function updateAvatarVideo(cardRef, track) {
 
 async function uploadAvatar(file) {
   if (!adminToken || !room?.localParticipant) return;
+  if (file.size > 50 * 1024 * 1024) {
+    showToast("Avatar too large (max 50MB)");
+    return;
+  }
   const identityBase = getIdentityBase(room.localParticipant.identity);
 
   // GIFs: upload raw file to preserve animation. Others: resize to 160x160 via canvas.
@@ -3290,10 +3357,13 @@ async function uploadAvatar(file) {
 
       debugLog("Avatar uploaded for " + identityBase + ", url=" + avatarUrl);
     } else {
+      var errMsg = data?.error || "Upload failed";
       debugLog("Avatar upload NOT ok: " + JSON.stringify(data));
+      showToast(errMsg);
     }
   } catch (e) {
     debugLog("Avatar upload failed: " + e.message);
+    showToast("Avatar upload failed: " + e.message);
   }
 }
 
@@ -4462,7 +4532,7 @@ function renderSoundboardCompact() {
       if (!room) return;
       primeSoundboardAudio();
       playSoundboardSound(sound.id).catch(() => {});
-      sendSoundboardMessage({ type: "sound-play", soundId: sound.id });
+      sendSoundboardMessage({ type: "sound-play", soundId: sound.id, senderName: room?.localParticipant?.name || "", soundName: sound.name || "" });
     });
     attachSoundboardDragDrop(btn, sound, soundboardCompactGrid, "sound-icon-btn", renderAllSoundboardViews);
     soundboardCompactGrid.appendChild(btn);
@@ -4541,7 +4611,7 @@ function renderSoundboard() {
       if (!room) return;
       primeSoundboardAudio();
       playSoundboardSound(sound.id).catch(() => {});
-      sendSoundboardMessage({ type: "sound-play", soundId: sound.id });
+      sendSoundboardMessage({ type: "sound-play", soundId: sound.id, senderName: room?.localParticipant?.name || "", soundName: sound.name || "" });
     });
 
     // --- Drag and drop (unrestricted) ---
@@ -5287,6 +5357,12 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (msg.type === "sound-play" && msg.soundId) {
           primeSoundboardAudio();
           playSoundboardSound(msg.soundId).catch(() => {});
+          // Show toast with who triggered it and what sound
+          if (msg.senderName && msg.soundName) {
+            showToast(msg.senderName + " played " + msg.soundName, 2500);
+          } else if (msg.senderName) {
+            showToast(msg.senderName + " played a sound", 2500);
+          }
         } else if (msg.type === "sound-added" && msg.sound) {
           upsertSoundboardSound(msg.sound);
         } else if (msg.type === "sound-updated" && msg.sound) {
@@ -5507,6 +5583,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   startRoomStatusPolling();
   refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
   setStatus(`Connected to ${roomId}`);
+  startUpdateCheckPolling();
 
 }
 
@@ -5711,16 +5788,14 @@ document.addEventListener("click", function(e) {
   if (href.startsWith(window.location.origin)) return; // skip internal links
   e.preventDefault();
   debugLog("[link] clicked: " + href);
-  // Try window.open first (works in regular browsers)
-  var w = window.open(href, "_blank");
-  if (!w && adminToken) {
-    // Popup blocked (Tauri/WebView2) + user is admin — ask server to open in system browser
-    debugLog("[link] window.open blocked, using server /api/open-url (admin)");
-    fetch(apiUrl("/api/open-url"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + adminToken },
-      body: JSON.stringify({ url: href })
-    }).catch(function(err) { debugLog("[link] open-url failed: " + err); });
+  if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+    // Tauri client: open on THIS user's machine via IPC
+    tauriInvoke("open_external_url", { url: href }).catch(function(err) {
+      debugLog("[link] tauriInvoke open_external_url failed: " + err);
+    });
+  } else {
+    // Regular browser: just open in new tab
+    window.open(href, "_blank");
   }
 });
 
@@ -5831,6 +5906,81 @@ function renderChatMessage(message) {
         contentEl.innerHTML = linkifyText(message.text);
         messageEl.appendChild(contentEl);
       }
+    } else if (message.fileType?.startsWith("video/")) {
+      // Inline video player with download button
+      const videoUrl = message.fileUrl.startsWith('http')
+        ? message.fileUrl
+        : `${controlUrlInput?.value || 'https://127.0.0.1:9443'}${message.fileUrl}`;
+      const videoEl = document.createElement("video");
+      videoEl.className = "chat-message-video";
+      videoEl.controls = true;
+      videoEl.preload = "metadata";
+      videoEl.style.maxWidth = "100%";
+      videoEl.style.maxHeight = "300px";
+      videoEl.style.borderRadius = "var(--radius-sm)";
+      // Fetch with auth and set blob src
+      (async () => {
+        try {
+          const token = currentAccessToken || adminToken;
+          const response = await fetch(videoUrl, {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          const blob = await response.blob();
+          videoEl.src = URL.createObjectURL(blob);
+        } catch (err) {
+          debugLog(`Failed to load video: ${err.message}`);
+        }
+      })();
+      messageEl.appendChild(videoEl);
+
+      // Download link below video
+      const dlLink = document.createElement("div");
+      dlLink.className = "chat-message-file";
+      dlLink.style.marginTop = "4px";
+      dlLink.style.cursor = "pointer";
+      dlLink.innerHTML = '<div class="chat-message-file-icon">💾</div><div class="chat-message-file-name">' + (message.fileName || "Video") + '</div>';
+      dlLink.addEventListener("click", async () => {
+        try {
+          const token = currentAccessToken || adminToken;
+          const dlUrl = message.fileUrl.startsWith('http') ? message.fileUrl : apiUrl(message.fileUrl);
+          const response = await fetch(dlUrl, { headers: { "Authorization": `Bearer ${token}` } });
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = message.fileName || "video.mp4";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          debugLog(`Failed to download video: ${err.message}`);
+        }
+      });
+      messageEl.appendChild(dlLink);
+    } else if (message.fileType?.startsWith("audio/")) {
+      // Inline audio player
+      const audioUrl = message.fileUrl.startsWith('http')
+        ? message.fileUrl
+        : `${controlUrlInput?.value || 'https://127.0.0.1:9443'}${message.fileUrl}`;
+      const audioEl = document.createElement("audio");
+      audioEl.className = "chat-message-audio";
+      audioEl.controls = true;
+      audioEl.preload = "metadata";
+      audioEl.style.width = "100%";
+      (async () => {
+        try {
+          const token = currentAccessToken || adminToken;
+          const response = await fetch(audioUrl, {
+            headers: { "Authorization": `Bearer ${token}` }
+          });
+          const blob = await response.blob();
+          audioEl.src = URL.createObjectURL(blob);
+        } catch (err) {
+          debugLog(`Failed to load audio: ${err.message}`);
+        }
+      })();
+      messageEl.appendChild(audioEl);
     } else {
       const fileEl = document.createElement("div");
       fileEl.className = "chat-message-file";
@@ -6967,26 +7117,47 @@ function buildVersionSection() {
     }
   })();
 
-  // Check for updates button — calls Rust IPC command
+  // Check for updates — query GitHub releases API then try Tauri auto-update
   updateBtn.addEventListener("click", async function() {
-    if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) {
-      updateStatus.textContent = "Updates only available in native client";
-      return;
-    }
     updateBtn.disabled = true;
     updateStatus.textContent = "Checking...";
     try {
-      var result = await tauriInvoke("check_for_updates");
-      if (result === "up_to_date") {
-        updateStatus.innerHTML = 'You\'re on the latest version! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+      // Fetch latest release from GitHub
+      var ghResp = await fetch("https://api.github.com/repos/SamWatson86/echo-chamber/releases/latest");
+      if (ghResp.ok) {
+        var ghData = await ghResp.json();
+        var latestTag = (ghData.tag_name || "").replace(/^v/, "");
+        var currentVer = versionLabel.textContent.replace(/^Version:\s*v?/, "").split(" ")[0];
+        if (latestTag && currentVer && latestTag !== currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "...") {
+          updateStatus.innerHTML = 'Update available: v' + latestTag + '! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Download from GitHub</a>';
+          // Try Tauri auto-update if available
+          if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+            try {
+              var result = await tauriInvoke("check_for_updates");
+              if (result !== "up_to_date") {
+                updateStatus.textContent = "Installing v" + latestTag + "... app will restart.";
+              }
+            } catch (e2) { /* auto-update unavailable, GitHub link already shown */ }
+          }
+        } else {
+          updateStatus.innerHTML = 'You\'re on the latest version! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+        }
       } else {
-        // If we get here, update was found and installed — app will restart
-        updateStatus.textContent = "Installing... app will restart.";
+        // GitHub API failed, fall back to Tauri check
+        if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+          var result = await tauriInvoke("check_for_updates");
+          if (result === "up_to_date") {
+            updateStatus.innerHTML = 'You\'re on the latest version! <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+          } else {
+            updateStatus.textContent = "Installing... app will restart.";
+          }
+        } else {
+          updateStatus.innerHTML = '<a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
+        }
       }
     } catch (e) {
-      var errStr = e.message || String(e);
-      debugLog("[updater] check failed: " + errStr);
-      updateStatus.innerHTML = 'Auto-update unavailable. <a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Download latest from GitHub</a>';
+      debugLog("[updater] check failed: " + (e.message || e));
+      updateStatus.innerHTML = '<a href="https://github.com/SamWatson86/echo-chamber/releases/latest" target="_blank" style="color:var(--accent)">Check GitHub releases</a>';
     }
     updateBtn.disabled = false;
   });
@@ -7335,12 +7506,22 @@ var bugReportStatsEl = document.getElementById("bug-report-stats");
 var bugReportStatusEl = document.getElementById("bug-report-status");
 var submitBugReportBtn = document.getElementById("submit-bug-report");
 var closeBugReportBtn = document.getElementById("close-bug-report");
+var bugReportFileInput = document.getElementById("bug-report-file");
+var bugReportScreenshotBtn = document.getElementById("bug-report-screenshot-btn");
+var bugReportFileName = document.getElementById("bug-report-file-name");
+var bugReportPreview = document.getElementById("bug-report-screenshot-preview");
+var _bugReportScreenshotUrl = null;
 
 function openBugReport() {
   if (!bugReportModal) return;
   bugReportModal.classList.remove("hidden");
   if (bugReportDesc) bugReportDesc.value = "";
   if (bugReportStatusEl) bugReportStatusEl.textContent = "";
+  // Reset screenshot state
+  _bugReportScreenshotUrl = null;
+  if (bugReportFileInput) bugReportFileInput.value = "";
+  if (bugReportFileName) bugReportFileName.textContent = "";
+  if (bugReportPreview) { bugReportPreview.innerHTML = ""; bugReportPreview.classList.add("hidden"); }
   if (bugReportStatsEl) {
     if (_latestScreenStats) {
       var s = _latestScreenStats;
@@ -7379,6 +7560,9 @@ async function sendBugReport() {
     name: room?.localParticipant?.name || "",
     room: currentRoomName || "",
   };
+  if (_bugReportScreenshotUrl) {
+    payload.screenshot_url = _bugReportScreenshotUrl;
+  }
   if (_latestScreenStats) {
     Object.assign(payload, _latestScreenStats);
   }
@@ -7418,6 +7602,45 @@ if (bugReportDesc) {
     if (e.key === "Enter" && e.ctrlKey) {
       e.preventDefault();
       sendBugReport();
+    }
+  });
+}
+// Screenshot attachment for bug reports
+if (bugReportScreenshotBtn && bugReportFileInput) {
+  bugReportScreenshotBtn.addEventListener("click", function() {
+    bugReportFileInput.click();
+  });
+  bugReportFileInput.addEventListener("change", async function() {
+    var file = bugReportFileInput.files && bugReportFileInput.files[0];
+    if (!file) return;
+    if (bugReportFileName) bugReportFileName.textContent = file.name;
+    // Show preview
+    if (bugReportPreview) {
+      var imgPreview = document.createElement("img");
+      imgPreview.src = URL.createObjectURL(file);
+      bugReportPreview.innerHTML = "";
+      bugReportPreview.appendChild(imgPreview);
+      bugReportPreview.classList.remove("hidden");
+    }
+    // Upload to server using chat upload endpoint
+    try {
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Uploading screenshot...";
+      var formData = new FormData();
+      formData.append("file", file);
+      var uploadResp = await fetch(apiUrl("/api/chat/upload"), {
+        method: "POST",
+        headers: { Authorization: "Bearer " + adminToken },
+        body: formData,
+      });
+      var uploadData = await uploadResp.json().catch(function() { return {}; });
+      if (uploadData.ok && uploadData.url) {
+        _bugReportScreenshotUrl = uploadData.url;
+        if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot attached.";
+      } else {
+        if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot upload failed.";
+      }
+    } catch (e) {
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot upload error: " + e.message;
     }
   });
 }

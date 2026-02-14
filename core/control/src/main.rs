@@ -146,6 +146,8 @@ struct BugReport {
     ice_local_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ice_remote_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -171,6 +173,8 @@ struct BugReportRequest {
     ice_local_type: Option<String>,
     #[serde(default)]
     ice_remote_type: Option<String>,
+    #[serde(default)]
+    screenshot_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -471,7 +475,8 @@ async fn main() {
     let config = Arc::new(load_config());
     let max_body = config
         .soundboard_max_bytes
-        .max(config.chat_max_upload_bytes);
+        .max(config.chat_max_upload_bytes)
+        .max(50 * 1024 * 1024); // avatar upload limit (50 MB for animated GIFs)
     let mut soundboard_state = SoundboardState {
         dir: config.soundboard_dir.clone(),
         max_bytes: config.soundboard_max_bytes,
@@ -1022,29 +1027,17 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-/// Open a URL in the system's default browser (admin-only, for Tauri client)
+/// Open a URL in the system's default browser — DISABLED.
+/// This endpoint was a security hole: remote users could open URLs on the
+/// server's desktop. Links now open locally via Tauri IPC (open_external_url)
+/// or window.open in the browser.
 async fn open_url(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     headers: HeaderMap,
-    body: axum::body::Bytes,
+    _body: axum::body::Bytes,
 ) -> StatusCode {
-    if ensure_admin(&state, &headers).is_err() {
-        return StatusCode::UNAUTHORIZED;
-    }
-    let url = match serde_json::from_slice::<serde_json::Value>(&body) {
-        Ok(v) => v
-            .get("url")
-            .and_then(|u| u.as_str())
-            .unwrap_or("")
-            .to_string(),
-        Err(_) => return StatusCode::BAD_REQUEST,
-    };
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return StatusCode::BAD_REQUEST;
-    }
-    eprintln!("[open-url] opening: {}", url);
-    let _ = std::process::Command::new("explorer").arg(&url).spawn();
-    StatusCode::OK
+    warn!("/api/open-url called but is disabled for security — use Tauri IPC instead");
+    StatusCode::GONE
 }
 
 async fn online_users(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -1140,7 +1133,7 @@ async fn issue_token(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Track participant in room (dedup: remove old entries with the same name base)
+    // Track participant in room (dedup old sessions, reject active name conflicts)
     {
         let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
         let name_base = payload
@@ -1149,16 +1142,27 @@ async fn issue_token(
             .last()
             .unwrap_or(&payload.identity)
             .to_string();
-        let stale_keys: Vec<String> = participants
+        let same_name_entries: Vec<(String, u64)> = participants
             .iter()
             .filter(|(k, _)| {
                 *k != &payload.identity && k.rsplitn(2, '-').last().unwrap_or(k) == name_base
             })
-            .map(|(k, _)| k.clone())
+            .map(|(k, v)| (k.clone(), v.last_seen))
             .collect();
-        for key in stale_keys {
+        for (key, last_seen) in &same_name_entries {
+            if now.saturating_sub(*last_seen) < 20 {
+                // Another user with this name is currently connected — reject
+                info!(
+                    "name conflict: {} is active, rejecting {}",
+                    key, payload.identity
+                );
+                return Err(StatusCode::CONFLICT);
+            }
+        }
+        // Remove stale entries with same name base (old sessions)
+        for (key, _) in same_name_entries {
             info!(
-                "dedup: removing old identity {} (replaced by {})",
+                "dedup: removing stale identity {} (replaced by {})",
                 key, payload.identity
             );
             participants.remove(&key);
@@ -1648,6 +1652,7 @@ async fn submit_bug_report(
         encoder: payload.encoder,
         ice_local_type: payload.ice_local_type,
         ice_remote_type: payload.ice_remote_type,
+        screenshot_url: payload.screenshot_url,
     };
 
     append_bug_report(&state.bug_log_dir, &report);
@@ -2355,6 +2360,7 @@ async fn jam_state(
             if resp.status().is_success() {
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
                     let item = &data["item"];
+                    let current_uri = item["uri"].as_str().unwrap_or("").to_string();
                     let np = NowPlayingInfo {
                         name: item["name"].as_str().unwrap_or("").to_string(),
                         artist: item["artists"]
@@ -2375,6 +2381,20 @@ async fn jam_state(
                         fetched_at: Some(std::time::Instant::now()),
                     };
                     let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+                    // Auto-remove played songs from queue: if the currently playing
+                    // track doesn't match the front of the queue, that song has
+                    // finished and should be removed.
+                    if !current_uri.is_empty() && !jam.queue.is_empty() {
+                        while !jam.queue.is_empty()
+                            && jam.queue[0].spotify_uri != current_uri
+                        {
+                            let removed = jam.queue.remove(0);
+                            info!(
+                                "Jam: auto-removed finished track '{}' from queue",
+                                removed.name
+                            );
+                        }
+                    }
                     jam.now_playing = Some(np);
                 }
             }
@@ -3297,12 +3317,12 @@ async fn avatar_upload(
         }));
     }
 
-    // 10 MB limit for avatars (animated GIFs can be large)
-    if body.len() > 10 * 1024 * 1024 {
+    // 50 MB limit for avatars (animated GIFs can be large)
+    if body.len() > 50 * 1024 * 1024 {
         return Ok(Json(ChatUploadResponse {
             ok: false,
             url: None,
-            error: Some("Avatar too large (max 10MB)".into()),
+            error: Some("Avatar too large (max 50MB)".into()),
         }));
     }
 

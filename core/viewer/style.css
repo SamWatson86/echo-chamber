@@ -1856,6 +1856,49 @@ video {
   font-family: "Cascadia Code", "Consolas", monospace;
 }
 
+.bug-report-screenshot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bug-report-screenshot-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--glass);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.bug-report-screenshot-btn:hover {
+  background: var(--glass-hover);
+  border-color: var(--border-hover);
+}
+
+.bug-report-file-name {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.bug-report-screenshot-preview {
+  margin-bottom: 8px;
+}
+
+.bug-report-screenshot-preview img {
+  max-width: 100%;
+  max-height: 150px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
 .bug-report-actions {
   display: flex;
   justify-content: flex-end;
@@ -2290,6 +2333,7 @@ video {
   font-size: 13px;
   font-family: inherit;
   resize: none;
+  min-height: 38px;
   max-height: 120px;
   overflow-y: auto;
   transition: var(--transition);
