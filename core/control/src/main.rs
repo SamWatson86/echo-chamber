@@ -249,12 +249,21 @@ struct ChatMessage {
     text: String,
     timestamp: u64,
     room: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     #[serde(rename = "fileUrl", skip_serializing_if = "Option::is_none")]
     file_url: Option<String>,
     #[serde(rename = "fileName", skip_serializing_if = "Option::is_none")]
     file_name: Option<String>,
     #[serde(rename = "fileType", skip_serializing_if = "Option::is_none")]
     file_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChatDeleteRequest {
+    id: String,
+    identity: String,
+    room: String,
 }
 
 #[derive(Serialize)]
@@ -709,6 +718,9 @@ async fn main() {
     let admin_dir = resolve_admin_dir();
     info!("admin dir: {:?}", admin_dir);
 
+    // Stamp cache-busting version strings into index.html at startup
+    stamp_viewer_index(&viewer_dir);
+
     let app = Router::new()
         .route("/", get(root_route))
         .nest_service(
@@ -742,6 +754,7 @@ async fn main() {
         .route("/api/soundboard/upload", post(soundboard_upload))
         .route("/api/soundboard/update", post(soundboard_update))
         .route("/api/chat/message", post(chat_save_message))
+        .route("/api/chat/delete", post(chat_delete_message))
         .route("/api/chat/history/:room", get(chat_get_history))
         .route("/api/chat/upload", post(chat_upload_file))
         .route("/api/chat/uploads/:file_name", get(chat_get_upload))
@@ -887,6 +900,44 @@ fn resolve_viewer_dir() -> PathBuf {
         return current.join("core").join("viewer");
     }
     PathBuf::from("viewer")
+}
+
+/// Stamp cache-busting version query strings into viewer/index.html on disk.
+/// Called once at server startup so ServeDir serves the already-stamped file.
+/// Idempotent — strips old ?v= params before re-stamping.
+fn stamp_viewer_index(viewer_dir: &PathBuf) {
+    let index_path = viewer_dir.join("index.html");
+    match fs::read_to_string(&index_path) {
+        Ok(html) => {
+            let v = env!("CARGO_PKG_VERSION");
+            let assets = ["style.css", "jam.css", "app.js", "jam.js", "changelog.js", "livekit-client.umd.js"];
+            let mut stamped = html;
+            for asset in &assets {
+                // Remove any existing ?v=... before the closing quote
+                let with_param = format!("{}?v=", asset);
+                if let Some(pos) = stamped.find(&with_param) {
+                    // Find the closing quote after the ?v= param
+                    let after = pos + with_param.len();
+                    if let Some(q) = stamped[after..].find('"') {
+                        stamped = format!("{}{}\"{}",
+                            &stamped[..pos],
+                            asset,
+                            &stamped[after + q + 1..]);
+                    }
+                }
+                // Now stamp the fresh version
+                let plain = format!("{}\"", asset);
+                let versioned = format!("{}?v={}\"", asset, v);
+                stamped = stamped.replace(&plain, &versioned);
+            }
+            if let Err(e) = fs::write(&index_path, &stamped) {
+                eprintln!("WARNING: could not stamp index.html: {}", e);
+            } else {
+                info!("Stamped viewer/index.html with ?v={}", v);
+            }
+        }
+        Err(e) => eprintln!("WARNING: could not read index.html for stamping: {}", e),
+    }
 }
 
 fn resolve_deploy_dir() -> PathBuf {
@@ -3231,7 +3282,43 @@ fn save_chat_message(dir: &PathBuf, message: &ChatMessage) {
     }
 }
 
+fn delete_chat_message(dir: &PathBuf, room: &str, message_id: &str, requester: &str) -> bool {
+    let mut history = load_chat_history(dir, room);
+    let before = history.len();
+    history.retain(|msg| {
+        if let Some(ref id) = msg.id {
+            if id == message_id {
+                return msg.identity != requester;
+            }
+        }
+        true
+    });
+    if history.len() == before {
+        return false;
+    }
+    let path = chat_history_path(dir, room);
+    if let Ok(json) = serde_json::to_string_pretty(&history) {
+        let _ = fs::write(&path, json);
+    }
+    true
+}
+
 // ==================== CHAT API HANDLERS ====================
+
+async fn chat_delete_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChatDeleteRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+    let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
+    let deleted = delete_chat_message(&chat.dir, &payload.room, &payload.id, &payload.identity);
+    if deleted {
+        Ok(Json(serde_json::json!({ "ok": true })))
+    } else {
+        Ok(Json(serde_json::json!({ "ok": false, "error": "Message not found or not yours" })))
+    }
+}
 
 async fn chat_save_message(
     State(state): State<AppState>,

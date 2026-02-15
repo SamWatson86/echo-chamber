@@ -121,6 +121,34 @@ function enterVideoFullscreen(videoEl) {
   document.addEventListener("fullscreenchange", onFsChange);
 }
 
+// Image lightbox — click chat image to view full-size, click or ESC to close
+function openImageLightbox(src) {
+  var overlay = document.createElement("div");
+  overlay.className = "image-lightbox";
+  var img = document.createElement("img");
+  img.src = src;
+  overlay.appendChild(img);
+  var hint = document.createElement("div");
+  hint.className = "image-lightbox-hint";
+  hint.textContent = "Click anywhere or press ESC to close";
+  overlay.appendChild(hint);
+  setTimeout(function() { hint.classList.add("fade-out"); }, 2000);
+
+  overlay.addEventListener("click", function(e) {
+    if (e.target === img) return; // clicking the image itself does nothing
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  });
+  function onKey(e) {
+    if (e.key === "Escape") {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+    }
+  }
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(overlay);
+}
+
 // --- RNNoise Noise Cancellation ---
 // Detects SIMD support for optimal WASM variant
 async function detectSimdSupport() {
@@ -219,7 +247,7 @@ function startNoiseGate() {
     // Smooth gate: ramp gain up/down to avoid clicks
     var target = rms > threshold ? 1.0 : 0.0;
     ncGateNode.gain.setTargetAtTime(target, ncGateNode.context.currentTime, target > 0.5 ? 0.01 : 0.05);
-  }, 20);
+  }, 50); // 20Hz — adequate for voice activity detection, was 50Hz which burned CPU
 }
 
 function stopNoiseGate() {
@@ -328,17 +356,20 @@ let _latestScreenStats = null;
 let currentRoomName = "main";
 let currentAccessToken = "";
 const IDENTITY_SUFFIX_KEY = "echo-core-identity-suffix";
+const DEVICE_ID_KEY = "echo-core-device-id";
 let audioMonitorTimer = null;
 let roomAudioMuted = false;
 let localScreenTrackSid = "";
 let screenRestarting = false;
 let _cameraReducedForScreenShare = false;
 let _bwLimitedCount = 0; // consecutive stats ticks showing bandwidth limitation
+let _bweLowTicks = 0;       // consecutive stats ticks with stuck-low BWE
+let _bweKickAttempted = false; // true after BWE watchdog re-asserts encoder params
 const screenReshareRequests = new Map();
 const ENABLE_SCREEN_WATCHDOG = true;
 let lastActiveSpeakerEvent = 0;
 const screenRecoveryAttempts = new Map();
-const AUDIO_MONITOR_INTERVAL = 80;
+const AUDIO_MONITOR_INTERVAL = 200; // 5Hz — human speech detection doesn't need faster
 let audioUnlocked = false;
 const screenResubscribeIntent = new Map();
 let mediaReconcileTimer = null;
@@ -351,12 +382,45 @@ const lastTrackHandled = new Map();
 const cameraClearTimers = new Map();
 const screenTileByIdentity = new Map();
 const hiddenScreens = new Set();
+const watchedScreens = new Set(); // Identities the user explicitly opted in to watch
+
+/**
+ * Returns true if this publication is a remote screen share (video or audio)
+ * that the local user has NOT opted in to watch.
+ * Used to gate all setSubscribed(true) calls so unwatched screens don't stream.
+ */
+function isUnwatchedScreenShare(publication, participant) {
+  var LK = getLiveKitClient();
+  if (!LK || !publication || !participant) return false;
+  var source = publication.source || (publication.track ? publication.track.source : null);
+  var isScreen = source === LK.Track.Source.ScreenShare ||
+                 source === LK.Track.Source.ScreenShareAudio;
+  if (!isScreen) return false;
+  // Local user always watches their own screen
+  if (room && room.localParticipant &&
+      participant.identity === room.localParticipant.identity) return false;
+  // If identity is in hiddenScreens, it's unwatched
+  return hiddenScreens.has(participant.identity);
+}
+
+/** Reliably extract track source from publication + track. Used everywhere. */
+function getTrackSource(publication, track) {
+  return publication?.source || track?.source || null;
+}
+
 const chatHistory = [];
 let chatDataChannel = null;
 const CHAT_MESSAGE_TYPE = "chat-message";
 const CHAT_FILE_TYPE = "chat-file";
 const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
+
+// ── Fast room switching: token cache + pre-warm state ──
+const tokenCache = new Map(); // roomId -> { token, fetchedAt, expiresInSeconds }
+const TOKEN_CACHE_MARGIN_MS = 60000; // Refresh tokens 60s before expiry
+var _isRoomSwitch = false; // True during switchRoom(), cleared after fast-wave settles
+var _lastTokenPrefetch = 0;
 const avatarUrls = new Map(); // identity_base -> avatar URL
+const deviceIdByIdentity = new Map(); // identityBase -> deviceId (for remote participants)
 const ROOM_DISPLAY_NAMES = { "main": "Main", "breakout-1": "Breakout 1", "breakout-2": "Breakout 2", "breakout-3": "Breakout 3" };
 let roomStatusTimer = null;
 let heartbeatTimer = null;
@@ -450,7 +514,8 @@ var _SETTINGS_KEYS = [
   "echo-noise-cancel", "echo-nc-level",
   "echo-device-mic", "echo-device-cam", "echo-device-speaker",
   "echo-core-remember-name", "echo-core-remember-pass",
-  "echo-core-identity-suffix"
+  "echo-core-identity-suffix", "echo-core-device-id",
+  "echo-avatar-device"
 ];
 
 async function loadAllSettings() {
@@ -611,6 +676,25 @@ function debugLog(message) {
   }
 }
 
+// ── Persistent event logging (server-side JSONL) ──
+// Captures important events (freeze, screen share start/stop, layer changes)
+// to daily stats log files for offline diagnosis.
+function logEvent(eventName, detail) {
+  try {
+    if (!room?.localParticipant?.identity) return;
+    fetch(apiUrl("/api/stats-log"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        identity: room.localParticipant.identity,
+        room: currentRoomName || "",
+        event: eventName,
+        event_detail: detail || null,
+      }),
+    }).catch(function() {});
+  } catch (e) {}
+}
+
 // ── General toast notification ──
 function showToast(message, durationMs) {
   var existing = document.querySelector(".jam-toast");
@@ -699,6 +783,37 @@ function ensureIdentitySuffix() {
   return fresh;
 }
 
+// Stable device UUID — persists across sessions regardless of what name the user types.
+// Used to key profile data (avatar, chimes) to the DEVICE, not the name.
+function ensureDeviceId() {
+  var existing = echoGet(DEVICE_ID_KEY);
+  if (existing) return existing;
+  // Generate a UUID-v4 using crypto API (or fallback to Math.random)
+  var uuid;
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    uuid = crypto.randomUUID();
+  } else if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    var bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    var hex = Array.from(bytes, function(b) { return b.toString(16).padStart(2, "0"); }).join("");
+    uuid = hex.slice(0,8) + "-" + hex.slice(8,12) + "-" + hex.slice(12,16) + "-" + hex.slice(16,20) + "-" + hex.slice(20);
+  } else {
+    uuid = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0;
+      return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+  echoSet(DEVICE_ID_KEY, uuid);
+  return uuid;
+}
+
+// Get the device ID for the local user (shorthand used throughout profile code)
+function getLocalDeviceId() {
+  return ensureDeviceId();
+}
+
 function slugifyIdentity(text) {
   return (text || "")
     .trim()
@@ -745,7 +860,7 @@ function hookPublication(publication, participant) {
   if (!publication || !participant) return;
   if (!publication._echoHooked) {
     publication._echoHooked = true;
-    if (publication.setSubscribed) {
+    if (publication.setSubscribed && !isUnwatchedScreenShare(publication, participant)) {
       publication.setSubscribed(true);
     }
     const LK = getLiveKitClient();
@@ -822,13 +937,24 @@ function unlockAudio() {
 
 function getScreenSharePublishOptions() {
   return {
+    // H264 High profile with hardware encoding (NVENC/QSV/AMF) via WebView2 flags.
+    // SDP is munged to upgrade Constrained Baseline (42e0) -> High (6400) to force
+    // hardware encoder selection. Software encoders (OpenH264, libvpx) max ~25fps.
     videoCodec: "h264",
-    simulcast: false,
-    // Start at 4 Mbps — lets congestion control ramp up gradually instead of
-    // bursting 10 Mbps which overwhelms Hyper-V vSwitch / Docker network adapters.
-    // WebRTC will increase bitrate if the path can handle it.
-    screenShareEncoding: { maxBitrate: 4_000_000, maxFramerate: 60 },
-    degradationPreference: "balanced",
+    // Simulcast: 3 quality layers so each receiver gets what their hardware can decode.
+    // HIGH = native (4K@60), MEDIUM = 1080p@60, LOW = 720p@30.
+    // SFU selects the best layer per subscriber based on bandwidth + decode capability.
+    simulcast: true,
+    screenShareEncoding: { maxBitrate: 15_000_000, maxFramerate: 60 },
+    screenShareSimulcastLayers: [
+      { width: 1920, height: 1080, encoding: { maxBitrate: 5_000_000, maxFramerate: 60 } },
+      { width: 1280, height: 720,  encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
+    ],
+    // "maintain-framerate" drops resolution under pressure instead of FPS.
+    // Critical for gaming — smooth 60fps at lower quality beats choppy high-res.
+    // Old note: "caused encoder startup issues with NVENC (0fps)" — that was the
+    // 12-second encoder death bug, now fixed by the canvas pipeline keeping frames flowing.
+    degradationPreference: "maintain-framerate",
   };
 }
 
@@ -836,6 +962,211 @@ function getScreenSharePublishOptions() {
 let _screenShareVideoTrack = null;
 let _screenShareAudioTrack = null;
 let _screenShareStatsInterval = null;
+let _inboundScreenStatsInterval = null;
+let _inboundScreenLastBytes = new Map(); // identity -> { bytes, time }
+// Adaptive layer selection: track quality per inbound video (screen shares + cameras)
+// to auto-downgrade when decoder/network can't keep up, and upgrade when stable.
+let _inboundDropTracker = new Map(); // "identity-source" -> { lastDropped, lastDecoded, highDropTicks, lowFpsTicks, stableTicks, currentQuality }
+
+function startInboundScreenStatsMonitor() {
+  if (_inboundScreenStatsInterval) return;
+  _inboundScreenStatsInterval = setInterval(async () => {
+    try {
+      if (!room || !room.remoteParticipants) return;
+      const LK = getLiveKitClient();
+      room.remoteParticipants.forEach(async (participant) => {
+        const pubs = getParticipantPublications(participant);
+        for (const pub of pubs) {
+          // Monitor both screen shares and cameras (video only)
+          if (pub?.source !== LK?.Track?.Source?.ScreenShare &&
+              pub?.source !== LK?.Track?.Source?.Camera) continue;
+          if (pub?.kind !== LK?.Track?.Kind?.Video) continue;
+          if (!pub.track || !pub.isSubscribed) continue;
+          // Skip unwatched screen shares
+          if (pub.source === LK?.Track?.Source?.ScreenShare && hiddenScreens.has(participant.identity)) continue;
+          // Get receiver stats from the track's mediaStreamTrack
+          const mst = pub.track.mediaStreamTrack;
+          if (!mst) continue;
+          const pc = room.engine?.pcManager?.subscriber?.pc;
+          if (!pc) continue;
+          const receivers = pc.getReceivers();
+          const receiver = receivers.find(r => r.track === mst);
+          if (!receiver) continue;
+          const stats = await receiver.getStats();
+          var isCamera = pub.source === LK?.Track?.Source?.Camera;
+          var sourceLabel = isCamera ? "camera" : "screen";
+          stats.forEach((report) => {
+            if (report.type === "inbound-rtp" && report.kind === "video") {
+              const fps = report.framesPerSecond || 0;
+              const w = report.frameWidth || 0;
+              const h = report.frameHeight || 0;
+              const now = Date.now();
+              // Source-aware key so camera + screen for same participant are tracked independently
+              const key = participant.identity + "-" + sourceLabel;
+              const prev = _inboundScreenLastBytes.get(key);
+              let kbps = 0;
+              if (prev) {
+                const elapsed = (now - prev.time) / 1000;
+                const bytesDelta = report.bytesReceived - prev.bytes;
+                kbps = elapsed > 0 ? Math.round((bytesDelta * 8) / elapsed / 1000) : 0;
+              }
+              _inboundScreenLastBytes.set(key, { bytes: report.bytesReceived, time: now });
+              // Get codec info
+              let codec = "?";
+              if (report.codecId) {
+                const codecReport = stats.get(report.codecId);
+                if (codecReport) codec = codecReport.mimeType?.replace("video/", "") || "?";
+              }
+              const jitter = report.jitter ? Math.round(report.jitter * 1000) : 0;
+              const pktLost = report.packetsLost || 0;
+              const decoder = report.decoderImplementation || "?";
+              const dropped = report.framesDropped || 0;
+              const decoded = report.framesDecoded || 0;
+              const nacks = report.nackCount || 0;
+              const plis = report.pliCount || 0;
+
+              // ── Adaptive layer selection: rolling average approach ──
+              // Previous approach counted individual bad ticks but failed when FPS oscillates
+              // (e.g. 13→23→29→14→25→18) — counter went up/down without ever triggering.
+              // Now we track a rolling window of FPS samples and decide based on the AVERAGE.
+              var dt = _inboundDropTracker.get(key);
+              if (!dt) {
+                dt = {
+                  lastDropped: dropped, lastDecoded: decoded,
+                  fpsHistory: [],       // last N fps readings (rolling window)
+                  stableTicks: 0,
+                  currentQuality: "HIGH",
+                  lastLayerChangeTime: 0,
+                };
+                _inboundDropTracker.set(key, dt);
+              }
+              var deltaDropped = dropped - dt.lastDropped;
+              var deltaDecoded = decoded - dt.lastDecoded;
+              dt.lastDropped = dropped;
+              dt.lastDecoded = decoded;
+              var dropRatio = deltaDecoded > 0 ? deltaDropped / (deltaDropped + deltaDecoded) : 0;
+
+              // Push FPS into rolling window (keep last 5 ticks = 15 seconds)
+              if (fps > 0) dt.fpsHistory.push(fps);
+              if (dt.fpsHistory.length > 5) dt.fpsHistory.shift();
+
+              // Calculate rolling average FPS
+              var avgFps = 0;
+              if (dt.fpsHistory.length > 0) {
+                avgFps = dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length;
+              }
+
+              var qualityChanged = false;
+              // Downgrade when rolling average is clearly bad:
+              // - avgFps < 30 over 15 seconds = consistently struggling (catches Jeff's 13-29fps oscillation)
+              // - OR decode struggles (> 40% frame drop ratio)
+              // Spencer on fiber at 50-60fps will never hit avgFps < 30.
+              var shouldDowngrade = (dt.fpsHistory.length >= 4 && avgFps < 30) || dropRatio > 0.4;
+              var reason = dropRatio > 0.4 ? "decode (drop=" + Math.round(dropRatio * 100) + "%)"
+                : "low avg fps (" + Math.round(avgFps) + "fps avg over " + dt.fpsHistory.length + " ticks)";
+
+              // Cooldown: don't switch layers more than once per 30 seconds to prevent thrashing
+              var nowMs = Date.now();
+              var timeSinceLastChange = nowMs - dt.lastLayerChangeTime;
+              var layerCooldown = 30000;
+
+              if (shouldDowngrade && timeSinceLastChange >= layerCooldown && dt.currentQuality === "HIGH" && LK?.VideoQuality) {
+                var newQuality = isCamera ? "LOW" : "MEDIUM";
+                var newLKQuality = isCamera ? LK.VideoQuality.LOW : LK.VideoQuality.MEDIUM;
+                dt.currentQuality = newQuality;
+                dt.fpsHistory = []; // reset window after layer change
+                dt.stableTicks = 0;
+                dt.lastLayerChangeTime = nowMs;
+                qualityChanged = true;
+                debugLog("[adaptive-layer] " + key + ": " + reason + ", downgrading HIGH -> " + newQuality);
+                logEvent("layer-downgrade", key + ": HIGH->" + newQuality + " " + reason);
+                try {
+                  if (pub.setVideoQuality) pub.setVideoQuality(newLKQuality);
+                  if (pub.setPreferredLayer) pub.setPreferredLayer({ quality: newLKQuality });
+                } catch (e) { debugLog("[adaptive-layer] downgrade failed: " + e.message); }
+              } else if (shouldDowngrade && timeSinceLastChange >= layerCooldown && dt.currentQuality === "MEDIUM" && !isCamera && LK?.VideoQuality) {
+                // Only downgrade MEDIUM -> LOW if there are actual decode problems (frame drops).
+                // If dropRatio is near zero, the frames that arrive decode fine — the bottleneck is
+                // the SFU transport pacer (e.g. TURN relay users), and downgrading to LOW just gives
+                // worse resolution at the same FPS. Better to stay on MEDIUM (1080p@20fps > 720p@20fps).
+                if (dropRatio > 0.1) {
+                  dt.currentQuality = "LOW";
+                  dt.fpsHistory = [];
+                  dt.stableTicks = 0;
+                  dt.lastLayerChangeTime = nowMs;
+                  qualityChanged = true;
+                  debugLog("[adaptive-layer] " + key + ": " + reason + " + decode drops=" + Math.round(dropRatio*100) + "%, downgrading MEDIUM -> LOW");
+                  logEvent("layer-downgrade", key + ": MEDIUM->LOW drops=" + Math.round(dropRatio*100) + "%");
+                  try {
+                    if (pub.setVideoQuality) pub.setVideoQuality(LK.VideoQuality.LOW);
+                    if (pub.setPreferredLayer) pub.setPreferredLayer({ quality: LK.VideoQuality.LOW });
+                  } catch (e) { debugLog("[adaptive-layer] downgrade failed: " + e.message); }
+                } else {
+                  debugLog("[adaptive-layer] " + key + ": " + reason + " but drops=" + Math.round(dropRatio*100) + "% (near-zero), staying on MEDIUM (SFU pacer bottleneck, not decode)");
+                }
+              }
+
+              // ── Upgrade: climb back when rolling average is good for current layer ──
+              // Compare against what's achievable at current layer:
+              // - LOW layer caps at 30fps → upgrade if avgFps >= 27 (90% of cap) and low jitter
+              // - MEDIUM layer caps at 60fps → upgrade if avgFps >= 45
+              // Bug fix: old code required avgFps >= 45 always, which is impossible on LOW (30fps cap)
+              var upgradeThreshold = dt.currentQuality === "LOW" ? 27 : 45;
+              var shouldUpgrade = !shouldDowngrade && avgFps >= upgradeThreshold && jitter < 25 && dropRatio < 0.15;
+              if (shouldUpgrade && dt.currentQuality !== "HIGH") {
+                dt.stableTicks++;
+              } else if (dt.currentQuality !== "HIGH") {
+                dt.stableTicks = Math.max(0, dt.stableTicks - 1);
+              }
+              // 8 good ticks (24s) + cooldown before upgrading
+              if (dt.stableTicks >= 8 && timeSinceLastChange >= layerCooldown && dt.currentQuality !== "HIGH" && LK?.VideoQuality) {
+                if (dt.currentQuality === "LOW" && !isCamera) {
+                  dt.currentQuality = "MEDIUM";
+                  dt.fpsHistory = [];
+                  dt.stableTicks = 0;
+                  dt.lastLayerChangeTime = nowMs;
+                  qualityChanged = true;
+                  debugLog("[adaptive-layer] " + key + ": stable 24s (avg " + Math.round(avgFps) + "fps), upgrading LOW -> MEDIUM");
+                  logEvent("layer-upgrade", key + ": LOW->MEDIUM avgFps=" + Math.round(avgFps));
+                  try {
+                    if (pub.setVideoQuality) pub.setVideoQuality(LK.VideoQuality.MEDIUM);
+                    if (pub.setPreferredLayer) pub.setPreferredLayer({ quality: LK.VideoQuality.MEDIUM });
+                  } catch (e) { debugLog("[adaptive-layer] upgrade failed: " + e.message); }
+                } else {
+                  dt.currentQuality = "HIGH";
+                  dt.fpsHistory = [];
+                  dt.stableTicks = 0;
+                  dt.lastLayerChangeTime = nowMs;
+                  qualityChanged = true;
+                  debugLog("[adaptive-layer] " + key + ": stable 24s (avg " + Math.round(avgFps) + "fps), upgrading -> HIGH");
+                  logEvent("layer-upgrade", key + ": ->HIGH avgFps=" + Math.round(avgFps));
+                  try {
+                    if (pub.setVideoQuality) pub.setVideoQuality(LK.VideoQuality.HIGH);
+                    if (pub.setPreferredLayer) pub.setPreferredLayer({ quality: LK.VideoQuality.HIGH });
+                  } catch (e) { debugLog("[adaptive-layer] upgrade failed: " + e.message); }
+                }
+              }
+
+              var layerInfo = qualityChanged ? " [LAYER->" + dt.currentQuality + "]" : "";
+              // Store latest report for persistent stats logging
+              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null };
+              debugLog(`Inbound ${sourceLabel} ${participant.identity}: ${fps}fps ${w}x${h} ${kbps}kbps codec=${codec} decoder=${decoder} jitter=${jitter}ms lost=${pktLost} dropped=${dropped}/${decoded} (${Math.round(dropRatio*100)}%/tick) nack=${nacks} pli=${plis} avgFps=${Math.round(avgFps)} layer=${dt.currentQuality}${layerInfo}`);
+            }
+          });
+        }
+      });
+    } catch {}
+  }, 3000);
+}
+
+function stopInboundScreenStatsMonitor() {
+  if (_inboundScreenStatsInterval) {
+    clearInterval(_inboundScreenStatsInterval);
+    _inboundScreenStatsInterval = null;
+  }
+  _inboundScreenLastBytes.clear();
+  _inboundDropTracker.clear();
+}
 
 // Native per-process audio capture (Tauri client only)
 var _nativeAudioCtx = null;        // AudioContext for worklet
@@ -883,9 +1214,12 @@ async function startScreenShareManual() {
   var isNativeClient = !!window.__ECHO_NATIVE__;
   var gdmConstraints = {
     video: {
-      width: { max: 3840 },
-      height: { max: 2160 },
+      // Capture at native resolution — NVENC handles 4K with zero CPU cost.
+      // No width/height cap so 4K monitors capture at 3840x2160.
       frameRate: { ideal: 60 },
+      // Don't resize window captures to monitor resolution — preserve native window size.
+      // Without this, sharing a small window on an ultrawide captures at 3432x1440 and stretches.
+      resizeMode: "none",
     },
     surfaceSwitching: "exclude",
     selfBrowserSurface: "exclude",
@@ -911,80 +1245,132 @@ async function startScreenShareManual() {
     // Set content hint for smooth motion (gaming/video)
     videoMst.contentHint = "motion";
 
-    // Bypass Chrome's 30fps screen capture cap by rendering through a canvas.
-    // Chrome caps getDisplayMedia-derived tracks at 30fps in WebRTC encoding,
-    // regardless of codec or encoding params. Canvas captureStream creates a
-    // completely new pixel source with no screen-capture tag.
-    let publishMst = videoMst;
-    try {
-      const _offVideo = document.createElement("video");
-      _offVideo.srcObject = new MediaStream([videoMst]);
-      _offVideo.muted = true;
-      _offVideo.playsInline = true;
-      await _offVideo.play();
-
-      // Wait for actual video dimensions (first frame decode) — critical for ultrawides
-      // videoWidth/Height may be 0 immediately after play() if frame hasn't decoded yet
-      if (!_offVideo.videoWidth || !_offVideo.videoHeight) {
-        await new Promise((resolve) => {
-          const onResize = () => { _offVideo.removeEventListener("resize", onResize); resolve(); };
-          _offVideo.addEventListener("resize", onResize);
-          // Timeout fallback in case resize never fires
-          setTimeout(resolve, 500);
-        });
-      }
-      let cw = _offVideo.videoWidth || settings.width || 1920;
-      let ch = _offVideo.videoHeight || settings.height || 1080;
-      debugLog("Canvas pipeline: source dimensions " + cw + "x" + ch + " (ratio " + (cw/ch).toFixed(2) + ")");
-      const _offCanvas = document.createElement("canvas");
-      _offCanvas.width = cw;
-      _offCanvas.height = ch;
-      const _ctx = _offCanvas.getContext("2d");
-
-      // captureStream(0) = manual frame pushing
-      const canvasStream = _offCanvas.captureStream(0);
-      publishMst = canvasStream.getVideoTracks()[0];
-      publishMst.contentHint = "motion";
-
-      // Push frames at 60fps using setTimeout (NOT requestAnimationFrame).
-      // rAF gets throttled when the Tauri window is behind the shared screen.
-      // setTimeout is not throttled for occluded (non-backgrounded) windows.
-      const TARGET_FPS = 60;
-      const FRAME_INTERVAL = 1000 / TARGET_FPS;
-      let _frameCount = 0;
-      let _fpsStart = performance.now();
-      function _pushFrame() {
-        if (videoMst.readyState === "ended") return;
-        // Resize canvas if source dimensions changed (e.g. window resize during capture)
-        const vw = _offVideo.videoWidth, vh = _offVideo.videoHeight;
-        if (vw && vh && (vw !== _offCanvas.width || vh !== _offCanvas.height)) {
-          _offCanvas.width = vw;
-          _offCanvas.height = vh;
-          debugLog("Canvas pipeline: resized to " + vw + "x" + vh + " (ratio " + (vw/vh).toFixed(2) + ")");
+    // ── Canvas pipeline: strip screen-capture tag for 60fps H264 encoding ──
+    // Chromium caps getDisplayMedia tracks at 30fps for H264 encoding (screen-capture flag).
+    // Drawing through a canvas creates a new track without this flag, unlocking 60fps.
+    // With NVENC hardware encoding, the canvas drawImage overhead is trivial (GPU-composited).
+    // A Web Worker timer drives requestFrame() to avoid setTimeout throttling when occluded.
+    let publishMst;
+    let canvasW = settings.width || 1920;
+    let canvasH = settings.height || 1080;
+    // Use a regular (DOM) canvas — OffscreenCanvas doesn't support captureStream
+    var pipeCanvas = document.createElement("canvas");
+    pipeCanvas.width = canvasW;
+    pipeCanvas.height = canvasH;
+    pipeCanvas.style.display = "none";
+    document.body.appendChild(pipeCanvas);
+    var ctx2d = pipeCanvas.getContext("2d", { alpha: false, desynchronized: true });
+    var offVideo = document.createElement("video");
+    offVideo.srcObject = new MediaStream([videoMst]);
+    offVideo.muted = true;
+    offVideo.playsInline = true;
+    window._canvasOffVideo = offVideo;
+    window._canvasPipeEl = pipeCanvas;
+    // captureStream(60) = auto-capture at 60fps — browser drives frame timing
+    // This is more reliable than captureStream(0) + requestFrame() in WebView2
+    var canvasStream = pipeCanvas.captureStream(60);
+    publishMst = canvasStream.getVideoTracks()[0];
+    publishMst.contentHint = "motion";
+    debugLog("[canvas-pipe] canvasStream created, track: readyState=" + publishMst.readyState + " id=" + publishMst.id);
+    // Draw loop: rAF + Worker fallback to keep canvas fed with fresh frames
+    var _canvasFrameCount = 0;
+    var _canvasDrawActive = false;
+    function canvasDraw() {
+      if (!offVideo || !_canvasDrawActive) return;
+      if (offVideo.readyState >= 2 && offVideo.videoWidth > 0) {
+        // Check if source dimensions changed (window resize, resizeMode correction)
+        if (_canvasFrameCount > 0 && _canvasFrameCount % 120 === 0) {
+          var srcW = offVideo.videoWidth;
+          var srcH = offVideo.videoHeight;
+          if (srcW > 0 && srcH > 0 && (srcW !== canvasW || srcH !== canvasH)) {
+            debugLog("[canvas-pipe] source resized: " + canvasW + "x" + canvasH + " -> " + srcW + "x" + srcH);
+            canvasW = srcW;
+            canvasH = srcH;
+            pipeCanvas.width = canvasW;
+            pipeCanvas.height = canvasH;
+            // Re-acquire context after canvas resize (spec says old context is lost)
+            ctx2d = pipeCanvas.getContext("2d", { alpha: false, desynchronized: true });
+          }
         }
-        // Draw at native dimensions — never stretch
-        _ctx.drawImage(_offVideo, 0, 0, _offCanvas.width, _offCanvas.height);
-        publishMst.requestFrame();
-        _frameCount++;
-        // Log actual canvas FPS every 5 seconds
-        const now = performance.now();
-        const elapsed = now - _fpsStart;
-        if (elapsed >= 5000) {
-          debugLog("Canvas pipeline: " + Math.round(_frameCount / (elapsed / 1000)) + " fps pushed @ " + _offCanvas.width + "x" + _offCanvas.height);
-          _frameCount = 0;
-          _fpsStart = now;
+        ctx2d.drawImage(offVideo, 0, 0, canvasW, canvasH);
+        _canvasFrameCount++;
+        if (_canvasFrameCount === 1) {
+          debugLog("[canvas-pipe] FIRST FRAME drawn! offVideo: " + offVideo.videoWidth + "x" + offVideo.videoHeight + " readyState=" + offVideo.readyState);
+        } else if (_canvasFrameCount === 60) {
+          debugLog("[canvas-pipe] 60 frames drawn — pipeline confirmed working");
+        } else if (_canvasFrameCount === 300) {
+          debugLog("[canvas-pipe] 300 frames drawn (5 seconds of 60fps)");
         }
-        window._canvasFrameLoop = setTimeout(_pushFrame, FRAME_INTERVAL);
       }
-      window._canvasFrameLoop = setTimeout(_pushFrame, FRAME_INTERVAL);
-      window._canvasOffVideo = _offVideo;
-      debugLog("Screen capture routed through canvas pipeline (bypasses 30fps cap)");
-    } catch (e) {
-      debugLog("Canvas pipeline failed, using raw track: " + e.message);
+      window._canvasRafId = requestAnimationFrame(canvasDraw);
+    }
+    // Worker timer: backup draw loop for when rAF is throttled (page behind shared screen)
+    var workerBlob = new Blob([
+      "var iv; onmessage = function(e) { if (e.data === 'stop') { clearInterval(iv); return; } iv = setInterval(function() { postMessage('t'); }, e.data); };"
+    ], { type: "application/javascript" });
+    var worker = new Worker(URL.createObjectURL(workerBlob));
+    worker.onmessage = function() {
+      if (!offVideo || !_canvasDrawActive) return;
+      if (offVideo.readyState >= 2 && offVideo.videoWidth > 0) {
+        ctx2d.drawImage(offVideo, 0, 0, canvasW, canvasH);
+        _canvasFrameCount++;
+      }
+    };
+    window._canvasFrameWorker = worker;
+    // Start drawing once video has data
+    function startCanvasDraw() {
+      if (_canvasDrawActive) return;
+      _canvasDrawActive = true;
+      debugLog("[canvas-pipe] starting draw loops — offVideo: " + offVideo.videoWidth + "x" + offVideo.videoHeight + " readyState=" + offVideo.readyState);
+      // Start rAF loop
+      window._canvasRafId = requestAnimationFrame(canvasDraw);
+      // Start worker backup at 60fps
+      worker.postMessage(Math.floor(1000 / 60));
+      // Draw first frame immediately
+      if (offVideo.readyState >= 2 && offVideo.videoWidth > 0) {
+        ctx2d.drawImage(offVideo, 0, 0, canvasW, canvasH);
+        _canvasFrameCount++;
+        debugLog("[canvas-pipe] drew initial frame synchronously");
+      }
+    }
+    offVideo.addEventListener("loadeddata", function() {
+      debugLog("[canvas-pipe] loadeddata fired: " + offVideo.videoWidth + "x" + offVideo.videoHeight + " readyState=" + offVideo.readyState);
+      startCanvasDraw();
+    });
+    // Safety: if already has data
+    if (offVideo.readyState >= 2) {
+      debugLog("[canvas-pipe] offVideo already has data (readyState=" + offVideo.readyState + ")");
+      startCanvasDraw();
+    }
+    // Safety timeout
+    setTimeout(function() {
+      if (!_canvasDrawActive) {
+        debugLog("[canvas-pipe] WARNING: no data after 2s — force-starting (readyState=" + offVideo.readyState + " videoWidth=" + offVideo.videoWidth + ")");
+        startCanvasDraw();
+      }
+    }, 2000);
+    // Play the video
+    offVideo.play().then(function() {
+      debugLog("[canvas-pipe] offVideo.play() resolved, readyState=" + offVideo.readyState);
+      // Trigger start if loadeddata was missed
+      if (!_canvasDrawActive && offVideo.readyState >= 2) startCanvasDraw();
+    }).catch(function(e) {
+      debugLog("[canvas-pipe] offVideo.play() FAILED: " + e.message);
+    });
+    debugLog("Screen capture: canvas pipeline active (" + canvasW + "x" + canvasH + " @60fps captureStream(60), NVENC H264)");
+    logEvent("screen-share-start", canvasW + "x" + canvasH + " @60fps canvas+NVENC");
+
+    // ── Resource shedding: tear down pre-warmed room connections ──
+    // Each pre-warmed room holds a WebRTC peer connection (ICE, DTLS, STUN keepalives).
+    // During screen share, every CPU/GPU cycle counts — free these resources.
+    if (prewarmedRooms.size > 0) {
+      debugLog("Screen share: closing " + prewarmedRooms.size + " pre-warmed connections to free resources");
+      prewarmedRooms.forEach(function(entry) { try { entry.room.disconnect(); } catch (e) {} });
+      prewarmedRooms.clear();
     }
 
     // Ghost subscriber REMOVED — was causing DTLS timeouts and encoder death.
-    // SDP bandwidth munging (b=AS:8000 + b=TIAS:8000000) now handles BWE priming.
+    // SDP bandwidth munging (b=AS:25000 + b=TIAS:25000000) handles BWE priming for simulcast.
 
     // Create LiveKit LocalVideoTrack and publish
     _screenShareVideoTrack = new LK.LocalVideoTrack(publishMst, undefined, false);
@@ -993,25 +1379,52 @@ async function startScreenShareManual() {
       ...getScreenSharePublishOptions(),
     });
 
-    // Set initial sender parameters — prioritize framerate over resolution.
-    // Do NOT lock bitrate — let congestion control adapt per-viewer.
-    // High bandwidth viewers get full quality, low bandwidth viewers get lower resolution but smooth FPS.
+    // Set initial sender parameters for simulcast screen share.
+    // 3 layers: HIGH (4K@60), MEDIUM (1080p@60), LOW (720p@30).
+    // Each layer gets explicit bitrate, framerate, and scale factor.
     const sender = _screenShareVideoTrack?.sender;
+    debugLog("Screen share sender: " + (sender ? "found" : "NULL") +
+      " track.sender=" + (typeof _screenShareVideoTrack?.sender) +
+      " mediaStreamTrack=" + (publishMst ? publishMst.readyState + " " + publishMst.getSettings().width + "x" + publishMst.getSettings().height : "null"));
     if (sender) {
-      const params = sender.getParameters();
-      params.degradationPreference = "maintain-framerate";
-      if (params.encodings) {
-        for (const enc of params.encodings) {
-          enc.maxFramerate = 60;
-          enc.priority = "high";
-          enc.networkPriority = "high";
+      try {
+        const params = sender.getParameters();
+        debugLog("Screen share encodings BEFORE override: " + JSON.stringify(params.encodings));
+        // Note: degradationPreference cannot be set via setParameters (Chromium rejects it).
+        // It's already set via addTransceiver init options.
+        if (params.encodings) {
+          for (const enc of params.encodings) {
+            // Note: priority/networkPriority cannot be set via setParameters in Chromium
+            // (throws "unimplemented parameter"). They are already set via addTransceiver init.
+            if (enc.rid === "f" || (!enc.rid && params.encodings.length === 1)) {
+              // HIGH layer: native resolution @60fps, 15 Mbps
+              // 12 Mbps wasn't enough for 4K@60 during high-motion gaming — encoder starved.
+              enc.maxFramerate = 60;
+              enc.maxBitrate = 15_000_000;
+              enc.scaleResolutionDownBy = 1;
+            } else if (enc.rid === "h") {
+              // MEDIUM layer: 1080p @60fps, 5 Mbps
+              enc.maxFramerate = 60;
+              enc.maxBitrate = 5_000_000;
+              enc.scaleResolutionDownBy = 2;
+            } else if (enc.rid === "q") {
+              // LOW layer: 720p @30fps, 1.5 Mbps
+              enc.maxFramerate = 30;
+              enc.maxBitrate = 1_500_000;
+              enc.scaleResolutionDownBy = 3;
+            }
+          }
+        }
+        await sender.setParameters(params);
+        const vp = sender.getParameters();
+        debugLog("Screen share encodings AFTER override: " + JSON.stringify(vp.encodings));
+      if (vp.encodings) {
+        for (const enc of vp.encodings) {
+          debugLog("Screen share layer " + (enc.rid || "single") + ": fps=" + enc.maxFramerate +
+            " bps=" + enc.maxBitrate + " scale=" + enc.scaleResolutionDownBy);
         }
       }
-      await sender.setParameters(params);
-      const vp = sender.getParameters();
-      const vEnc = vp.encodings?.[0];
-      debugLog("Screen share params: fps=" + vEnc?.maxFramerate + " bps=" + vEnc?.maxBitrate +
-        " scale=" + vEnc?.scaleResolutionDownBy + " degPref=" + vp.degradationPreference);
+      debugLog("Screen share degPref=" + vp.degradationPreference + " layers=" + (vp.encodings?.length || 1));
 
       // Diagnostic: dump actual SDP bandwidth after 3s to see if munging worked
       setTimeout(() => {
@@ -1029,21 +1442,46 @@ async function startScreenShareManual() {
           }
         } catch (e) { debugLog("SDP-CHECK error: " + e.message); }
       }, 3000);
+      } catch (e) {
+        debugLog("Screen share post-publish setParameters FAILED: " + e.message);
+      }
     }
 
-    // Monitor encoding stats every 2s
+    // Monitor capture track health — log if track ends/mutes unexpectedly
+    if (publishMst) {
+      publishMst.addEventListener("ended", () => {
+        debugLog("WARNING: screen capture MediaStreamTrack ENDED (readyState=" + publishMst.readyState + ")");
+      });
+      publishMst.addEventListener("mute", () => {
+        debugLog("WARNING: screen capture MediaStreamTrack MUTED");
+      });
+      publishMst.addEventListener("unmute", () => {
+        debugLog("screen capture MediaStreamTrack unmuted");
+      });
+      debugLog("Screen capture track: readyState=" + publishMst.readyState + " enabled=" + publishMst.enabled + " muted=" + publishMst.muted +
+        " width=" + publishMst.getSettings().width + " height=" + publishMst.getSettings().height + " fps=" + publishMst.getSettings().frameRate);
+    }
+
+    // Monitor encoding stats every 2s — simulcast-aware (per-layer tracking)
     if (_screenShareStatsInterval) clearInterval(_screenShareStatsInterval);
-    let _lastBytesSent = 0;
-    let _lastStatsTime = Date.now();
+    const _layerBytes = new Map(); // rid -> { lastBytes, lastTime }
     _screenShareStatsInterval = setInterval(async () => {
       try {
         const sender = _screenShareVideoTrack?.sender;
         if (!sender) return;
 
-        // Check if capture track is still alive
+        // Check if capture track and canvas pipeline are still alive
         const captureTrack = sender.track;
+        var _pipeHealth = "";
+        if (window._canvasOffVideo) {
+          var ov = window._canvasOffVideo;
+          var srcTrack = ov.srcObject && ov.srcObject.getVideoTracks ? ov.srcObject.getVideoTracks()[0] : null;
+          _pipeHealth = " pipe[offVid:rs=" + ov.readyState + "/p=" + ov.paused + "/w=" + ov.videoWidth +
+            " src:" + (srcTrack ? "rs=" + srcTrack.readyState + "/en=" + srcTrack.enabled + "/mt=" + srcTrack.muted : "NONE") +
+            " canv:" + (captureTrack ? "rs=" + captureTrack.readyState + "/en=" + captureTrack.enabled + "/mt=" + captureTrack.muted : "NONE") + "]";
+        }
         if (captureTrack && captureTrack.readyState !== "live") {
-          debugLog("Screen share: CAPTURE TRACK DEAD: " + captureTrack.readyState);
+          debugLog("Screen share: CAPTURE TRACK DEAD: " + captureTrack.readyState + _pipeHealth);
         }
 
         // Get BWE + ICE candidate info from sender stats
@@ -1070,75 +1508,192 @@ async function startScreenShareManual() {
           }
         });
 
+        // Collect per-layer stats (simulcast: multiple outbound-rtp with rid)
+        const layers = [];
+        let highLayerFps = 0;
+        let highLayerLimit = "none";
+        let totalKbps = 0;
         stats.forEach((report) => {
           if (report.type === "outbound-rtp" && report.kind === "video") {
+            const rid = report.rid || "single";
             const fps = report.framesPerSecond || 0;
             const w = report.frameWidth || 0;
             const h = report.frameHeight || 0;
             const now = Date.now();
-            const elapsed = (now - _lastStatsTime) / 1000;
-            const bytesDelta = report.bytesSent - _lastBytesSent;
+            const prev = _layerBytes.get(rid) || { lastBytes: report.bytesSent, lastTime: now };
+            const elapsed = (now - prev.lastTime) / 1000;
+            const bytesDelta = report.bytesSent - prev.lastBytes;
             const kbps = elapsed > 0 ? Math.round((bytesDelta * 8) / elapsed / 1000) : 0;
-            _lastBytesSent = report.bytesSent;
-            _lastStatsTime = now;
+            _layerBytes.set(rid, { lastBytes: report.bytesSent, lastTime: now });
             const codec = report.encoderImplementation || "unknown";
             const limit = report.qualityLimitationReason || "none";
-            debugLog(`Screen: ${fps}fps ${w}x${h} ${kbps}kbps bwe=${bwe}kbps codec=${codec} limit=${limit} ${iceInfo}`);
-
-            _latestScreenStats = {
-              screen_fps: fps, screen_width: w, screen_height: h,
-              screen_bitrate_kbps: kbps,
-              bwe_kbps: typeof bwe === "number" ? bwe : null,
-              quality_limitation: limit, encoder: codec,
-              ice_local_type: lType !== "?" ? lType : null,
-              ice_remote_type: rType !== "?" ? rType : null,
-            };
-
-            // Report stats to admin dashboard
-            if (adminToken && _echoServerUrl) {
-              fetch(apiUrl("/admin/api/stats"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
-                body: JSON.stringify({
-                  identity: room?.localParticipant?.identity || "",
-                  name: room?.localParticipant?.name || "",
-                  room: currentRoomName || "",
-                  screen_fps: fps, screen_width: w, screen_height: h,
-                  screen_bitrate_kbps: kbps,
-                  bwe_kbps: typeof bwe === "number" ? bwe : null,
-                  quality_limitation: limit, encoder: codec,
-                  ice_local_type: lType !== "?" ? lType : null,
-                  ice_remote_type: rType !== "?" ? rType : null,
-                }),
-              }).catch(() => {});
-            }
-
-            // Adaptive camera quality: reduce camera when bandwidth-constrained during screen share
-            if (limit === "bandwidth" || fps === 0) {
-              _bwLimitedCount++;
-            } else {
-              _bwLimitedCount = Math.max(0, _bwLimitedCount - 1);
-            }
-            // Reduce camera after 3 consecutive bandwidth-limited ticks (~6 seconds)
-            if (_bwLimitedCount >= 3 && camEnabled && !_cameraReducedForScreenShare) {
-              _cameraReducedForScreenShare = true;
-              debugLog("Adaptive: reducing camera to 360p/15fps to free bandwidth for screen share");
-              reduceCameraForScreenShare();
-            }
-            // Restore camera after 5 consecutive non-limited ticks (~10 seconds of good bandwidth)
-            if (_bwLimitedCount === 0 && _cameraReducedForScreenShare) {
-              _cameraReducedForScreenShare = false;
-              debugLog("Adaptive: restoring camera to full quality (bandwidth recovered)");
-              restoreCameraQuality();
+            totalKbps += kbps;
+            layers.push({ rid, fps, w, h, kbps, codec, limit });
+            // Track HIGH layer stats for adaptive camera + admin reporting
+            if (rid === "f" || rid === "single") {
+              highLayerFps = fps;
+              highLayerLimit = limit;
             }
           }
         });
+
+        // Log per-layer stats
+        if (layers.length > 1) {
+          // Simulcast: compact per-layer summary
+          var layerSummary = layers.map(function(l) {
+            var label = l.rid === "f" ? "HIGH" : l.rid === "h" ? "MED" : l.rid === "q" ? "LOW" : l.rid;
+            return label + ":" + l.fps + "fps/" + l.w + "x" + l.h + "/" + l.kbps + "kbps";
+          }).join(" ");
+          var limitStr = highLayerLimit && highLayerLimit !== "none" ? " limit=" + highLayerLimit : "";
+          var statsLine = "Screen: " + layerSummary + " total=" + totalKbps + "kbps bwe=" + bwe + "kbps" + limitStr + " " + layers[0].codec + " " + iceInfo;
+          if (highLayerFps === 0 && _pipeHealth) statsLine += _pipeHealth;
+          debugLog(statsLine);
+        } else if (layers.length === 1) {
+          // Single layer fallback
+          var l = layers[0];
+          var statsLine = `Screen: ${l.fps}fps ${l.w}x${l.h} ${l.kbps}kbps bwe=${bwe}kbps codec=${l.codec} limit=${l.limit} ${iceInfo}`;
+          if (l.fps === 0 && _pipeHealth) statsLine += _pipeHealth;
+          debugLog(statsLine);
+        }
+
+        // Use HIGH layer stats for admin dashboard + adaptive camera
+        var highLayer = layers.find(function(l) { return l.rid === "f" || l.rid === "single"; }) || layers[0];
+        if (highLayer) {
+          _latestScreenStats = {
+            screen_fps: highLayer.fps, screen_width: highLayer.w, screen_height: highLayer.h,
+            screen_bitrate_kbps: totalKbps,
+            bwe_kbps: typeof bwe === "number" ? bwe : null,
+            quality_limitation: highLayer.limit, encoder: highLayer.codec,
+            ice_local_type: lType !== "?" ? lType : null,
+            ice_remote_type: rType !== "?" ? rType : null,
+            simulcast_layers: layers.length,
+          };
+
+          // Report stats to admin dashboard (apiUrl handles native vs browser path)
+          if (adminToken) {
+            fetch(apiUrl("/admin/api/stats"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
+              body: JSON.stringify({
+                identity: room?.localParticipant?.identity || "",
+                name: room?.localParticipant?.name || "",
+                room: currentRoomName || "",
+                screen_fps: highLayer.fps, screen_width: highLayer.w, screen_height: highLayer.h,
+                screen_bitrate_kbps: totalKbps,
+                bwe_kbps: typeof bwe === "number" ? bwe : null,
+                quality_limitation: highLayer.limit, encoder: highLayer.codec,
+                ice_local_type: lType !== "?" ? lType : null,
+                ice_remote_type: rType !== "?" ? rType : null,
+                simulcast_layers: layers.length,
+              }),
+            }).catch(() => {});
+          }
+
+          // ── Persistent stats log (daily JSONL on server) ──
+          // Captures both outbound encoder stats and inbound viewer stats
+          // for offline analysis across sessions.
+          try {
+            var inboundArr = [];
+            _inboundDropTracker.forEach(function(dt, key) {
+              var lastBytes = _inboundScreenLastBytes.get(key);
+              if (!lastBytes) return;
+              var parts = key.split("-");
+              var source = parts[parts.length - 1]; // "screen" or "camera"
+              var fromId = parts.slice(0, parts.length - 1).join("-");
+              var avgF = dt.fpsHistory.length > 0
+                ? dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length : 0;
+              // Pull latest stats from the last debugLog data (stored in tracker)
+              if (dt._lastReport) {
+                inboundArr.push({
+                  from: fromId, source: source,
+                  fps: dt._lastReport.fps, width: dt._lastReport.w, height: dt._lastReport.h,
+                  bitrate_kbps: dt._lastReport.kbps, jitter_ms: dt._lastReport.jitter,
+                  lost: dt._lastReport.lost, dropped: dt._lastReport.dropped,
+                  decoded: dt._lastReport.decoded, nack: dt._lastReport.nack,
+                  pli: dt._lastReport.pli, avg_fps: Math.round(avgF),
+                  layer: dt.currentQuality, codec: dt._lastReport.codec || null,
+                });
+              }
+            });
+            fetch(apiUrl("/api/stats-log"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                identity: room?.localParticipant?.identity || "",
+                room: currentRoomName || "",
+                out_fps: highLayer.fps, out_width: highLayer.w, out_height: highLayer.h,
+                out_bitrate_kbps: totalKbps,
+                out_bwe_kbps: typeof bwe === "number" ? bwe : null,
+                out_limit: highLayer.limit || null,
+                out_encoder: highLayer.codec || null,
+                out_layers: layers.length,
+                out_ice: iceInfo || null,
+                inbound: inboundArr.length > 0 ? inboundArr : null,
+              }),
+            }).catch(function() {});
+          } catch (e) {}
+
+          // Adaptive camera quality: reduce camera when HIGH layer is bandwidth-constrained
+          if (highLayerLimit === "bandwidth" || highLayerFps === 0) {
+            _bwLimitedCount++;
+          } else {
+            _bwLimitedCount = Math.max(0, _bwLimitedCount - 1);
+          }
+          if (_bwLimitedCount >= 3 && camEnabled && !_cameraReducedForScreenShare) {
+            _cameraReducedForScreenShare = true;
+            debugLog("Adaptive: reducing camera to 360p/15fps to free bandwidth for screen share");
+            logEvent("camera-reduced", "360p/15fps bandwidth-limited " + _bwLimitedCount + " ticks");
+            reduceCameraForScreenShare();
+          }
+          if (_bwLimitedCount === 0 && _cameraReducedForScreenShare) {
+            _cameraReducedForScreenShare = false;
+            debugLog("Adaptive: restoring camera to full quality (bandwidth recovered)");
+            logEvent("camera-restored", "bandwidth recovered");
+            restoreCameraQuality();
+          }
+
+          // ── BWE watchdog: detect stuck-low bitrate and kick encoder ──
+          // Chrome BWE starts at ~300kbps and probes up. If SFU congestion control
+          // or TURN relay causes slow ramp-up, the HIGH layer can stay at <1Mbps for
+          // a long time. After 10s of low total bitrate, re-assert minimum bitrate
+          // via setParameters to nudge the BWE prober.
+          if (!_bweKickAttempted && typeof bwe === "number" && bwe < 2000 && totalKbps < 1000) {
+            _bweLowTicks++;
+            if (_bweLowTicks >= 5) { // 5 ticks × 2s = 10s of stuck-low BWE
+              _bweKickAttempted = true;
+              debugLog("[bwe-watchdog] BWE stuck at " + bwe + "kbps (total send " + totalKbps + "kbps) — re-asserting encoder params");
+              logEvent("bwe-watchdog-kick", "bwe=" + bwe + "kbps total=" + totalKbps + "kbps after " + _bweLowTicks + " ticks");
+              try {
+                var kickParams = sender.getParameters();
+                if (kickParams.encodings) {
+                  for (var kEnc of kickParams.encodings) {
+                    if (kEnc.rid === "f" || (!kEnc.rid && kickParams.encodings.length === 1)) {
+                      kEnc.maxBitrate = 15_000_000;
+                    } else if (kEnc.rid === "h") {
+                      kEnc.maxBitrate = 5_000_000;
+                    } else if (kEnc.rid === "q") {
+                      kEnc.maxBitrate = 1_500_000;
+                    }
+                  }
+                }
+                sender.setParameters(kickParams).then(function() {
+                  debugLog("[bwe-watchdog] encoder params re-asserted — waiting for BWE ramp-up");
+                }).catch(function(e) {
+                  debugLog("[bwe-watchdog] setParameters failed: " + e.message);
+                });
+              } catch (e) { debugLog("[bwe-watchdog] kick failed: " + e.message); }
+            }
+          } else {
+            _bweLowTicks = Math.max(0, _bweLowTicks - 1);
+          }
+        }
       } catch {}
     }, 2000);
 
     // Handle browser "Stop sharing" button
     videoMst.addEventListener("ended", () => {
       debugLog("Screen share ended by browser stop button");
+      logEvent("screen-share-stop", "browser stop button");
       stopScreenShareManual().catch(() => {});
       screenEnabled = false;
       renderPublishButtons();
@@ -1175,9 +1730,14 @@ async function startScreenShareManual() {
 async function stopScreenShareManual() {
   // Stop native per-process audio capture if active
   await stopNativeAudioCapture();
-  // Clean up canvas pipeline
-  if (window._canvasFrameLoop) { clearTimeout(window._canvasFrameLoop); window._canvasFrameLoop = null; }
+  // Clean up canvas pipeline (Web Worker frame timer)
+  if (window._canvasFrameWorker) {
+    try { window._canvasFrameWorker.postMessage("stop"); window._canvasFrameWorker.terminate(); } catch {}
+    window._canvasFrameWorker = null;
+  }
+  if (window._canvasRafId) { cancelAnimationFrame(window._canvasRafId); window._canvasRafId = null; }
   if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
+  if (window._canvasPipeEl) { window._canvasPipeEl.remove(); window._canvasPipeEl = null; }
   // Ghost subscriber removed (was causing DTLS timeouts)
   if (window._ghostSubscriber) {
     try { window._ghostSubscriber.disconnect(); } catch {}
@@ -1187,6 +1747,10 @@ async function stopScreenShareManual() {
     clearInterval(_screenShareStatsInterval);
     _screenShareStatsInterval = null;
   }
+  logEvent("screen-share-stop", "manual stop");
+  // Always reset BWE watchdog state when screen share stops
+  _bweLowTicks = 0;
+  _bweKickAttempted = false;
   // Restore camera quality if it was reduced for screen share
   if (_cameraReducedForScreenShare) {
     _cameraReducedForScreenShare = false;
@@ -1665,6 +2229,48 @@ async function ensureRoomExists(baseUrl, adminToken, roomId) {
   }).catch(() => {});
 }
 
+// ── Fast room switching: token prefetch ──
+async function prefetchRoomTokens() {
+  if (!adminToken) return;
+  var cUrl = controlUrlInput.value.trim();
+  if (!cUrl) return;
+  var nm = nameInput.value.trim() || "Viewer";
+  var id = identityInput ? identityInput.value : buildIdentity(nm);
+  for (var i = 0; i < FIXED_ROOMS.length; i++) {
+    var rid = FIXED_ROOMS[i];
+    if (rid === currentRoomName) continue;
+    var cached = tokenCache.get(rid);
+    if (cached) {
+      var age = Date.now() - cached.fetchedAt;
+      if (age < (cached.expiresInSeconds * 1000) - TOKEN_CACHE_MARGIN_MS) continue;
+    }
+    try {
+      var res = await fetch(cUrl + "/v1/auth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
+        body: JSON.stringify({ room: rid, identity: id, name: nm }),
+      });
+      if (!res.ok) continue;
+      var data = await res.json();
+      tokenCache.set(rid, { token: data.token, fetchedAt: Date.now(), expiresInSeconds: data.expires_in_seconds || 14400 });
+      debugLog("[fast-switch] prefetched token for " + rid);
+    } catch (e) { /* silent — fall back to live fetch on switch */ }
+  }
+}
+
+async function getCachedOrFetchToken(baseUrl, adminToken, roomId, identity, name) {
+  var cached = tokenCache.get(roomId);
+  if (cached) {
+    var age = Date.now() - cached.fetchedAt;
+    if (age < (cached.expiresInSeconds * 1000) - TOKEN_CACHE_MARGIN_MS) {
+      debugLog("[fast-switch] using cached token for " + roomId + " (age " + Math.round(age / 1000) + "s)");
+      return cached.token;
+    }
+    tokenCache.delete(roomId);
+  }
+  return fetchRoomToken(baseUrl, adminToken, roomId, identity, name);
+}
+
 async function fetchRooms(baseUrl, adminToken) {
   const res = await fetch(`${baseUrl}/v1/rooms`, {
     headers: {
@@ -1766,6 +2372,40 @@ function playSwitchChime() {
   } catch {}
 }
 
+function playScreenShareChime() {
+  try {
+    const ctx = getChimeCtx();
+    const now = ctx.currentTime;
+    // Digital broadcast alert: three-note ascending sparkle with a shimmer tail
+    // Notes: G5 (783.99) → B5 (987.77) → D6 (1174.66) — a bright G major triad arpeggio
+    var notes = [783.99, 987.77, 1174.66];
+    notes.forEach(function(freq, i) {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      var onset = i * 0.08; // 80ms between notes — quick arpeggio
+      gain.gain.setValueAtTime(0.001, now + onset);
+      gain.gain.linearRampToValueAtTime(0.16, now + onset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + onset + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + onset);
+      osc.stop(now + onset + 0.4);
+    });
+    // Shimmer tail: quiet high-frequency sine that fades out slowly
+    var shimmer = ctx.createOscillator();
+    var shimmerGain = ctx.createGain();
+    shimmer.type = "sine";
+    shimmer.frequency.value = 2349.32; // D7 — one octave above the last note
+    shimmerGain.gain.setValueAtTime(0.001, now + 0.2);
+    shimmerGain.gain.linearRampToValueAtTime(0.06, now + 0.25);
+    shimmerGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    shimmer.connect(shimmerGain).connect(ctx.destination);
+    shimmer.start(now + 0.2);
+    shimmer.stop(now + 0.75);
+  } catch {}
+}
+
 async function fetchChimeBuffer(identityBase, kind) {
   const cacheKey = identityBase + "-" + kind;
   const cached = chimeBufferCache.get(cacheKey);
@@ -1798,8 +2438,8 @@ function playCustomChime(buffer) {
 
 async function playChimeForIdentities(identities, kind) {
   for (const id of identities) {
-    const identityBase = getIdentityBase(id);
-    const buffer = await fetchChimeBuffer(identityBase, kind);
+    var chimeKey = getChimeKey(id);
+    const buffer = await fetchChimeBuffer(chimeKey, kind);
     if (buffer) {
       playCustomChime(buffer);
       return;
@@ -1809,50 +2449,49 @@ async function playChimeForIdentities(identities, kind) {
   else playLeaveChime();
 }
 
+// Get the chime lookup key for a participant — deviceId if known, else identityBase (fallback)
+function getChimeKey(identity) {
+  var identityBase = getIdentityBase(identity);
+  // Check if we know this participant's device ID
+  var deviceId = deviceIdByIdentity.get(identityBase);
+  return deviceId || identityBase;
+}
+
+// Pre-fetch chime buffers for all participants in the current room so playback is instant
+function prefetchChimeBuffersForRoom() {
+  if (!room || !room.remoteParticipants) return;
+  room.remoteParticipants.forEach(function(participant) {
+    var chimeKey = getChimeKey(participant.identity);
+    // Fetch both enter and exit chimes into cache
+    fetchChimeBuffer(chimeKey, "enter").catch(function() {});
+    fetchChimeBuffer(chimeKey, "exit").catch(function() {});
+  });
+}
+
+// Play chime for a single participant — instant if pre-fetched, async fetch otherwise
+async function playChimeForParticipant(identity, kind) {
+  var chimeKey = getChimeKey(identity);
+  var buffer = await fetchChimeBuffer(chimeKey, kind);
+  if (buffer) {
+    playCustomChime(buffer);
+  } else if (kind === "enter") {
+    playJoinChime();
+  } else {
+    playLeaveChime();
+  }
+}
+
 function detectRoomChanges(statusMap) {
+  // Track participant sets for room list UI (chimes are now handled by real-time LiveKit events)
   const currentIds = {};
   FIXED_ROOMS.forEach((roomId) => {
     currentIds[roomId] = new Set((statusMap[roomId] || []).map((p) => p.identity));
   });
-  const myIdentity = identityInput ? identityInput.value : "";
   const myRoom = currentRoomName;
-  // If Sam just switched rooms (or this is the first poll), skip chime detection.
-  // Stale previousRoomParticipants for the new room would trigger false leave/join chimes.
   if (previousDetectedRoom !== myRoom) {
     previousDetectedRoom = myRoom;
-    previousRoomParticipants = currentIds;
-    return;
-  }
-  // Build flat lookup: identity -> room for previous and current
-  const prevByUser = {};
-  const currByUser = {};
-  FIXED_ROOMS.forEach((roomId) => {
-    (previousRoomParticipants[roomId] || new Set()).forEach((id) => { prevByUser[id] = roomId; });
-    currentIds[roomId].forEach((id) => { currByUser[id] = roomId; });
-  });
-  // Perspective-based: only care about people entering/leaving MY room
-  const enteredIds = [];
-  const leftIds = [];
-  let someoneSwitchedAway = false;
-  const prevMyRoom = previousRoomParticipants[myRoom] || new Set();
-  const currMyRoom = currentIds[myRoom] || new Set();
-  // Someone appeared in my room (join or switch — either way, welcome them)
-  for (const id of currMyRoom) {
-    if (id === myIdentity) continue;
-    if (!prevMyRoom.has(id)) enteredIds.push(id);
-  }
-  // Someone disappeared from my room
-  for (const id of prevMyRoom) {
-    if (id === myIdentity) continue;
-    if (!currMyRoom.has(id)) {
-      if (currByUser[id]) someoneSwitchedAway = true;
-      else leftIds.push(id);
-    }
   }
   previousRoomParticipants = currentIds;
-  if (enteredIds.length > 0) playChimeForIdentities(enteredIds, "enter");
-  else if (someoneSwitchedAway) playSwitchChime();
-  else if (leftIds.length > 0) playChimeForIdentities(leftIds, "exit");
 }
 
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
@@ -1908,6 +2547,11 @@ function startRoomStatusPolling() {
   if (!controlUrl || !adminToken) return;
   roomStatusTimer = setInterval(() => {
     refreshRoomList(controlUrl, adminToken, currentRoomName).catch(() => {});
+    // Refresh token cache every 5 minutes
+    if (Date.now() - _lastTokenPrefetch > 300000) {
+      _lastTokenPrefetch = Date.now();
+      prefetchRoomTokens();
+    }
   }, 5000);
 }
 
@@ -1927,6 +2571,16 @@ function startUpdateCheckPolling() {
   setTimeout(checkForUpdateNotification, 10000);
   _updateCheckTimer = setInterval(checkForUpdateNotification, 5 * 60 * 1000);
 }
+function isNewerVersion(latest, current) {
+  var a = latest.split(".").map(Number);
+  var b = current.split(".").map(Number);
+  for (var i = 0; i < Math.max(a.length, b.length); i++) {
+    var x = a[i] || 0, y = b[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
 async function checkForUpdateNotification() {
   if (_updateDismissed) return;
   try {
@@ -1944,7 +2598,7 @@ async function checkForUpdateNotification() {
     if (!resp.ok) return;
     var data = await resp.json();
     var latestClient = data.latest_client || "";
-    if (latestClient && latestClient !== currentVer) {
+    if (latestClient && isNewerVersion(latestClient, currentVer)) {
       showUpdateBanner(latestClient);
     }
   } catch (e) {
@@ -2002,6 +2656,50 @@ function sendLeaveNotification() {
 let switchingRoom = false;
 let connectSequence = 0;
 
+// ── Fast room switching: pre-warmed connections ──
+const prewarmedRooms = new Map(); // roomId -> { room: LK.Room, createdAt }
+const PREWARM_MAX_AGE_MS = 300000; // 5 minutes
+
+async function prewarmRooms() {
+  // Don't pre-warm while screen sharing — each pre-warmed connection burns
+  // CPU/GPU via WebRTC peer connections (ICE, DTLS, STUN). During screen share
+  // every resource matters for maintaining 60fps.
+  if (_screenShareVideoTrack) return;
+  var LK = getLiveKitClient();
+  if (!LK || !LK.Room) return;
+  var sfu = sfuUrlInput.value.trim();
+  if (!sfu) return;
+  for (var i = 0; i < FIXED_ROOMS.length; i++) {
+    var rid = FIXED_ROOMS[i];
+    if (rid === currentRoomName) continue;
+    var existing = prewarmedRooms.get(rid);
+    if (existing && (Date.now() - existing.createdAt) < PREWARM_MAX_AGE_MS) continue;
+    var cached = tokenCache.get(rid);
+    if (!cached) continue;
+    // Clean up stale pre-warmed room
+    if (existing && existing.room) {
+      try { existing.room.disconnect(); } catch (e) {}
+    }
+    try {
+      var warmRoom = new LK.Room({ adaptiveStream: false, dynacast: false, autoSubscribe: true });
+      await warmRoom.prepareConnection(sfu, cached.token);
+      prewarmedRooms.set(rid, { room: warmRoom, createdAt: Date.now() });
+      debugLog("[fast-switch] pre-warmed connection for " + rid);
+    } catch (e) {
+      debugLog("[fast-switch] pre-warm failed for " + rid + ": " + (e.message || e));
+    }
+  }
+}
+
+function cleanupPrewarmedRooms() {
+  prewarmedRooms.forEach(function(entry) {
+    try { entry.room.disconnect(); } catch (e) {}
+  });
+  prewarmedRooms.clear();
+  tokenCache.clear();
+}
+
+var _lastRoomSwitchTime = 0;
 async function switchRoom(roomId) {
   if (!room) return;
   if (roomId === currentRoomName) return;
@@ -2009,8 +2707,18 @@ async function switchRoom(roomId) {
     debugLog(`Switch to ${roomId} ignored — already switching`);
     return;
   }
+  // Cooldown: prevent rapid switching (500ms minimum — safe with pre-warmed connections)
+  var now = Date.now();
+  if (now - _lastRoomSwitchTime < 500) {
+    debugLog(`Switch to ${roomId} ignored — cooldown`);
+    return;
+  }
+  _lastRoomSwitchTime = now;
   switchingRoom = true;
-  debugLog(`Switching from ${currentRoomName} to ${roomId}`);
+  _isRoomSwitch = true;
+  // Remember mic state before switch so we can restore it
+  var wasMicEnabled = micEnabled;
+  debugLog(`Switching from ${currentRoomName} to ${roomId} (mic was ${wasMicEnabled ? "on" : "off"})`);
   currentRoomName = roomId;
   try {
     const controlUrl = controlUrlInput.value.trim();
@@ -2040,10 +2748,19 @@ function addTile(label, element) {
 function addScreenTile(label, element, trackSid) {
   configureVideoElement(element, true);
   // Force contain so ultrawides and non-standard ratios are never stretched
-  element.style.objectFit = "contain";
+  element.style.setProperty("object-fit", "contain", "important");
   element.style.width = "100%";
   element.style.height = "100%";
   element.style.background = "transparent";
+  // MutationObserver: enforce object-fit:contain even if SDK re-sets inline styles
+  if (!element._objectFitGuard) {
+    element._objectFitGuard = new MutationObserver(() => {
+      if (element.style.objectFit !== "contain") {
+        element.style.setProperty("object-fit", "contain", "important");
+      }
+    });
+    element._objectFitGuard.observe(element, { attributes: true, attributeFilter: ["style"] });
+  }
   ensureVideoPlays(element._lkTrack, element);
   const tile = addTile(label, element);
   tile.addEventListener("click", () => {
@@ -2059,6 +2776,19 @@ function addScreenTile(label, element, trackSid) {
   const overlay = document.createElement("div");
   overlay.className = "tile-overlay";
   tile.appendChild(overlay);
+
+  // Fullscreen button — appears on hover
+  var fsBtn = document.createElement("button");
+  fsBtn.className = "tile-fullscreen-btn";
+  fsBtn.title = "Fullscreen";
+  fsBtn.innerHTML = "&#x26F6;"; // ⛶ fullscreen icon
+  fsBtn.addEventListener("click", function(e) {
+    e.stopPropagation(); // don't trigger tile focus toggle
+    var video = tile.querySelector("video");
+    if (video) enterVideoFullscreen(video);
+  });
+  tile.appendChild(fsBtn);
+
   if (trackSid) {
     tile.dataset.trackSid = trackSid;
     screenTileBySid.set(trackSid, tile);
@@ -2079,6 +2809,14 @@ function addScreenTile(label, element, trackSid) {
     element.addEventListener("resize", tagAspect);
     // Check immediately in case already loaded
     tagAspect();
+    // Diagnostic: log actual object-fit to debug stretching
+    setTimeout(() => {
+      const computed = window.getComputedStyle(element).objectFit;
+      const inline = element.style.objectFit;
+      debugLog("[object-fit] screen video: computed=" + computed + " inline=" + inline +
+        " videoW=" + element.videoWidth + " videoH=" + element.videoHeight +
+        " clientW=" + element.clientWidth + " clientH=" + element.clientHeight);
+    }, 2000);
   }
   return tile;
 }
@@ -2125,6 +2863,11 @@ function startScreenWatchdog() {
   screenWatchdogTimer = setInterval(() => {
     const now = performance.now();
     screenTrackMeta.forEach((meta, trackSid) => {
+      // Skip recovery for unwatched remote screens
+      if (meta.identity && hiddenScreens.has(meta.identity)) {
+        var isLocal = room && room.localParticipant && room.localParticipant.identity === meta.identity;
+        if (!isLocal) return;
+      }
       const tile = meta.tile;
       if (!tile || !tile.isConnected) return;
       const video = tile.querySelector("video");
@@ -2266,9 +3009,11 @@ function removeScreenTile(trackSid) {
 function clearMedia() {
   screenGridEl.innerHTML = "";
   screenTileBySid.clear();
+  screenTileByIdentity.clear();
   screenTrackMeta.clear();
   screenRecoveryAttempts.clear();
   screenResubscribeIntent.clear();
+  stopInboundScreenStatsMonitor();
   cameraRecoveryAttempts.clear();
   cameraVideoBySid.clear();
   lastTrackHandled.clear();
@@ -2339,38 +3084,51 @@ function configureVideoElement(element, muted = true) {
   // Force contain on ALL video elements — prevents stretching regardless of
   // what the LiveKit SDK sets via inline styles after attach()
   if (element.tagName === "VIDEO") {
-    element.style.objectFit = "contain";
+    element.style.setProperty("object-fit", "contain", "important");
   }
   element._attachedAt = performance.now();
+  // Cancel any previous play chain for this element
+  element._playGeneration = (element._playGeneration || 0) + 1;
+  const playGen = element._playGeneration;
+  const sid = () => element._lkTrack?.sid || 'unknown';
+
   const tryPlay = async () => {
+    // Abort if a newer configureVideoElement call started
+    if (element._playGeneration !== playGen) return;
+    if (!element.isConnected) return;
     try {
       await element.play();
-      debugLog(`video play() succeeded for ${element._lkTrack?.sid || 'unknown'}, muted=${element.muted}`);
+      debugLog(`video play() succeeded for ${sid()}, muted=${element.muted}`);
     } catch (err) {
-      debugLog(`ERROR: video play() FAILED for ${element._lkTrack?.sid || 'unknown'}: ${err.message}`);
-
-      // Try to refresh autoplay permission by replaying the dummy video, then retry
-      if (window._dummyVideo && !element._autoplayRetried) {
-        element._autoplayRetried = true;
-        try {
-          await window._dummyVideo.play();
-          await new Promise(resolve => setTimeout(resolve, 50));
-          await element.play();
-          debugLog(`video play() SUCCEEDED after autoplay refresh for ${element._lkTrack?.sid || 'unknown'}`);
-        } catch (retryErr) {
-          debugLog(`video play() still failed after autoplay refresh: ${retryErr.message}`);
-
-          // Track this video for enabling on next user interaction
-          if (window._pausedVideos) {
-            window._pausedVideos.add(element);
-            debugLog(`Video ${element._lkTrack?.sid || 'unknown'} queued for next user interaction`);
-            showRefreshButton();
+      if (element._playGeneration !== playGen) return;
+      // "interrupted by a new load request" = SDP renegotiation changed srcObject mid-play.
+      // This is NOT an autoplay policy issue — never queue for user interaction.
+      // Instead, wait for the new srcObject to be ready via loadedmetadata, then retry.
+      if (err.message && err.message.indexOf("interrupted") !== -1) {
+        debugLog(`video play() interrupted for ${sid()} — waiting for loadedmetadata`);
+        element.addEventListener("loadedmetadata", function onReady() {
+          if (element._playGeneration !== playGen) return;
+          element.play().then(function() {
+            debugLog(`video play() succeeded after load for ${sid()}`);
+          }).catch(function() {
+            // Still interrupted — another renegotiation happened. The next
+            // loadedmetadata will trigger another attempt automatically.
+          });
+        }, { once: true });
+        // Fallback: if loadedmetadata doesn't fire within 3s, try play anyway
+        setTimeout(function() {
+          if (element._playGeneration !== playGen) return;
+          if (element.paused && element.isConnected) {
+            element.play().catch(function() {});
           }
-        }
-      } else if (window._pausedVideos) {
-        // Already retried, just queue for user interaction
+        }, 3000);
+        return;
+      }
+      debugLog(`ERROR: video play() FAILED for ${sid()}: ${err.message}`);
+      // Genuine autoplay policy failure — queue for user interaction
+      if (window._pausedVideos) {
         window._pausedVideos.add(element);
-        debugLog(`Video ${element._lkTrack?.sid || 'unknown'} queued for next user interaction`);
+        debugLog(`Video ${sid()} queued for next user interaction`);
         showRefreshButton();
       }
     }
@@ -2488,51 +3246,32 @@ function ensureAudioPlays(element) {
 function ensureVideoPlays(track, element) {
   if (!track || !element) return;
   // Cancel any previous ensureVideoPlays chain for this element
-  if (element._ensurePlayId) {
-    element._ensurePlayId++;
-  }
-  const playId = (element._ensurePlayId || 0) + 1;
-  element._ensurePlayId = playId;
+  element._ensurePlayId = (element._ensurePlayId || 0) + 1;
+  const playId = element._ensurePlayId;
+
+  // If already playing with frames, nothing to do
+  if (!element.paused && element.videoWidth > 0) return;
 
   let attempts = 0;
   const check = () => {
-    // Abort if a newer chain was started
     if (element._ensurePlayId !== playId) return;
-    attempts += 1;
     if (!element.isConnected) return;
     if (element.videoWidth > 0 || element.videoHeight > 0) return;
+    attempts += 1;
     if (track.mediaStreamTrack && track.mediaStreamTrack.muted) {
-      if (attempts < 8) {
-        setTimeout(check, 800);
-      }
+      if (attempts < 8) setTimeout(check, 800);
       return;
     }
-    try {
-      track.requestKeyFrame?.();
-    } catch {}
-    try {
-      track.attach(element);
-      element._lkTrack = track;
-      configureVideoElement(element, true);
-    } catch {}
-    if (attempts < 8) {
-      setTimeout(check, 800);
+    // Request keyframe to help decoder recover — but do NOT call track.attach()
+    // as that sets a new srcObject which interrupts any pending play().
+    try { track.requestKeyFrame?.(); } catch {}
+    // Only call play() if paused — don't re-trigger configureVideoElement
+    if (element.paused) {
+      element.play().catch(function() {});
     }
+    if (attempts < 8) setTimeout(check, 800);
   };
   setTimeout(check, 400);
-  const kick = () => {
-    if (!element.isConnected) return;
-    if (element.videoWidth > 0 || element.videoHeight > 0) return;
-    if (element.paused) {
-      element.play().catch(() => {});
-    }
-  };
-  kick();
-  const kickTimer = setInterval(() => {
-    if (!element.isConnected) return clearInterval(kickTimer);
-    if (element.videoWidth > 0 || element.videoHeight > 0) return clearInterval(kickTimer);
-    kick();
-  }, 400);
 }
 
 function replaceScreenVideoElement(tile, track, publication) {
@@ -2563,6 +3302,13 @@ function replaceScreenVideoElement(tile, track, publication) {
 
 function kickStartScreenVideo(publication, track, element) {
   if (!track || !element) return;
+  // Don't kick-start unwatched screen shares
+  var ksSid = publication?.trackSid || track?.sid;
+  var ksMeta = ksSid ? screenTrackMeta.get(ksSid) : null;
+  if (ksMeta && ksMeta.identity && hiddenScreens.has(ksMeta.identity)) {
+    var ksLocal = room && room.localParticipant && room.localParticipant.identity === ksMeta.identity;
+    if (!ksLocal) return;
+  }
   const start = performance.now();
   let attempts = 0;
   const tick = () => {
@@ -2582,6 +3328,12 @@ function kickStartScreenVideo(publication, track, element) {
 
 function scheduleScreenRecovery(trackSid, publication, element) {
   if (!trackSid || !publication || !element) return;
+  // Don't schedule recovery for unwatched screen shares
+  var srMeta = screenTrackMeta.get(trackSid);
+  if (srMeta && srMeta.identity && hiddenScreens.has(srMeta.identity)) {
+    var srLocal = room && room.localParticipant && room.localParticipant.identity === srMeta.identity;
+    if (!srLocal) return;
+  }
   const attempt = screenRecoveryAttempts.get(trackSid) || 0;
   if (attempt >= 1) return;
   setTimeout(() => {
@@ -2621,35 +3373,59 @@ function forceVideoLayer(publication, element) {
   }
   const LK = getLiveKitClient();
   try {
-    // Start with LOW quality to ensure video displays, then upgrade
-    const initialQuality = LK?.VideoQuality?.LOW || LK?.VideoQuality?.MEDIUM;
+    const source = publication.source || publication.track?.source;
+    const isScreenShare = source === LK?.Track?.Source?.ScreenShare;
     const targetQuality = LK?.VideoQuality?.HIGH;
 
-    if (publication.setVideoQuality && initialQuality != null) {
-      publication.setVideoQuality(initialQuality);
-    }
-    if (publication.setPreferredLayer && initialQuality != null) {
-      publication.setPreferredLayer({ quality: initialQuality });
-    }
-
-    // Upgrade to HIGH quality after video is playing
-    setTimeout(() => {
-      if (element && element.videoWidth > 0 && targetQuality != null) {
-        try {
-          if (publication.setVideoQuality) {
-            publication.setVideoQuality(targetQuality);
-          }
-          if (publication.setPreferredLayer) {
-            publication.setPreferredLayer({ quality: targetQuality });
-          }
-        } catch {}
+    if (isScreenShare) {
+      // Screen shares: request HIGH quality — with simulcast enabled, the SFU sends
+      // the best layer the receiver can handle. Requesting HIGH ensures capable receivers
+      // get 4K@60 while bandwidth-limited ones auto-downgrade to 1080p or 720p.
+      if (publication.setVideoQuality && targetQuality != null) {
+        publication.setVideoQuality(targetQuality);
       }
-    }, 2000);
+      if (publication.setPreferredLayer && targetQuality != null) {
+        publication.setPreferredLayer({ quality: targetQuality });
+      }
+    } else {
+      // Cameras: start LOW then upgrade to HIGH to ensure fast first frame
+      const initialQuality = LK?.VideoQuality?.LOW || LK?.VideoQuality?.MEDIUM;
+      if (publication.setVideoQuality && initialQuality != null) {
+        publication.setVideoQuality(initialQuality);
+      }
+      if (publication.setPreferredLayer && initialQuality != null) {
+        publication.setPreferredLayer({ quality: initialQuality });
+      }
+      // Upgrade to HIGH quality after video is playing
+      setTimeout(() => {
+        if (element && element.videoWidth > 0 && targetQuality != null) {
+          try {
+            if (publication.setVideoQuality) {
+              publication.setVideoQuality(targetQuality);
+            }
+            if (publication.setPreferredLayer) {
+              publication.setPreferredLayer({ quality: targetQuality });
+            }
+          } catch {}
+        }
+      }, 2000);
+    }
   } catch {}
 }
 
 function ensureVideoSubscribed(publication, element) {
   if (!publication || !publication.setSubscribed) return;
+  // Don't re-subscribe unwatched screen shares
+  var evsSource = publication.source || (publication.track ? publication.track.source : null);
+  var LK_evs = getLiveKitClient();
+  if (evsSource === LK_evs?.Track?.Source?.ScreenShare) {
+    var evsSid = publication.trackSid || (publication.track ? publication.track.sid : null);
+    var evsMeta = evsSid ? screenTrackMeta.get(evsSid) : null;
+    if (evsMeta && evsMeta.identity && hiddenScreens.has(evsMeta.identity)) {
+      var evsLocal = room && room.localParticipant && room.localParticipant.identity === evsMeta.identity;
+      if (!evsLocal) return;
+    }
+  }
   let attempts = 0;
   const check = () => {
     attempts += 1;
@@ -3016,17 +3792,131 @@ function ensureParticipantCard(participant, isLocal = false) {
       e.stopPropagation();
       var identity = participant.identity;
       var pState = participantState.get(identity);
+      var LK_wt = getLiveKitClient();
+
       if (hiddenScreens.has(identity)) {
+        // === START WATCHING: subscribe to screen share tracks ===
         hiddenScreens.delete(identity);
+        watchedScreens.add(identity);
+        watchToggleBtn.textContent = "Stop Watching";
+        debugLog("[opt-in] user opted in to watch " + identity);
+
+        // Find the remote participant and subscribe to their screen share tracks
+        var remote = null;
+        if (room && room.remoteParticipants) {
+          if (room.remoteParticipants.get) {
+            remote = room.remoteParticipants.get(identity);
+          }
+          if (!remote) {
+            room.remoteParticipants.forEach(function(p) {
+              if (p.identity === identity) remote = p;
+            });
+          }
+        }
+        if (remote) {
+          var pubs = getParticipantPublications(remote);
+          pubs.forEach(function(pub) {
+            var src = pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
+            if (src === LK_wt.Track.Source.ScreenShare || src === LK_wt.Track.Source.ScreenShareAudio) {
+              // Subscribe to the track on the SFU
+              if (pub.setSubscribed) pub.setSubscribed(true);
+              // Ensure publication is hooked (event listeners registered)
+              hookPublication(pub, remote);
+              // If the track is already available (SDK cached it), process immediately
+              if (pub.track && pub.isSubscribed) {
+                debugLog("[opt-in] track already available for " + src + " " + identity + " — processing immediately");
+                handleTrackSubscribed(pub.track, pub, remote);
+              } else {
+                debugLog("[opt-in] subscribed to " + src + " for " + identity + " — waiting for track (subscribed=" + (pub.isSubscribed ?? "?") + " hasTrack=" + !!pub.track + ")");
+              }
+            }
+          });
+          // Fallback at 500ms: check if tracks arrived and process them
+          setTimeout(function() {
+            var remoteFb = null;
+            if (room && room.remoteParticipants) {
+              if (room.remoteParticipants.get) remoteFb = room.remoteParticipants.get(identity);
+              if (!remoteFb) room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteFb = p; });
+            }
+            if (!remoteFb) return;
+            var fbPubs = getParticipantPublications(remoteFb);
+            fbPubs.forEach(function(pub) {
+              var src = pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
+              if (src === LK_wt.Track.Source.ScreenShare) {
+                if (pub.track && pub.isSubscribed && !screenTileByIdentity.has(identity)) {
+                  debugLog("[opt-in] fallback@500ms: processing screen track for " + identity);
+                  handleTrackSubscribed(pub.track, pub, remoteFb);
+                }
+                // If still not subscribed, force re-subscribe
+                if (!pub.isSubscribed && pub.setSubscribed) {
+                  debugLog("[opt-in] fallback@500ms: re-subscribing screen for " + identity);
+                  pub.setSubscribed(true);
+                }
+              }
+              if (src === LK_wt.Track.Source.ScreenShareAudio) {
+                var fbState = participantState.get(identity);
+                if (pub.track && pub.isSubscribed && fbState && fbState.screenAudioEls.size === 0) {
+                  debugLog("[opt-in] fallback@500ms: processing screen audio for " + identity);
+                  handleTrackSubscribed(pub.track, pub, remoteFb);
+                }
+                if (!pub.isSubscribed && pub.setSubscribed) {
+                  debugLog("[opt-in] fallback@500ms: re-subscribing screen audio for " + identity);
+                  pub.setSubscribed(true);
+                }
+              }
+            });
+          }, 500);
+          // Fallback at 1500ms: full reconcile to catch anything still missing
+          setTimeout(function() {
+            var remoteFb2 = null;
+            if (room && room.remoteParticipants) {
+              if (room.remoteParticipants.get) remoteFb2 = room.remoteParticipants.get(identity);
+              if (!remoteFb2) room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteFb2 = p; });
+            }
+            if (remoteFb2) {
+              debugLog("[opt-in] fallback@1500ms: full reconcile for " + identity);
+              reconcileParticipantMedia(remoteFb2);
+            }
+          }, 1500);
+          // Schedule reconcile waves to ensure everything settles
+          scheduleReconcileWaves("opt-in-watch");
+        }
+        // Show existing tile if it was created
         var tile = screenTileByIdentity.get(identity);
         if (tile) tile.style.display = "";
         // Unmute screen share audio
         if (pState && pState.screenAudioEls) {
           pState.screenAudioEls.forEach(function(el) { el.muted = false; });
         }
-        watchToggleBtn.textContent = "Stop Watching";
       } else {
+        // === STOP WATCHING: unsubscribe from screen share tracks ===
         hiddenScreens.add(identity);
+        watchedScreens.delete(identity);
+        watchToggleBtn.textContent = "Start Watching";
+        debugLog("[opt-in] user stopped watching " + identity);
+
+        // Find the remote participant and unsubscribe from their screen share tracks
+        var remote = null;
+        if (room && room.remoteParticipants) {
+          if (room.remoteParticipants.get) {
+            remote = room.remoteParticipants.get(identity);
+          }
+          if (!remote) {
+            room.remoteParticipants.forEach(function(p) {
+              if (p.identity === identity) remote = p;
+            });
+          }
+        }
+        if (remote) {
+          var pubs = getParticipantPublications(remote);
+          pubs.forEach(function(pub) {
+            var src = pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
+            if (src === LK_wt.Track.Source.ScreenShare || src === LK_wt.Track.Source.ScreenShareAudio) {
+              if (pub.setSubscribed) pub.setSubscribed(false);
+            }
+          });
+        }
+        // Hide tile
         var tile = screenTileByIdentity.get(identity);
         if (tile) {
           if (tile.classList.contains("is-focused")) {
@@ -3039,7 +3929,6 @@ function ensureParticipantCard(participant, isLocal = false) {
         if (pState && pState.screenAudioEls) {
           pState.screenAudioEls.forEach(function(el) { el.muted = true; });
         }
-        watchToggleBtn.textContent = "Start Watching";
       }
     });
     screenIndicatorRow.append(watchToggleBtn);
@@ -3166,7 +4055,11 @@ function ensureParticipantCard(participant, isLocal = false) {
     micStatusEl = micControl;
     screenStatusEl = screenControl;
   }
-  userListEl.appendChild(card);
+  if (isLocal) {
+    userListEl.prepend(card);
+  } else {
+    userListEl.appendChild(card);
+  }
 
   const state = {
     cameraTrackSid: null,
@@ -3259,7 +4152,7 @@ function resubscribeParticipantTracks(participant) {
   const pubs = getParticipantPublications(participant);
   if (!pubs.length) return;
   pubs.forEach((pub) => {
-    if (pub?.setSubscribed) pub.setSubscribed(true);
+    if (pub?.setSubscribed && !isUnwatchedScreenShare(pub, participant)) pub.setSubscribed(true);
     if (pub?.kind === getLiveKitClient()?.Track?.Kind?.Video) {
       requestVideoKeyFrame(pub, pub.track);
     }
@@ -3271,7 +4164,7 @@ function attachParticipantTracks(participant) {
   const pubs = getParticipantPublications(participant);
   if (!pubs.length) return;
   pubs.forEach((pub) => {
-    if (pub?.setSubscribed) pub.setSubscribed(true);
+    if (pub?.setSubscribed && !isUnwatchedScreenShare(pub, participant)) pub.setSubscribed(true);
     hookPublication(pub, participant);
   });
 }
@@ -3335,7 +4228,8 @@ async function uploadAvatar(file) {
   }
 
   try {
-    const res = await fetch(apiUrl(`/api/avatar/upload?identity=${encodeURIComponent(identityBase)}`), {
+    var deviceId = getLocalDeviceId();
+    const res = await fetch(apiUrl(`/api/avatar/upload?identity=${encodeURIComponent(deviceId)}`), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${adminToken}`,
@@ -3349,7 +4243,7 @@ async function uploadAvatar(file) {
       const relativePath = data.url + "?t=" + Date.now(); // relative path for storage/broadcast
       const avatarUrl = apiUrl(data.url) + "?t=" + Date.now(); // full URL for local rendering
       avatarUrls.set(identityBase, avatarUrl);
-      echoSet("echo-avatar-" + identityBase, relativePath); // store relative, not absolute
+      echoSet("echo-avatar-device", relativePath); // store by device, not name
 
       // Update own card
       updateAvatarDisplay(room.localParticipant.identity);
@@ -3357,7 +4251,7 @@ async function uploadAvatar(file) {
       // Broadcast relative path so remote users resolve via their own server
       broadcastAvatar(identityBase, relativePath);
 
-      debugLog("Avatar uploaded for " + identityBase + ", url=" + avatarUrl);
+      debugLog("Avatar uploaded for " + identityBase + " (device=" + deviceId + "), url=" + avatarUrl);
     } else {
       var errMsg = data?.error || "Upload failed";
       debugLog("Avatar upload NOT ok: " + JSON.stringify(data));
@@ -3410,6 +4304,20 @@ function broadcastAvatar(identityBase, avatarUrl) {
     room.localParticipant.publishData(new TextEncoder().encode(msg), { reliable: true });
   } catch (e) {
     debugLog("Avatar broadcast failed: " + e.message);
+  }
+}
+
+// Broadcast our device ID so other participants can map identity -> device for chime/profile lookups
+function broadcastDeviceId() {
+  if (!room?.localParticipant) return;
+  var identityBase = getIdentityBase(room.localParticipant.identity);
+  var deviceId = getLocalDeviceId();
+  var msg = JSON.stringify({ type: "device-id", identityBase: identityBase, deviceId: deviceId });
+  try {
+    room.localParticipant.publishData(new TextEncoder().encode(msg), { reliable: true });
+    debugLog("[device-profile] broadcast deviceId " + deviceId + " for " + identityBase);
+  } catch (e) {
+    debugLog("[device-profile] broadcast failed: " + e.message);
   }
 }
 
@@ -3484,10 +4392,12 @@ function reconcileParticipantMedia(participant) {
   const pubs = getParticipantPublications(participant);
   pubs.forEach((pub) => {
     if (!pub) return;
+    // Opt-in: skip unwatched remote screen shares entirely
+    if (isUnwatchedScreenShare(pub, participant)) return;
     if (pub.setSubscribed) pub.setSubscribed(true);
-    const source = pub.source;
     const track = pub.track;
     if (!track) return;
+    const source = getTrackSource(pub, track);
     if (pub.kind === LK?.Track?.Kind?.Video && source === LK.Track.Source.ScreenShare) {
       const trackSid = getTrackSid(pub, track, `${participant.identity}-screen`);
       const existingTile = trackSid ? screenTileBySid.get(trackSid) : null;
@@ -3554,6 +4464,26 @@ function scheduleReconcileWaves(reason) {
   reconcileTimers.add(resetTimer);
 }
 
+// Fast reconcile for room switches — ICE is warm, tracks arrive quickly
+function scheduleReconcileWavesFast(reason) {
+  if (reconcilePending) {
+    const timer = setTimeout(() => runFullReconcile(reason), 200);
+    reconcileTimers.add(timer);
+    return;
+  }
+  reconcilePending = true;
+  var delays = [100, 400];
+  delays.forEach(function(delay) {
+    var timer = setTimeout(function() { runFullReconcile(reason); }, delay);
+    reconcileTimers.add(timer);
+  });
+  var resetTimer = setTimeout(function() {
+    reconcilePending = false;
+    _isRoomSwitch = false; // Room switch settled
+  }, 600);
+  reconcileTimers.add(resetTimer);
+}
+
 function resetRemoteSubscriptions(reason) {
   if (!room || !room.remoteParticipants) return;
   const now = performance.now();
@@ -3567,6 +4497,7 @@ function resetRemoteSubscriptions(reason) {
     const pubs = getParticipantPublications(participant);
     pubs.forEach((pub) => {
       if (!pub?.setSubscribed) return;
+      if (isUnwatchedScreenShare(pub, participant)) return;
       if (pub.kind === LK?.Track?.Kind?.Video) {
         pub.setSubscribed(false);
         setTimeout(() => {
@@ -3694,8 +4625,11 @@ function startAudioMonitor() {
 
 function handleTrackSubscribed(track, publication, participant) {
   const LK = getLiveKitClient();
-  const source = publication?.source || track.source;
+  const source = getTrackSource(publication, track);
   const cardRef = ensureParticipantCard(participant);
+  debugLog("[track-source] " + participant.identity + " kind=" + track.kind +
+    " source=" + source + " pub.source=" + publication?.source +
+    " track.source=" + track?.source);
   const handleKey = track.kind === "video" ? `${participant.identity}-${source || track.kind}` : getTrackSid(publication, track, `${participant.identity}-${source || track.kind}`);
 
   // Check if recently handled, but also verify track is actually displayed
@@ -3749,7 +4683,7 @@ function handleTrackSubscribed(track, publication, participant) {
   } else {
     markHandled(handleKey);
   }
-  if (publication?.setSubscribed) {
+  if (publication?.setSubscribed && !isUnwatchedScreenShare(publication, participant)) {
     publication.setSubscribed(true);
   }
   if (track.kind === "video") {
@@ -3757,6 +4691,17 @@ function handleTrackSubscribed(track, publication, participant) {
     setTimeout(() => requestVideoKeyFrame(publication, track), 500);
   }
   if (track.kind === "video" && source === LK.Track.Source.ScreenShare) {
+    // Opt-in: remote screen shares default to unwatched — unsubscribe unless explicitly watching
+    var _isLocalScreen = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    if (!_isLocalScreen && isUnwatchedScreenShare(publication, participant)) {
+      if (publication?.setSubscribed) publication.setSubscribed(false);
+      if (cardRef && cardRef.watchToggleBtn) {
+        cardRef.watchToggleBtn.style.display = "";
+        cardRef.watchToggleBtn.textContent = "Start Watching";
+      }
+      debugLog("[opt-in] auto-unsubscribed unwatched screen " + participant.identity);
+      return;
+    }
     const identity = participant.identity;
     const screenTrackSid = publication?.trackSid || track?.sid || null;
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
@@ -3766,21 +4711,34 @@ function handleTrackSubscribed(track, publication, participant) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = hiddenScreens.has(identity) ? "Start Watching" : "Stop Watching";
       }
-      // If same track and has frames OR was attached recently, just ensure it plays
-      const recentlyAttached = existingVideo?._attachedAt && (performance.now() - existingVideo._attachedAt) < 3000;
-      if (existingVideo && existingVideo._lkTrack === track && (existingVideo.videoWidth > 0 || recentlyAttached)) {
+      // If same track object, NEVER replace the element — just ensure it plays.
+      // SDP renegotiations fire unsub/resub for the same track every ~2s. Replacing
+      // the video element interrupts play(), creating a loop of "interrupted by new load".
+      if (existingVideo && existingVideo._lkTrack === track) {
         ensureVideoPlays(track, existingVideo);
         ensureVideoSubscribed(publication, existingVideo);
         forceVideoLayer(publication, existingVideo);
         return;
       }
-      // Different track or stale — replace video element in existing tile (don't recreate tile)
+      // Different track — replace video element in existing tile (don't recreate tile)
       replaceScreenVideoElement(existingTile, track, publication);
+      // Clean up old trackSid references so watchdog doesn't monitor stale data
+      const oldTrackSid = existingTile.dataset.trackSid;
+      if (oldTrackSid && oldTrackSid !== screenTrackSid) {
+        screenTileBySid.delete(oldTrackSid);
+        unregisterScreenTrack(oldTrackSid);
+        debugLog("[screen-tile] migrated trackSid: " + oldTrackSid + " -> " + screenTrackSid + " for " + identity);
+      }
       if (screenTrackSid) {
         existingTile.dataset.trackSid = screenTrackSid;
         screenTileBySid.set(screenTrackSid, existingTile);
+        registerScreenTrack(screenTrackSid, publication, existingTile, participant.identity);
+        scheduleScreenRecovery(screenTrackSid, publication, existingTile.querySelector("video"));
       }
       screenTileByIdentity.set(identity, existingTile);
+      // Update participantState to track new screenTrackSid
+      const pState = participantState.get(identity);
+      if (pState) pState.screenTrackSid = screenTrackSid;
       return;
     }
     // Clean up stale references if tile was removed from DOM
@@ -3792,6 +4750,21 @@ function handleTrackSubscribed(track, publication, participant) {
     const label = `${participant.name || "Guest"} (Screen)`;
     const element = createLockedVideoElement(track);
     configureVideoElement(element, true);
+    // Minimize video playout delay for screen share to reduce A/V desync
+    var _isRemoteScreen = room && room.localParticipant && participant.identity !== room.localParticipant.identity;
+    if (_isRemoteScreen && track?.mediaStreamTrack) {
+      try {
+        const pc = room?.engine?.pcManager?.subscriber?.pc;
+        if (pc) {
+          const receivers = pc.getReceivers();
+          const videoReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
+          if (videoReceiver && "playoutDelayHint" in videoReceiver) {
+            videoReceiver.playoutDelayHint = 0; // Minimum playout delay
+            debugLog("[sync] set video playoutDelayHint=0 for " + participant.identity);
+          }
+        }
+      } catch {}
+    }
     if (track?.mediaStreamTrack) {
       track.mediaStreamTrack.onunmute = () => {
         requestVideoKeyFrame(publication, track);
@@ -3812,15 +4785,11 @@ function handleTrackSubscribed(track, publication, participant) {
       screenResubscribeIntent.delete(screenTrackSid);
     }
     screenTileByIdentity.set(participant.identity, tile);
-    // Screen share is opt-in: hide by default for remote participants
-    var isLocal = room && room.localParticipant && participant.identity === room.localParticipant.identity;
-    if (!isLocal && !hiddenScreens.has(participant.identity)) {
-      // First time seeing this screen — default to hidden (opt-in)
-      hiddenScreens.add(participant.identity);
-    }
-    if (hiddenScreens.has(participant.identity)) {
-      tile.style.display = "none";
-    }
+    // Start inbound stats monitor for remote screen shares
+    var _isLocalTile = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    if (!_isLocalTile) startInboundScreenStatsMonitor();
+    // Opt-in screen shares: tile was created because user is watching (or it's local)
+    // No need to hide — the intercept at the top of this function already unsubscribed unwatched screens
     if (cardRef && cardRef.watchToggleBtn) {
       cardRef.watchToggleBtn.style.display = "";
       cardRef.watchToggleBtn.textContent = hiddenScreens.has(participant.identity) ? "Start Watching" : "Stop Watching";
@@ -3863,9 +4832,27 @@ function handleTrackSubscribed(track, publication, participant) {
         debugLog(`camera size ${participant.identity} ${camEl.videoWidth}x${camEl.videoHeight} muted=${track.mediaStreamTrack?.muted ?? "?"}`);
       }
     }, 900);
+    // Start inbound stats monitor for remote cameras (adaptive layer selection)
+    var _isLocalCam = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    if (!_isLocalCam) startInboundScreenStatsMonitor();
+    return;
+  }
+  // Defensive fallback: video track with unknown/null source — route to camera card
+  // This is safer than dropping the track entirely or letting it land in the screen grid
+  if (track.kind === "video" && source !== LK.Track.Source.ScreenShare && source !== LK.Track.Source.Camera) {
+    debugLog("[source-detect] WARNING: video track with unknown source for " +
+      participant.identity + " — defaulting to camera. pub.source=" +
+      publication?.source + " track.source=" + track?.source);
+    ensureCameraVideo(cardRef, track, publication);
     return;
   }
   if (track.kind === "audio") {
+    // Opt-in: don't attach audio for unwatched remote screen shares
+    if (isUnwatchedScreenShare(publication, participant)) {
+      if (publication?.setSubscribed) publication.setSubscribed(false);
+      debugLog("[opt-in] auto-unsubscribed unwatched screen audio " + participant.identity);
+      return;
+    }
     const audioSid = getTrackSid(publication, track, `${participant.identity}-${source || "audio"}`);
     if (audioSid && audioElBySid.has(audioSid)) {
       return;
@@ -3878,6 +4865,20 @@ function handleTrackSubscribed(track, publication, participant) {
       element.srcObject = new MediaStream([track.mediaStreamTrack]);
     }
     element.volume = 1.0;
+    // Minimize audio playout delay for screen share audio to reduce A/V desync
+    if (source === LK.Track.Source.ScreenShareAudio) {
+      try {
+        const pc = room?.engine?.pcManager?.subscriber?.pc;
+        if (pc && track.mediaStreamTrack) {
+          const receivers = pc.getReceivers();
+          const audioReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
+          if (audioReceiver && "playoutDelayHint" in audioReceiver) {
+            audioReceiver.playoutDelayHint = 0; // Minimum playout delay
+            debugLog("[sync] set audio playoutDelayHint=0 for " + participant.identity);
+          }
+        }
+      } catch {}
+    }
     // Append to DOM FIRST, then configure and play (some browsers need element in DOM)
     audioBucketEl.appendChild(element);
     // Apply selected speaker device BEFORE playing so audio routes correctly from the start
@@ -3929,12 +4930,13 @@ function handleTrackSubscribed(track, publication, participant) {
 
 function handleTrackUnsubscribed(track, publication, participant) {
   const LK = getLiveKitClient();
-  const source = publication?.source || track.source;
+  const source = getTrackSource(publication, track);
   const trackSid = getTrackSid(
     publication,
     track,
     participant ? `${participant.identity}-${source || track.kind}` : null
   );
+  debugLog("[unsub] handleTrackUnsubscribed " + (participant?.identity || "?") + " src=" + source + " sid=" + trackSid + " kind=" + track.kind);
   const intentTs = trackSid ? screenResubscribeIntent.get(trackSid) : null;
   const suppressRemoval = intentTs && performance.now() - intentTs < 5000;
   if (trackSid) {
@@ -3943,19 +4945,67 @@ function handleTrackUnsubscribed(track, publication, participant) {
   if (track.kind === "video" && source === LK.Track.Source.ScreenShare) {
     const identity = participant?.identity;
     const tile = trackSid ? screenTileBySid.get(trackSid) : null;
-    if (!suppressRemoval && tile && tile.dataset.trackSid === trackSid) {
+    // Check if the publisher is still sharing — if so, this is a transient unsub
+    // from SDP renegotiation and we should NOT destroy the tile.
+    var stillPublishing = false;
+    if (identity && room && room.remoteParticipants) {
+      var remoteP = null;
+      if (room.remoteParticipants.get) remoteP = room.remoteParticipants.get(identity);
+      if (!remoteP) {
+        room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteP = p; });
+      }
+      if (remoteP) {
+        var pubs = getParticipantPublications(remoteP);
+        stillPublishing = pubs.some(function(pub) {
+          return pub && pub.source === LK.Track.Source.ScreenShare && pub.kind === LK?.Track?.Kind?.Video;
+        });
+      }
+    }
+    // Don't remove tile if user just opted out (stopped watching) — they may re-watch.
+    // Only remove if the publisher actually stopped sharing or if suppressRemoval is active.
+    var userOptedOut = identity && hiddenScreens.has(identity);
+    if (stillPublishing && tile) {
+      // Transient unsub during SDP renegotiation — keep tile alive
+      debugLog("[unsub] SUPPRESSED tile removal for " + identity + " (publisher still sharing, transient SDP unsub)");
+    } else if (!suppressRemoval && !userOptedOut && tile && tile.dataset.trackSid === trackSid) {
+      debugLog("[unsub] removing tile for " + identity + " sid=" + trackSid);
       removeScreenTile(trackSid);
       unregisterScreenTrack(trackSid);
       if (identity) screenTileByIdentity.delete(identity);
       if (trackSid) screenResubscribeIntent.delete(trackSid);
+    } else if (userOptedOut && tile) {
+      // User stopped watching — hide tile but keep it in the DOM for fast re-watch
+      tile.style.display = "none";
+      debugLog("[opt-in] hiding tile (user opted out, publisher still sharing) " + identity);
     }
     if (identity) {
-      hiddenScreens.delete(identity);
-      var cardRef2 = participantCards.get(identity);
-      if (cardRef2 && cardRef2.watchToggleBtn) {
-        cardRef2.watchToggleBtn.style.display = "none";
-        cardRef2.watchToggleBtn.textContent = "Stop Watching";
+      // Only clear hiddenScreens and hide watch button if the participant
+      // actually stopped sharing (not just user unsubscribing via opt-out)
+      var stillPublishing = false;
+      var remoteP = null;
+      if (room && room.remoteParticipants) {
+        if (room.remoteParticipants.get) remoteP = room.remoteParticipants.get(identity);
+        if (!remoteP) {
+          room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteP = p; });
+        }
       }
+      if (remoteP) {
+        var rPubs = getParticipantPublications(remoteP);
+        stillPublishing = rPubs.some(function(pub) {
+          return pub && pub.source === LK.Track.Source.ScreenShare;
+        });
+      }
+      if (!stillPublishing) {
+        // Participant stopped sharing — clean up fully
+        hiddenScreens.delete(identity);
+        watchedScreens.delete(identity);
+        var cardRef2 = participantCards.get(identity);
+        if (cardRef2 && cardRef2.watchToggleBtn) {
+          cardRef2.watchToggleBtn.style.display = "none";
+          cardRef2.watchToggleBtn.textContent = "Stop Watching";
+        }
+      }
+      // If still publishing but user unsubscribed, keep hiddenScreens and button as-is
     }
   } else if (track.kind === "video" && source === LK.Track.Source.Camera) {
     const identity = participant?.identity;
@@ -5019,16 +6069,17 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     // First connect: ensure room exists (not needed for subsequent switches of fixed rooms)
     await ensureRoomExists(controlUrl, adminToken, roomId);
   }
-  // Disconnect old room ASAP to reduce perceived lag
-  if (room) {
-    room.disconnect();
-    clearMedia();
-    clearSoundboardState();
-  }
-  if (seq !== connectSequence) return; // a newer connect started, bail
-  const accessToken = await fetchRoomToken(controlUrl, adminToken, roomId, identity, name);
+  // Fetch token (cached on room switch, live on first connect)
+  const accessToken = reuseAdmin
+    ? await getCachedOrFetchToken(controlUrl, adminToken, roomId, identity, name)
+    : await fetchRoomToken(controlUrl, adminToken, roomId, identity, name);
   if (seq !== connectSequence) return;
   currentAccessToken = accessToken;
+  tokenCache.delete(roomId); // Invalidate cache for room we just joined
+
+  // Save reference to old room so we can disconnect AFTER new room connects
+  const oldRoom = room;
+  const hadOldRoom = !!oldRoom;
 
   setStatus("Connecting to SFU...");
 
@@ -5052,35 +6103,81 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         result.push(line);
         // Add our bandwidth right after c= line in video section
         if (inVideo && line.startsWith("c=") && !addedBW) {
-          result.push("b=AS:10000");
-          result.push("b=TIAS:10000000");
+          result.push("b=AS:25000");
+          result.push("b=TIAS:25000000");
           addedBW = true;
         }
       }
       return result.join("\r\n");
     }
 
-    function _addH264BitrateHints(sdp) {
-      // Upgrade H264 profile level to at least 4.2 (0x2A) for 1080p@60fps.
-      // Level 4.0 (0x28) caps at 30fps for 1080p (245,760 max MBps / 8,160 MBs = 30fps).
-      // Level 4.2 (0x2A) allows 64fps at 1080p (522,240 max MBps).
+    // Profile + level upgrade — only for local/offer SDPs (publisher side).
+    // Changing profiles in remote (SFU answer) SDPs breaks negotiation.
+    function _upgradeH264Profile(sdp) {
+      // Constrained Baseline (42e0) routes to OpenH264 (software, ~25fps max for 1080p).
+      // High profile (6400) routes to hardware encoder (NVENC/QSV/AMF, 60fps easy).
+      // Level 5.1 (0x33) supports up to 4096x2304@60fps — needed for 4K simulcast HIGH layer.
       sdp = sdp.replace(/profile-level-id=([0-9a-fA-F]{4})([0-9a-fA-F]{2})/g, function(match, profile, level) {
-        const lvl = parseInt(level, 16);
-        if (lvl < 0x2A) {
-          debugLog("[SDP] H264 level " + level + " -> 2A (4.0->4.2 for 60fps)");
-          return "profile-level-id=" + profile + "2A";
+        var newProfile = profile;
+        var newLevel = level;
+        // Upgrade Constrained Baseline (42e0/42c0) or Baseline (4200) to High (6400)
+        var profileLower = profile.toLowerCase();
+        if (profileLower === "42e0" || profileLower === "42c0" || profileLower === "4200" || profileLower === "4d00") {
+          newProfile = "6400";
+          debugLog("[SDP] H264 profile " + profile + " -> 6400 (High, for hardware encoder)");
+        }
+        // Upgrade level to 5.1 for 4K@60fps simulcast
+        var lvl = parseInt(level, 16);
+        if (lvl < 0x33) {
+          newLevel = "33";
+          debugLog("[SDP] H264 level " + level + " -> 33 (5.1 for 4K@60fps)");
+        }
+        return "profile-level-id=" + newProfile + newLevel;
+      });
+      return sdp;
+    }
+
+    // Level-only upgrade for remote SDPs — don't change profiles in SFU answers
+    function _upgradeLevelOnly(sdp) {
+      sdp = sdp.replace(/profile-level-id=([0-9a-fA-F]{4})([0-9a-fA-F]{2})/g, function(match, profile, level) {
+        var lvl = parseInt(level, 16);
+        if (lvl < 0x33) {
+          debugLog("[SDP] H264 level " + level + " -> 33 (5.1 for 4K@60fps)");
+          return "profile-level-id=" + profile + "33";
         }
         return match;
       });
+      return sdp;
+    }
 
-      // Add max-fr=60 to H264 fmtp lines
+    function _addCodecBitrateHints(sdp) {
+
+      // ── H264 fmtp bitrate hints ──
       const h264Matches = sdp.matchAll(/a=rtpmap:(\d+) H264\/90000/g);
       for (const m of h264Matches) {
         const pt = m[1];
         const re = new RegExp(`(a=fmtp:${pt} [^\\r\\n]*)`, "g");
         if (re.test(sdp)) {
           sdp = sdp.replace(new RegExp(`(a=fmtp:${pt} [^\\r\\n]*)`, "g"),
-            "$1;x-google-start-bitrate=6000;x-google-min-bitrate=4000;x-google-max-bitrate=8000;max-fr=60");
+            "$1;x-google-start-bitrate=10000;x-google-min-bitrate=5000;x-google-max-bitrate=25000;max-fr=60");
+        }
+      }
+
+      // ── VP8/VP9 x-google bitrate hints ──
+      // These help Chrome's BWE ramp up faster for VP8/VP9 screen share
+      for (const codec of ["VP8", "VP9"]) {
+        const vpMatches = sdp.matchAll(new RegExp("a=rtpmap:(\\d+) " + codec + "/90000", "g"));
+        for (const vm of vpMatches) {
+          const pt = vm[1];
+          // Check if fmtp line exists for this payload type
+          const fmtpRe = new RegExp("(a=fmtp:" + pt + " [^\\r\\n]*)", "g");
+          if (fmtpRe.test(sdp)) {
+            // Append x-google hints if not already present
+            if (sdp.indexOf("a=fmtp:" + pt + " ") >= 0 && sdp.indexOf("x-google-start-bitrate") === -1) {
+              sdp = sdp.replace(new RegExp("(a=fmtp:" + pt + " [^\\r\\n]*)", "g"),
+                "$1;x-google-start-bitrate=10000;x-google-min-bitrate=5000;x-google-max-bitrate=25000");
+            }
+          }
         }
       }
       return sdp;
@@ -5091,8 +6188,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     RTCPeerConnection.prototype.createOffer = async function(...args) {
       const offer = await _origCreateOffer.apply(this, args);
       if (offer && offer.sdp) {
-        offer.sdp = _addH264BitrateHints(_mungeSDPBandwidth(offer.sdp));
-        debugLog("[SDP] OFFER munged: b=AS:8000 + H264 hints");
+        // Offers: upgrade profile + level + bitrate hints (publisher side)
+        offer.sdp = _upgradeH264Profile(_addCodecBitrateHints(_mungeSDPBandwidth(offer.sdp)));
+        debugLog("[SDP] OFFER munged: profile=High lvl=5.1 + b=AS:25000 + codec hints");
       }
       return offer;
     };
@@ -5100,8 +6198,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     const _origSLD = RTCPeerConnection.prototype.setLocalDescription;
     RTCPeerConnection.prototype.setLocalDescription = function(desc, ...args) {
       if (desc && desc.sdp) {
-        desc = { type: desc.type, sdp: _addH264BitrateHints(_mungeSDPBandwidth(desc.sdp)) };
-        debugLog("[SDP] LOCAL munged");
+        // Local descriptions (our offers/answers): upgrade profile + level
+        desc = { type: desc.type, sdp: _upgradeH264Profile(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp))) };
+        debugLog("[SDP] LOCAL munged (profile+level+bw)");
       } else if (!desc) {
         debugLog("[SDP] WARNING: implicit setLocalDescription (no SDP to munge)");
       }
@@ -5111,66 +6210,130 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     const _origSRD = RTCPeerConnection.prototype.setRemoteDescription;
     RTCPeerConnection.prototype.setRemoteDescription = function(desc, ...args) {
       if (desc && desc.sdp) {
-        // Apply bandwidth AND H264 level upgrade to SFU answer too
-        desc = { type: desc.type, sdp: _addH264BitrateHints(_mungeSDPBandwidth(desc.sdp)) };
-        debugLog("[SDP] REMOTE munged: bandwidth + H264 level upgrade");
+        // Remote descriptions (SFU answers): level upgrade + bandwidth only.
+        // Do NOT change profiles — SFU negotiated a specific profile, changing it breaks encoding.
+        desc = { type: desc.type, sdp: _upgradeLevelOnly(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp))) };
+        debugLog("[SDP] REMOTE munged: level+bw (profile preserved)");
       }
       return _origSRD.apply(this, [desc, ...args]);
     };
 
-    // Override addTransceiver to force 60fps from creation.
+    // Override addTransceiver to enforce per-layer encoding params — SCREEN SHARE ONLY.
     // LiveKit SDK defaults screen share to 15fps (h1080fps15 preset).
-    // Chrome may not allow setParameters() to override maxFramerate set in addTransceiver.
+    // With simulcast, there are 3 encodings (rids: q=LOW, h=MEDIUM, f=HIGH).
+    // We force 60fps on HIGH+MEDIUM, allow 30fps on LOW, and set per-layer bitrate floors.
     const _origAddTransceiver = RTCPeerConnection.prototype.addTransceiver;
     RTCPeerConnection.prototype.addTransceiver = function(trackOrKind, init, ...args) {
-      if (init && init.sendEncodings) {
+      // Detect if this is a screen share track
+      var isScreenTrack = false;
+      try {
+        if (trackOrKind && typeof trackOrKind === "object" && trackOrKind.kind === "video") {
+          var ssMst = _screenShareVideoTrack?.mediaStreamTrack;
+          if (ssMst && trackOrKind === ssMst) isScreenTrack = true;
+          if (!isScreenTrack && trackOrKind.contentHint === "motion" && _screenShareVideoTrack) isScreenTrack = true;
+        }
+      } catch (_) {}
+      if (isScreenTrack && init && init.sendEncodings) {
         for (const enc of init.sendEncodings) {
-          if (typeof enc.maxFramerate === "number" && enc.maxFramerate < 60) {
-            debugLog("[TRANSCEIVER] Overriding maxFramerate " + enc.maxFramerate + " -> 60");
-            enc.maxFramerate = 60;
-          }
-          // Don't override bitrate — let it adapt. Only ensure high initial ceiling.
-          if (typeof enc.maxBitrate === "number" && enc.maxBitrate < 3000000) {
-            enc.maxBitrate = 10000000;
+          var isLow = enc.rid === "q" || (enc.scaleResolutionDownBy && enc.scaleResolutionDownBy >= 2.5);
+          if (isLow) {
+            // LOW layer (720p@30): allow 30fps, floor at 1.5 Mbps
+            if (typeof enc.maxFramerate === "number" && enc.maxFramerate < 30) {
+              debugLog("[TRANSCEIVER] Screen LOW: maxFramerate " + enc.maxFramerate + " -> 30");
+              enc.maxFramerate = 30;
+            }
+            if (typeof enc.maxBitrate === "number" && enc.maxBitrate < 1000000) {
+              enc.maxBitrate = 1500000;
+            }
+          } else {
+            // HIGH or MEDIUM layer: force 60fps
+            if (typeof enc.maxFramerate === "number" && enc.maxFramerate < 60) {
+              debugLog("[TRANSCEIVER] Screen " + (enc.rid || "?") + ": maxFramerate " + enc.maxFramerate + " -> 60");
+              enc.maxFramerate = 60;
+            }
+            // Bitrate floor: 5 Mbps for MEDIUM, 15 Mbps for HIGH
+            var isMedium = enc.rid === "h" || (enc.scaleResolutionDownBy && enc.scaleResolutionDownBy >= 1.5);
+            var bitrateFloor = isMedium ? 5000000 : 15000000;
+            if (typeof enc.maxBitrate === "number" && enc.maxBitrate < bitrateFloor) {
+              enc.maxBitrate = bitrateFloor;
+            }
           }
         }
       }
       return _origAddTransceiver.apply(this, [trackOrKind, init, ...args]);
     };
 
-    debugLog("SDP + transceiver overrides installed (60fps, 8Mbps, b=AS:8000)");
+    // Override setParameters to prevent LiveKit SDK from capping screen share framerate.
+    // After our publishTrack() + setParameters(60fps), the SDK may asynchronously
+    // call setParameters again with its own encoding defaults (h1080fps15 = 15fps).
+    // With simulcast: enforce 60fps on HIGH+MEDIUM layers, allow 30fps on LOW layer.
+    // Camera senders are left alone (adaptive quality needs to throttle them).
+    const _origSetParams = RTCRtpSender.prototype.setParameters;
+    RTCRtpSender.prototype.setParameters = function(params, ...args) {
+      var isScreenSender = false;
+      try {
+        var ssTrk = _screenShareVideoTrack?.sender;
+        if (ssTrk && this === ssTrk) isScreenSender = true;
+        if (!isScreenSender && this.track && _screenShareVideoTrack?.mediaStreamTrack) {
+          if (this.track === _screenShareVideoTrack.mediaStreamTrack) isScreenSender = true;
+        }
+      } catch (_) {}
+      if (isScreenSender && params && params.encodings) {
+        for (const enc of params.encodings) {
+          var isLow = enc.rid === "q";
+          var minFps = isLow ? 30 : 60;
+          if (typeof enc.maxFramerate === "number" && enc.maxFramerate < minFps) {
+            debugLog("[SENDER] Screen " + (enc.rid || "?") + ": maxFramerate " + enc.maxFramerate + " -> " + minFps);
+            enc.maxFramerate = minFps;
+          }
+        }
+      }
+      return _origSetParams.apply(this, [params, ...args]);
+    };
+
+    debugLog("SDP + transceiver + setParameters overrides installed (H264 High 5.1, simulcast 3-layer, 20Mbps aggregate)");
   }
 
   const LK = getLiveKitClient();
   if (!LK || !LK.Room) {
     throw new Error("LiveKit client failed to load. Please refresh and try again.");
   }
-  room = new LK.Room({
-    adaptiveStream: false,
-    dynacast: false,
-    autoSubscribe: true,
-    videoCaptureDefaults: {
-      resolution: { width: 1920, height: 1080, frameRate: 60 },
-    },
-    publishDefaults: {
-      simulcast: true,
-      videoCodec: "h264",
-      videoEncoding: { maxBitrate: 5_000_000, maxFramerate: 60 },
-      videoSimulcastLayers: [
-        { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
-      ],
-      screenShareEncoding: { maxBitrate: 4_000_000, maxFramerate: 60 },
-      dtx: true,
-      degradationPreference: "maintain-resolution",
-    },
-  });
+  // ── Fast room switching: use pre-warmed room if available ──
+  var prewarmed = reuseAdmin ? prewarmedRooms.get(roomId) : null;
+  var newRoom;
+  if (prewarmed && prewarmed.room) {
+    newRoom = prewarmed.room;
+    prewarmedRooms.delete(roomId);
+    debugLog("[fast-switch] using pre-warmed Room for " + roomId);
+  } else {
+    if (prewarmed) prewarmedRooms.delete(roomId);
+    newRoom = new LK.Room({
+      adaptiveStream: false,
+      dynacast: false,
+      autoSubscribe: true,
+      videoCaptureDefaults: {
+        resolution: { width: 1920, height: 1080, frameRate: 60 },
+      },
+      publishDefaults: {
+        simulcast: true,
+        videoCodec: "h264",
+        videoEncoding: { maxBitrate: 5_000_000, maxFramerate: 60 },
+        videoSimulcastLayers: [
+          { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
+        ],
+        screenShareEncoding: { maxBitrate: 15_000_000, maxFramerate: 60 },
+        dtx: true,
+        degradationPreference: "maintain-resolution",
+      },
+    });
+  }
   try {
-    if (typeof room.startAudio === "function") {
-      room.startAudio().catch(() => {});
+    if (typeof newRoom.startAudio === "function") {
+      newRoom.startAudio().catch(() => {});
     }
   } catch {}
   if (LK.RoomEvent?.ConnectionStateChanged) {
-    room.on(LK.RoomEvent.ConnectionStateChanged, (state) => {
+    newRoom.on(LK.RoomEvent.ConnectionStateChanged, (state) => {
       if (!state) return;
       if (state === "disconnected") {
         setStatus(`Connection: ${state}`, true);
@@ -5180,30 +6343,43 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.Disconnected) {
-    room.on(LK.RoomEvent.Disconnected, (reason) => {
+    newRoom.on(LK.RoomEvent.Disconnected, (reason) => {
       const detail = describeDisconnectReason(reason, LK);
       setStatus(`Disconnected: ${detail}`, true);
+      logEvent("room-disconnect", detail);
     });
   }
   if (LK.RoomEvent?.SignalReconnecting) {
-    room.on(LK.RoomEvent.SignalReconnecting, () => {
+    newRoom.on(LK.RoomEvent.SignalReconnecting, () => {
       setStatus("Signal reconnecting...", true);
+      logEvent("signal-reconnecting", "");
     });
   }
   if (LK.RoomEvent?.SignalReconnected) {
-    room.on(LK.RoomEvent.SignalReconnected, () => {
+    newRoom.on(LK.RoomEvent.SignalReconnected, () => {
       setStatus("Signal reconnected");
+      logEvent("signal-reconnected", "");
     });
   }
   if (LK.RoomEvent?.ConnectionError) {
-    room.on(LK.RoomEvent.ConnectionError, (err) => {
+    newRoom.on(LK.RoomEvent.ConnectionError, (err) => {
       const detail = err?.message || String(err || "unknown");
       setStatus(`Connection error: ${detail}`, true);
     });
   }
   const localIdentity = identity;
   ensureParticipantCard({ identity: localIdentity, name }, true);
-  room.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+  newRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+    // Opt-in: if a remote screen share arrives but identity isn't in hiddenScreens yet
+    // (TrackSubscribed fired before TrackPublished race), add to hiddenScreens now
+    // But skip if user explicitly opted in via watchedScreens
+    var _subSource = getTrackSource(publication, track);
+    var _subIsRemoteScreen = participant && room && room.localParticipant &&
+      participant.identity !== room.localParticipant.identity &&
+      (_subSource === LK.Track.Source.ScreenShare || _subSource === LK.Track.Source.ScreenShareAudio);
+    if (_subIsRemoteScreen && !hiddenScreens.has(participant.identity) && !watchedScreens.has(participant.identity)) {
+      hiddenScreens.add(participant.identity);
+    }
     handleTrackSubscribed(track, publication, participant);
     scheduleReconcileWaves("track-subscribed");
     if (participant) hookPublication(publication, participant);
@@ -5218,11 +6394,16 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     }
   });
   if (LK.RoomEvent?.TrackSubscriptionFailed) {
-    room.on(LK.RoomEvent.TrackSubscriptionFailed, (publication, participant, err) => {
+    newRoom.on(LK.RoomEvent.TrackSubscriptionFailed, (publication, participant, err) => {
       const detail = err?.message || String(err || "track subscription failed");
       setStatus(`Track subscription failed: ${detail}`, true);
       debugLog(`track subscription failed ${participant?.identity || "unknown"} ${detail}`);
       if (publication?.setSubscribed) {
+        // Don't retry subscription for unwatched screen shares
+        if (isUnwatchedScreenShare(publication, participant)) {
+          debugLog("[opt-in] skipping subscription retry for unwatched screen " + (participant?.identity || "unknown"));
+          return;
+        }
         publication.setSubscribed(false);
         setTimeout(() => {
           publication.setSubscribed(true);
@@ -5235,53 +6416,102 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.TrackPublished) {
-    room.on(LK.RoomEvent.TrackPublished, (publication, participant) => {
+    newRoom.on(LK.RoomEvent.TrackPublished, (publication, participant) => {
+      var pubSource = getTrackSource(publication, publication?.track);
+      var isRemoteScreen = participant && room && room.localParticipant &&
+        participant.identity !== room.localParticipant.identity &&
+        (pubSource === LK.Track.Source.ScreenShare || pubSource === LK.Track.Source.ScreenShareAudio);
+
+      if (isRemoteScreen) {
+        // Opt-in: don't subscribe to remote screen shares by default
+        if (!hiddenScreens.has(participant.identity)) {
+          hiddenScreens.add(participant.identity);
+        }
+        // Play screen share chime for video track only (not audio), and not during room switches
+        if (!_isRoomSwitch && pubSource === LK.Track.Source.ScreenShare) {
+          playScreenShareChime();
+        }
+        var cardRef = participantCards.get(participant.identity);
+        if (cardRef && cardRef.watchToggleBtn) {
+          cardRef.watchToggleBtn.style.display = "";
+          cardRef.watchToggleBtn.textContent = "Start Watching";
+        }
+        debugLog(`[opt-in] track published (screen, unwatched) ${participant.identity} src=${pubSource}`);
+        // Still hook so we can subscribe later when user opts in
+        if (participant) hookPublication(publication, participant);
+        return;
+      }
+
       if (publication && publication.setSubscribed) {
         publication.setSubscribed(true);
       }
-      debugLog(`track published ${participant?.identity || "unknown"} src=${publication?.source || publication?.kind}`);
+      debugLog(`track published ${participant?.identity || "unknown"} src=${pubSource}`);
       if (publication?.kind === LK.Track.Kind.Video) {
         requestVideoKeyFrame(publication, publication.track);
-        setTimeout(() => requestVideoKeyFrame(publication, publication.track), 700);
+        var _kfDelay = _isRoomSwitch ? 300 : 700;
+        setTimeout(() => requestVideoKeyFrame(publication, publication.track), _kfDelay);
       }
       if (participant) {
         hookPublication(publication, participant);
       }
       if (participant) {
-        setTimeout(() => resubscribeParticipantTracks(participant), 900);
+        var _resubDelay = _isRoomSwitch ? 200 : 900;
+        setTimeout(() => resubscribeParticipantTracks(participant), _resubDelay);
       }
-      scheduleReconcileWaves("track-published");
+      if (_isRoomSwitch) {
+        scheduleReconcileWavesFast("track-published");
+      } else {
+        scheduleReconcileWaves("track-published");
+      }
     });
   }
-  room.on(LK.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+  newRoom.on(LK.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
     handleTrackUnsubscribed(track, publication, participant);
   });
-  room.on(LK.RoomEvent.ParticipantConnected, (participant) => {
+  newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
     ensureParticipantCard(participant);
     debugLog(`participant connected ${participant.identity}`);
-    // Small delay to let tracks be published before attaching
-    setTimeout(() => {
+    // Real-time enter chime — fires instantly via WebSocket, no polling delay
+    if (!_isRoomSwitch) {
+      playChimeForParticipant(participant.identity, "enter");
+    }
+    // Attach tracks — immediate on room switch (tracks already published), delayed on first connect
+    var _trackDelay = _isRoomSwitch ? 0 : 200;
+    if (_trackDelay === 0) {
       attachParticipantTracks(participant);
       resubscribeParticipantTracks(participant);
-      // Refresh Camera Lobby if open
       if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
         populateCameraLobby();
       }
-    }, 200);
-    scheduleReconcileWaves("participant-connected");
-    // Re-broadcast own avatar so new participant receives it (relative path)
+    } else {
+      setTimeout(() => {
+        attachParticipantTracks(participant);
+        resubscribeParticipantTracks(participant);
+        if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
+          populateCameraLobby();
+        }
+      }, _trackDelay);
+    }
+    if (_isRoomSwitch) {
+      scheduleReconcileWavesFast("participant-connected");
+    } else {
+      scheduleReconcileWaves("participant-connected");
+    }
+    // Re-broadcast own avatar so new participant receives it
+    var _avatarDelay = _isRoomSwitch ? 200 : 1000;
     setTimeout(() => {
       const identityBase = getIdentityBase(room.localParticipant.identity);
-      const savedAvatar = echoGet("echo-avatar-" + identityBase);
+      var savedAvatar = echoGet("echo-avatar-device") || echoGet("echo-avatar-" + identityBase);
       if (savedAvatar) {
         const relativePath = savedAvatar.startsWith("/") ? savedAvatar
           : savedAvatar.replace(/^https?:\/\/[^/]+/, "");
         broadcastAvatar(identityBase, relativePath);
       }
-    }, 1000);
+      broadcastDeviceId();
+    }, _avatarDelay);
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
-    room.on(LK.RoomEvent.ParticipantNameChanged, (participant) => {
+    newRoom.on(LK.RoomEvent.ParticipantNameChanged, (participant) => {
       const cardRef = participantCards.get(participant.identity);
       if (!cardRef) return;
       const label = participant.name || "Guest";
@@ -5293,16 +6523,44 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       }
     });
   }
-  room.on(LK.RoomEvent.ParticipantDisconnected, (participant) => {
+  newRoom.on(LK.RoomEvent.ParticipantDisconnected, (participant) => {
     const key = participant.identity;
     const cardRef = participantCards.get(key);
     if (cardRef) cardRef.card.remove();
     participantCards.delete(key);
     participantState.delete(key);
     debugLog(`participant disconnected ${participant.identity}`);
+    // Real-time leave/switch chime — check if they moved to another room or fully left
+    if (!_isRoomSwitch) {
+      (async function() {
+        try {
+          var statusList = await fetchRoomStatus(controlUrlInput.value.trim(), adminToken);
+          var inAnotherRoom = false;
+          if (Array.isArray(statusList)) {
+            for (var i = 0; i < statusList.length; i++) {
+              var r = statusList[i];
+              if (r.room_id === currentRoomName) continue;
+              var parts = r.participants || [];
+              for (var j = 0; j < parts.length; j++) {
+                if (parts[j].identity === key) { inAnotherRoom = true; break; }
+              }
+              if (inAnotherRoom) break;
+            }
+          }
+          if (inAnotherRoom) {
+            playSwitchChime();
+          } else {
+            playChimeForParticipant(key, "exit");
+          }
+        } catch (e) {
+          // Fallback: play leave chime if status check fails
+          playChimeForParticipant(key, "exit");
+        }
+      })();
+    }
   });
   if (LK.RoomEvent?.TrackMuted) {
-    room.on(LK.RoomEvent.TrackMuted, (publication, participant) => {
+    newRoom.on(LK.RoomEvent.TrackMuted, (publication, participant) => {
       if (!participant) return;
       const source = publication?.source;
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
@@ -5322,7 +6580,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.TrackUnmuted) {
-    room.on(LK.RoomEvent.TrackUnmuted, (publication, participant) => {
+    newRoom.on(LK.RoomEvent.TrackUnmuted, (publication, participant) => {
       if (!participant) return;
       const source = publication?.source;
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
@@ -5344,14 +6602,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.ActiveSpeakers) {
-    room.on(LK.RoomEvent.ActiveSpeakers, (speakers) => {
+    newRoom.on(LK.RoomEvent.ActiveSpeakers, (speakers) => {
       activeSpeakerIds = new Set(speakers.map((p) => p.identity));
       lastActiveSpeakerEvent = performance.now();
       updateActiveSpeakerUi();
     });
   }
   if (LK.RoomEvent?.DataReceived) {
-    room.on(LK.RoomEvent.DataReceived, (payload, participant) => {
+    newRoom.on(LK.RoomEvent.DataReceived, (payload, participant) => {
       try {
         const text = new TextDecoder().decode(payload);
         const msg = JSON.parse(text);
@@ -5374,6 +6632,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           // We handle black frames locally via resubscribe + keyframe.
         } else if (msg.type === CHAT_MESSAGE_TYPE || msg.type === CHAT_FILE_TYPE) {
           handleIncomingChatData(payload, participant);
+        } else if (msg.type === "chat-delete" && msg.id) {
+          var delIdx = chatHistory.findIndex(function(m) { return m.id === msg.id; });
+          if (delIdx !== -1) chatHistory.splice(delIdx, 1);
+          var delEl = chatMessages?.querySelector('[data-msg-id="' + CSS.escape(msg.id) + '"]');
+          if (delEl) delEl.remove();
         } else if (msg.type === "jam-started" && msg.host) {
           if (typeof showJamToast === "function") showJamToast(msg.host + " started a Jam Session!");
           if (typeof handleJamDataMessage === "function") handleJamDataMessage(msg);
@@ -5381,6 +6644,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           if (typeof showJamToast === "function") showJamToast("Jam Session ended");
           if (typeof handleJamDataMessage === "function") handleJamDataMessage(msg);
           if (typeof stopJamAudioStream === "function") stopJamAudioStream();
+        } else if (msg.type === "device-id" && msg.identityBase && msg.deviceId) {
+          // Map remote participant's identity to their device ID (for chime/profile lookups)
+          deviceIdByIdentity.set(msg.identityBase, msg.deviceId);
+          debugLog("[device-profile] mapped " + msg.identityBase + " -> " + msg.deviceId);
+          // Pre-fetch their chime buffers now that we know their device ID
+          fetchChimeBuffer(msg.deviceId, "enter").catch(function() {});
+          fetchChimeBuffer(msg.deviceId, "exit").catch(function() {});
         } else if (msg.type === "avatar-update" && msg.identityBase && msg.avatarUrl) {
           // Resolve relative paths through our own server URL
           var resolved = msg.avatarUrl.startsWith("/") ? apiUrl(msg.avatarUrl) : msg.avatarUrl;
@@ -5398,7 +6668,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.LocalTrackPublished) {
-    room.on(LK.RoomEvent.LocalTrackPublished, (publication) => {
+    newRoom.on(LK.RoomEvent.LocalTrackPublished, (publication) => {
       const local = room.localParticipant;
       if (!local || !publication) return;
       const source = publication.source;
@@ -5436,7 +6706,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   if (LK.RoomEvent?.LocalTrackUnpublished) {
-    room.on(LK.RoomEvent.LocalTrackUnpublished, (publication) => {
+    newRoom.on(LK.RoomEvent.LocalTrackUnpublished, (publication) => {
       const source = publication.source;
       if (publication.track?.kind === "video" && source === LK.Track.Source.ScreenShare) {
         removeScreenTile(publication.trackSid);
@@ -5481,7 +6751,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     turnHost = _u.hostname;
   } catch(e) {}
 
-  await room.connect(sfuUrl, accessToken, {
+  await newRoom.connect(sfuUrl, accessToken, {
     autoSubscribe: true,
     rtcConfig: {
       iceServers: [
@@ -5495,15 +6765,47 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       ],
     },
   });
-  if (seq !== connectSequence) { room.disconnect(); return; }
+  if (seq !== connectSequence) { newRoom.disconnect(); return; }
+
+  // New room is connected — NOW disconnect old room and swap
+  if (hadOldRoom && oldRoom) {
+    oldRoom.disconnect();
+    clearMedia();
+    clearSoundboardState();
+    hiddenScreens.clear();
+    watchedScreens.clear();
+  }
+  room = newRoom;
+  // Recreate local participant card immediately so it's first in the list
+  ensureParticipantCard({ identity: localIdentity, name }, true);
   startMediaReconciler();
   try {
     room.startAudio?.();
   } catch {}
-  // Pre-load soundboard sounds so remote playback works even if user never opens the panel
-  loadSoundboardList().catch(() => {});
-  // Check if a Jam is already running so the Now Playing banner appears
-  if (typeof startBannerPolling === "function") startBannerPolling();
+
+  // ── HIGH PRIORITY: Re-enable mic ASAP so users aren't muted after room switch ──
+  // On first connect we need ensureDevicePermissions; on room switch we already have it.
+  currentRoomName = roomId;
+  setPublishButtonsEnabled(true);
+  if (reuseAdmin && micEnabled) {
+    // Room switch: mic was already on, re-enable immediately without permission dance
+    micEnabled = false; // reset so toggleMicOn proceeds
+    toggleMicOn().catch((err) => {
+      debugLog("[mic] room-switch re-enable failed: " + (err.message || err));
+    });
+  } else {
+    // First connect: go through full permission flow
+    ensureDevicePermissions().then(() => refreshDevices()).then(() => {
+      toggleMicOn().catch((err) => {
+        debugLog("[mic] auto-enable failed: " + (err.message || err));
+        setStatus("Mic failed to start — check permissions in System Settings", true);
+      });
+    }).catch((err) => {
+      debugLog("[devices] post-connect device setup failed: " + (err.message || err));
+    });
+  }
+
+  // ── Attach existing remote participants ──
   const remoteList = room.remoteParticipants
     ? (typeof room.remoteParticipants.forEach === "function"
         ? Array.from(room.remoteParticipants.values ? room.remoteParticipants.values() : room.remoteParticipants)
@@ -5512,80 +6814,180 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   remoteList.forEach((participant) => {
     ensureParticipantCard(participant);
     attachParticipantTracks(participant);
+    // Opt-in: detect existing screen shares and show "Start Watching" button
+    var pubs = getParticipantPublications(participant);
+    var hasScreen = pubs.some(function(pub) {
+      return pub && pub.source === LK.Track.Source.ScreenShare;
+    });
+    if (hasScreen) {
+      if (!hiddenScreens.has(participant.identity)) {
+        hiddenScreens.add(participant.identity);
+      }
+      var cardRef = participantCards.get(participant.identity);
+      if (cardRef && cardRef.watchToggleBtn) {
+        cardRef.watchToggleBtn.style.display = "";
+        cardRef.watchToggleBtn.textContent = "Start Watching";
+      }
+    }
   });
-  // Retry existing participants after a delay to catch tracks that load asynchronously
-  setTimeout(() => {
-    remoteList.forEach((participant) => {
-      attachParticipantTracks(participant);
-      resubscribeParticipantTracks(participant);
-    });
-  }, 500);
-  setTimeout(() => {
-    remoteList.forEach((participant) => {
-      attachParticipantTracks(participant);
-      resubscribeParticipantTracks(participant);
-    });
-  }, 1500);
-  scheduleReconcileWaves("post-connect");
+  // Retry existing participants — fast on room switch, full on first connect
+  if (reuseAdmin) {
+    // Room switch: single quick retry (ICE warm, tracks arrive fast)
+    setTimeout(() => {
+      remoteList.forEach((participant) => {
+        attachParticipantTracks(participant);
+        resubscribeParticipantTracks(participant);
+      });
+    }, 300);
+  } else {
+    // First connect: full retry schedule for async track loading
+    setTimeout(() => {
+      remoteList.forEach((participant) => {
+        attachParticipantTracks(participant);
+        resubscribeParticipantTracks(participant);
+      });
+    }, 500);
+    setTimeout(() => {
+      remoteList.forEach((participant) => {
+        attachParticipantTracks(participant);
+        resubscribeParticipantTracks(participant);
+      });
+    }, 1500);
+  }
+  // ── Reconcile: use fast waves on room switch, full waves on first connect ──
+  if (reuseAdmin) {
+    scheduleReconcileWavesFast("room-switch");
+  } else {
+    scheduleReconcileWaves("post-connect");
+  }
   startAudioMonitor();
-  currentRoomName = roomId;
-  if (openSoundboardButton) openSoundboardButton.disabled = false;
-  if (openCameraLobbyButton) openCameraLobbyButton.disabled = false;
-  if (openChatButton) openChatButton.disabled = false;
-  if (bugReportBtn) bugReportBtn.disabled = false;
-  if (openJamButton) openJamButton.disabled = false;
-  if (toggleRoomAudioButton) {
-    toggleRoomAudioButton.disabled = false;
-    setRoomAudioMutedState(false);
+
+  // ── First-connect-only UI setup (skip on room switch) ──
+  if (!reuseAdmin) {
+    if (openSoundboardButton) openSoundboardButton.disabled = false;
+    if (openCameraLobbyButton) openCameraLobbyButton.disabled = false;
+    if (openChatButton) openChatButton.disabled = false;
+    if (bugReportBtn) bugReportBtn.disabled = false;
+    if (openJamButton) openJamButton.disabled = false;
+    if (toggleRoomAudioButton) {
+      toggleRoomAudioButton.disabled = false;
+      setRoomAudioMutedState(false);
+    }
+    if (openSettingsButton) openSettingsButton.disabled = false;
+    if (settingsDevicePanel && deviceActionsEl) {
+      settingsDevicePanel.appendChild(deviceActionsEl);
+      if (deviceStatusEl) settingsDevicePanel.appendChild(deviceStatusEl);
+    }
+    buildChimeSettingsUI();
+    buildVersionSection();
+    primeSoundboardAudio();
+    initializeEmojiPicker();
+    stopOnlineUsersPolling();
+    connectBtn.disabled = true;
+    disconnectBtn.disabled = false;
+    disconnectTopBtn.disabled = false;
+    roomListEl.classList.remove("hidden");
+    connectPanel.classList.add("hidden");
+    startUpdateCheckPolling();
   }
-  if (openSettingsButton) openSettingsButton.disabled = false;
-  if (settingsDevicePanel && deviceActionsEl) {
-    settingsDevicePanel.appendChild(deviceActionsEl);
-    if (deviceStatusEl) settingsDevicePanel.appendChild(deviceStatusEl);
-  }
-  buildChimeSettingsUI();
-  buildVersionSection();
-  primeSoundboardAudio();
-  initializeEmojiPicker();
+
+  // ── Every connect/switch: room-specific data ──
+  loadSoundboardList().catch(() => {});
   loadChatHistory(roomId);
-  // Load own avatar from localStorage and broadcast to room
+  startHeartbeat();
+  startRoomStatusPolling();
+  refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
+  setStatus(`Connected to ${roomId}`);
+  logEvent("room-join", roomId + " as " + identity);
+  if (typeof startBannerPolling === "function") startBannerPolling();
+
+  // Load own avatar from device-keyed storage and broadcast to room
   {
     const identityBase = getIdentityBase(identity);
-    const savedAvatar = echoGet("echo-avatar-" + identityBase);
+    // Try device-keyed storage first, then fall back to old name-keyed storage (migration)
+    var savedAvatar = echoGet("echo-avatar-device");
+    if (!savedAvatar) {
+      // Migrate from old name-based key if it exists
+      savedAvatar = echoGet("echo-avatar-" + identityBase);
+      if (savedAvatar) {
+        echoSet("echo-avatar-device", savedAvatar);
+        debugLog("[device-profile] migrated avatar from echo-avatar-" + identityBase + " to echo-avatar-device");
+      }
+    }
     if (savedAvatar) {
-      // Normalize: strip server origin if stored as absolute URL (legacy)
       const relativePath = savedAvatar.startsWith("/") ? savedAvatar
         : savedAvatar.replace(/^https?:\/\/[^/]+/, "");
       const resolvedAvatar = apiUrl(relativePath);
       avatarUrls.set(identityBase, resolvedAvatar);
       updateAvatarDisplay(identity);
-      // Broadcast relative path so remote users resolve via their own server
-      setTimeout(() => broadcastAvatar(identityBase, relativePath), 2000);
+      // Faster broadcast on room switch (already primed), slower on first connect
+      var avatarDelay = reuseAdmin ? 200 : 2000;
+      setTimeout(() => broadcastAvatar(identityBase, relativePath), avatarDelay);
     }
+    // One-time server-side avatar migration: copy from old identityBase key to deviceId key
+    if (!reuseAdmin) {
+      var _deviceId = getLocalDeviceId();
+      (async function() {
+        try {
+          // Check if avatar exists on server under deviceId
+          var checkRes = await fetch(apiUrl("/api/avatar/" + encodeURIComponent(_deviceId)), { method: "HEAD" });
+          if (!checkRes.ok) {
+            // No avatar under deviceId — check under old identityBase
+            var oldRes = await fetch(apiUrl("/api/avatar/" + encodeURIComponent(identityBase)));
+            if (oldRes.ok) {
+              var blob = await oldRes.blob();
+              // Re-upload under deviceId
+              await fetch(apiUrl("/api/avatar/upload?identity=" + encodeURIComponent(_deviceId)), {
+                method: "POST",
+                headers: { Authorization: "Bearer " + adminToken, "Content-Type": blob.type || "image/jpeg" },
+                body: blob
+              });
+              // Update local storage to point to new server path
+              var newPath = "/api/avatar/" + encodeURIComponent(_deviceId) + "?t=" + Date.now();
+              echoSet("echo-avatar-device", newPath);
+              avatarUrls.set(identityBase, apiUrl(newPath));
+              updateAvatarDisplay(identity);
+              broadcastAvatar(identityBase, newPath);
+              debugLog("[device-profile] migrated server avatar from " + identityBase + " to " + _deviceId);
+            }
+          }
+          // Also migrate chimes: copy from old identityBase key to deviceId key
+          var kinds = ["enter", "exit"];
+          for (var ci = 0; ci < kinds.length; ci++) {
+            var ck = kinds[ci];
+            var chimeCheck = await fetch(apiUrl("/api/chime/" + encodeURIComponent(_deviceId) + "/" + ck), { method: "HEAD" });
+            if (!chimeCheck.ok) {
+              var oldChime = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + ck));
+              if (oldChime.ok) {
+                var chimeBlob = await oldChime.blob();
+                await fetch(apiUrl("/api/chime/upload?identity=" + encodeURIComponent(_deviceId) + "&kind=" + ck), {
+                  method: "POST",
+                  headers: { Authorization: "Bearer " + adminToken, "Content-Type": chimeBlob.type || "audio/mpeg" },
+                  body: chimeBlob
+                });
+                debugLog("[device-profile] migrated server chime " + ck + " from " + identityBase + " to " + _deviceId);
+              }
+            }
+          }
+        } catch (e) {
+          debugLog("[device-profile] server profile migration error: " + (e.message || e));
+        }
+      })();
+    }
+    // Broadcast device ID so other participants can map identity -> device for chime lookups
+    var deviceIdDelay = reuseAdmin ? 100 : 1500;
+    setTimeout(() => broadcastDeviceId(), deviceIdDelay);
   }
-  stopOnlineUsersPolling();
-  connectBtn.disabled = true;
-  disconnectBtn.disabled = false;
-  disconnectTopBtn.disabled = false;
-  roomListEl.classList.remove("hidden");
-  connectPanel.classList.add("hidden");
-  setPublishButtonsEnabled(true);
-  // Refresh devices, then auto-enable mic. On macOS WKWebView, getUserMedia may
-  // need to be called first to unlock device labels, so we ensure permissions
-  // before toggling mic on.
-  ensureDevicePermissions().then(() => refreshDevices()).then(() => {
-    toggleMicOn().catch((err) => {
-      debugLog("[mic] auto-enable failed: " + (err.message || err));
-      setStatus("Mic failed to start — check permissions in System Settings", true);
+
+  // ── Fast room switching: prefetch tokens then pre-warm connections ──
+  setTimeout(() => {
+    prefetchRoomTokens().then(() => {
+      setTimeout(() => prewarmRooms(), 500);
     });
-  }).catch((err) => {
-    debugLog("[devices] post-connect device setup failed: " + (err.message || err));
-  });
-  startHeartbeat();
-  startRoomStatusPolling();
-  refreshRoomList(controlUrl, adminToken, roomId).catch(() => {});
-  setStatus(`Connected to ${roomId}`);
-  startUpdateCheckPolling();
+  }, 1000);
+
+  // Pre-fetch chime audio buffers for all current room participants so playback is instant
+  setTimeout(() => prefetchChimeBuffersForRoom(), 500);
 
 }
 
@@ -5710,7 +7112,14 @@ async function disconnect() {
   sendLeaveNotification();
   stopHeartbeat();
   stopRoomStatusPolling();
-  // Clean up manual screen share tracks before disconnecting
+  // Clean up canvas pipeline before disconnecting
+  if (window._canvasFrameWorker) {
+    try { window._canvasFrameWorker.postMessage("stop"); window._canvasFrameWorker.terminate(); } catch {}
+    window._canvasFrameWorker = null;
+  }
+  if (window._canvasRafId) { cancelAnimationFrame(window._canvasRafId); window._canvasRafId = null; }
+  if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
+  if (window._canvasPipeEl) { window._canvasPipeEl.remove(); window._canvasPipeEl = null; }
   _screenShareVideoTrack?.mediaStreamTrack?.stop();
   _screenShareAudioTrack?.mediaStreamTrack?.stop();
   _screenShareVideoTrack = null;
@@ -5718,6 +7127,7 @@ async function disconnect() {
   disableNoiseCancellation();
   room.disconnect();
   room = null;
+  cleanupPrewarmedRooms(); // Clean up pre-warmed connections and token cache
   clearMedia();
   clearSoundboardState();
   currentAccessToken = "";
@@ -5844,6 +7254,9 @@ async function fetchImageAsBlob(url) {
 function renderChatMessage(message) {
   const messageEl = document.createElement("div");
   messageEl.className = "chat-message";
+  if (message.id) {
+    messageEl.dataset.msgId = message.id;
+  }
 
   const headerEl = document.createElement("div");
   headerEl.className = "chat-message-header";
@@ -5862,6 +7275,19 @@ function renderChatMessage(message) {
   headerEl.appendChild(authorEl);
   headerEl.appendChild(timeEl);
   messageEl.appendChild(headerEl);
+
+  // Delete button — own messages only
+  if (message.identity === room?.localParticipant?.identity && message.id) {
+    var deleteBtn = document.createElement("button");
+    deleteBtn.className = "chat-message-delete";
+    deleteBtn.textContent = "\u00D7";
+    deleteBtn.title = "Delete message";
+    deleteBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      deleteChatMessage(message);
+    });
+    messageEl.appendChild(deleteBtn);
+  }
 
   if (message.type === CHAT_FILE_TYPE && message.fileUrl) {
     if (message.fileType?.startsWith("image/")) {
@@ -5885,20 +7311,9 @@ function renderChatMessage(message) {
         }
       });
 
-      imgEl.addEventListener("click", async () => {
-        // Open image in new tab by fetching with auth
-        try {
-          const token = currentAccessToken || adminToken;
-          const clickUrl = message.fileUrl.startsWith('http') ? message.fileUrl : apiUrl(message.fileUrl);
-          const response = await fetch(clickUrl, {
-            headers: { "Authorization": `Bearer ${token}` }
-          });
-          const blob = await response.blob();
-          const url = URL.createObjectURL(blob);
-          window.open(url, "_blank");
-        } catch (err) {
-          debugLog(`Failed to open image: ${err.message}`);
-        }
+      imgEl.addEventListener("click", () => {
+        // Open full-size image in lightbox overlay
+        if (imgEl.src) openImageLightbox(imgEl.src);
       });
       messageEl.appendChild(imgEl);
 
@@ -6050,13 +7465,15 @@ function addChatMessage(message) {
 function sendChatMessage(text, fileData = null) {
   if (!room || !room.localParticipant) return;
 
+  const ts = Date.now();
   const message = {
     type: fileData ? CHAT_FILE_TYPE : CHAT_MESSAGE_TYPE,
     identity: room.localParticipant.identity,
     name: room.localParticipant.name || room.localParticipant.identity,
     text: text.trim(),
-    timestamp: Date.now(),
-    room: currentRoomName
+    timestamp: ts,
+    room: currentRoomName,
+    id: room.localParticipant.identity + "-" + ts
   };
 
   if (fileData) {
@@ -6335,6 +7752,39 @@ async function saveChatMessage(message) {
     });
   } catch (err) {
     debugLog(`Failed to save chat message: ${err.message}`);
+  }
+}
+
+async function deleteChatMessage(message) {
+  if (!message.id || !room || !room.localParticipant) return;
+  if (message.identity !== room.localParticipant.identity) return;
+  // Remove from server
+  try {
+    var controlUrl = controlUrlInput?.value || "https://127.0.0.1:9443";
+    await fetch(controlUrl + "/api/chat/delete", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: message.id, identity: room.localParticipant.identity, room: currentRoomName })
+    });
+  } catch (err) {
+    debugLog("Failed to delete chat message: " + err.message);
+    return;
+  }
+  // Remove from local history
+  var idx = chatHistory.findIndex(function(m) { return m.id === message.id; });
+  if (idx !== -1) chatHistory.splice(idx, 1);
+  // Remove from DOM
+  var msgEl = chatMessages?.querySelector('[data-msg-id="' + CSS.escape(message.id) + '"]');
+  if (msgEl) msgEl.remove();
+  // Broadcast deletion to other users
+  try {
+    var encoder = new TextEncoder();
+    room.localParticipant.publishData(
+      encoder.encode(JSON.stringify({ type: "chat-delete", id: message.id, identity: room.localParticipant.identity, room: currentRoomName })),
+      { reliable: true }
+    );
+  } catch (err) {
+    debugLog("Failed to broadcast chat deletion: " + err.message);
   }
 }
 
@@ -7017,7 +8467,8 @@ function buildChimeSettingsUI() {
           var mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", webm: "audio/webm", m4a: "audio/mp4", aac: "audio/aac", flac: "audio/flac", opus: "audio/ogg" };
           mime = mimeMap[ext] || "audio/mpeg";
         }
-        var res = await fetch(apiUrl("/api/chime/upload?identity=" + encodeURIComponent(identityBase) + "&kind=" + kind), {
+        var chimeDeviceId = getLocalDeviceId();
+        var res = await fetch(apiUrl("/api/chime/upload?identity=" + encodeURIComponent(chimeDeviceId) + "&kind=" + kind), {
           method: "POST",
           headers: { Authorization: "Bearer " + adminToken, "Content-Type": mime },
           body: file
@@ -7027,7 +8478,7 @@ function buildChimeSettingsUI() {
           statusEl.textContent = file.name;
           previewBtn.classList.remove("hidden");
           removeBtn.classList.remove("hidden");
-          chimeBufferCache.delete(identityBase + "-" + kind);
+          chimeBufferCache.delete(chimeDeviceId + "-" + kind);
         } else {
           statusEl.textContent = (data && data.error) || "Upload failed";
         }
@@ -7038,21 +8489,21 @@ function buildChimeSettingsUI() {
     });
 
     previewBtn.addEventListener("click", async function() {
-      var identityBase = getIdentityBase(room.localParticipant.identity);
-      chimeBufferCache.delete(identityBase + "-" + kind);
-      var buf = await fetchChimeBuffer(identityBase, kind);
+      var chimeDeviceId = getLocalDeviceId();
+      chimeBufferCache.delete(chimeDeviceId + "-" + kind);
+      var buf = await fetchChimeBuffer(chimeDeviceId, kind);
       if (buf) playCustomChime(buf);
     });
 
     removeBtn.addEventListener("click", async function() {
-      var identityBase = getIdentityBase(room.localParticipant.identity);
+      var chimeDeviceId = getLocalDeviceId();
       try {
         await fetch(apiUrl("/api/chime/delete"), {
           method: "POST",
           headers: { Authorization: "Bearer " + adminToken, "Content-Type": "application/json" },
-          body: JSON.stringify({ identity: identityBase, kind: kind })
+          body: JSON.stringify({ identity: chimeDeviceId, kind: kind })
         });
-        chimeBufferCache.delete(identityBase + "-" + kind);
+        chimeBufferCache.delete(chimeDeviceId + "-" + kind);
         previewBtn.classList.add("hidden");
         removeBtn.classList.add("hidden");
         statusEl.textContent = "";
@@ -7062,9 +8513,9 @@ function buildChimeSettingsUI() {
     // Check if chime already exists
     (async function() {
       if (!room || !room.localParticipant) return;
-      var identityBase = getIdentityBase(room.localParticipant.identity);
+      var chimeDeviceId = getLocalDeviceId();
       try {
-        var res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind), { method: "HEAD" });
+        var res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(chimeDeviceId) + "/" + kind), { method: "HEAD" });
         if (res.ok) {
           previewBtn.classList.remove("hidden");
           removeBtn.classList.remove("hidden");
@@ -7134,7 +8585,7 @@ function buildVersionSection() {
           latestClient = verData.latest_client || "";
         }
       }
-      if (latestClient && currentVer && latestClient !== currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "...") {
+      if (latestClient && currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "..." && isNewerVersion(latestClient, currentVer)) {
         updateStatus.textContent = "Update available: v" + latestClient + "!";
         // Try Tauri auto-update if available
         if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
@@ -7703,6 +9154,7 @@ function toggleAdminDash() {
     fetchAdminBugs();
     _adminDashTimer = setInterval(function() {
       fetchAdminDashboard();
+      fetchAdminMetrics();
     }, 3000);
   } else {
     panel.classList.add("hidden");
