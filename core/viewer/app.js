@@ -358,6 +358,9 @@ let currentAccessToken = "";
 const roomSwitchState = (window.EchoRoomSwitchState && window.EchoRoomSwitchState.createRoomSwitchState)
   ? window.EchoRoomSwitchState.createRoomSwitchState({ initialRoomName: currentRoomName, cooldownMs: 500 })
   : null;
+const publishStateReconcile = (window.EchoPublishStateReconcile && window.EchoPublishStateReconcile.reconcilePublishIndicators)
+  ? window.EchoPublishStateReconcile.reconcilePublishIndicators
+  : null;
 const IDENTITY_SUFFIX_KEY = "echo-core-identity-suffix";
 const DEVICE_ID_KEY = "echo-core-device-id";
 let audioMonitorTimer = null;
@@ -4464,6 +4467,7 @@ function runFullReconcile(reason) {
   if (room.remoteParticipants?.forEach) {
     room.remoteParticipants.forEach((participant) => reconcileParticipantMedia(participant));
   }
+  reconcileLocalPublishIndicators(reason || "full-reconcile");
   // Diagnostic: log remote participants and their screen share status
   if (room.remoteParticipants?.size > 0) {
     const LK = getLiveKitClient();
@@ -5148,6 +5152,36 @@ function renderPublishButtons() {
   micBtn.classList.toggle("is-on", micEnabled);
   camBtn.classList.toggle("is-on", camEnabled);
   screenBtn.classList.toggle("is-on", screenEnabled);
+}
+
+function reconcileLocalPublishIndicators(reason) {
+  if (!publishStateReconcile || !room || !room.localParticipant) return;
+  const LK = getLiveKitClient();
+  const pubs = getParticipantPublications(room.localParticipant);
+  const cameraPublished = pubs.some((pub) =>
+    pub &&
+    pub.source === LK?.Track?.Source?.Camera &&
+    pub.kind === LK?.Track?.Kind?.Video &&
+    !!pub.track
+  );
+  const screenPublished = pubs.some((pub) =>
+    pub &&
+    pub.source === LK?.Track?.Source?.ScreenShare &&
+    pub.kind === LK?.Track?.Kind?.Video &&
+    !!pub.track
+  );
+
+  const out = publishStateReconcile(
+    { camEnabled, screenEnabled },
+    { cameraPublished, screenPublished }
+  );
+
+  if (out.anyDrift) {
+    camEnabled = out.next.camEnabled;
+    screenEnabled = out.next.screenEnabled;
+    renderPublishButtons();
+    debugLog(`[publish-reconcile] ${reason || "unknown"} camera=${camEnabled} screen=${screenEnabled}`);
+  }
 }
 
 function setSelectOptions(select, items, placeholder) {
@@ -6739,6 +6773,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           }
         }
       }
+      reconcileLocalPublishIndicators("local-track-published");
     });
   }
   if (LK.RoomEvent?.LocalTrackUnpublished) {
@@ -6777,6 +6812,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           state.micAnalyser = null;
         }
       }
+      reconcileLocalPublishIndicators("local-track-unpublished");
     });
   }
 
@@ -6828,6 +6864,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     currentRoomName = roomId;
   }
   setPublishButtonsEnabled(true);
+  reconcileLocalPublishIndicators("post-connect");
   if (reuseAdmin && micEnabled) {
     // Room switch: mic was already on, re-enable immediately without permission dance
     micEnabled = false; // reset so toggleMicOn proceeds
