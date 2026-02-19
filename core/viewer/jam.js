@@ -18,6 +18,44 @@ var _jamAudioWs = null;        // WebSocket connection
 var _jamAudioCtx = null;       // AudioContext for playback
 var _jamGainNode = null;       // GainNode for volume control
 var _jamNextPlayTime = 0;      // next scheduled buffer start time
+var _jamReconnectTimer = null;
+var _jamSessionState = (window.EchoJamSessionState && window.EchoJamSessionState.createJamSessionState)
+  ? window.EchoJamSessionState.createJamSessionState({ reconnectBaseMs: 500, reconnectMaxMs: 8000 })
+  : null;
+
+function syncJamButtonsFromState() {
+  if (!_jamSessionState || !_jamSessionState.ui) return;
+  var ui = _jamSessionState.ui();
+  var joinBtn = document.getElementById("jam-join-btn");
+  var leaveBtn = document.getElementById("jam-leave-btn");
+  if (joinBtn) joinBtn.style.display = ui.joinVisible ? "" : "none";
+  if (leaveBtn) leaveBtn.style.display = ui.leaveVisible ? "" : "none";
+}
+
+function clearJamReconnectTimer() {
+  if (_jamReconnectTimer) {
+    clearTimeout(_jamReconnectTimer);
+    _jamReconnectTimer = null;
+  }
+}
+
+function scheduleJamReconnect(delayMs) {
+  clearJamReconnectTimer();
+  _jamReconnectTimer = setTimeout(function() {
+    _jamReconnectTimer = null;
+    if (!_jamSessionState || !_jamSessionState.reconnectAttemptStarted) {
+      startJamAudioStream();
+      return;
+    }
+    var step = _jamSessionState.reconnectAttemptStarted();
+    if (!step.shouldConnect) {
+      syncJamButtonsFromState();
+      return;
+    }
+    syncJamButtonsFromState();
+    startJamAudioStream();
+  }, Math.max(0, delayMs || 0));
+}
 
 // === HTML Escape ===
 function escapeHtml(str) {
@@ -330,6 +368,10 @@ async function addToQueue(track) {
 
 async function joinJam() {
   try {
+    if (_jamSessionState && _jamSessionState.requestJoin) {
+      _jamSessionState.requestJoin();
+      syncJamButtonsFromState();
+    }
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
     var resp = await fetch(apiUrl("/api/jam/join"), {
       method: "POST",
@@ -337,19 +379,26 @@ async function joinJam() {
       body: JSON.stringify({ identity: identity })
     });
     if (!resp.ok) {
+      if (_jamSessionState && _jamSessionState.joinRejected) {
+        _jamSessionState.joinRejected("join-status-" + resp.status);
+        syncJamButtonsFromState();
+      }
       showJamError("Join failed (status " + resp.status + ")");
       debugLog("[jam] joinJam server error: " + resp.status);
       return;
     }
+    if (_jamSessionState && _jamSessionState.joinAccepted) {
+      _jamSessionState.joinAccepted();
+      syncJamButtonsFromState();
+    }
     // Start receiving audio via WebSocket
     startJamAudioStream();
-    // Immediately update button state so Leave is responsive
-    var joinBtn = document.getElementById("jam-join-btn");
-    var leaveBtn = document.getElementById("jam-leave-btn");
-    if (joinBtn) joinBtn.style.display = "none";
-    if (leaveBtn) leaveBtn.style.display = "";
     fetchJamState();
   } catch (e) {
+    if (_jamSessionState && _jamSessionState.joinRejected) {
+      _jamSessionState.joinRejected(e && e.message ? e.message : "join-error");
+      syncJamButtonsFromState();
+    }
     showJamError("Join failed: " + e.message);
     debugLog("[jam] joinJam error: " + e);
   }
@@ -357,24 +406,38 @@ async function joinJam() {
 
 async function leaveJam() {
   try {
+    if (_jamSessionState && _jamSessionState.requestLeave) {
+      _jamSessionState.requestLeave();
+      syncJamButtonsFromState();
+    }
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
-    // Stop audio immediately so user gets instant feedback
-    stopJamAudioStream();
-    // Immediately update button state
-    var joinBtn = document.getElementById("jam-join-btn");
-    var leaveBtn = document.getElementById("jam-leave-btn");
-    if (joinBtn) joinBtn.style.display = "";
-    if (leaveBtn) leaveBtn.style.display = "none";
     var resp = await fetch(apiUrl("/api/jam/leave"), {
       method: "POST",
       headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
       body: JSON.stringify({ identity: identity })
     });
     if (!resp.ok) {
+      if (_jamSessionState && _jamSessionState.leaveFailed) {
+        _jamSessionState.leaveFailed("leave-status-" + resp.status);
+        syncJamButtonsFromState();
+      }
       debugLog("[jam] leaveJam server error: " + resp.status);
+      if (!_jamAudioWs) scheduleJamReconnect(0);
+      return;
     }
+    if (_jamSessionState && _jamSessionState.leaveSucceeded) {
+      _jamSessionState.leaveSucceeded();
+      syncJamButtonsFromState();
+    }
+    clearJamReconnectTimer();
+    stopJamAudioStream();
     fetchJamState();
   } catch (e) {
+    if (_jamSessionState && _jamSessionState.leaveFailed) {
+      _jamSessionState.leaveFailed(e && e.message ? e.message : "leave-error");
+      syncJamButtonsFromState();
+    }
+    if (!_jamAudioWs) scheduleJamReconnect(0);
     showJamError("Leave failed: " + e.message);
     debugLog("[jam] leaveJam error: " + e);
   }
@@ -446,9 +509,25 @@ function renderJamPanel() {
   var joinBtn = document.getElementById("jam-join-btn");
   var leaveBtn = document.getElementById("jam-leave-btn");
   var listenCount = document.getElementById("jam-listener-count");
-  if (joinBtn) joinBtn.style.display = (!isListening && _jamState.active) ? "" : "none";
-  if (leaveBtn) leaveBtn.style.display = (isListening && _jamState.active) ? "" : "none";
   if (listenCount) listenCount.textContent = (_jamState.listener_count || 0) + " listening";
+
+  if (_jamSessionState && _jamSessionState.snapshot) {
+    var snap = _jamSessionState.snapshot();
+    var serverListening = isListening && _jamState.active;
+
+    if (!_jamState.active && _jamSessionState.leaveSucceeded) {
+      _jamSessionState.leaveSucceeded();
+    } else if (serverListening && !snap.serverJoined && _jamSessionState.joinAccepted) {
+      _jamSessionState.joinAccepted();
+    } else if (!serverListening && snap.serverJoined && !snap.pendingLeave && _jamSessionState.leaveSucceeded) {
+      _jamSessionState.leaveSucceeded();
+    }
+
+    syncJamButtonsFromState();
+  } else {
+    if (joinBtn) joinBtn.style.display = (!isListening && _jamState.active) ? "" : "none";
+    if (leaveBtn) leaveBtn.style.display = (isListening && _jamState.active) ? "" : "none";
+  }
 
   // Search + queue sections visible only when spotify connected
   var searchSection = document.getElementById("jam-search-section");
@@ -578,6 +657,11 @@ function startJamAudioStream() {
 
     ws.onopen = function() {
       debugLog("[jam] audio WebSocket connected");
+      if (_jamSessionState && _jamSessionState.streamOpen) {
+        _jamSessionState.streamOpen();
+        syncJamButtonsFromState();
+      }
+      clearJamReconnectTimer();
     };
 
     ws.onmessage = function(e) {
@@ -610,12 +694,26 @@ function startJamAudioStream() {
     ws.onclose = function() {
       debugLog("[jam] audio WebSocket closed");
       _jamAudioWs = null;
+      if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+        var closeState = _jamSessionState.streamClosedTransient("ws-close");
+        syncJamButtonsFromState();
+        if (closeState.shouldReconnect) {
+          scheduleJamReconnect(closeState.delayMs);
+        }
+      }
     };
 
     ws.onerror = function(e) {
       debugLog("[jam] audio WebSocket error: " + (e.message || e.type || "unknown"));
       _jamAudioWs = null;
-      if (typeof showToast === "function") showToast("Jam audio connection failed — try rejoining");
+      if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+        var errState = _jamSessionState.streamClosedTransient(e.message || e.type || "ws-error");
+        syncJamButtonsFromState();
+        if (errState.shouldReconnect) {
+          scheduleJamReconnect(errState.delayMs);
+        }
+      }
+      if (typeof showToast === "function") showToast("Jam audio dropped — retrying");
     };
   } catch (ex) {
     debugLog("[jam] startJamAudioStream exception: " + ex.message);
@@ -623,6 +721,7 @@ function startJamAudioStream() {
 }
 
 function stopJamAudioStream() {
+  clearJamReconnectTimer();
   if (_jamAudioWs) {
     _jamAudioWs.close();
     _jamAudioWs = null;
@@ -766,6 +865,8 @@ function initJam() {
   var volumeInput = document.getElementById("jam-volume-slider");
   if (volumeInput) volumeInput.oninput = onJamVolumeChange;
 
+  syncJamButtonsFromState();
+
   // Start polling
   fetchJamState();
   _jamPollTimer = setInterval(fetchJamState, 5000);
@@ -785,6 +886,11 @@ function cleanupJam() {
   updateNowPlayingBanner(null);
   _jamState = null;
   _jamInited = false;
+  clearJamReconnectTimer();
+  if (_jamSessionState && _jamSessionState.leaveSucceeded) {
+    _jamSessionState.leaveSucceeded();
+    syncJamButtonsFromState();
+  }
   stopJamAudioStream();
   closeJamPanel();
 }

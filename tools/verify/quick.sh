@@ -11,7 +11,7 @@ node --check core/viewer/app.js
 node --check core/viewer/jam.js
 
 echo "[verify] JS deterministic tests"
-node --test core/viewer/room-switch-state.test.js
+node --test core/viewer/*.test.js
 
 if [[ "${VERIFY_SKIP_RUST:-0}" == "1" ]]; then
   echo "[verify] skipping Rust checks (VERIFY_SKIP_RUST=1)"

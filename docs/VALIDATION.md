@@ -11,7 +11,7 @@ bash tools/verify/quick.sh
 
 What it does:
 - JS syntax check for viewer files
-- Deterministic JS state tests (`node --test core/viewer/room-switch-state.test.js`)
+- Deterministic JS state tests (`node --test core/viewer/*.test.js`)
 - Rust compile check for control plane (`cargo check -p echo-core-control`)
 - (Optional) Rust formatting check when enabled (`VERIFY_RUN_FMT=1`)
 
