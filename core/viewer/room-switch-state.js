@@ -51,6 +51,18 @@
     }
 
     function markConnected(connectedRoomName) {
+      // Ignore stale "connected" callbacks that can arrive out-of-order while a
+      // switch is in-flight (e.g. old room emits connected after new room switch
+      // already started). Only the pending target is allowed to commit the switch.
+      if (
+        state.isSwitching &&
+        connectedRoomName &&
+        state.pendingRoomName &&
+        connectedRoomName !== state.pendingRoomName
+      ) {
+        return state.activeRoomName;
+      }
+
       const nextRoom = connectedRoomName || state.pendingRoomName || state.activeRoomName;
       state.connectedRoomName = nextRoom;
       state.activeRoomName = nextRoom;

@@ -82,3 +82,31 @@ test("same-room request is denied after switch commit", () => {
   assert.equal(denied.ok, false);
   assert.equal(denied.reason, "same-room");
 });
+
+test("stale markConnected callback is ignored while switching", () => {
+  const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+  s.requestSwitch("breakout-1", 1_000);
+
+  // Old room callback arrives out-of-order during in-flight switch.
+  const room = s.markConnected("main");
+  assert.equal(room, "breakout-1");
+
+  assert.deepEqual(s.snapshot(), {
+    connectedRoomName: "main",
+    activeRoomName: "breakout-1",
+    pendingRoomName: "breakout-1",
+    isSwitching: true,
+    lastSwitchRequestedAt: 1_000,
+    cooldownMs: 0,
+  });
+});
+
+test("pending room commits when markConnected is called without explicit room", () => {
+  const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+  s.requestSwitch("breakout-2", 1_000);
+
+  const room = s.markConnected();
+  assert.equal(room, "breakout-2");
+  assert.equal(s.snapshot().isSwitching, false);
+  assert.equal(s.snapshot().connectedRoomName, "breakout-2");
+});

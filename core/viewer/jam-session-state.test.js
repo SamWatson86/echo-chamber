@@ -92,3 +92,28 @@ test("reconnectAttemptStarted is blocked after leave request", () => {
   assert.equal(s.snapshot().pendingLeave, true);
   assert.equal(s.ui().leaveVisible, true);
 });
+
+test("transient close after leave success never schedules reconnect", () => {
+  const s = createJamSessionState({ reconnectBaseMs: 100, reconnectMaxMs: 400 });
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+  s.requestLeave();
+  s.leaveSucceeded();
+
+  const close = s.streamClosedTransient("late-close");
+  assert.equal(close.shouldReconnect, false);
+  assert.equal(close.delayMs, 0);
+  assert.equal(s.snapshot().reconnectAttempt, 0);
+});
+
+test("connect attempt is blocked after join rejection race", () => {
+  const s = createJamSessionState();
+  s.requestJoin();
+  s.joinAccepted();
+  s.joinRejected("server-denied");
+
+  const reconnect = s.reconnectAttemptStarted();
+  assert.equal(reconnect.shouldConnect, false);
+  assert.equal(s.ui().status, "error");
+});

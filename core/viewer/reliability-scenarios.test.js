@@ -49,3 +49,47 @@ test("jam reconnect loop is deterministic and resets after successful stream ope
   assert.equal(jam.snapshot().reconnectAttempt, 0);
   assert.equal(jam.ui().status, "connected");
 });
+
+test("stale room-connected callback does not override pending switch publish truth", () => {
+  const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+  rooms.requestSwitch("breakout", 1_000);
+
+  // Stale callback from prior room must not collapse in-flight switch.
+  rooms.markConnected("main");
+  assert.equal(rooms.snapshot().isSwitching, true);
+  assert.equal(rooms.snapshot().activeRoomName, "breakout");
+
+  // During transition, callbacks may report camera still published in old room.
+  const reconciled = reconcilePublishIndicators(
+    { camEnabled: false, screenEnabled: false },
+    { cameraPublished: true, screenPublished: false }
+  );
+  assert.equal(reconciled.next.camEnabled, true);
+
+  rooms.markConnected("breakout");
+  assert.equal(rooms.snapshot().isSwitching, false);
+  assert.equal(rooms.snapshot().connectedRoomName, "breakout");
+});
+
+test("room switch transition converges when publication callbacks arrive in opposite order", () => {
+  const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+
+  rooms.requestSwitch("breakout-2", 1_000);
+
+  // First callback says everything unpublished (disconnect edge)
+  const first = reconcilePublishIndicators(
+    { camEnabled: true, screenEnabled: true },
+    { cameraPublished: false, screenPublished: false }
+  );
+  assert.deepEqual(first.next, { camEnabled: false, screenEnabled: false });
+
+  // Later callback says screen actually published (late subscribe edge)
+  const second = reconcilePublishIndicators(
+    first.next,
+    { cameraPublished: false, screenPublished: true }
+  );
+  assert.deepEqual(second.next, { camEnabled: false, screenEnabled: true });
+
+  rooms.markConnected("breakout-2");
+  assert.equal(rooms.heartbeatRoomName(), "breakout-2");
+});
