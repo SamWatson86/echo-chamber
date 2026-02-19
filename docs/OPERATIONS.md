@@ -1,51 +1,66 @@
-# Operations (Runbook)
+# Operations Runbook
 
-## Start / Stop (Tray)
-Echo Chamber installs a Windows tray launcher at login.
+This runbook is intentionally short and practical for a friend-group service.
 
-Tray script:
-- `tools/echo-tray.ps1`
-- Startup entry: `%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\Echo Chamber Tray.vbs`
+## Deployment modes
 
-If the tray icon is visible:
-- Right-click tray icon -> Start/Stop/Restart Server
-- "Open Admin UI" opens the local web UI
-- "Open Logs Folder" opens the log directory
+### Mode A: Central/shared server
+- One host runs the control runtime.
+- Clients (browser or desktop) connect to that host.
+- Most behavior changes are deployed server-side.
 
-## Startup behavior
-The tray launcher auto-starts the server on login.
-If the server process is missing or the port isn't listening, the launcher retries.
+### Mode B: Local desktop-hosted runtime
+- A desktop app instance runs the runtime locally for usage.
+- Updates may require desktop binary refresh depending on what changed.
 
-## Verify server is running
-PowerShell:
-```
-Get-NetTCPConnection -LocalPort 8443 -State Listen
-```
+Use [Release Boundaries](./RELEASE-BOUNDARIES.md) to decide whether a binary release is required.
 
-Open UI:
-- `https://localhost:8443`
+---
 
-## Logs
-Server log (desktop):
-- `%APPDATA%\\@echo\\desktop\\logs\\echo-chamber-server.log`
+## Daily operator checklist
 
-Tray log:
-- `%APPDATA%\\@echo\\desktop\\logs\\echo-tray.log`
+1. Confirm service is reachable.
+2. Confirm logs are being written.
+3. Verify a basic room join + audio path.
+4. Spot-check room switch and jam join/leave flows.
 
-TURN log (if enabled):
-- `%APPDATA%\\@echo\\desktop\\logs\\echo-turn.log`
+---
 
-## Common problems
-1) Tray launched but server not running
-- Check `echo-tray.log`
-- Check for a stale PID in `%APPDATA%\\@echo\\desktop\\echo-server.pid`
+## Incident triage (quick flow)
 
-2) Screen share shows blank tile
-- Browser autoplay restrictions can block video play.
-- Re-click/tap the page or re-join; the client also attempts recovery.
+1. **Classify**
+   - Server/API failure
+   - Client state regression
+   - Media transport issue
+2. **Scope**
+   - One user vs everyone
+   - One room vs all rooms
+3. **Gather evidence**
+   - timestamps
+   - user action sequence
+   - relevant logs/console output
+4. **Contain**
+   - rollback or restart affected component
+5. **Document**
+   - open/update issue with repro steps and impact
 
-3) No mic audio
-- Check output device selection in Settings.
-- Verify "Mute All" is not active.
-- Confirm the peer is not muted in Active Users.
+---
 
+## Logs and diagnostics
+
+Capture enough to reproduce, not just enough to speculate.
+
+Recommended minimum in issue reports:
+- environment (desktop/browser, OS, app version)
+- exact actions performed
+- expected vs actual behavior
+- timestamps + relevant logs
+
+---
+
+## Change management
+
+- No direct pushes to `main`/`master`.
+- PRs only.
+- Verification checks must pass before merge.
+- Prefer small, focused PRs after foundation lands.

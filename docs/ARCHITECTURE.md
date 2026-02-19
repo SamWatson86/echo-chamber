@@ -1,34 +1,57 @@
 # Architecture
 
-Echo Chamber is a self-hosted WebRTC app for mic + screen sharing.
-It uses a simple peer-to-peer mesh: each participant connects to every other participant.
+Echo Chamber currently has two practical runtime surfaces:
 
-## Components
-- apps/server
-  - Express server for API + static web UI
-  - WebSocket signaling server (rooms, peers, SDP/candidates)
-- apps/server/public
-  - Web UI (login, lobby, rooms, screen grid, camera lobby, soundboard)
-- apps/desktop
-  - Electron wrapper that starts the server locally and opens the UI
-- tools/turn
-  - Optional self-hosted TURN server (UDP) for WAN/cellular reliability
+1. **Control plane + viewer (core stack)**
+2. **Desktop client wrapper (Tauri/native packaging + updater hooks)**
 
-## Media flow
-- Each peer publishes:
-  - mic audio
-  - optional screen video + screen audio
-  - optional camera video
-- Track roles are tagged via "track-meta" messages to keep camera/screen distinct.
-- Each client renders:
-  - Screens grid (screen video only)
-  - Camera lobby (camera video only)
-  - Active users bar (avatar or camera mini)
-- Audio playback:
-  - Mic + screen audio are mixed into a single output using WebAudio.
-  - Per-peer volume and mute controls adjust gain nodes.
+The key operational reality: some changes are **server/runtime** only, while others are **packaged desktop** changes. That boundary drives release decisions.
 
-## Limits
-- P2P mesh scales poorly. Keep rooms small (default MAX_PEERS_PER_ROOM=8).
-- Browser WebRTC controls final quality. "Max" settings are only targets.
+---
 
+## High-level component map
+
+- `core/control` (Rust)
+  - Auth, room/session endpoints, state, and service APIs
+  - Serves/coordinates viewer-facing behavior
+- `core/viewer` (JS/HTML)
+  - Client UX (rooms, media controls, jam/audio interactions)
+  - Connects to control/media surfaces and renders participant state
+- `core/desktop` (Tauri)
+  - Native shell/runtime integration
+  - App lifecycle, platform integration, updater IPC
+- `tools/*`
+  - Operational scripts (deployment, TURN/runtime helpers, utilities)
+
+---
+
+## Runtime boundaries
+
+### Server-side/runtime boundary
+Changes here are applied when the server/runtime is deployed/restarted.
+
+Typical examples:
+- API behavior
+- room/session rules
+- server-side bug handling
+- runtime config defaults
+
+### Client/UI boundary
+Changes in viewer logic affect user behavior and can be regression-prone in transitions/races.
+
+Typical examples:
+- room-switch state handling
+- jam join/leave/reconnect UX
+- publish-state indicator truthfulness
+
+### Desktop binary boundary
+Changes in Tauri/native shell or packaged assets generally require publishing new desktop artifacts (EXE/DMG) for installed desktop users.
+
+---
+
+## Design principles for this project
+
+- Prefer conventional, boring patterns over cleverness.
+- Treat user-facing state transitions as first-class correctness concerns.
+- Keep boundaries explicit so release decisions are predictable.
+- Make regressions hard by anchoring behavior in deterministic tests.
