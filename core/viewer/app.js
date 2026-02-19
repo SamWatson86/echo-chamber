@@ -355,6 +355,12 @@ let adminToken = "";
 let _latestScreenStats = null;
 let currentRoomName = "main";
 let currentAccessToken = "";
+const roomSwitchState = (window.EchoRoomSwitchState && window.EchoRoomSwitchState.createRoomSwitchState)
+  ? window.EchoRoomSwitchState.createRoomSwitchState({ initialRoomName: currentRoomName, cooldownMs: 500 })
+  : null;
+const publishStateReconcile = (window.EchoPublishStateReconcile && window.EchoPublishStateReconcile.reconcilePublishIndicators)
+  ? window.EchoPublishStateReconcile.reconcilePublishIndicators
+  : null;
 const IDENTITY_SUFFIX_KEY = "echo-core-identity-suffix";
 const DEVICE_ID_KEY = "echo-core-device-id";
 let audioMonitorTimer = null;
@@ -2625,10 +2631,13 @@ function startHeartbeat() {
   const sendBeat = () => {
     const identity = identityInput ? identityInput.value : "";
     const name = nameInput.value.trim() || "Viewer";
+    const beatRoom = roomSwitchState && roomSwitchState.heartbeatRoomName
+      ? roomSwitchState.heartbeatRoomName()
+      : currentRoomName;
     fetch(`${controlUrl}/v1/participants/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ room: currentRoomName, identity, name }),
+      body: JSON.stringify({ room: beatRoom, identity, name }),
     }).catch(() => {});
   };
   sendBeat();
@@ -2703,23 +2712,42 @@ var _lastRoomSwitchTime = 0;
 async function switchRoom(roomId) {
   if (!room) return;
   if (roomId === currentRoomName) return;
-  if (switchingRoom) {
-    debugLog(`Switch to ${roomId} ignored — already switching`);
-    return;
-  }
-  // Cooldown: prevent rapid switching (500ms minimum — safe with pre-warmed connections)
+
   var now = Date.now();
-  if (now - _lastRoomSwitchTime < 500) {
-    debugLog(`Switch to ${roomId} ignored — cooldown`);
-    return;
+  var fromRoom = currentRoomName;
+
+  if (roomSwitchState && roomSwitchState.requestSwitch) {
+    var decision = roomSwitchState.requestSwitch(roomId, now);
+    if (!decision.ok) {
+      if (decision.reason === "in-flight") {
+        debugLog(`Switch to ${roomId} ignored — already switching`);
+      } else if (decision.reason === "cooldown") {
+        debugLog(`Switch to ${roomId} ignored — cooldown`);
+      }
+      return;
+    }
+    fromRoom = decision.fromRoom || currentRoomName;
+    currentRoomName = roomSwitchState.snapshot().activeRoomName;
+  } else {
+    if (switchingRoom) {
+      debugLog(`Switch to ${roomId} ignored — already switching`);
+      return;
+    }
+    // Cooldown: prevent rapid switching (500ms minimum — safe with pre-warmed connections)
+    if (now - _lastRoomSwitchTime < 500) {
+      debugLog(`Switch to ${roomId} ignored — cooldown`);
+      return;
+    }
+    _lastRoomSwitchTime = now;
+    currentRoomName = roomId;
   }
-  _lastRoomSwitchTime = now;
+
   switchingRoom = true;
   _isRoomSwitch = true;
   // Remember mic state before switch so we can restore it
   var wasMicEnabled = micEnabled;
-  debugLog(`Switching from ${currentRoomName} to ${roomId} (mic was ${wasMicEnabled ? "on" : "off"})`);
-  currentRoomName = roomId;
+  debugLog(`Switching from ${fromRoom} to ${roomId} (mic was ${wasMicEnabled ? "on" : "off"})`);
+
   try {
     const controlUrl = controlUrlInput.value.trim();
     const sfuUrl = sfuUrlInput.value.trim();
@@ -2729,6 +2757,17 @@ async function switchRoom(roomId) {
       identityInput.value = identity;
     }
     await connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuseAdmin: true });
+    if (roomSwitchState && roomSwitchState.markConnected) {
+      roomSwitchState.markConnected(roomId);
+      currentRoomName = roomSwitchState.snapshot().activeRoomName;
+    }
+  } catch (err) {
+    if (roomSwitchState && roomSwitchState.markFailed) {
+      roomSwitchState.markFailed();
+      currentRoomName = roomSwitchState.snapshot().activeRoomName;
+    }
+    _isRoomSwitch = false;
+    throw err;
   } finally {
     switchingRoom = false;
   }
@@ -4428,6 +4467,7 @@ function runFullReconcile(reason) {
   if (room.remoteParticipants?.forEach) {
     room.remoteParticipants.forEach((participant) => reconcileParticipantMedia(participant));
   }
+  reconcileLocalPublishIndicators(reason || "full-reconcile");
   // Diagnostic: log remote participants and their screen share status
   if (room.remoteParticipants?.size > 0) {
     const LK = getLiveKitClient();
@@ -5112,6 +5152,36 @@ function renderPublishButtons() {
   micBtn.classList.toggle("is-on", micEnabled);
   camBtn.classList.toggle("is-on", camEnabled);
   screenBtn.classList.toggle("is-on", screenEnabled);
+}
+
+function reconcileLocalPublishIndicators(reason) {
+  if (!publishStateReconcile || !room || !room.localParticipant) return;
+  const LK = getLiveKitClient();
+  const pubs = getParticipantPublications(room.localParticipant);
+  const cameraPublished = pubs.some((pub) =>
+    pub &&
+    pub.source === LK?.Track?.Source?.Camera &&
+    pub.kind === LK?.Track?.Kind?.Video &&
+    !!pub.track
+  );
+  const screenPublished = pubs.some((pub) =>
+    pub &&
+    pub.source === LK?.Track?.Source?.ScreenShare &&
+    pub.kind === LK?.Track?.Kind?.Video &&
+    !!pub.track
+  );
+
+  const out = publishStateReconcile(
+    { camEnabled, screenEnabled },
+    { cameraPublished, screenPublished }
+  );
+
+  if (out.anyDrift) {
+    camEnabled = out.next.camEnabled;
+    screenEnabled = out.next.screenEnabled;
+    renderPublishButtons();
+    debugLog(`[publish-reconcile] ${reason || "unknown"} camera=${camEnabled} screen=${screenEnabled}`);
+  }
 }
 
 function setSelectOptions(select, items, placeholder) {
@@ -6703,6 +6773,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           }
         }
       }
+      reconcileLocalPublishIndicators("local-track-published");
     });
   }
   if (LK.RoomEvent?.LocalTrackUnpublished) {
@@ -6741,6 +6812,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           state.micAnalyser = null;
         }
       }
+      reconcileLocalPublishIndicators("local-track-unpublished");
     });
   }
 
@@ -6785,8 +6857,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
 
   // ── HIGH PRIORITY: Re-enable mic ASAP so users aren't muted after room switch ──
   // On first connect we need ensureDevicePermissions; on room switch we already have it.
-  currentRoomName = roomId;
+  if (roomSwitchState && roomSwitchState.forceConnected) {
+    roomSwitchState.forceConnected(roomId);
+    currentRoomName = roomSwitchState.snapshot().activeRoomName;
+  } else {
+    currentRoomName = roomId;
+  }
   setPublishButtonsEnabled(true);
+  reconcileLocalPublishIndicators("post-connect");
   if (reuseAdmin && micEnabled) {
     // Room switch: mic was already on, re-enable immediately without permission dance
     micEnabled = false; // reset so toggleMicOn proceeds
