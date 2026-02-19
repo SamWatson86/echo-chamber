@@ -1,36 +1,25 @@
 # AGENTS
 
-## Project summary
-Echo Chamber is a self-hosted, password-protected, real-time room for mic + screen sharing.
-The host runs the server on their Windows 11 machine; friends join in a browser.
-A desktop app (Electron) is provided for installing and hosting on Windows.
+## Scope
+Echo Chamber is a self-hosted real-time communication app. In this repo, active product development is centered in `core/`.
 
-## Repo structure
-- apps/server: Express + WebSocket signaling server and static web client
-- apps/server/public: UI (login, lobby, call controls)
-- apps/desktop: Electron wrapper that starts the server and opens the local UI
-- tools/turn: Self-hosted TURN server (Go) + startup scripts
+## Where to work
+- `core/control/` — Rust control plane (API/auth/room state, serves viewer)
+- `core/viewer/` — browser UI/state transitions/media UX
+- `core/client/` — Tauri desktop shell/updater/native integrations
+- `core/sfu/`, `core/turn/` — media transport infrastructure
+- `docs/` — project operating docs and decision records
 
-## Common commands
-- npm install
-- npm run dev (server only)
-- npm run start (server production)
-- npm run build (server + desktop)
-- npm run pack:win (Windows installer)
-- npm run setup:env -w @echo/server "password"
+## Core guardrails
+- PRs only. Never push directly to `main`/`master`.
+- Prefer small, focused diffs over broad rewrites.
+- Keep release impact explicit: server-only vs desktop-binary vs both.
+- Avoid one-off patterns; prefer conventional, maintainable approaches.
 
-## Environment setup
-- Copy apps/server/.env.example to .env (repo root) or apps/server/.env
-- Generate AUTH_PASSWORD_HASH with npm run hash:password -w @echo/server "yourpassword"
-- Or generate a full .env: npm run setup:env -w @echo/server "yourpassword"
-- Set AUTH_JWT_SECRET to a long random string
-- For screen sharing over LAN/WAN, use HTTPS with TLS_CERT_PATH and TLS_KEY_PATH
-- Optional: set ICE_SERVERS_JSON (TURN/STUN), MAX_PEERS_PER_ROOM, and SERVER_NAME
-- Self-hosted TURN: tools/turn/run-turn.ps1 (ports UDP 3478, UDP 49152-49200)
-- Logs: LOG_DIR or LOG_FILE (defaults to logs/echo-chamber-server.log or %APPDATA%\\@echo\\desktop\\logs)
+## Quality expectations
+- Any user-facing behavior change should include verification evidence.
+- Add or update regression coverage when touching state/race-prone paths.
+- Update docs when behavior or boundaries change.
 
-## Development practices
-- Keep network-facing behavior explicit and documented in README
-- Prefer small, testable changes; avoid auto-generated diffs in review
-- Do not commit secrets (.env is ignored)
-- Validate WebRTC flows manually after changes (mic, screen share, join/leave)
+## Key context
+Use `docs/RELEASE-BOUNDARIES.md` and `docs/TERMINOLOGY.md` to avoid server/client/binary confusion when planning or describing changes.
