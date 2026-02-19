@@ -225,3 +225,66 @@ test("jam reconnect is blocked while leave is pending and resumes after leave fa
   assert.equal(afterFailure.shouldReconnect, true);
   assert.equal(afterFailure.delayMs, 100);
 });
+
+test("connect callback sequencing: stale explicit callback then implicit success commits pending target", () => {
+  const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+
+  rooms.requestSwitch("studio", 1_000);
+
+  // Old room callback lands first; switch must remain in-flight.
+  rooms.markConnected("main");
+  assert.equal(rooms.snapshot().isSwitching, true);
+  assert.equal(rooms.snapshot().activeRoomName, "studio");
+
+  // connectToRoom success callback can arrive without explicit room name.
+  rooms.markConnected();
+  assert.equal(rooms.snapshot().isSwitching, false);
+  assert.equal(rooms.snapshot().connectedRoomName, "studio");
+  assert.equal(rooms.heartbeatRoomName(), "studio");
+});
+
+test("transition media interleavings converge when camera and screen flap independently", () => {
+  let ui = { camEnabled: true, screenEnabled: true };
+
+  const callbackOrder = [
+    // old room camera drops first
+    { cameraPublished: false, screenPublished: true },
+    // then old room screen drops
+    { cameraPublished: false, screenPublished: false },
+    // new room screen recovers before camera
+    { cameraPublished: false, screenPublished: true },
+    // finally camera recovers
+    { cameraPublished: true, screenPublished: true },
+    // brief duplicate stale screen drop
+    { cameraPublished: true, screenPublished: false },
+    // settled truth
+    { cameraPublished: true, screenPublished: true },
+  ];
+
+  for (const actual of callbackOrder) {
+    ui = reconcilePublishIndicators(ui, actual).next;
+  }
+
+  assert.deepEqual(ui, { camEnabled: true, screenEnabled: true });
+});
+
+test("reconnect/disconnect race: leave success hard-stops reconnect even after prior close", () => {
+  const jam = createJamSessionState({ reconnectBaseMs: 100, reconnectMaxMs: 400 });
+  jam.requestJoin();
+  jam.joinAccepted();
+  jam.streamOpen();
+
+  // Transport drops and schedules reconnect.
+  const dropped = jam.streamClosedTransient("socket-close");
+  assert.equal(dropped.shouldReconnect, true);
+  assert.equal(dropped.delayMs, 100);
+
+  // User leaves before reconnect attempt runs.
+  jam.requestLeave();
+  jam.leaveSucceeded();
+
+  // Scheduled reconnect callback must now be blocked.
+  assert.equal(jam.reconnectAttemptStarted().shouldConnect, false);
+  assert.equal(jam.snapshot().serverJoined, false);
+  assert.equal(jam.snapshot().reconnectAttempt, 0);
+});
