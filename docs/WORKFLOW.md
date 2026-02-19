@@ -1,55 +1,36 @@
-# Dev vs Prod Workflow
+# Development Workflow
 
-We maintain two long-lived branches:
-- `main` = **production** (what you run on your server)
-- `dev` = **integration** (incoming changes to test)
+## Branch model
 
-## How friends contribute
-1) Create a branch from `dev`
-2) Push to GitHub
-3) Open a Pull Request **into `dev`**
+- `main` = release-ready branch
+- feature/fix/docs branches = PR branches
 
-## How you deploy
-1) Test locally from `dev`
-2) Merge `dev` -> `main`
-3) Pull `main` on the server and restart
+## Rules
 
-## Commands (server PC)
-### Pull production (live server)
-```
-git checkout main
-git pull origin main
-```
+1. Never push directly to `main`/`master`.
+2. Use pull requests for all changes.
+3. Required verification checks must pass before merge.
+4. Prefer small, focused PRs unless intentionally batching foundational work.
 
-### Pull dev (testing)
-```
-git checkout dev
-git pull origin dev
-```
+## Typical flow
 
-## Running with dev/prod env files
-You can keep separate config files and select them at startup.
+1. Branch from `main`.
+2. Implement change.
+3. Run quick verification locally.
+4. Push branch and open PR.
+5. Ensure CI checks pass.
+6. Merge.
 
-Supported locations:
-- repo root: `.env.dev`, `.env.prod`
-- or `apps/server/.env.dev`, `apps/server/.env.prod`
+## PR description minimum
 
-```
-ECHO_ENV=dev   # loads .env.dev if present
-ECHO_ENV=prod  # loads .env.prod if present
-```
+- linked issue(s)
+- what changed and why
+- release impact (`server-only` / `desktop-binary` / `both`)
+- evidence of verification
 
-You can also point to a specific file:
-```
-ECHO_ENV_FILE=F:\\path\\to\\.env.prod
-```
+## Foundation-first policy
 
-Helper scripts:
-```
-tools\\run-dev.ps1
-tools\\run-prod.ps1
-```
-
-## Full Stack (future)
-When we build the full media stack, we will use a separate repo
-and keep the same branch pattern (`main` = prod, `dev` = integration).
+For large fix waves:
+- merge verification/testing foundation first
+- then branch fix/enhancement waves on top
+- avoid carrying large stacks that rebase badly

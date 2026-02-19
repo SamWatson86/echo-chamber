@@ -1,31 +1,38 @@
-# GitHub Setup (Personal Repo)
+# GitHub Project Conventions
 
-This guide assumes Git is installed on Windows.
+This project uses GitHub as the coordination surface for code, issues, and PR-driven releases.
 
-## 1) Initialize the repo locally
-From the project root:
-```
-git init
-git add .
-git commit -m "Initial commit"
-```
+## Repository features
 
-## 2) Create a GitHub repository
-Create a new private repo on GitHub (recommended).
-Example name: `echo-chamber`
+Recommended:
+- Issues: enabled
+- Pull Requests: enabled
+- Actions: enabled (cost-aware workflows)
+- Discussions/Wiki: optional (not required if docs live in `/docs`)
 
-## 3) Add remote and push
-```
-git remote add origin https://github.com/<YOUR_USER>/<YOUR_REPO>.git
-git branch -M main
-git push -u origin main
-```
+## Branch protection (recommended)
 
-## 4) Collaboration
-Invite collaborators in GitHub:
-- Repo -> Settings -> Collaborators
+Protect `main` with:
+- required status checks
+- PR required before merge
+- no force-push
+- optional required approvals (team preference)
 
-## Notes
-- `.env` files are ignored by `.gitignore`
-- Keep backups of secrets and certs locally
+## Labels
 
+Use consistent triad labels on issues:
+- one `type:*`
+- one `area:*`
+- one `sev:*`
+
+Optional release impact labels for PRs/issues:
+- `release-impact:server-only`
+- `release-impact:desktop-binary`
+- `release-impact:both`
+
+## PR hygiene
+
+- include linked issue(s)
+- include release impact statement
+- include verification evidence
+- keep scope narrow unless batching foundational work intentionally

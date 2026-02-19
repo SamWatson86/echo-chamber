@@ -32,8 +32,12 @@ If PowerShell blocks `npm` scripts, use `npm.cmd` instead (e.g., `npm.cmd instal
 Tip: share a room link like `http://HOST:PORT/?room=main` and your friends will auto-fill the room name.
 
 ## Docs
+- docs/INDEX.md (start here)
 - docs/ARCHITECTURE.md
 - docs/OPERATIONS.md
+- docs/TESTING.md
+- docs/RELEASE-BOUNDARIES.md
+- docs/TERMINOLOGY.md
 - docs/BACKUPS.md
 - docs/GITHUB.md
 - docs/WORKFLOW.md
