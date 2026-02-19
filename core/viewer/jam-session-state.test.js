@@ -193,3 +193,19 @@ test("late disconnect after successful reconnect resets backoff to base", () => 
   assert.equal(next.shouldReconnect, true);
   assert.equal(next.delayMs, 120);
 });
+
+test("late stream-open callback is ignored once leave is pending", () => {
+  const s = createJamSessionState();
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+
+  s.requestLeave();
+
+  // Transport callback arrives out-of-order after leave intent.
+  s.streamOpen();
+
+  assert.equal(s.snapshot().streamConnected, false);
+  assert.equal(s.snapshot().pendingLeave, true);
+  assert.equal(s.ui().status, "idle");
+});

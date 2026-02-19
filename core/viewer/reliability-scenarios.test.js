@@ -94,7 +94,7 @@ test("room switch transition converges when publication callbacks arrive in oppo
   assert.equal(rooms.heartbeatRoomName(), "breakout-2");
 });
 
-test("forceConnected path still converges after late callback churn", () => {
+test("forceConnected path ignores late callback churn from superseded room", () => {
   const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
 
   rooms.requestSwitch("breakout-1", 1_000);
@@ -104,9 +104,9 @@ test("forceConnected path still converges after late callback churn", () => {
 
   // Late callback for the superseded room must not move us back.
   rooms.markConnected("breakout-1");
-  assert.equal(rooms.snapshot().connectedRoomName, "breakout-1");
+  assert.equal(rooms.snapshot().connectedRoomName, "breakout-2");
 
-  // Once the true active room callback arrives, heartbeat converges correctly.
+  // Idempotent callback for active room preserves committed truth.
   rooms.markConnected("breakout-2");
   assert.equal(rooms.heartbeatRoomName(), "breakout-2");
 });
@@ -287,4 +287,32 @@ test("reconnect/disconnect race: leave success hard-stops reconnect even after p
   assert.equal(jam.reconnectAttemptStarted().shouldConnect, false);
   assert.equal(jam.snapshot().serverJoined, false);
   assert.equal(jam.snapshot().reconnectAttempt, 0);
+});
+
+test("transition media callback churn always converges to final camera/screen truth", () => {
+  const states = [
+    { cameraPublished: false, screenPublished: false },
+    { cameraPublished: true, screenPublished: false },
+    { cameraPublished: false, screenPublished: true },
+    { cameraPublished: true, screenPublished: true },
+  ];
+
+  for (let a = 0; a < states.length; a += 1) {
+    for (let b = 0; b < states.length; b += 1) {
+      for (let c = 0; c < states.length; c += 1) {
+        for (let d = 0; d < states.length; d += 1) {
+          let ui = { camEnabled: true, screenEnabled: true };
+          ui = reconcilePublishIndicators(ui, states[a]).next;
+          ui = reconcilePublishIndicators(ui, states[b]).next;
+          ui = reconcilePublishIndicators(ui, states[c]).next;
+          ui = reconcilePublishIndicators(ui, states[d]).next;
+
+          assert.deepEqual(ui, {
+            camEnabled: states[d].cameraPublished,
+            screenEnabled: states[d].screenPublished,
+          });
+        }
+      }
+    }
+  }
 });

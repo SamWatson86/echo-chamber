@@ -128,7 +128,7 @@ test("stale callback then implicit callback commits only pending switch target",
   assert.equal(s.heartbeatRoomName(), "breakout-3");
 });
 
-test("forced room connect does not get reverted by late old-room callback", () => {
+test("forced room connect ignores late old-room callback after commit", () => {
   const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
   s.requestSwitch("breakout-1", 1_000);
 
@@ -136,11 +136,25 @@ test("forced room connect does not get reverted by late old-room callback", () =
   s.forceConnected("breakout-1");
   assert.equal(s.snapshot().connectedRoomName, "breakout-1");
 
-  // Late callback from old room can still fire and should not become heartbeat truth.
+  // Late callback from old room must be ignored once switch is settled.
   s.markConnected("main");
-  assert.equal(s.snapshot().connectedRoomName, "main");
-
-  // Fresh callback from active room must converge heartbeat back to the target room.
-  s.markConnected("breakout-1");
+  assert.equal(s.snapshot().connectedRoomName, "breakout-1");
   assert.equal(s.heartbeatRoomName(), "breakout-1");
+});
+
+test("forceConnected followed by explicit markConnected target is idempotent", () => {
+  const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+  s.requestSwitch("studio", 1_000);
+
+  s.forceConnected("studio");
+  s.markConnected("studio");
+
+  assert.deepEqual(s.snapshot(), {
+    connectedRoomName: "studio",
+    activeRoomName: "studio",
+    pendingRoomName: null,
+    isSwitching: false,
+    lastSwitchRequestedAt: 1_000,
+    cooldownMs: 0,
+  });
 });

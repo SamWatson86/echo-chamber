@@ -52,6 +52,13 @@
     }
 
     function streamOpen() {
+      // Ignore late stream-open callbacks that arrive after user requested leave.
+      if (state.pendingLeave || !state.desiredListening) {
+        state.streamConnected = false;
+        state.streamConnecting = false;
+        return snapshot();
+      }
+
       state.streamConnected = true;
       state.streamConnecting = false;
       state.reconnectAttempt = 0;

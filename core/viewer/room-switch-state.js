@@ -63,6 +63,18 @@
         return state.activeRoomName;
       }
 
+      // Once a room is force-committed, late callbacks from superseded rooms should
+      // not roll us backward. Accept explicit callbacks only when they match the
+      // current settled room (or when a switch is still pending above).
+      if (
+        !state.isSwitching &&
+        !state.pendingRoomName &&
+        connectedRoomName &&
+        connectedRoomName !== state.activeRoomName
+      ) {
+        return state.activeRoomName;
+      }
+
       const nextRoom = connectedRoomName || state.pendingRoomName || state.activeRoomName;
       state.connectedRoomName = nextRoom;
       state.activeRoomName = nextRoom;
