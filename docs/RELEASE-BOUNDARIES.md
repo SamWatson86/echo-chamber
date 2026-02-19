@@ -8,6 +8,14 @@ A new desktop binary is required **only** when the installed desktop app itself 
 
 If a change is purely server/runtime and clients consume it from the server, a binary release is usually **not** required.
 
+## Echo Chamber-specific reality (important)
+
+In the current Core Tauri client, the app window is explicitly opened against a **server-hosted viewer URL** (`{server}/viewer/`) rather than hard-loading bundled static UI only.
+
+Practical implication:
+- many things Sam may call a "client update" are actually **server-served viewer updates** and can often ship via server deploy,
+- while native shell/updater/IPC changes still require a new EXE/DMG.
+
 ---
 
 ## Decision matrix
@@ -56,6 +64,16 @@ No published release artifacts = nothing for updater to apply.
 ---
 
 ## Practical release triggers
+
+### Usually server-only (no new EXE/DMG)
+- `core/viewer` JS/HTML/CSS behavior fixes served by control server
+- control-plane API logic fixes
+- room/jam/state bugfixes that are delivered via server-hosted viewer assets
+
+### Usually desktop-binary required
+- `core/client` (or native shell) code changes
+- updater behavior, native IPC commands, window/tray/native integration changes
+- packaged resource/runtime changes that existing installs cannot fetch dynamically
 
 Cut a new desktop release when one or more are true:
 

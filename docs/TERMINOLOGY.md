@@ -11,6 +11,7 @@ Use these terms consistently when discussing work with contributors/agents.
 ## Delivery terms
 
 - **Server deploy**: rollout of runtime/server changes.
+- **Server-served viewer update**: frontend behavior change delivered by server-hosted viewer assets (often what people casually call a "client update").
 - **Desktop release**: publishing new EXE/DMG artifacts.
 - **Auto-updater**: desktop mechanism that applies published desktop releases.
 
@@ -30,6 +31,7 @@ Use these terms consistently when discussing work with contributors/agents.
 
 Prefer:
 - “server deploy required”
+- “server-served viewer update”
 - “desktop binary release required”
 - “server-only fix”
 
