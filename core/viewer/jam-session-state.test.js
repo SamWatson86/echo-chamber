@@ -67,3 +67,28 @@ test("join rejected clears listening state", () => {
   assert.equal(snap.streamConnected, false);
   assert.equal(s.ui().joinVisible, true);
 });
+
+test("reconnect backoff is capped at reconnectMaxMs", () => {
+  const s = createJamSessionState({ reconnectBaseMs: 200, reconnectMaxMs: 700 });
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+
+  assert.equal(s.streamClosedTransient("ws-close").delayMs, 200);
+  assert.equal(s.streamClosedTransient("ws-close").delayMs, 400);
+  assert.equal(s.streamClosedTransient("ws-close").delayMs, 700);
+  assert.equal(s.streamClosedTransient("ws-close").delayMs, 700);
+});
+
+test("reconnectAttemptStarted is blocked after leave request", () => {
+  const s = createJamSessionState();
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+  s.requestLeave();
+
+  const out = s.reconnectAttemptStarted();
+  assert.equal(out.shouldConnect, false);
+  assert.equal(s.snapshot().pendingLeave, true);
+  assert.equal(s.ui().leaveVisible, true);
+});

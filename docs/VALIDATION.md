@@ -38,6 +38,24 @@ CI equivalent:
 - Require human approval before merge
 - Prefer PRs with concrete repro + before/after evidence
 
+## Reliability coverage map (viewer deterministic tests)
+The quick suite now directly covers these user-facing reliability clusters:
+
+- **Room/session transitions & race behavior**
+  - `core/viewer/room-switch-state.test.js`
+  - `core/viewer/reliability-scenarios.test.js`
+  - Invariants: optimistic room switch lifecycle, heartbeat room truth during in-flight switch, cooldown/in-flight guards, hard reset via `forceConnected`.
+
+- **Jam lifecycle / reconnect behavior**
+  - `core/viewer/jam-session-state.test.js`
+  - `core/viewer/reliability-scenarios.test.js`
+  - Invariants: deterministic reconnect backoff, reconnect cap, reconnect gating after leave intent, reconnect reset after successful stream open.
+
+- **Publish-state truth vs actual publication**
+  - `core/viewer/publish-state-reconcile.test.js`
+  - `core/viewer/reliability-scenarios.test.js`
+  - Invariants: stale UI flags are corrected to publication truth, per-signal drift reporting (camera vs screen), default-safe behavior on missing inputs.
+
 ## Cost-aware CI usage
 This project is private/friend-group scale, so CI is intentionally lean:
 - Quick checks run on PRs

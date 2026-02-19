@@ -55,3 +55,30 @@ test("cannot switch while in-flight", () => {
   assert.equal(denied.ok, false);
   assert.equal(denied.reason, "in-flight");
 });
+
+test("forceConnected hard-resets optimistic switching state", () => {
+  const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+  s.requestSwitch("breakout-1", 1_000);
+
+  const forced = s.forceConnected("lobby");
+  assert.equal(forced, "lobby");
+
+  assert.deepEqual(s.snapshot(), {
+    connectedRoomName: "lobby",
+    activeRoomName: "lobby",
+    pendingRoomName: null,
+    isSwitching: false,
+    lastSwitchRequestedAt: 1_000,
+    cooldownMs: 0,
+  });
+});
+
+test("same-room request is denied after switch commit", () => {
+  const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+  s.requestSwitch("breakout-1", 1_000);
+  s.markConnected("breakout-1");
+
+  const denied = s.requestSwitch("breakout-1", 1_100);
+  assert.equal(denied.ok, false);
+  assert.equal(denied.reason, "same-room");
+});

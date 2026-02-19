@@ -34,3 +34,21 @@ test("no drift when UI state already matches publication reality", () => {
   assert.equal(out.anyDrift, false);
   assert.deepEqual(out.next, { camEnabled: true, screenEnabled: false });
 });
+
+test("missing inputs default to unpublished false flags", () => {
+  const out = reconcilePublishIndicators(undefined, undefined);
+
+  assert.deepEqual(out.next, { camEnabled: false, screenEnabled: false });
+  assert.equal(out.anyDrift, false);
+});
+
+test("camera and screen drift are tracked independently", () => {
+  const out = reconcilePublishIndicators(
+    { camEnabled: false, screenEnabled: true },
+    { cameraPublished: true, screenPublished: true }
+  );
+
+  assert.equal(out.drift.camera, true);
+  assert.equal(out.drift.screen, false);
+  assert.equal(out.anyDrift, true);
+});
