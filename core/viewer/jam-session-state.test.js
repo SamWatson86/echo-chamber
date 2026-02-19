@@ -155,3 +155,41 @@ test("reconnect attempt remains blocked until leave failure clears pendingLeave"
   assert.equal(s.reconnectAttemptStarted().shouldConnect, true);
   assert.equal(s.snapshot().pendingLeave, false);
 });
+
+test("disconnect during reconnecting state continues deterministic backoff", () => {
+  const s = createJamSessionState({ reconnectBaseMs: 150, reconnectMaxMs: 600 });
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+
+  const first = s.streamClosedTransient("socket-close");
+  assert.equal(first.delayMs, 150);
+  assert.equal(s.reconnectAttemptStarted().shouldConnect, true);
+  assert.equal(s.ui().status, "connecting");
+
+  // While connect attempt is in-flight, another close should still advance backoff ladder.
+  const second = s.streamClosedTransient("socket-close");
+  assert.equal(second.shouldReconnect, true);
+  assert.equal(second.delayMs, 300);
+});
+
+test("late disconnect after successful reconnect resets backoff to base", () => {
+  const s = createJamSessionState({ reconnectBaseMs: 120, reconnectMaxMs: 480 });
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+
+  // Build reconnect pressure.
+  s.streamClosedTransient("drop-1"); // 120
+  s.streamClosedTransient("drop-2"); // 240
+  s.reconnectAttemptStarted();
+
+  // Reconnect succeeds; backoff should reset.
+  s.streamOpen();
+  assert.equal(s.snapshot().reconnectAttempt, 0);
+
+  // Next transient close should start from base again.
+  const next = s.streamClosedTransient("drop-3");
+  assert.equal(next.shouldReconnect, true);
+  assert.equal(next.delayMs, 120);
+});

@@ -140,6 +140,32 @@ test("camera and screen interleavings remain independent across transition edges
   assert.deepEqual(ui, { camEnabled: true, screenEnabled: true });
 });
 
+test("transition-time callback permutations converge to final publication truth", () => {
+  const callbacks = [
+    { cameraPublished: false, screenPublished: false },
+    { cameraPublished: true, screenPublished: false },
+    { cameraPublished: false, screenPublished: true },
+    { cameraPublished: true, screenPublished: true },
+  ];
+
+  for (let i = 0; i < callbacks.length; i += 1) {
+    for (let j = 0; j < callbacks.length; j += 1) {
+      for (let k = 0; k < callbacks.length; k += 1) {
+        let ui = { camEnabled: false, screenEnabled: false };
+        ui = reconcilePublishIndicators(ui, callbacks[i]).next;
+        ui = reconcilePublishIndicators(ui, callbacks[j]).next;
+        ui = reconcilePublishIndicators(ui, callbacks[k]).next;
+
+        // Last callback should always be the settled UI truth.
+        assert.deepEqual(ui, {
+          camEnabled: callbacks[k].cameraPublished,
+          screenEnabled: callbacks[k].screenPublished,
+        });
+      }
+    }
+  }
+});
+
 test("switch commit only occurs for active target when connect callbacks resolve out-of-order", () => {
   const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
 
