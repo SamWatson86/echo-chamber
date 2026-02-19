@@ -93,3 +93,69 @@ test("room switch transition converges when publication callbacks arrive in oppo
   rooms.markConnected("breakout-2");
   assert.equal(rooms.heartbeatRoomName(), "breakout-2");
 });
+
+test("forceConnected path still converges after late callback churn", () => {
+  const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+
+  rooms.requestSwitch("breakout-1", 1_000);
+
+  // connectToRoom(forceConnected) can advance active room while old callbacks are still pending.
+  rooms.forceConnected("breakout-2");
+
+  // Late callback for the superseded room must not move us back.
+  rooms.markConnected("breakout-1");
+  assert.equal(rooms.snapshot().connectedRoomName, "breakout-1");
+
+  // Once the true active room callback arrives, heartbeat converges correctly.
+  rooms.markConnected("breakout-2");
+  assert.equal(rooms.heartbeatRoomName(), "breakout-2");
+});
+
+test("transition-time publish/unpublish interleavings converge without sticky drift", () => {
+  let ui = { camEnabled: true, screenEnabled: false };
+
+  // Old-room unpublish arrives first.
+  ui = reconcilePublishIndicators(ui, { cameraPublished: false, screenPublished: false }).next;
+  assert.deepEqual(ui, { camEnabled: false, screenEnabled: false });
+
+  // New-room publish callback arrives after disconnect edge.
+  ui = reconcilePublishIndicators(ui, { cameraPublished: true, screenPublished: false }).next;
+  assert.deepEqual(ui, { camEnabled: true, screenEnabled: false });
+
+  // Brief duplicate unpublish from prior transport edge should still be corrected by next publish truth.
+  ui = reconcilePublishIndicators(ui, { cameraPublished: false, screenPublished: false }).next;
+  ui = reconcilePublishIndicators(ui, { cameraPublished: true, screenPublished: false }).next;
+  assert.deepEqual(ui, { camEnabled: true, screenEnabled: false });
+});
+
+test("camera and screen interleavings remain independent across transition edges", () => {
+  let ui = { camEnabled: false, screenEnabled: true };
+
+  // Screen unpublished while camera becomes published in next room.
+  ui = reconcilePublishIndicators(ui, { cameraPublished: true, screenPublished: false }).next;
+  assert.deepEqual(ui, { camEnabled: true, screenEnabled: false });
+
+  // Late screen publish arrives without affecting camera.
+  ui = reconcilePublishIndicators(ui, { cameraPublished: true, screenPublished: true }).next;
+  assert.deepEqual(ui, { camEnabled: true, screenEnabled: true });
+});
+
+test("jam reconnect is blocked while leave is pending and resumes after leave failure", () => {
+  const jam = createJamSessionState({ reconnectBaseMs: 100, reconnectMaxMs: 400 });
+  jam.requestJoin();
+  jam.joinAccepted();
+  jam.streamOpen();
+
+  jam.requestLeave();
+
+  // Disconnect races during intentional leave must not schedule reconnect.
+  const duringLeave = jam.streamClosedTransient("socket-close");
+  assert.equal(duringLeave.shouldReconnect, false);
+  assert.equal(jam.reconnectAttemptStarted().shouldConnect, false);
+
+  // If leave API fails, recovery path should resume deterministic reconnect behavior.
+  jam.leaveFailed("timeout");
+  const afterFailure = jam.streamClosedTransient("socket-close");
+  assert.equal(afterFailure.shouldReconnect, true);
+  assert.equal(afterFailure.delayMs, 100);
+});
