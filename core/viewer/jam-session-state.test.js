@@ -117,3 +117,41 @@ test("connect attempt is blocked after join rejection race", () => {
   assert.equal(reconnect.shouldConnect, false);
   assert.equal(s.ui().status, "error");
 });
+
+test("late transient disconnect after leave failure restarts deterministic reconnect ladder", () => {
+  const s = createJamSessionState({ reconnectBaseMs: 100, reconnectMaxMs: 800 });
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+
+  s.requestLeave();
+  s.leaveFailed("timeout");
+
+  const first = s.streamClosedTransient("late-close");
+  const second = s.streamClosedTransient("late-close");
+
+  assert.equal(first.shouldReconnect, true);
+  assert.equal(first.delayMs, 100);
+  assert.equal(second.shouldReconnect, true);
+  assert.equal(second.delayMs, 200);
+  assert.equal(s.snapshot().reconnectAttempt, 2);
+});
+
+test("reconnect attempt remains blocked until leave failure clears pendingLeave", () => {
+  const s = createJamSessionState();
+  s.requestJoin();
+  s.joinAccepted();
+  s.streamOpen();
+
+  s.requestLeave();
+  assert.equal(s.reconnectAttemptStarted().shouldConnect, false);
+
+  // Transport closes while leave is pending; reconnect still blocked.
+  s.streamClosedTransient("socket-close");
+  assert.equal(s.reconnectAttemptStarted().shouldConnect, false);
+
+  // Once leave failure clears pendingLeave, reconnect is permitted again.
+  s.leaveFailed("api-timeout");
+  assert.equal(s.reconnectAttemptStarted().shouldConnect, true);
+  assert.equal(s.snapshot().pendingLeave, false);
+});

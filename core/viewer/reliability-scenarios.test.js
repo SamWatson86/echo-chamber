@@ -140,6 +140,46 @@ test("camera and screen interleavings remain independent across transition edges
   assert.deepEqual(ui, { camEnabled: true, screenEnabled: true });
 });
 
+test("switch commit only occurs for active target when connect callbacks resolve out-of-order", () => {
+  const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
+
+  // User initiates a switch; UI optimistically points to breakout.
+  rooms.requestSwitch("breakout", 1_000);
+  assert.equal(rooms.snapshot().activeRoomName, "breakout");
+  assert.equal(rooms.heartbeatRoomName(), "main");
+
+  // Stale callback from the previous connection attempt lands first.
+  rooms.markConnected("main");
+  assert.equal(rooms.snapshot().isSwitching, true);
+  assert.equal(rooms.snapshot().activeRoomName, "breakout");
+  assert.equal(rooms.heartbeatRoomName(), "main");
+
+  // Correct callback lands later and must commit the switch.
+  rooms.markConnected("breakout");
+  assert.equal(rooms.snapshot().isSwitching, false);
+  assert.equal(rooms.heartbeatRoomName(), "breakout");
+});
+
+test("publish reconcile converges after alternating room-edge callback churn", () => {
+  let ui = { camEnabled: true, screenEnabled: true };
+
+  const callbackOrder = [
+    { cameraPublished: false, screenPublished: true },
+    { cameraPublished: false, screenPublished: false },
+    { cameraPublished: true, screenPublished: false },
+    { cameraPublished: true, screenPublished: true },
+    { cameraPublished: false, screenPublished: true },
+    { cameraPublished: true, screenPublished: true },
+  ];
+
+  for (const actual of callbackOrder) {
+    ui = reconcilePublishIndicators(ui, actual).next;
+  }
+
+  // Final callback truth should always win, regardless of transition churn.
+  assert.deepEqual(ui, { camEnabled: true, screenEnabled: true });
+});
+
 test("jam reconnect is blocked while leave is pending and resumes after leave failure", () => {
   const jam = createJamSessionState({ reconnectBaseMs: 100, reconnectMaxMs: 400 });
   jam.requestJoin();
