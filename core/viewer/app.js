@@ -352,6 +352,17 @@ let selectedMicId = "";
 let selectedCamId = "";
 let selectedSpeakerId = "";
 let adminToken = "";
+// Extract viewer version from the cache-busting ?v= param stamped on app.js by the server
+var _viewerVersion = (function() {
+  try {
+    var scripts = document.querySelectorAll('script[src*="app.js"]');
+    for (var i = 0; i < scripts.length; i++) {
+      var m = scripts[i].src.match(/[?&]v=([^&]+)/);
+      if (m) return m[1];
+    }
+  } catch(e) {}
+  return null;
+})();
 let _latestScreenStats = null;
 let currentRoomName = "main";
 let currentAccessToken = "";
@@ -365,8 +376,38 @@ let _cameraReducedForScreenShare = false;
 let _bwLimitedCount = 0; // consecutive stats ticks showing bandwidth limitation
 let _bweLowTicks = 0;       // consecutive stats ticks with stuck-low BWE
 let _bweKickAttempted = false; // true after BWE watchdog re-asserts encoder params
+let _highPausedTicks = 0;   // consecutive ticks where HIGH simulcast layer is paused (0fps, limit=bandwidth)
+let _latestOutboundBwe = 0; // latest BWE (kbps) from outbound stats — updated every tick, read by LOW restore interval
+// ── Adaptive publisher bitrate control (publisher side) ──
+// When a remote viewer detects packet loss on our screen share, they send a
+// bitrate-cap data channel message. We apply the most restrictive cap across
+// all requesters via RTCRtpSender.setParameters(). Caps expire after 15s TTL.
+let _bitrateCaps = new Map();        // senderIdentity -> { high, med, low, timestamp }
+let _currentAppliedCap = null;       // { high, med, low } currently applied, or null = uncapped
+let _bitrateCapCleanupTimer = null;  // interval that expires stale caps
+const BITRATE_CAP_TTL = 15000;       // 15s before a requester's cap expires
+const BITRATE_DEFAULT_HIGH = 15_000_000;
+const BITRATE_DEFAULT_MED = 5_000_000;
+const BITRATE_DEFAULT_LOW = 1_500_000;
 const screenReshareRequests = new Map();
 const ENABLE_SCREEN_WATCHDOG = true;
+// ── Shared AudioContext for participant volume boost (GainNode) ──
+// A single AudioContext handles all participant audio routing. GainNode
+// allows amplification beyond 1.0 (100%) for volume boost up to 300%.
+let _participantAudioCtx = null;
+function getParticipantAudioCtx() {
+  if (!_participantAudioCtx || _participantAudioCtx.state === "closed") {
+    _participantAudioCtx = new AudioContext();
+    // Route to selected speaker device if one is chosen
+    if (selectedSpeakerId && typeof _participantAudioCtx.setSinkId === "function") {
+      _participantAudioCtx.setSinkId(selectedSpeakerId).catch(() => {});
+    }
+  }
+  if (_participantAudioCtx.state === "suspended") {
+    _participantAudioCtx.resume().catch(() => {});
+  }
+  return _participantAudioCtx;
+}
 let lastActiveSpeakerEvent = 0;
 const screenRecoveryAttempts = new Map();
 const AUDIO_MONITOR_INTERVAL = 200; // 5Hz — human speech detection doesn't need faster
@@ -418,6 +459,8 @@ const FIXED_ROOMS = ["main", "breakout-1", "breakout-2", "breakout-3"];
 const tokenCache = new Map(); // roomId -> { token, fetchedAt, expiresInSeconds }
 const TOKEN_CACHE_MARGIN_MS = 60000; // Refresh tokens 60s before expiry
 var _isRoomSwitch = false; // True during switchRoom(), cleared after fast-wave settles
+var _isReconnecting = false; // True during signal/media reconnection — suppresses chimes and delays cleanup
+var _pendingDisconnects = new Map(); // identity -> timeoutId, delayed cleanup during reconnection
 var _lastTokenPrefetch = 0;
 const avatarUrls = new Map(); // identity_base -> avatar URL
 const deviceIdByIdentity = new Map(); // identityBase -> deviceId (for remote participants)
@@ -515,7 +558,7 @@ var _SETTINGS_KEYS = [
   "echo-device-mic", "echo-device-cam", "echo-device-speaker",
   "echo-core-remember-name", "echo-core-remember-pass",
   "echo-core-identity-suffix", "echo-core-device-id",
-  "echo-avatar-device"
+  "echo-avatar-device", "echo-volume-prefs"
 ];
 
 async function loadAllSettings() {
@@ -587,6 +630,23 @@ function _persistSettings() {
   tauriInvoke("save_settings", { settings: JSON.stringify(_settingsCache) }).catch(function(e) {
     debugLog("[settings] save failed: " + e);
   });
+}
+
+// ─── Per-participant volume persistence ───
+function _getVolumePrefs() {
+  try { return JSON.parse(echoGet("echo-volume-prefs") || "{}"); } catch(e) { return {}; }
+}
+function _saveVolumePrefs(prefs) {
+  echoSet("echo-volume-prefs", JSON.stringify(prefs));
+}
+function saveParticipantVolume(identity, mic, screen) {
+  var prefs = _getVolumePrefs();
+  prefs[identity] = { mic: mic, screen: screen };
+  _saveVolumePrefs(prefs);
+}
+function getParticipantVolume(identity) {
+  var prefs = _getVolumePrefs();
+  return prefs[identity] || null;
 }
 
 function _reapplySettingsAfterLoad() {
@@ -935,20 +995,33 @@ function unlockAudio() {
   } catch {}
 }
 
-function getScreenSharePublishOptions() {
+function getScreenSharePublishOptions(srcW, srcH) {
+  // Compute simulcast layers dynamically based on actual source dimensions.
+  // This prevents the MEDIUM layer from matching HIGH when the source height
+  // is less than 1080 (e.g. ultrawide 1920x804 after canvas cap).
+  // Layers: MEDIUM = half resolution, LOW = third resolution.
+  var medW = Math.round((srcW || 1920) / 2);
+  var medH = Math.round((srcH || 1080) / 2);
+  medW = medW - (medW % 2); medH = medH - (medH % 2); // even dims for H.264
+  var lowW = Math.round((srcW || 1920) / 3);
+  var lowH = Math.round((srcH || 1080) / 3);
+  lowW = lowW - (lowW % 2); lowH = lowH - (lowH % 2);
+  debugLog("[simulcast] layers: HIGH=" + (srcW||1920) + "x" + (srcH||1080) +
+    " MED=" + medW + "x" + medH + " LOW=" + lowW + "x" + lowH);
   return {
     // H264 High profile with hardware encoding (NVENC/QSV/AMF) via WebView2 flags.
     // SDP is munged to upgrade Constrained Baseline (42e0) -> High (6400) to force
     // hardware encoder selection. Software encoders (OpenH264, libvpx) max ~25fps.
     videoCodec: "h264",
     // Simulcast: 3 quality layers so each receiver gets what their hardware can decode.
-    // HIGH = native (4K@60), MEDIUM = 1080p@60, LOW = 720p@30.
+    // HIGH = source resolution @60fps. MEDIUM = half @60fps. LOW = third @30fps.
+    // Layers are computed dynamically to guarantee MEDIUM < HIGH (ultrawide fix).
     // SFU selects the best layer per subscriber based on bandwidth + decode capability.
     simulcast: true,
     screenShareEncoding: { maxBitrate: 15_000_000, maxFramerate: 60 },
     screenShareSimulcastLayers: [
-      { width: 1920, height: 1080, encoding: { maxBitrate: 5_000_000, maxFramerate: 60 } },
-      { width: 1280, height: 720,  encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
+      { width: medW, height: medH, encoding: { maxBitrate: 5_000_000, maxFramerate: 60 } },
+      { width: lowW, height: lowH, encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
     ],
     // "maintain-framerate" drops resolution under pressure instead of FPS.
     // Critical for gaming — smooth 60fps at lower quality beats choppy high-res.
@@ -967,6 +1040,11 @@ let _inboundScreenLastBytes = new Map(); // identity -> { bytes, time }
 // Adaptive layer selection: track quality per inbound video (screen shares + cameras)
 // to auto-downgrade when decoder/network can't keep up, and upgrade when stable.
 let _inboundDropTracker = new Map(); // "identity-source" -> { lastDropped, lastDecoded, highDropTicks, lowFpsTicks, stableTicks, currentQuality }
+// ── Adaptive publisher bitrate control (receiver side) ──
+// AIMD algorithm: when we detect loss on a remote screen share, we compute an
+// optimal bitrate cap and send it to the publisher via data channel. The publisher
+// applies it to their RTCRtpSender, reducing upload without changing resolution.
+let _pubBitrateControl = new Map(); // publisherIdentity -> AIMD controller state
 
 function startInboundScreenStatsMonitor() {
   if (_inboundScreenStatsInterval) return;
@@ -974,6 +1052,28 @@ function startInboundScreenStatsMonitor() {
     try {
       if (!room || !room.remoteParticipants) return;
       const LK = getLiveKitClient();
+      // Extract ICE candidate-pair info once per poll cycle (from subscriber PeerConnection)
+      var _iceType = "";
+      try {
+        const subPc = room.engine?.pcManager?.subscriber?.pc;
+        if (subPc) {
+          const pcStats = await subPc.getStats();
+          const iceCandidates = new Map();
+          pcStats.forEach(function(r) {
+            if (r.type === "local-candidate" || r.type === "remote-candidate") iceCandidates.set(r.id, r);
+          });
+          pcStats.forEach(function(r) {
+            if (r.type === "candidate-pair" && r.state === "succeeded") {
+              const lc = iceCandidates.get(r.localCandidateId);
+              const rc = iceCandidates.get(r.remoteCandidateId);
+              var lType = lc?.candidateType || "?";
+              var rType = rc?.candidateType || "?";
+              var rtt = r.currentRoundTripTime ? Math.round(r.currentRoundTripTime * 1000) : "?";
+              _iceType = `ice=${lType}->${rType} rtt=${rtt}ms`;
+            }
+          });
+        }
+      } catch (e) { /* ignore ICE stats errors */ }
       room.remoteParticipants.forEach(async (participant) => {
         const pubs = getParticipantPublications(participant);
         for (const pub of pubs) {
@@ -1031,11 +1131,19 @@ function startInboundScreenStatsMonitor() {
               // Now we track a rolling window of FPS samples and decide based on the AVERAGE.
               var dt = _inboundDropTracker.get(key);
               if (!dt) {
+                // Cameras start on LOW (forceVideoLayer sends LOW first, then upgrades).
+                // Screen shares start on HIGH. Initialize to match actual requested layer
+                // to prevent false "HIGH is failing" downgrades.
+                var initQuality = isCamera ? "LOW" : "HIGH";
                 dt = {
                   lastDropped: dropped, lastDecoded: decoded,
+                  lastLost: pktLost,    // track packet loss delta for proactive keyframe requests
                   fpsHistory: [],       // last N fps readings (rolling window)
+                  lossHistory: [],      // last N ticks of packet loss deltas (rolling window for loss-rate detection)
+                  lossDowngraded: false, // true if currently downgraded due to packet loss
+                  lossStableTicks: 0,   // consecutive ticks with zero loss (for promote-back)
                   stableTicks: 0,
-                  currentQuality: "HIGH",
+                  currentQuality: initQuality,
                   lastLayerChangeTime: 0,
                 };
                 _inboundDropTracker.set(key, dt);
@@ -1046,17 +1154,315 @@ function startInboundScreenStatsMonitor() {
               dt.lastDecoded = decoded;
               var dropRatio = deltaDecoded > 0 ? deltaDropped / (deltaDropped + deltaDecoded) : 0;
 
+              // ── Proactive keyframe request on packet loss ──
+              // When packets are lost, the decoder may stall waiting for a reference frame.
+              // Rather than waiting for the natural PLI cycle (which can take seconds), we
+              // detect new losses and immediately request a keyframe to speed recovery.
+              // This is especially important for TURN relay users where RTT is 40-80ms —
+              // NACK retransmission alone may not recover in time.
+              var deltaLost = pktLost - (dt.lastLost || 0);
+              dt.lastLost = pktLost;
+              if (deltaLost > 0) {
+                debugLog(`[packet-loss] ${key}: ${deltaLost} new packets lost (total=${pktLost}), requesting keyframe`);
+                try {
+                  if (pub.track?.requestKeyFrame) pub.track.requestKeyFrame();
+                  else if (pub.videoTrack?.requestKeyFrame) pub.videoTrack.requestKeyFrame();
+                } catch (e) { /* ignore */ }
+              }
+              // Also detect FPS stall (0fps when we previously had frames) — decoder is stuck
+              if (fps === 0 && dt.fpsHistory.length > 0 && dt.fpsHistory[dt.fpsHistory.length - 1] > 0) {
+                debugLog(`[stall-recovery] ${key}: FPS dropped to 0 (was ${dt.fpsHistory[dt.fpsHistory.length - 1]}), requesting keyframe`);
+                try {
+                  if (pub.track?.requestKeyFrame) pub.track.requestKeyFrame();
+                  else if (pub.videoTrack?.requestKeyFrame) pub.videoTrack.requestKeyFrame();
+                } catch (e) { /* ignore */ }
+              }
+
+              var qualityChanged = false;
+
+              // ── SCREEN SHARES: Adaptive Publisher Bitrate Control (AIMD) ──
+              // Instead of switching simulcast layers (which causes 1080p→360p jumps),
+              // we tell the PUBLISHER to reduce their encoder bitrate. Resolution stays
+              // 1080p@60fps; only compression level changes. Uses data channel messages.
+              if (!isCamera && participant && room?.localParticipant) {
+                var pubIdent = participant.identity;
+                var ctrl = _pubBitrateControl.get(pubIdent);
+                if (!ctrl) {
+                  ctrl = {
+                    lossHistory: [], kbpsHistory: [],
+                    currentCapHigh: BITRATE_DEFAULT_HIGH, capped: false,
+                    probePhase: "idle", probeBitrate: 0, probeCleanTicks: 0,
+                    lastCapSendTime: 0, lastLossTime: 0, cleanTicksSinceLoss: 0,
+                    ackReceived: false, firstCapSendTime: 0, fallbackToLayers: false,
+                    _lockedHigh: false,
+                  };
+                  _pubBitrateControl.set(pubIdent, ctrl);
+                }
+
+                // Feed data into AIMD
+                ctrl.lossHistory.push(deltaLost);
+                if (ctrl.lossHistory.length > 10) ctrl.lossHistory.shift();
+                ctrl.kbpsHistory.push(kbps);
+                if (ctrl.kbpsHistory.length > 10) ctrl.kbpsHistory.shift();
+
+                // EWMA loss (alpha=0.3, recent ticks weighted more)
+                var ewmaLoss = 0, weightSum = 0;
+                for (var ei = 0; ei < ctrl.lossHistory.length; ei++) {
+                  var w_e = Math.pow(0.7, ctrl.lossHistory.length - 1 - ei);
+                  ewmaLoss += ctrl.lossHistory[ei] * w_e;
+                  weightSum += w_e;
+                }
+                ewmaLoss = weightSum > 0 ? ewmaLoss / weightSum : 0;
+
+                // Average received kbps
+                var avgKbps = ctrl.kbpsHistory.reduce(function(a, b) { return a + b; }, 0) /
+                              Math.max(1, ctrl.kbpsHistory.length);
+
+                // Estimate loss rate
+                var lossRate = 0;
+                if (avgKbps > 0 && ewmaLoss > 0) {
+                  var estTotalPkts = (avgKbps * 1000 / 8 / 1200) * 3 + ewmaLoss;
+                  lossRate = ewmaLoss / Math.max(1, estTotalPkts);
+                }
+
+                // ── AIMD trigger: use loss RATE not absolute count ──
+                // At 12Mbps/60fps through TURN relay, ~4000 packets per 3s tick.
+                // TURN relay normally produces 0.03% loss (small bursts of 1-50 pkts).
+                // Only trigger AIMD when loss rate exceeds 0.5% (genuine congestion).
+                var estPktsPerTick = Math.max(100, (avgKbps * 1000 / 8 / 1200) * 3);
+                var tickLossRate = deltaLost / estPktsPerTick;
+                var isCongestion = tickLossRate > 0.005; // >0.5% loss rate
+                var isSevereCongestion = tickLossRate > 0.02; // >2% loss rate
+                var targetHighBps = ctrl.currentCapHigh;
+                var nowCtrl = Date.now();
+
+                if (isCongestion) {
+                  // ── LOSS DETECTED: multiplicative decrease ──
+                  ctrl.lastLossTime = nowCtrl;
+                  ctrl.cleanTicksSinceLoss = 0;
+                  ctrl.probePhase = "backing-off";
+                  ctrl.probeCleanTicks = 0;
+
+                  if (!ctrl.capped) {
+                    // First congestion: cut to 70% of received bitrate
+                    targetHighBps = Math.round(avgKbps * 1000 * 0.7);
+                  } else {
+                    // Already capped, still congested: ×0.7 multiplicative decrease
+                    targetHighBps = Math.round(ctrl.currentCapHigh * 0.7);
+                  }
+                  // Severe congestion: more aggressive (50%)
+                  if (isSevereCongestion) {
+                    targetHighBps = Math.round(avgKbps * 1000 * 0.5);
+                  }
+                  // Floor 1Mbps, ceiling 15Mbps
+                  targetHighBps = Math.max(1_000_000, Math.min(targetHighBps, BITRATE_DEFAULT_HIGH));
+                  ctrl.currentCapHigh = targetHighBps;
+                  ctrl.capped = true;
+                  debugLog("[bitrate-ctrl] " + pubIdent + ": lossRate=" +
+                    (tickLossRate * 100).toFixed(2) + "% (" + deltaLost + "/" +
+                    Math.round(estPktsPerTick) + " pkts) → cap=" +
+                    Math.round(targetHighBps / 1000) + "kbps");
+
+                } else {
+                  // ── LOW/MODERATE LOSS (below congestion threshold): recover ──
+                  // Allow recovery even during stalls (fps=0) — the old fps>0 check
+                  // caused a deadlock: AIMD capped → stall → couldn't uncap because fps=0
+                  // TURN relay normally has 0.03-0.15% loss — this is NOT congestion.
+                  ctrl.cleanTicksSinceLoss++;
+
+                  // ── BURST DETECTION: instant snap-back for transient loss ──
+                  // TURN relay bursts are transient (wifi interference, buffer overflow).
+                  // Pattern: large loss in one tick, then immediately clean.
+                  // If the FIRST tick after capping is clean, path capacity is unchanged
+                  // — snap back immediately instead of slow 12s probe ramp.
+                  if (ctrl.capped && ctrl.cleanTicksSinceLoss === 1 && ctrl.probePhase === "backing-off") {
+                    // First tick after loss is clean → burst, not sustained congestion
+                    debugLog("[bitrate-ctrl] " + pubIdent + ": burst detected (clean after 1 tick) — INSTANT SNAP BACK");
+                    targetHighBps = BITRATE_DEFAULT_HIGH;
+                    ctrl.currentCapHigh = targetHighBps;
+                    ctrl.capped = false;
+                    ctrl.probePhase = "idle";
+                    ctrl.lossHistory = [];
+                    ctrl.kbpsHistory = [];
+                  }
+                  // Sustained congestion recovery: slow probe ramp
+                  else if (ctrl.capped && ctrl.cleanTicksSinceLoss >= 3) {
+                    // 3 consecutive clean ticks (~9s) = sustained congestion has cleared
+                    debugLog("[bitrate-ctrl] " + pubIdent + ": 9s low-loss — SNAP BACK to full bitrate");
+                    targetHighBps = BITRATE_DEFAULT_HIGH;
+                    ctrl.currentCapHigh = targetHighBps;
+                    ctrl.capped = false;
+                    ctrl.probePhase = "idle";
+                    ctrl.lossHistory = [];
+                    ctrl.kbpsHistory = [];
+                  } else if (ctrl.capped && ctrl.probePhase === "backing-off" && ctrl.cleanTicksSinceLoss >= 2) {
+                    // 2 clean ticks but not burst (loss continued for >1 tick) — start probing
+                    ctrl.probePhase = "probing";
+                    ctrl.probeCleanTicks = 0;
+                    ctrl.probeBitrate = ctrl.currentCapHigh + 3_000_000; // faster: +3Mbps steps
+                    ctrl.probeBitrate = Math.min(ctrl.probeBitrate, BITRATE_DEFAULT_HIGH);
+                    targetHighBps = ctrl.probeBitrate;
+                    ctrl.currentCapHigh = targetHighBps;
+                  } else if (ctrl.probePhase === "probing") {
+                    ctrl.probeCleanTicks++;
+                    // 1 clean tick (~3s) per step, +3Mbps per step
+                    if (ctrl.probeCleanTicks >= 1) {
+                      ctrl.probeCleanTicks = 0;
+                      ctrl.probeBitrate = ctrl.currentCapHigh + 3_000_000;
+                      if (ctrl.probeBitrate >= BITRATE_DEFAULT_HIGH) {
+                        // Reached full bitrate — uncap
+                        targetHighBps = BITRATE_DEFAULT_HIGH;
+                        ctrl.currentCapHigh = targetHighBps;
+                        ctrl.capped = false;
+                        ctrl.probePhase = "idle";
+                        ctrl.lossHistory = [];
+                        ctrl.kbpsHistory = [];
+                      } else {
+                        targetHighBps = ctrl.probeBitrate;
+                        ctrl.currentCapHigh = targetHighBps;
+                      }
+                    }
+                  }
+                }
+
+                // Send cap or restore to publisher
+                if (ctrl.capped && nowCtrl - ctrl.lastCapSendTime >= 2000) {
+                  ctrl.lastCapSendTime = nowCtrl;
+                  if (!ctrl.firstCapSendTime) ctrl.firstCapSendTime = nowCtrl;
+                  var capMsg = {
+                    type: "bitrate-cap", version: 1,
+                    targetBitrateHigh: targetHighBps,
+                    targetBitrateMed: Math.round(targetHighBps * 0.33),
+                    targetBitrateLow: Math.round(targetHighBps * 0.1),
+                    reason: isSevereCongestion ? "severe" : isCongestion ? "congestion" :
+                            ctrl.probePhase === "probing" ? "probe" : "hold",
+                    lossRate: Math.round(lossRate * 1000) / 1000,
+                    senderIdentity: room.localParticipant.identity
+                  };
+                  try {
+                    room.localParticipant.publishData(
+                      new TextEncoder().encode(JSON.stringify(capMsg)),
+                      { reliable: true, destinationIdentities: [pubIdent] }
+                    );
+                    debugLog("[bitrate-ctrl] sent cap to " + pubIdent + ": HIGH=" +
+                      Math.round(targetHighBps / 1000) + "kbps phase=" + ctrl.probePhase +
+                      " reason=" + capMsg.reason);
+                  } catch (e) { /* ignore send failure */ }
+
+                  // Ensure we stay on HIGH layer (don't also downgrade layer)
+                  if (!ctrl._lockedHigh && LK?.VideoQuality) {
+                    try {
+                      if (pub.setVideoQuality) pub.setVideoQuality(LK.VideoQuality.HIGH);
+                    } catch (e) {}
+                    ctrl._lockedHigh = true;
+                  }
+                }
+
+                // Send restore when uncapped (once)
+                if (!ctrl.capped && ctrl.lastCapSendTime > 0) {
+                  var restoreMsg = {
+                    type: "bitrate-cap", version: 1,
+                    targetBitrateHigh: BITRATE_DEFAULT_HIGH,
+                    targetBitrateMed: BITRATE_DEFAULT_MED,
+                    targetBitrateLow: BITRATE_DEFAULT_LOW,
+                    reason: "restore", lossRate: 0,
+                    senderIdentity: room.localParticipant.identity
+                  };
+                  try {
+                    room.localParticipant.publishData(
+                      new TextEncoder().encode(JSON.stringify(restoreMsg)),
+                      { reliable: true, destinationIdentities: [pubIdent] }
+                    );
+                    debugLog("[bitrate-ctrl] sent RESTORE to " + pubIdent);
+                  } catch (e) { /* ignore */ }
+                  ctrl.lastCapSendTime = 0;
+                  ctrl.firstCapSendTime = 0;
+                  ctrl._lockedHigh = false;
+                }
+
+                // Fallback: if publisher never ack'd after 10s, revert to v3 layer switching
+                if (ctrl.capped && ctrl.firstCapSendTime > 0 && !ctrl.ackReceived &&
+                    nowCtrl - ctrl.firstCapSendTime > 10000) {
+                  debugLog("[bitrate-ctrl] " + pubIdent + " no ack after 10s — falling back to layer switching");
+                  ctrl.fallbackToLayers = true;
+                  _pubBitrateControl.delete(pubIdent);
+                }
+              }
+
+              // ── CAMERAS (or screen share fallback): v3 layer switching ──
+              // Only used for camera tracks, or screen shares where bitrate control failed.
+              var _bitrateCtrlActive = !isCamera && _pubBitrateControl.has(participant?.identity);
+              if (!_bitrateCtrlActive) {
+                dt.lossHistory.push(deltaLost);
+                if (dt.lossHistory.length > 8) dt.lossHistory.shift();
+                var nowMsLoss = Date.now();
+                var timeSinceLastLossChange = nowMsLoss - (dt.lastLayerChangeTime || 0);
+                var prevFps = dt.fpsHistory.length > 0 ? dt.fpsHistory[dt.fpsHistory.length - 1] : 0;
+                var isStalled = fps === 0 && prevFps > 0;
+                var isTanking = fps > 0 && fps < 30 && prevFps >= 30 && deltaLost > 15;
+                var isBurstNuke = deltaLost >= 50;
+                var shouldDropLow = (isStalled && deltaLost > 0) || isTanking || isBurstNuke;
+
+                if (shouldDropLow && dt.currentQuality !== "LOW" && timeSinceLastLossChange >= 3000 && LK?.VideoQuality) {
+                  var oldQ = dt.currentQuality;
+                  dt.currentQuality = "LOW";
+                  dt.lossDowngraded = true;
+                  dt.lossStableTicks = 0;
+                  dt.fpsHistory = [];
+                  dt.stableTicks = 0;
+                  dt.lastLayerChangeTime = nowMsLoss;
+                  dt.lossHistory = [];
+                  qualityChanged = true;
+                  var dropReason = isStalled ? "stall+loss(" + deltaLost + ")" : isTanking ? "fps-tanking(" + fps + "fps+" + deltaLost + "lost)" : "burst-nuke(" + deltaLost + "lost)";
+                  debugLog("[adaptive-loss] " + key + ": INSTANT DROP " + oldQ + " -> LOW (" + dropReason + ")");
+                  logEvent("loss-drop", key + ": " + oldQ + "->LOW " + dropReason);
+                  try {
+                    if (pub.setVideoQuality) pub.setVideoQuality(LK.VideoQuality.LOW);
+                    if (pub.setPreferredLayer) pub.setPreferredLayer({ quality: LK.VideoQuality.LOW });
+                  } catch (e) { debugLog("[adaptive-loss] drop failed: " + e.message); }
+                }
+
+                if (dt.lossDowngraded) {
+                  if (deltaLost === 0 && fps > 0) {
+                    dt.lossStableTicks++;
+                  } else {
+                    dt.lossStableTicks = 0;
+                  }
+                  if (dt.lossStableTicks >= 4 && timeSinceLastLossChange >= 12000 && LK?.VideoQuality) {
+                    dt.currentQuality = "HIGH";
+                    dt.lossDowngraded = false;
+                    dt.fpsHistory = [];
+                    dt.stableTicks = 0;
+                    dt.lossStableTicks = 0;
+                    dt.lossHistory = [];
+                    dt.lastLayerChangeTime = nowMsLoss;
+                    qualityChanged = true;
+                    debugLog("[adaptive-loss] " + key + ": clean 12s, SNAP BACK LOW -> HIGH");
+                    logEvent("loss-snapback", key + ": LOW->HIGH");
+                    try {
+                      if (pub.setVideoQuality) pub.setVideoQuality(LK.VideoQuality.HIGH);
+                      if (pub.setPreferredLayer) pub.setPreferredLayer({ quality: LK.VideoQuality.HIGH });
+                    } catch (e) { debugLog("[adaptive-loss] snapback failed: " + e.message); }
+                  }
+                }
+              }
+
               // Push FPS into rolling window (keep last 5 ticks = 15 seconds)
               if (fps > 0) dt.fpsHistory.push(fps);
               if (dt.fpsHistory.length > 5) dt.fpsHistory.shift();
 
-              // Calculate rolling average FPS
+              // Calculate rolling average FPS (used by both layer switching and debug log)
               var avgFps = 0;
               if (dt.fpsHistory.length > 0) {
                 avgFps = dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length;
               }
 
-              var qualityChanged = false;
+              // ── FPS-based layer switching ──
+              // Skip for screen shares when AIMD bitrate control is active — bitrate
+              // control handles quality smoothly without resolution jumps. Only used
+              // for cameras, or screen shares where bitrate control isn't active/failed.
+              if (!_bitrateCtrlActive) {
+
               // Downgrade when rolling average is clearly bad:
               // - avgFps < 30 over 15 seconds = consistently struggling (catches Jeff's 13-29fps oscillation)
               // - OR decode struggles (> 40% frame drop ratio)
@@ -1111,15 +1517,19 @@ function startInboundScreenStatsMonitor() {
               // - LOW layer caps at 30fps → upgrade if avgFps >= 27 (90% of cap) and low jitter
               // - MEDIUM layer caps at 60fps → upgrade if avgFps >= 45
               // Bug fix: old code required avgFps >= 45 always, which is impossible on LOW (30fps cap)
-              var upgradeThreshold = dt.currentQuality === "LOW" ? 27 : 45;
-              var shouldUpgrade = !shouldDowngrade && avgFps >= upgradeThreshold && jitter < 25 && dropRatio < 0.15;
+              // LOW cameras through TURN relay often cap at ~25fps, so 27fps threshold
+              // creates a permanent stuck-on-LOW feedback loop. Use 20fps for LOW.
+              var upgradeThreshold = dt.currentQuality === "LOW" ? 20 : 45;
+              // Don't let FPS-based system upgrade when loss system is holding quality down
+              var shouldUpgrade = !shouldDowngrade && !dt.lossDowngraded && avgFps >= upgradeThreshold && jitter < 25 && dropRatio < 0.15;
               if (shouldUpgrade && dt.currentQuality !== "HIGH") {
                 dt.stableTicks++;
               } else if (dt.currentQuality !== "HIGH") {
                 dt.stableTicks = Math.max(0, dt.stableTicks - 1);
               }
-              // 8 good ticks (24s) + cooldown before upgrading
-              if (dt.stableTicks >= 8 && timeSinceLastChange >= layerCooldown && dt.currentQuality !== "HIGH" && LK?.VideoQuality) {
+              // Cameras: 4 good ticks (12s), Screen shares: 8 ticks (24s) + cooldown
+              var upgradeTicksNeeded = isCamera ? 4 : 8;
+              if (dt.stableTicks >= upgradeTicksNeeded && timeSinceLastChange >= layerCooldown && dt.currentQuality !== "HIGH" && LK?.VideoQuality) {
                 if (dt.currentQuality === "LOW" && !isCamera) {
                   dt.currentQuality = "MEDIUM";
                   dt.fpsHistory = [];
@@ -1146,11 +1556,12 @@ function startInboundScreenStatsMonitor() {
                   } catch (e) { debugLog("[adaptive-layer] upgrade failed: " + e.message); }
                 }
               }
+              } // end if (!_bitrateCtrlActive) — FPS-based layer switching guard
 
               var layerInfo = qualityChanged ? " [LAYER->" + dt.currentQuality + "]" : "";
               // Store latest report for persistent stats logging
-              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null };
-              debugLog(`Inbound ${sourceLabel} ${participant.identity}: ${fps}fps ${w}x${h} ${kbps}kbps codec=${codec} decoder=${decoder} jitter=${jitter}ms lost=${pktLost} dropped=${dropped}/${decoded} (${Math.round(dropRatio*100)}%/tick) nack=${nacks} pli=${plis} avgFps=${Math.round(avgFps)} layer=${dt.currentQuality}${layerInfo}`);
+              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost };
+              debugLog(`Inbound ${sourceLabel} ${participant.identity}: ${fps}fps ${w}x${h} ${kbps}kbps codec=${codec} decoder=${decoder} jitter=${jitter}ms lost=${pktLost} dropped=${dropped}/${decoded} (${Math.round(dropRatio*100)}%/tick) nack=${nacks} pli=${plis} avgFps=${Math.round(avgFps)} layer=${dt.currentQuality}${layerInfo}${_iceType ? " " + _iceType : ""}`);
             }
           });
         }
@@ -1253,6 +1664,29 @@ async function startScreenShareManual() {
     let publishMst;
     let canvasW = settings.width || 1920;
     let canvasH = settings.height || 1080;
+    // ── Smart downscaling for ultrawide/4K captures ──
+    // At 15Mbps/60fps, standard 1080p (2.07M px) gets 0.12 bits/pixel — good.
+    // A 3440x1440 ultrawide (4.95M px) gets only 0.05 bpp — causes encoder stalls.
+    // Cap at MAX_CANVAS_WIDTH to keep bits/pixel healthy while preserving aspect ratio.
+    // 2560px wide covers the largest viewer tile with room to spare.
+    var MAX_CANVAS_WIDTH = 1920;
+    var MAX_CANVAS_PIXELS = 2_100_000; // ~1920x1094
+    // Helper: cap resolution for ultrawide/4K while preserving aspect ratio
+    function capCanvasRes(w, h, label) {
+      var px = w * h;
+      if (w > MAX_CANVAS_WIDTH || px > MAX_CANVAS_PIXELS) {
+        var sc = Math.min(MAX_CANVAS_WIDTH / w, Math.sqrt(MAX_CANVAS_PIXELS / px));
+        var nw = Math.round(w * sc); var nh = Math.round(h * sc);
+        nw = nw - (nw % 2); nh = nh - (nh % 2); // H.264 needs even dims
+        debugLog("[canvas-pipe] " + label + " downscale: " + w + "x" + h +
+          " (" + (px / 1e6).toFixed(1) + "M px) -> " + nw + "x" + nh +
+          " (" + (nw * nh / 1e6).toFixed(1) + "M px), scale=" + sc.toFixed(2));
+        return { w: nw, h: nh };
+      }
+      return null; // no cap needed
+    }
+    var capped = capCanvasRes(canvasW, canvasH, "initial");
+    if (capped) { canvasW = capped.w; canvasH = capped.h; }
     // Use a regular (DOM) canvas — OffscreenCanvas doesn't support captureStream
     var pipeCanvas = document.createElement("canvas");
     pipeCanvas.width = canvasW;
@@ -1278,18 +1712,24 @@ async function startScreenShareManual() {
     function canvasDraw() {
       if (!offVideo || !_canvasDrawActive) return;
       if (offVideo.readyState >= 2 && offVideo.videoWidth > 0) {
-        // Check if source dimensions changed (window resize, resizeMode correction)
-        if (_canvasFrameCount > 0 && _canvasFrameCount % 120 === 0) {
+        // Fallback resize check (primary is the 'resize' event on offVideo)
+        if (_canvasFrameCount > 0 && _canvasFrameCount % 30 === 0) {
           var srcW = offVideo.videoWidth;
           var srcH = offVideo.videoHeight;
-          if (srcW > 0 && srcH > 0 && (srcW !== canvasW || srcH !== canvasH)) {
-            debugLog("[canvas-pipe] source resized: " + canvasW + "x" + canvasH + " -> " + srcW + "x" + srcH);
-            canvasW = srcW;
-            canvasH = srcH;
-            pipeCanvas.width = canvasW;
-            pipeCanvas.height = canvasH;
-            // Re-acquire context after canvas resize (spec says old context is lost)
-            ctx2d = pipeCanvas.getContext("2d", { alpha: false, desynchronized: true });
+          if (srcW > 0 && srcH > 0) {
+            // Apply ultrawide cap to the source dimensions
+            var rc = capCanvasRes(srcW, srcH, "fallback-resize");
+            var targetW = rc ? rc.w : srcW;
+            var targetH = rc ? rc.h : srcH;
+            if (targetW !== canvasW || targetH !== canvasH) {
+              debugLog("[canvas-pipe] source resized: " + canvasW + "x" + canvasH + " -> " + targetW + "x" + targetH + " (raw=" + srcW + "x" + srcH + ")");
+              canvasW = targetW;
+              canvasH = targetH;
+              pipeCanvas.width = canvasW;
+              pipeCanvas.height = canvasH;
+              // Re-acquire context after canvas resize (spec says old context is lost)
+              ctx2d = pipeCanvas.getContext("2d", { alpha: false, desynchronized: true });
+            }
           }
         }
         ctx2d.drawImage(offVideo, 0, 0, canvasW, canvasH);
@@ -1337,6 +1777,27 @@ async function startScreenShareManual() {
       debugLog("[canvas-pipe] loadeddata fired: " + offVideo.videoWidth + "x" + offVideo.videoHeight + " readyState=" + offVideo.readyState);
       startCanvasDraw();
     });
+    // Resize canvas immediately when captured window changes size (e.g. user resizes Chrome window).
+    // Without this, drawImage stretches the smaller source to fill the old larger canvas — causing
+    // distortion AND wasting encoder bandwidth (encoding 3840x2088 when source is only 1600x900).
+    offVideo.addEventListener("resize", function() {
+      var srcW = offVideo.videoWidth;
+      var srcH = offVideo.videoHeight;
+      if (srcW > 0 && srcH > 0) {
+        // Apply ultrawide cap to the new source dimensions
+        var rc = capCanvasRes(srcW, srcH, "resize-event");
+        var targetW = rc ? rc.w : srcW;
+        var targetH = rc ? rc.h : srcH;
+        if (targetW !== canvasW || targetH !== canvasH) {
+          debugLog("[canvas-pipe] source window resized: " + canvasW + "x" + canvasH + " -> " + targetW + "x" + targetH + " (raw=" + srcW + "x" + srcH + ")");
+          canvasW = targetW;
+          canvasH = targetH;
+          pipeCanvas.width = canvasW;
+          pipeCanvas.height = canvasH;
+          ctx2d = pipeCanvas.getContext("2d", { alpha: false, desynchronized: true });
+        }
+      }
+    });
     // Safety: if already has data
     if (offVideo.readyState >= 2) {
       debugLog("[canvas-pipe] offVideo already has data (readyState=" + offVideo.readyState + ")");
@@ -1376,7 +1837,7 @@ async function startScreenShareManual() {
     _screenShareVideoTrack = new LK.LocalVideoTrack(publishMst, undefined, false);
     await room.localParticipant.publishTrack(_screenShareVideoTrack, {
       source: LK.Track.Source.ScreenShare,
-      ...getScreenSharePublishOptions(),
+      ...getScreenSharePublishOptions(canvasW, canvasH),
     });
 
     // Set initial sender parameters for simulcast screen share.
@@ -1498,6 +1959,7 @@ async function startScreenShareManual() {
         stats.forEach((report) => {
           if (report.type === "candidate-pair" && report.state === "succeeded") {
             bwe = Math.round((report.availableOutgoingBitrate || 0) / 1000);
+            _latestOutboundBwe = bwe; // update module-level for LOW restore interval to read
             const local = candidateMap.get(report.localCandidateId);
             const remote = candidateMap.get(report.remoteCandidateId);
             lType = local?.candidateType || "?";
@@ -1666,13 +2128,17 @@ async function startScreenShareManual() {
               try {
                 var kickParams = sender.getParameters();
                 if (kickParams.encodings) {
+                  // Respect active bitrate cap from AIMD — don't override to defaults
+                  var capHigh = _currentAppliedCap ? _currentAppliedCap.high : 15_000_000;
+                  var capMed = _currentAppliedCap ? _currentAppliedCap.med : 5_000_000;
+                  var capLow = _currentAppliedCap ? _currentAppliedCap.low : 1_500_000;
                   for (var kEnc of kickParams.encodings) {
                     if (kEnc.rid === "f" || (!kEnc.rid && kickParams.encodings.length === 1)) {
-                      kEnc.maxBitrate = 15_000_000;
+                      kEnc.maxBitrate = capHigh;
                     } else if (kEnc.rid === "h") {
-                      kEnc.maxBitrate = 5_000_000;
+                      kEnc.maxBitrate = capMed;
                     } else if (kEnc.rid === "q") {
-                      kEnc.maxBitrate = 1_500_000;
+                      kEnc.maxBitrate = capLow;
                     }
                   }
                 }
@@ -1685,6 +2151,111 @@ async function startScreenShareManual() {
             }
           } else {
             _bweLowTicks = Math.max(0, _bweLowTicks - 1);
+          }
+
+          // ── HIGH layer rescue: detect BWE crash pausing HIGH layer ──
+          // When BWE drops from 25Mbps to ~5Mbps (e.g. jitter spike on TURN relay),
+          // WebRTC disables the HIGH simulcast layer (0fps, limit=bandwidth) and only
+          // sends MED+LOW. The BWE may recover slowly on its own, but the HIGH layer
+          // can stay paused for 30+ seconds. This watchdog detects the pattern and
+          // actively re-enables the HIGH layer by temporarily disabling LOW to free
+          // bandwidth headroom for BWE to probe back up.
+          var highPaused = highLayerFps === 0 && highLayerLimit === "bandwidth" && layers.length > 1;
+          if (highPaused) {
+            _highPausedTicks = (_highPausedTicks || 0) + 1;
+          } else {
+            _highPausedTicks = 0;
+          }
+          // After 3 ticks (6s) of HIGH layer paused, try rescue
+          if (_highPausedTicks === 3) {
+            debugLog("[bwe-rescue] HIGH layer paused for 6s (bwe=" + bwe + "kbps) — temporarily disabling LOW layer to free bandwidth for HIGH recovery");
+            logEvent("bwe-rescue", "HIGH paused 6s, bwe=" + bwe + "kbps total=" + totalKbps + "kbps");
+            try {
+              var rescueParams = sender.getParameters();
+              if (rescueParams.encodings) {
+                // Respect active bitrate cap from AIMD
+                var rescueCapHigh = _currentAppliedCap ? _currentAppliedCap.high : 15_000_000;
+                for (var rEnc of rescueParams.encodings) {
+                  if (rEnc.rid === "q") {
+                    // Disable LOW layer temporarily to free ~1.5Mbps for HIGH
+                    rEnc.active = false;
+                  }
+                  if (rEnc.rid === "f") {
+                    // Re-assert HIGH layer active with fresh bitrate
+                    rEnc.active = true;
+                    rEnc.maxBitrate = rescueCapHigh;
+                  }
+                }
+              }
+              sender.setParameters(rescueParams).then(function() {
+                debugLog("[bwe-rescue] LOW layer disabled, HIGH re-asserted — BWE should ramp up");
+                // Restore LOW layer once BWE has recovered enough (>= 10Mbps) or after 20s max.
+                // Check every 2s instead of a blind 10s timer — prevents re-triggering HIGH pause
+                // when BWE hasn't recovered enough to sustain all 3 layers.
+                var _lowRestoreChecks = 0;
+                var _lowRestoreInterval = setInterval(function() {
+                  _lowRestoreChecks++;
+                  try {
+                    // Read current BWE from the module-level variable (updated every stats tick)
+                    var currentBwe = _latestOutboundBwe || 0;
+                    // If BWE >= 10Mbps or we've waited 20s, restore LOW
+                    if (currentBwe >= 10000 || _lowRestoreChecks >= 10) {
+                      clearInterval(_lowRestoreInterval);
+                      var restoreParams = sender.getParameters();
+                      if (restoreParams.encodings) {
+                        var restoreCapLow = _currentAppliedCap ? _currentAppliedCap.low : 1_500_000;
+                        for (var rEnc2 of restoreParams.encodings) {
+                          if (rEnc2.rid === "q") {
+                            rEnc2.active = true;
+                            rEnc2.maxBitrate = restoreCapLow;
+                          }
+                        }
+                      }
+                      sender.setParameters(restoreParams).then(function() {
+                        debugLog("[bwe-rescue] LOW layer restored (bwe=" + currentBwe + "kbps, checks=" + _lowRestoreChecks + ")");
+                      }).catch(function() {});
+                    }
+                  } catch (e2) { clearInterval(_lowRestoreInterval); }
+                }, 2000);
+              }).catch(function(e) {
+                debugLog("[bwe-rescue] setParameters failed: " + e.message);
+              });
+            } catch (e) { debugLog("[bwe-rescue] rescue failed: " + e.message); }
+          }
+          // If HIGH is still paused after 15 ticks (30s), try a harder rescue:
+          // re-assert all layer params to force BWE re-evaluation
+          if (_highPausedTicks === 15) {
+            debugLog("[bwe-rescue] HIGH layer still paused after 30s — hard re-asserting all encoder params");
+            logEvent("bwe-rescue-hard", "HIGH paused 30s, bwe=" + bwe + "kbps");
+            try {
+              var hardParams = sender.getParameters();
+              if (hardParams.encodings) {
+                // Respect active bitrate cap from AIMD
+                var hardCapHigh = _currentAppliedCap ? _currentAppliedCap.high : 15_000_000;
+                var hardCapMed = _currentAppliedCap ? _currentAppliedCap.med : 5_000_000;
+                var hardCapLow = _currentAppliedCap ? _currentAppliedCap.low : 1_500_000;
+                for (var hEnc of hardParams.encodings) {
+                  hEnc.active = true;
+                  if (hEnc.rid === "f" || (!hEnc.rid && hardParams.encodings.length === 1)) {
+                    hEnc.maxBitrate = hardCapHigh;
+                    hEnc.maxFramerate = 60;
+                  } else if (hEnc.rid === "h") {
+                    hEnc.maxBitrate = hardCapMed;
+                    hEnc.maxFramerate = 60;
+                  } else if (hEnc.rid === "q") {
+                    hEnc.maxBitrate = hardCapLow;
+                    hEnc.maxFramerate = 30;
+                  }
+                }
+              }
+              sender.setParameters(hardParams).then(function() {
+                debugLog("[bwe-rescue] hard re-assert complete — all layers active with target bitrates");
+              }).catch(function(e) {
+                debugLog("[bwe-rescue] hard setParameters failed: " + e.message);
+              });
+            } catch (e) { debugLog("[bwe-rescue] hard rescue failed: " + e.message); }
+            // Reset counter so we can try again in another 30s if still stuck
+            _highPausedTicks = 0;
           }
         }
       } catch {}
@@ -1751,6 +2322,16 @@ async function stopScreenShareManual() {
   // Always reset BWE watchdog state when screen share stops
   _bweLowTicks = 0;
   _bweKickAttempted = false;
+  _highPausedTicks = 0;
+  _latestOutboundBwe = 0;
+  // Clean up publisher-side bitrate cap state
+  _bitrateCaps.clear();
+  _currentAppliedCap = null;
+  if (_bitrateCapCleanupTimer) {
+    clearInterval(_bitrateCapCleanupTimer);
+    _bitrateCapCleanupTimer = null;
+  }
+  debugLog("[bitrate-ctrl] publisher-side caps cleared (screen share stopped)");
   // Restore camera quality if it was reduced for screen share
   if (_cameraReducedForScreenShare) {
     _cameraReducedForScreenShare = false;
@@ -2628,7 +3209,7 @@ function startHeartbeat() {
     fetch(`${controlUrl}/v1/participants/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ room: currentRoomName, identity, name }),
+      body: JSON.stringify({ room: currentRoomName, identity, name, viewer_version: _viewerVersion }),
     }).catch(() => {});
   };
   sendBeat();
@@ -3396,19 +3977,24 @@ function forceVideoLayer(publication, element) {
       if (publication.setPreferredLayer && initialQuality != null) {
         publication.setPreferredLayer({ quality: initialQuality });
       }
-      // Upgrade to HIGH quality after video is playing
-      setTimeout(() => {
-        if (element && element.videoWidth > 0 && targetQuality != null) {
-          try {
-            if (publication.setVideoQuality) {
-              publication.setVideoQuality(targetQuality);
-            }
-            if (publication.setPreferredLayer) {
-              publication.setPreferredLayer({ quality: targetQuality });
-            }
-          } catch {}
-        }
-      }, 2000);
+      // Upgrade to HIGH quality after video is playing — retry at 2s, 5s, 10s
+      // TURN relay users may take longer to produce first frames
+      var _upgradeAttempts = [2000, 5000, 10000];
+      _upgradeAttempts.forEach(function(delay) {
+        setTimeout(() => {
+          if (element && element.videoWidth > 0 && targetQuality != null) {
+            try {
+              if (publication.setVideoQuality) {
+                publication.setVideoQuality(targetQuality);
+              }
+              if (publication.setPreferredLayer) {
+                publication.setPreferredLayer({ quality: targetQuality });
+              }
+              debugLog("[camera-upgrade] promoted to HIGH after " + delay + "ms");
+            } catch {}
+          }
+        }, delay);
+      });
     }
   } catch {}
 }
@@ -3756,8 +4342,20 @@ function ensureParticipantCard(participant, isLocal = false) {
   let screenMuteButton = null;
   let micSlider = null;
   let screenSlider = null;
+  let micPct = null;
+  let screenPct = null;
   let micRow = null;
   let screenRow = null;
+  let camOverlay = null;
+  let ovMicBtn = null;
+  let ovMicMute = null;
+  let ovScreenBtn = null;
+  let ovScreenMute = null;
+  let ovWatchClone = null;
+  let popMicSlider = null;
+  let popMicPct = null;
+  let popScreenSlider = null;
+  let popScreenPct = null;
   if (!isLocal) {
     const indicators = document.createElement("div");
     indicators.className = "user-indicators";
@@ -3799,6 +4397,7 @@ function ensureParticipantCard(participant, isLocal = false) {
         hiddenScreens.delete(identity);
         watchedScreens.add(identity);
         watchToggleBtn.textContent = "Stop Watching";
+        if (ovWatchClone) ovWatchClone.textContent = "Stop Watching";
         debugLog("[opt-in] user opted in to watch " + identity);
 
         // Find the remote participant and subscribe to their screen share tracks
@@ -3886,13 +4485,18 @@ function ensureParticipantCard(participant, isLocal = false) {
         if (tile) tile.style.display = "";
         // Unmute screen share audio
         if (pState && pState.screenAudioEls) {
-          pState.screenAudioEls.forEach(function(el) { el.muted = false; });
+          pState.screenAudioEls.forEach(function(el) {
+            el.muted = false;
+            var gn = pState.screenGainNodes?.get(el);
+            if (gn) gn.gain.gain.value = pState.screenVolume || 1;
+          });
         }
       } else {
         // === STOP WATCHING: unsubscribe from screen share tracks ===
         hiddenScreens.add(identity);
         watchedScreens.delete(identity);
         watchToggleBtn.textContent = "Start Watching";
+        if (ovWatchClone) ovWatchClone.textContent = "Start Watching";
         debugLog("[opt-in] user stopped watching " + identity);
 
         // Find the remote participant and unsubscribe from their screen share tracks
@@ -3927,7 +4531,11 @@ function ensureParticipantCard(participant, isLocal = false) {
         }
         // Mute screen share audio
         if (pState && pState.screenAudioEls) {
-          pState.screenAudioEls.forEach(function(el) { el.muted = true; });
+          pState.screenAudioEls.forEach(function(el) {
+            el.muted = true;
+            var gn = pState.screenGainNodes?.get(el);
+            if (gn) gn.gain.gain.value = 0;
+          });
         }
       }
     });
@@ -3965,10 +4573,13 @@ function ensureParticipantCard(participant, isLocal = false) {
     micSlider = document.createElement("input");
     micSlider.type = "range";
     micSlider.min = "0";
-    micSlider.max = "1";
+    micSlider.max = "3";
     micSlider.step = "0.01";
     micSlider.value = "1";
-    micRow.append(micLabel, micSlider);
+    micPct = document.createElement("span");
+    micPct.className = "vol-pct";
+    micPct.textContent = "100%";
+    micRow.append(micLabel, micSlider, micPct);
     screenRow = document.createElement("div");
     screenRow.className = "audio-row hidden";
     const screenLabel = document.createElement("span");
@@ -3976,12 +4587,158 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenSlider = document.createElement("input");
     screenSlider.type = "range";
     screenSlider.min = "0";
-    screenSlider.max = "1";
+    screenSlider.max = "3";
     screenSlider.step = "0.01";
     screenSlider.value = "1";
-    screenRow.append(screenLabel, screenSlider);
+    screenPct = document.createElement("span");
+    screenPct.className = "vol-pct";
+    screenPct.textContent = "100%";
+    screenRow.append(screenLabel, screenSlider, screenPct);
     audioControls.append(micRow, screenRow);
     meta.append(indicators, audioControls);
+
+    // ─── Camera Overlay Bar (for has-camera mode) ───
+    try {
+    camOverlay = document.createElement("div");
+    camOverlay.className = "cam-overlay";
+
+    var overlayName = document.createElement("span");
+    overlayName.className = "cam-overlay-name";
+    overlayName.textContent = participant.name || "Guest";
+
+    var overlayControls = document.createElement("div");
+    overlayControls.className = "cam-overlay-controls";
+
+    // Overlay mic icon — click toggles volume popup
+    ovMicBtn = document.createElement("button");
+    ovMicBtn.type = "button";
+    ovMicBtn.className = "icon-button indicator-only";
+    ovMicBtn.innerHTML = iconSvg("mic");
+    ovMicBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var popup = camOverlay.querySelector(".vol-popup");
+      if (popup) popup.classList.toggle("is-open");
+    });
+
+    // Overlay mic mute button
+    ovMicMute = document.createElement("button");
+    ovMicMute.type = "button";
+    ovMicMute.className = "mute-button";
+    ovMicMute.textContent = "Mute";
+    ovMicMute.addEventListener("click", function(e) {
+      e.stopPropagation();
+      micMuteButton.click();
+    });
+
+    // Overlay screen icon — click toggles volume popup
+    ovScreenBtn = document.createElement("button");
+    ovScreenBtn.type = "button";
+    ovScreenBtn.className = "icon-button indicator-only";
+    ovScreenBtn.innerHTML = iconSvg("screen");
+    ovScreenBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var popup = camOverlay.querySelector(".vol-popup");
+      if (popup) popup.classList.toggle("is-open");
+    });
+
+    // Overlay screen mute button
+    ovScreenMute = document.createElement("button");
+    ovScreenMute.type = "button";
+    ovScreenMute.className = "mute-button";
+    ovScreenMute.textContent = "Mute";
+    ovScreenMute.addEventListener("click", function(e) {
+      e.stopPropagation();
+      screenMuteButton.click();
+    });
+
+    // Overlay watch toggle clone
+    ovWatchClone = document.createElement("button");
+    ovWatchClone.type = "button";
+    ovWatchClone.className = "watch-toggle-btn";
+    ovWatchClone.textContent = watchToggleBtn.textContent;
+    ovWatchClone.style.display = watchToggleBtn.style.display;
+    ovWatchClone.addEventListener("click", function(e) {
+      e.stopPropagation();
+      watchToggleBtn.click();
+    });
+
+    overlayControls.append(ovMicBtn, ovMicMute, ovScreenBtn, ovScreenMute, ovWatchClone);
+
+    // Overlay admin controls (if admin)
+    if (isAdminMode()) {
+      var ovAdminRow = document.createElement("div");
+      ovAdminRow.className = "admin-controls admin-only";
+      var ovKick = document.createElement("button");
+      ovKick.type = "button";
+      ovKick.className = "admin-kick-btn";
+      ovKick.textContent = "Kick";
+      ovKick.addEventListener("click", function(e) {
+        e.stopPropagation();
+        adminKickParticipant(participant.identity);
+      });
+      var ovMuteServer = document.createElement("button");
+      ovMuteServer.type = "button";
+      ovMuteServer.className = "admin-mute-btn";
+      ovMuteServer.textContent = "S.Mute";
+      ovMuteServer.addEventListener("click", function(e) {
+        e.stopPropagation();
+        adminMuteParticipant(participant.identity);
+      });
+      ovAdminRow.append(ovMuteServer, ovKick);
+      overlayControls.append(ovAdminRow);
+    }
+
+    // Volume popup (appears above overlay)
+    var volPopup = document.createElement("div");
+    volPopup.className = "vol-popup";
+
+    var popMicRow = document.createElement("div");
+    popMicRow.className = "audio-row";
+    var popMicLabel = document.createElement("span");
+    popMicLabel.textContent = "Mic";
+    popMicSlider = document.createElement("input");
+    popMicSlider.type = "range";
+    popMicSlider.min = "0";
+    popMicSlider.max = "3";
+    popMicSlider.step = "0.01";
+    popMicSlider.value = micSlider.value;
+    popMicPct = document.createElement("span");
+    popMicPct.className = "vol-pct";
+    popMicPct.textContent = micPct.textContent;
+    if (Number(micSlider.value) > 1) popMicPct.classList.add("boosted");
+    popMicRow.append(popMicLabel, popMicSlider, popMicPct);
+
+    var popScreenRow = document.createElement("div");
+    popScreenRow.className = "audio-row";
+    var popScreenLabel = document.createElement("span");
+    popScreenLabel.textContent = "Screen";
+    popScreenSlider = document.createElement("input");
+    popScreenSlider.type = "range";
+    popScreenSlider.min = "0";
+    popScreenSlider.max = "3";
+    popScreenSlider.step = "0.01";
+    popScreenSlider.value = screenSlider.value;
+    popScreenPct = document.createElement("span");
+    popScreenPct.className = "vol-pct";
+    popScreenPct.textContent = screenPct.textContent;
+    if (Number(screenSlider.value) > 1) popScreenPct.classList.add("boosted");
+    popScreenRow.append(popScreenLabel, popScreenSlider, popScreenPct);
+
+    volPopup.append(popMicRow, popScreenRow);
+    camOverlay.append(overlayName, overlayControls, volPopup);
+
+    // Close popup when clicking outside
+    document.addEventListener("click", function(e) {
+      if (!camOverlay.contains(e.target)) {
+        volPopup.classList.remove("is-open");
+      }
+    });
+
+    header.appendChild(camOverlay);
+    } catch (overlayErr) {
+      debugLog("[cam-overlay] ERROR creating overlay for " + key + ": " + overlayErr.message);
+      camOverlay = null;
+    }
   }
   header.append(avatar, meta);
   card.append(header);
@@ -4031,7 +4788,11 @@ function ensureParticipantCard(participant, isLocal = false) {
         var tile = screenTileByIdentity.get(identity);
         if (tile) tile.style.display = "";
         if (pState && pState.screenAudioEls) {
-          pState.screenAudioEls.forEach(function(el) { el.muted = false; });
+          pState.screenAudioEls.forEach(function(el) {
+            el.muted = false;
+            var gn = pState.screenGainNodes?.get(el);
+            if (gn) gn.gain.gain.value = pState.screenVolume || 1;
+          });
         }
         watchToggleBtn.textContent = "Stop Watching";
       } else {
@@ -4045,7 +4806,11 @@ function ensureParticipantCard(participant, isLocal = false) {
           tile.style.display = "none";
         }
         if (pState && pState.screenAudioEls) {
-          pState.screenAudioEls.forEach(function(el) { el.muted = true; });
+          pState.screenAudioEls.forEach(function(el) {
+            el.muted = true;
+            var gn = pState.screenGainNodes?.get(el);
+            if (gn) gn.gain.gain.value = 0;
+          });
         }
         watchToggleBtn.textContent = "Start Watching";
       }
@@ -4073,6 +4838,8 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenUserMuted: false,
     micAudioEls: new Set(),
     screenAudioEls: new Set(),
+    micGainNodes: new Map(),     // audioEl -> { source, gain } for volume boost
+    screenGainNodes: new Map(),  // audioEl -> { source, gain } for volume boost
     micAnalyser: null,
     screenAnalyser: null,
     micLevel: 0,
@@ -4101,6 +4868,11 @@ function ensureParticipantCard(participant, isLocal = false) {
       state.micUserMuted = !state.micUserMuted;
       micMuteButton.textContent = state.micUserMuted ? "Unmute" : "Mute";
       micMuteButton.classList.toggle("is-muted", state.micUserMuted);
+      // Sync overlay mute button
+      if (ovMicMute) {
+        ovMicMute.textContent = state.micUserMuted ? "Unmute" : "Mute";
+        ovMicMute.classList.toggle("is-muted", state.micUserMuted);
+      }
       applyParticipantAudioVolumes(state);
       updateActiveSpeakerUi();
     });
@@ -4110,20 +4882,88 @@ function ensureParticipantCard(participant, isLocal = false) {
       state.screenUserMuted = !state.screenUserMuted;
       screenMuteButton.textContent = state.screenUserMuted ? "Unmute" : "Mute";
       screenMuteButton.classList.toggle("is-muted", state.screenUserMuted);
+      // Sync overlay mute button
+      if (ovScreenMute) {
+        ovScreenMute.textContent = state.screenUserMuted ? "Unmute" : "Mute";
+        ovScreenMute.classList.toggle("is-muted", state.screenUserMuted);
+      }
       applyParticipantAudioVolumes(state);
     });
   }
   if (micSlider) {
     micSlider.addEventListener("input", () => {
       state.micVolume = Number(micSlider.value);
+      if (micPct) micPct.textContent = Math.round(state.micVolume * 100) + "%";
+      if (micPct) micPct.classList.toggle("boosted", state.micVolume > 1);
+      // Sync popup slider
+      if (popMicSlider) popMicSlider.value = state.micVolume;
+      if (popMicPct) { popMicPct.textContent = Math.round(state.micVolume * 100) + "%"; popMicPct.classList.toggle("boosted", state.micVolume > 1); }
       applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume);
     });
   }
   if (screenSlider) {
     screenSlider.addEventListener("input", () => {
       state.screenVolume = Number(screenSlider.value);
+      if (screenPct) screenPct.textContent = Math.round(state.screenVolume * 100) + "%";
+      if (screenPct) screenPct.classList.toggle("boosted", state.screenVolume > 1);
+      // Sync popup slider
+      if (popScreenSlider) popScreenSlider.value = state.screenVolume;
+      if (popScreenPct) { popScreenPct.textContent = Math.round(state.screenVolume * 100) + "%"; popScreenPct.classList.toggle("boosted", state.screenVolume > 1); }
       applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume);
     });
+  }
+  // Popup slider handlers (sync back to original sliders)
+  if (popMicSlider) {
+    popMicSlider.addEventListener("input", function() {
+      var val = Number(popMicSlider.value);
+      state.micVolume = val;
+      if (micSlider) micSlider.value = val;
+      var pctText = Math.round(val * 100) + "%";
+      if (popMicPct) { popMicPct.textContent = pctText; popMicPct.classList.toggle("boosted", val > 1); }
+      if (micPct) { micPct.textContent = pctText; micPct.classList.toggle("boosted", val > 1); }
+      applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume);
+    });
+  }
+  if (popScreenSlider) {
+    popScreenSlider.addEventListener("input", function() {
+      var val = Number(popScreenSlider.value);
+      state.screenVolume = val;
+      if (screenSlider) screenSlider.value = val;
+      var pctText = Math.round(val * 100) + "%";
+      if (popScreenPct) { popScreenPct.textContent = pctText; popScreenPct.classList.toggle("boosted", val > 1); }
+      if (screenPct) { screenPct.textContent = pctText; screenPct.classList.toggle("boosted", val > 1); }
+      applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume);
+    });
+  }
+  // Restore saved volume preferences for this participant
+  if (!isLocal) {
+    var savedVol = getParticipantVolume(key);
+    if (savedVol) {
+      if (savedVol.mic != null && micSlider) {
+        state.micVolume = savedVol.mic;
+        micSlider.value = savedVol.mic;
+        if (micPct) micPct.textContent = Math.round(savedVol.mic * 100) + "%";
+        if (micPct) micPct.classList.toggle("boosted", savedVol.mic > 1);
+        // Sync popup slider
+        if (popMicSlider) popMicSlider.value = savedVol.mic;
+        if (popMicPct) { popMicPct.textContent = Math.round(savedVol.mic * 100) + "%"; popMicPct.classList.toggle("boosted", savedVol.mic > 1); }
+      }
+      if (savedVol.screen != null && screenSlider) {
+        state.screenVolume = savedVol.screen;
+        screenSlider.value = savedVol.screen;
+        if (screenPct) screenPct.textContent = Math.round(savedVol.screen * 100) + "%";
+        if (screenPct) screenPct.classList.toggle("boosted", savedVol.screen > 1);
+        // Sync popup slider
+        if (popScreenSlider) popScreenSlider.value = savedVol.screen;
+        if (popScreenPct) { popScreenPct.textContent = Math.round(savedVol.screen * 100) + "%"; popScreenPct.classList.toggle("boosted", savedVol.screen > 1); }
+      }
+      applyParticipantAudioVolumes(state);
+      debugLog("[vol-prefs] restored " + key + " mic=" + (savedVol.mic || 1) + " screen=" + (savedVol.screen || 1));
+    }
   }
 
   participantCards.set(key, {
@@ -4139,7 +4979,17 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenMuteButton,
     micRow,
     screenRow,
-    watchToggleBtn: typeof watchToggleBtn !== "undefined" ? watchToggleBtn : null
+    watchToggleBtn: typeof watchToggleBtn !== "undefined" ? watchToggleBtn : null,
+    camOverlay,
+    ovMicBtn,
+    ovMicMute,
+    ovScreenBtn,
+    ovScreenMute,
+    ovWatchClone,
+    popMicSlider,
+    popMicPct,
+    popScreenSlider,
+    popScreenPct
   });
   participantState.set(key, state);
   debugLog(`participant card created and added to DOM for ${key}, card.isConnected=${card.isConnected}, avatar exists=${!!avatar}`);
@@ -4171,26 +5021,41 @@ function attachParticipantTracks(participant) {
 
 function updateAvatarVideo(cardRef, track) {
   if (!cardRef || !cardRef.avatar) {
-    debugLog(`ERROR: updateAvatarVideo called with invalid cardRef or avatar! cardRef=${!!cardRef}, avatar=${!!cardRef?.avatar}`);
+    debugLog("ERROR: updateAvatarVideo called with invalid cardRef or avatar! cardRef=" + !!cardRef + ", avatar=" + !!cardRef?.avatar);
     return;
   }
-  const { avatar } = cardRef;
+  var avatar = cardRef.avatar;
+  var card = cardRef.card;
+  var isLocal = cardRef.isLocal;
   // Preserve the hidden file input for local user avatar upload
-  const fileInput = avatar.querySelector('input[type="file"]');
+  var fileInput = avatar.querySelector('input[type="file"]');
   avatar.innerHTML = "";
   if (fileInput) avatar.appendChild(fileInput);
   if (track) {
-    const element = createLockedVideoElement(track);
+    var element = createLockedVideoElement(track);
     configureVideoElement(element, true);
     startBasicVideoMonitor(element);
     avatar.appendChild(element);
-    debugLog(`video attached to avatar for track ${track.sid || 'unknown'}`);
+    debugLog("video attached to avatar for track " + (track.sid || "unknown"));
+    // Toggle camera-first layout for remote users
+    if (!isLocal && card) {
+      card.classList.add("has-camera");
+    }
   } else {
-    avatar.textContent = getInitials(cardRef.card.querySelector(".user-name")?.textContent || "");
+    avatar.textContent = getInitials(card?.querySelector(".user-name")?.textContent || "");
     if (fileInput) avatar.appendChild(fileInput);
     // Show avatar image if one exists (replaces initials)
-    const identity = cardRef.card?.dataset?.identity;
+    var identity = card?.dataset?.identity;
     if (identity) updateAvatarDisplay(identity);
+    // Revert to compact layout for remote users
+    if (!isLocal && card) {
+      card.classList.remove("has-camera");
+    }
+    // Close any open volume popup
+    if (cardRef.camOverlay) {
+      var popup = cardRef.camOverlay.querySelector(".vol-popup");
+      if (popup) popup.classList.remove("is-open");
+    }
   }
 }
 
@@ -4356,6 +5221,13 @@ function ensureCameraVideo(cardRef, track, publication) {
     debugLog(`ERROR: ensureCameraVideo called with invalid params! cardRef=${!!cardRef}, track=${!!track}`);
     return;
   }
+  // Guard: NEVER put a screen share track in the camera avatar
+  var LK_ec = getLiveKitClient();
+  var pubSource = publication?.source || track?.source;
+  if (pubSource === LK_ec?.Track?.Source?.ScreenShare || pubSource === LK_ec?.Track?.Source?.ScreenShareAudio) {
+    debugLog(`ERROR: ensureCameraVideo called with screen share track! identity=${cardRef.card?.dataset?.identity} source=${pubSource} trackSid=${track.sid || "?"}`);
+    return;
+  }
   const cardIdentity = cardRef.card?.dataset?.identity || 'unknown';
   debugLog(`ensureCameraVideo called for track ${track.sid || 'unknown'}, participant=${cardIdentity}, cardRef.avatar=${!!cardRef.avatar}`);
   const existing = cardRef.avatar.querySelector("video");
@@ -4509,6 +5381,46 @@ function resetRemoteSubscriptions(reason) {
   });
 }
 
+// Lazily create a GainNode for an audio element (only when boost > 100% needed)
+// createMediaStreamSource captures the stream into WebAudio so the HTML element
+// can no longer output audio independently — only call this when actually boosting.
+function ensureGainNode(state, audioEl, isScreen) {
+  var map = isScreen ? state.screenGainNodes : state.micGainNodes;
+  if (map.has(audioEl)) return map.get(audioEl);
+  try {
+    var actx = getParticipantAudioCtx();
+    if (actx.state === "suspended") actx.resume().catch(function() {});
+    if (!audioEl.srcObject) return null;
+    var srcNode = actx.createMediaStreamSource(audioEl.srcObject);
+    var gainNode = actx.createGain();
+    gainNode.gain.value = 1.0;
+    srcNode.connect(gainNode);
+    gainNode.connect(actx.destination);
+    audioEl.volume = 0; // GainNode now handles output
+    audioEl.muted = false;
+    var ref = { source: srcNode, gain: gainNode };
+    map.set(audioEl, ref);
+    return ref;
+  } catch (e) {
+    debugLog("[vol-boost] lazy GainNode failed: " + e.message);
+    return null;
+  }
+}
+
+// Clean up WebAudio gain nodes when an audio element is removed
+function cleanupGainNode(state, audioEl, isScreen) {
+  if (!state) return;
+  var map = isScreen ? state.screenGainNodes : state.micGainNodes;
+  if (map) {
+    var gn = map.get(audioEl);
+    if (gn) {
+      try { gn.gain.disconnect(); } catch (e) {}
+      try { gn.source.disconnect(); } catch (e) {}
+      map.delete(audioEl);
+    }
+  }
+}
+
 function startMediaReconciler() {
   scheduleReconcileWaves("start");
 }
@@ -4529,11 +5441,28 @@ function applyParticipantAudioVolumes(state) {
   if (!state) return;
   const micVolume = roomAudioMuted || state.micUserMuted ? 0 : state.micVolume;
   state.micAudioEls.forEach((el) => {
-    el.volume = micVolume;
+    var gn = state.micGainNodes?.get(el);
+    if (!gn && state.micVolume > 1) {
+      // Lazily create GainNode only when boosting above 100%
+      gn = ensureGainNode(state, el, false);
+    }
+    if (gn) {
+      gn.gain.gain.value = micVolume;
+    } else {
+      el.volume = Math.min(1, micVolume);
+    }
   });
   const screenVolume = roomAudioMuted || state.screenUserMuted ? 0 : state.screenVolume;
   state.screenAudioEls.forEach((el) => {
-    el.volume = screenVolume;
+    var gn = state.screenGainNodes?.get(el);
+    if (!gn && state.screenVolume > 1) {
+      gn = ensureGainNode(state, el, true);
+    }
+    if (gn) {
+      gn.gain.gain.value = screenVolume;
+    } else {
+      el.volume = Math.min(1, screenVolume);
+    }
   });
 }
 
@@ -4554,6 +5483,21 @@ function updateActiveSpeakerUi() {
         micEl.classList.toggle("is-active", active);
       }
     }
+    // Sync overlay mic button state
+    try {
+      if (cardRef.ovMicBtn) {
+        cardRef.ovMicBtn.classList.toggle("is-muted", !!muted);
+        if (muted) {
+          cardRef.ovMicBtn.classList.remove("is-active");
+        } else {
+          var hasRecentAS = performance.now() - lastActiveSpeakerEvent < 1500;
+          var remAct = hasRecentAS ? activeSpeakerIds.has(identity) : Boolean(state?.micActive);
+          var locAct = Boolean(state?.micActive);
+          var act = cardRef.isLocal ? locAct : remAct;
+          cardRef.ovMicBtn.classList.toggle("is-active", act);
+        }
+      }
+    } catch (_e) {}
   });
 
   // Update Camera Lobby speaking indicators
@@ -4698,6 +5642,7 @@ function handleTrackSubscribed(track, publication, participant) {
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = "Start Watching";
+        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
       }
       debugLog("[opt-in] auto-unsubscribed unwatched screen " + participant.identity);
       return;
@@ -4710,6 +5655,7 @@ function handleTrackSubscribed(track, publication, participant) {
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = hiddenScreens.has(identity) ? "Start Watching" : "Stop Watching";
+        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = cardRef.watchToggleBtn.textContent; }
       }
       // If same track object, NEVER replace the element — just ensure it plays.
       // SDP renegotiations fire unsub/resub for the same track every ~2s. Replacing
@@ -4793,6 +5739,7 @@ function handleTrackSubscribed(track, publication, participant) {
     if (cardRef && cardRef.watchToggleBtn) {
       cardRef.watchToggleBtn.style.display = "";
       cardRef.watchToggleBtn.textContent = hiddenScreens.has(participant.identity) ? "Start Watching" : "Stop Watching";
+      if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = cardRef.watchToggleBtn.textContent; }
     }
     participantState.get(participant.identity).screenTrackSid = screenTrackSid;
     forceVideoLayer(publication, element);
@@ -4837,13 +5784,24 @@ function handleTrackSubscribed(track, publication, participant) {
     if (!_isLocalCam) startInboundScreenStatsMonitor();
     return;
   }
-  // Defensive fallback: video track with unknown/null source — route to camera card
-  // This is safer than dropping the track entirely or letting it land in the screen grid
+  // Defensive fallback: video track with unknown/null source
+  // Try to infer source from track label, resolution, or existing state before routing
   if (track.kind === "video" && source !== LK.Track.Source.ScreenShare && source !== LK.Track.Source.Camera) {
+    var mstLabel = track?.mediaStreamTrack?.label || "";
+    var mstW = track?.mediaStreamTrack?.getSettings?.()?.width || 0;
+    // Heuristics: screen shares typically have "screen"/"window"/"monitor" in label, or very wide resolution
+    var looksLikeScreen = /screen|window|monitor|display/i.test(mstLabel) || mstW > 1280;
     debugLog("[source-detect] WARNING: video track with unknown source for " +
-      participant.identity + " — defaulting to camera. pub.source=" +
-      publication?.source + " track.source=" + track?.source);
-    ensureCameraVideo(cardRef, track, publication);
+      participant.identity + " — pub.source=" + publication?.source +
+      " track.source=" + track?.source + " label=" + mstLabel +
+      " width=" + mstW + " looksLikeScreen=" + looksLikeScreen);
+    if (looksLikeScreen) {
+      // Route to screen share path instead of clobbering the camera avatar
+      debugLog("[source-detect] routing unknown video as screen share for " + participant.identity);
+      handleTrackSubscribed(track, Object.assign({}, publication, { source: LK.Track.Source.ScreenShare }), participant);
+    } else {
+      ensureCameraVideo(cardRef, track, publication);
+    }
     return;
   }
   if (track.kind === "audio") {
@@ -4865,6 +5823,9 @@ function handleTrackSubscribed(track, publication, participant) {
       element.srcObject = new MediaStream([track.mediaStreamTrack]);
     }
     element.volume = 1.0;
+    // Volume boost: GainNode is created lazily in applyParticipantAudioVolumes()
+    // only when the user boosts above 100%. At normal volume, the plain HTML
+    // audio element handles playback directly.
     // Minimize audio playout delay for screen share audio to reduce A/V desync
     if (source === LK.Track.Source.ScreenShareAudio) {
       try {
@@ -4999,10 +5960,16 @@ function handleTrackUnsubscribed(track, publication, participant) {
         // Participant stopped sharing — clean up fully
         hiddenScreens.delete(identity);
         watchedScreens.delete(identity);
+        // Clean up receiver-side AIMD bitrate control state for this publisher
+        if (_pubBitrateControl.has(identity)) {
+          _pubBitrateControl.delete(identity);
+          debugLog("[bitrate-ctrl] cleared AIMD state for " + identity + " (screen share ended)");
+        }
         var cardRef2 = participantCards.get(identity);
         if (cardRef2 && cardRef2.watchToggleBtn) {
           cardRef2.watchToggleBtn.style.display = "none";
           cardRef2.watchToggleBtn.textContent = "Stop Watching";
+          if (cardRef2.ovWatchClone) { cardRef2.ovWatchClone.style.display = "none"; cardRef2.ovWatchClone.textContent = "Stop Watching"; }
         }
       }
       // If still publishing but user unsubscribed, keep hiddenScreens and button as-is
@@ -5058,12 +6025,42 @@ function handleTrackUnsubscribed(track, publication, participant) {
             audioEl.remove();
             audioElBySid.delete(trackSid);
             if (pState) {
+              cleanupGainNode(pState, audioEl, true);
               pState.screenAudioEls.delete(audioEl);
               if (pState.screenAnalyser?.cleanup) pState.screenAnalyser.cleanup();
               pState.screenAnalyser = null;
             }
           } else {
             debugLog(`screen share audio kept (track returned): ${identity} sid=${trackSid}`);
+          }
+        }
+      }, 2000);
+      return; // Don't remove yet
+    }
+    // Grace period for mic audio during reconnection: delay removal so audio survives brief reconnects
+    if (_isReconnecting && source === LK.Track.Source.Microphone && audioEl && participant) {
+      debugLog(`[reconnect] mic audio unsubscribe ${participant.identity} sid=${trackSid} — delaying removal (2s grace)`);
+      const micIdentity = participant.identity;
+      setTimeout(() => {
+        const currentEl = audioElBySid.get(trackSid);
+        if (currentEl === audioEl) {
+          const pubs = participant.trackPublications ? Array.from(participant.trackPublications.values()) : [];
+          const hasMic = pubs.some((pub) => pub?.source === LK.Track.Source.Microphone && pub.track && pub.isSubscribed);
+          if (!hasMic) {
+            debugLog(`mic audio removed after grace period: ${micIdentity} sid=${trackSid}`);
+            audioEl.remove();
+            audioElBySid.delete(trackSid);
+            const pState = participantState.get(micIdentity);
+            if (pState) {
+              cleanupGainNode(pState, audioEl, false);
+              pState.micAudioEls.delete(audioEl);
+              pState.micMuted = true;
+              if (pState.micAnalyser?.cleanup) pState.micAnalyser.cleanup();
+              pState.micAnalyser = null;
+              updateActiveSpeakerUi();
+            }
+          } else {
+            debugLog(`mic audio kept (track returned): ${micIdentity} sid=${trackSid}`);
           }
         }
       }, 2000);
@@ -5077,12 +6074,14 @@ function handleTrackUnsubscribed(track, publication, participant) {
       const state = participantState.get(participant.identity);
       if (state) {
         if (source === LK.Track.Source.ScreenShareAudio) {
+          cleanupGainNode(state, audioEl, true);
           state.screenAudioEls.delete(audioEl);
           if (state.screenAnalyser?.cleanup) {
             state.screenAnalyser.cleanup();
           }
           state.screenAnalyser = null;
         } else {
+          cleanupGainNode(state, audioEl, false);
           state.micAudioEls.delete(audioEl);
           state.micMuted = true;
           if (state.micAnalyser?.cleanup) {
@@ -5241,6 +6240,11 @@ async function applySpeakerToMedia() {
         el.setSinkId(selectedSpeakerId).catch(() => {});
       }
     });
+  }
+  // Route participant volume-boost AudioContext to selected speaker
+  if (_participantAudioCtx && typeof _participantAudioCtx.setSinkId === "function") {
+    var sinkId = selectedSpeakerId && selectedSpeakerId.length > 0 ? selectedSpeakerId : "default";
+    try { await _participantAudioCtx.setSinkId(sinkId); } catch {}
   }
   if (soundboardContext) {
     await applySoundboardOutputDevice();
@@ -6335,7 +7339,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (LK.RoomEvent?.ConnectionStateChanged) {
     newRoom.on(LK.RoomEvent.ConnectionStateChanged, (state) => {
       if (!state) return;
+      debugLog("[connection] state changed: " + state);
+      if (state === "reconnecting") {
+        _isReconnecting = true;
+      } else if (state === "connected") {
+        _isReconnecting = false;
+      }
       if (state === "disconnected") {
+        _isReconnecting = false;
         setStatus(`Connection: ${state}`, true);
       } else {
         setStatus(`Connection: ${state}`);
@@ -6351,14 +7362,73 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
   if (LK.RoomEvent?.SignalReconnecting) {
     newRoom.on(LK.RoomEvent.SignalReconnecting, () => {
+      _isReconnecting = true;
       setStatus("Signal reconnecting...", true);
       logEvent("signal-reconnecting", "");
+      debugLog("[reconnect] signal reconnecting — suppressing chimes and delaying cleanup");
+      // Safety: auto-reset after 10s if reconnection stalls
+      setTimeout(() => { if (_isReconnecting) { _isReconnecting = false; debugLog("[reconnect] safety timeout — resetting reconnecting flag"); } }, 10000);
     });
   }
   if (LK.RoomEvent?.SignalReconnected) {
     newRoom.on(LK.RoomEvent.SignalReconnected, () => {
+      _isReconnecting = false;
       setStatus("Signal reconnected");
       logEvent("signal-reconnected", "");
+      debugLog("[reconnect] signal reconnected — cancelling pending disconnects");
+      // Cancel any pending disconnect cleanups — the participant is back
+      for (const [pendingKey, pendingTimer] of _pendingDisconnects) {
+        clearTimeout(pendingTimer);
+        debugLog("[reconnect] cancelled pending disconnect for " + pendingKey);
+      }
+      _pendingDisconnects.clear();
+      // Reset adaptive layer tracker to HIGH after reconnection
+      for (const [dtKey, dtVal] of _inboundDropTracker) {
+        if (dtVal.currentQuality !== "HIGH" && LK?.VideoQuality) {
+          debugLog("[reconnect] resetting adaptive quality for " + dtKey + " to HIGH");
+          dtVal.currentQuality = "HIGH";
+          dtVal.fpsHistory = [];
+          dtVal.stableTicks = 0;
+          dtVal.lowFpsTicks = 0;
+          dtVal.highDropTicks = 0;
+          dtVal.lastLayerChangeTime = performance.now();
+        }
+      }
+    });
+  }
+  // Room-level reconnecting/reconnected (covers media reconnection too)
+  if (LK.RoomEvent?.Reconnecting) {
+    newRoom.on(LK.RoomEvent.Reconnecting, () => {
+      _isReconnecting = true;
+      setStatus("Reconnecting...", true);
+      logEvent("reconnecting", "");
+      debugLog("[reconnect] room reconnecting — suppressing chimes and delaying cleanup");
+      setTimeout(() => { if (_isReconnecting) { _isReconnecting = false; debugLog("[reconnect] safety timeout — resetting reconnecting flag"); } }, 10000);
+    });
+  }
+  if (LK.RoomEvent?.Reconnected) {
+    newRoom.on(LK.RoomEvent.Reconnected, () => {
+      _isReconnecting = false;
+      setStatus("Reconnected");
+      logEvent("reconnected", "");
+      debugLog("[reconnect] room reconnected — cancelling pending disconnects");
+      for (const [pendingKey, pendingTimer] of _pendingDisconnects) {
+        clearTimeout(pendingTimer);
+        debugLog("[reconnect] cancelled pending disconnect for " + pendingKey);
+      }
+      _pendingDisconnects.clear();
+      // Reset adaptive layer tracker to HIGH after reconnection so quality recovers immediately
+      for (const [dtKey, dtVal] of _inboundDropTracker) {
+        if (dtVal.currentQuality !== "HIGH" && LK?.VideoQuality) {
+          debugLog("[reconnect] resetting adaptive quality for " + dtKey + " to HIGH");
+          dtVal.currentQuality = "HIGH";
+          dtVal.fpsHistory = [];
+          dtVal.stableTicks = 0;
+          dtVal.lowFpsTicks = 0;
+          dtVal.highDropTicks = 0;
+          dtVal.lastLayerChangeTime = performance.now();
+        }
+      }
     });
   }
   if (LK.RoomEvent?.ConnectionError) {
@@ -6435,6 +7505,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (cardRef && cardRef.watchToggleBtn) {
           cardRef.watchToggleBtn.style.display = "";
           cardRef.watchToggleBtn.textContent = "Start Watching";
+          if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
         }
         debugLog(`[opt-in] track published (screen, unwatched) ${participant.identity} src=${pubSource}`);
         // Still hook so we can subscribe later when user opts in
@@ -6470,9 +7541,17 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   });
   newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
     ensureParticipantCard(participant);
-    debugLog(`participant connected ${participant.identity}`);
+    debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
+    // Cancel any pending disconnect cleanup — this participant just came back
+    var wasPendingDisconnect = _pendingDisconnects.has(participant.identity);
+    if (wasPendingDisconnect) {
+      clearTimeout(_pendingDisconnects.get(participant.identity));
+      _pendingDisconnects.delete(participant.identity);
+      debugLog(`[reconnect] participant ${participant.identity} reconnected — cancelled pending disconnect`);
+    }
     // Real-time enter chime — fires instantly via WebSocket, no polling delay
-    if (!_isRoomSwitch) {
+    // Suppress during reconnection (they never actually left) or brief disconnect/rejoin
+    if (!_isRoomSwitch && !_isReconnecting && !wasPendingDisconnect) {
       playChimeForParticipant(participant.identity, "enter");
     }
     // Attach tracks — immediate on room switch (tracks already published), delayed on first connect
@@ -6525,39 +7604,56 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
   newRoom.on(LK.RoomEvent.ParticipantDisconnected, (participant) => {
     const key = participant.identity;
-    const cardRef = participantCards.get(key);
-    if (cardRef) cardRef.card.remove();
-    participantCards.delete(key);
-    participantState.delete(key);
-    debugLog(`participant disconnected ${participant.identity}`);
-    // Real-time leave/switch chime — check if they moved to another room or fully left
-    if (!_isRoomSwitch) {
-      (async function() {
-        try {
-          var statusList = await fetchRoomStatus(controlUrlInput.value.trim(), adminToken);
-          var inAnotherRoom = false;
-          if (Array.isArray(statusList)) {
-            for (var i = 0; i < statusList.length; i++) {
-              var r = statusList[i];
-              if (r.room_id === currentRoomName) continue;
-              var parts = r.participants || [];
-              for (var j = 0; j < parts.length; j++) {
-                if (parts[j].identity === key) { inAnotherRoom = true; break; }
+    debugLog(`participant disconnected ${participant.identity} (reconnecting=${_isReconnecting})`);
+
+    // Always use a grace period for participant disconnects.
+    // Participants may briefly disconnect and rejoin (e.g. when stopping/starting
+    // screen share triggers a full SDP renegotiation through the signaling proxy).
+    // The ParticipantConnected handler cancels this timer if they come back.
+    var graceMs = _isReconnecting ? 5000 : 8000;
+    debugLog(`[reconnect] delaying disconnect cleanup for ${key} (${graceMs}ms grace period)`);
+    if (_pendingDisconnects.has(key)) {
+      clearTimeout(_pendingDisconnects.get(key));
+    }
+    const timer = setTimeout(() => {
+      _pendingDisconnects.delete(key);
+      debugLog(`[reconnect] grace period expired for ${key} — cleaning up`);
+      const cardRef = participantCards.get(key);
+      if (cardRef) cardRef.card.remove();
+      participantCards.delete(key);
+      participantState.delete(key);
+      // Check if they moved to another room or fully left
+      if (!_isRoomSwitch) {
+        (async function() {
+          try {
+            var statusList = await fetchRoomStatus(controlUrlInput.value.trim(), adminToken);
+            var inAnotherRoom = false;
+            if (Array.isArray(statusList)) {
+              for (var i = 0; i < statusList.length; i++) {
+                var r = statusList[i];
+                if (r.room_id === currentRoomName) continue;
+                var parts = r.participants || [];
+                for (var j = 0; j < parts.length; j++) {
+                  if (parts[j].identity === key) { inAnotherRoom = true; break; }
+                }
+                if (inAnotherRoom) break;
               }
-              if (inAnotherRoom) break;
             }
-          }
-          if (inAnotherRoom) {
-            playSwitchChime();
-          } else {
-            playChimeForParticipant(key, "exit");
+            if (inAnotherRoom) {
+              playSwitchChime();
+            } else {
+              playChimeForParticipant(key, "exit");
           }
         } catch (e) {
           // Fallback: play leave chime if status check fails
           playChimeForParticipant(key, "exit");
         }
       })();
-    }
+      } else {
+        playChimeForParticipant(key, "exit");
+      }
+    }, graceMs);
+    _pendingDisconnects.set(key, timer);
   });
   if (LK.RoomEvent?.TrackMuted) {
     newRoom.on(LK.RoomEvent.TrackMuted, (publication, participant) => {
@@ -6661,6 +7757,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
               updateAvatarDisplay(ident);
             }
           });
+        } else if (msg.type === "bitrate-cap" && msg.version === 1 && msg.targetBitrateHigh) {
+          handleBitrateCapRequest(msg, participant);
+        } else if (msg.type === "bitrate-cap-ack" && msg.version === 1) {
+          debugLog("[bitrate-ctrl] " + (msg.identity || "?") + " ack'd cap: " +
+            Math.round((msg.appliedBitrateHigh || 0) / 1000) + "kbps");
+          // Mark ack received on the controller for this publisher
+          var ackCtrl = _pubBitrateControl.get(msg.identity);
+          if (ackCtrl) ackCtrl.ackReceived = true;
         }
       } catch {
         // ignore
@@ -6827,6 +7931,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = "Start Watching";
+        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
       }
     }
   });
@@ -7881,6 +8986,115 @@ async function restoreCameraQuality() {
   } catch (e) { debugLog("Adaptive camera restore failed: " + e.message); }
 }
 
+// ── Adaptive publisher bitrate control — publisher-side functions ──
+// Receives bitrate-cap messages from viewers and applies to local screen share sender.
+function handleBitrateCapRequest(msg, participant) {
+  if (!_screenShareVideoTrack?.sender) {
+    debugLog("[bitrate-ctrl] ignoring cap request — not screen sharing");
+    return;
+  }
+  var senderIdent = msg.senderIdentity || participant?.identity || "unknown";
+  var capHigh = Math.max(500_000, Math.min(msg.targetBitrateHigh || BITRATE_DEFAULT_HIGH, BITRATE_DEFAULT_HIGH));
+  var capMed = Math.max(300_000, Math.min(msg.targetBitrateMed || Math.round(capHigh * 0.33), BITRATE_DEFAULT_MED));
+  var capLow = Math.max(200_000, Math.min(msg.targetBitrateLow || Math.round(capHigh * 0.1), BITRATE_DEFAULT_LOW));
+  // Enforce layer ordering: HIGH > MED > LOW
+  if (capMed >= capHigh) capMed = Math.round(capHigh * 0.6);
+  if (capLow >= capMed) capLow = Math.round(capMed * 0.5);
+
+  _bitrateCaps.set(senderIdent, {
+    high: capHigh, med: capMed, low: capLow,
+    timestamp: Date.now(), reason: msg.reason || "unknown"
+  });
+  debugLog("[bitrate-ctrl] cap from " + senderIdent + ": HIGH=" +
+    Math.round(capHigh / 1000) + "kbps reason=" + (msg.reason || "?") +
+    " lossRate=" + (msg.lossRate || "?"));
+
+  // Start cleanup timer if not already running
+  if (!_bitrateCapCleanupTimer) {
+    _bitrateCapCleanupTimer = setInterval(cleanupAndApplyBitrateCaps, 5000);
+  }
+  applyMostRestrictiveCap();
+
+  // Ack back to requester
+  try {
+    var ack = JSON.stringify({
+      type: "bitrate-cap-ack", version: 1,
+      appliedBitrateHigh: capHigh, identity: room?.localParticipant?.identity
+    });
+    room.localParticipant.publishData(
+      new TextEncoder().encode(ack),
+      { reliable: true, destinationIdentities: [senderIdent] }
+    );
+  } catch (e) { /* ignore ack failure */ }
+}
+
+function cleanupAndApplyBitrateCaps() {
+  var now = Date.now();
+  var expired = [];
+  _bitrateCaps.forEach(function(cap, ident) {
+    if (now - cap.timestamp > BITRATE_CAP_TTL) expired.push(ident);
+  });
+  expired.forEach(function(ident) {
+    _bitrateCaps.delete(ident);
+    debugLog("[bitrate-ctrl] cap expired from " + ident);
+  });
+  if (_bitrateCaps.size === 0 && _currentAppliedCap !== null) {
+    debugLog("[bitrate-ctrl] all caps expired, restoring defaults");
+    _currentAppliedCap = null;
+    applyBitrateToSender(BITRATE_DEFAULT_HIGH, BITRATE_DEFAULT_MED, BITRATE_DEFAULT_LOW);
+    clearInterval(_bitrateCapCleanupTimer);
+    _bitrateCapCleanupTimer = null;
+  } else if (_bitrateCaps.size > 0) {
+    applyMostRestrictiveCap();
+  }
+}
+
+function applyMostRestrictiveCap() {
+  var minHigh = BITRATE_DEFAULT_HIGH;
+  var minMed = BITRATE_DEFAULT_MED;
+  var minLow = BITRATE_DEFAULT_LOW;
+  _bitrateCaps.forEach(function(cap) {
+    if (cap.high < minHigh) minHigh = cap.high;
+    if (cap.med < minMed) minMed = cap.med;
+    if (cap.low < minLow) minLow = cap.low;
+  });
+  if (_currentAppliedCap &&
+      _currentAppliedCap.high === minHigh &&
+      _currentAppliedCap.med === minMed) {
+    return; // no change
+  }
+  _currentAppliedCap = { high: minHigh, med: minMed, low: minLow };
+  applyBitrateToSender(minHigh, minMed, minLow);
+}
+
+function applyBitrateToSender(highBps, medBps, lowBps) {
+  var sender = _screenShareVideoTrack?.sender;
+  if (!sender) return;
+  try {
+    var params = sender.getParameters();
+    if (!params.encodings) return;
+    for (var i = 0; i < params.encodings.length; i++) {
+      var enc = params.encodings[i];
+      if (enc.rid === "f" || (!enc.rid && params.encodings.length === 1)) {
+        enc.maxBitrate = highBps;
+      } else if (enc.rid === "h") {
+        enc.maxBitrate = medBps;
+      } else if (enc.rid === "q") {
+        enc.maxBitrate = lowBps;
+      }
+    }
+    sender.setParameters(params).then(function() {
+      debugLog("[bitrate-ctrl] applied: HIGH=" + Math.round(highBps / 1000) +
+        "kbps MED=" + Math.round(medBps / 1000) + "kbps LOW=" + Math.round(lowBps / 1000) + "kbps");
+      logEvent("bitrate-cap-applied", "HIGH=" + Math.round(highBps / 1000) + "kbps");
+    }).catch(function(e) {
+      debugLog("[bitrate-ctrl] setParameters failed: " + e.message);
+    });
+  } catch (e) {
+    debugLog("[bitrate-ctrl] apply failed: " + e.message);
+  }
+}
+
 async function toggleCam() {
   if (!room) return;
   const desired = !camEnabled;
@@ -8623,6 +9837,7 @@ if (isAdminMode()) {
   document.body.classList.add("admin-mode");
   // Show admin-only elements
   document.querySelectorAll(".admin-only").forEach(function(el) {
+    if (el.id === "admin-dash-panel") return; // Panel shown via toggleAdminDash()
     el.classList.remove("hidden");
   });
   // Auto-login: fetch password from Tauri config and auto-connect
@@ -9109,7 +10324,7 @@ var _adminDashOpen = false;
 
 function adminKickParticipant(identity) {
   if (!confirm("Kick " + identity + " from the room?")) return;
-  var roomId = currentRoomId;
+  var roomId = currentRoomName;
   if (!roomId) return;
   fetch(apiUrl("/v1/rooms/" + encodeURIComponent(roomId) + "/kick/" + encodeURIComponent(identity)), {
     method: "POST",
@@ -9117,6 +10332,19 @@ function adminKickParticipant(identity) {
   }).then(function(res) {
     if (res.ok) {
       setStatus("Kicked " + identity);
+      // Remove the card immediately since they're gone
+      var cardRef = participantCards.get(identity);
+      if (cardRef) cardRef.card.remove();
+      participantCards.delete(identity);
+      participantState.delete(identity);
+    } else if (res.status === 502) {
+      // 502 = SFU returned error (e.g. 404 participant not found)
+      setStatus(identity + " already left the room", true);
+      // Clean up stale card
+      var cardRef = participantCards.get(identity);
+      if (cardRef) cardRef.card.remove();
+      participantCards.delete(identity);
+      participantState.delete(identity);
     } else {
       setStatus("Kick failed: " + res.status, true);
     }
@@ -9126,7 +10354,7 @@ function adminKickParticipant(identity) {
 }
 
 function adminMuteParticipant(identity) {
-  var roomId = currentRoomId;
+  var roomId = currentRoomName;
   if (!roomId) return;
   fetch(apiUrl("/v1/rooms/" + encodeURIComponent(roomId) + "/mute/" + encodeURIComponent(identity)), {
     method: "POST",
@@ -9150,6 +10378,7 @@ function toggleAdminDash() {
     panel.classList.remove("hidden");
     fetchAdminDashboard();
     fetchAdminHistory();
+    fetchAdminDashboardMetrics();
     fetchAdminMetrics();
     fetchAdminBugs();
     _adminDashTimer = setInterval(function() {
@@ -9164,6 +10393,40 @@ function toggleAdminDash() {
     }
   }
 }
+
+(function initAdminResize() {
+  var panel = document.getElementById("admin-dash-panel");
+  if (!panel) return;
+  var handle = document.createElement("div");
+  handle.className = "admin-dash-resize-handle";
+  panel.appendChild(handle);
+
+  var saved = localStorage.getItem("admin-panel-width");
+  if (saved) panel.style.setProperty("--admin-panel-width", saved + "px");
+
+  var dragging = false;
+  handle.addEventListener("mousedown", function(e) {
+    e.preventDefault();
+    dragging = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  });
+  document.addEventListener("mousemove", function(e) {
+    if (!dragging) return;
+    var w = window.innerWidth - e.clientX;
+    if (w < 400) w = 400;
+    if (w > window.innerWidth * 0.8) w = window.innerWidth * 0.8;
+    panel.style.setProperty("--admin-panel-width", w + "px");
+  });
+  document.addEventListener("mouseup", function() {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    var current = panel.style.getPropertyValue("--admin-panel-width");
+    if (current) localStorage.setItem("admin-panel-width", parseInt(current));
+  });
+})();
 
 function switchAdminTab(btn, tabId) {
   document.querySelectorAll(".admin-dash-content").forEach(function(el) { el.classList.add("hidden"); });
@@ -9203,7 +10466,8 @@ async function fetchAdminDashboard() {
     var el = document.getElementById("admin-dash-live");
     if (!el) return;
     var total = data.total_online || 0;
-    var html = '<div class="adm-stat-row"><span class="adm-stat-label">Online</span><span class="adm-stat-value">' + total + '</span></div>';
+    var sv = data.server_version || "";
+    var html = '<div class="adm-stat-row"><span class="adm-stat-label">Online' + (sv ? ' · v' + sv : '') + '</span><span class="adm-stat-value">' + total + '</span></div>';
     if (data.rooms && data.rooms.length > 0) {
       data.rooms.forEach(function(room) {
         var pCount = room.participants ? room.participants.length : 0;
@@ -9211,6 +10475,15 @@ async function fetchAdminDashboard() {
         (room.participants || []).forEach(function(p) {
           var s = p.stats || {};
           var chips = "";
+          // Version badge
+          var vv = p.viewer_version;
+          if (!vv) {
+            chips += '<span class="adm-badge adm-badge-bad">STALE</span>';
+          } else if (sv && vv !== sv) {
+            chips += '<span class="adm-badge adm-badge-bad">v' + escAdm(vv) + '</span>';
+          } else {
+            chips += '<span class="adm-badge adm-badge-ok">v' + escAdm(vv) + '</span>';
+          }
           if (s.ice_remote_type) chips += '<span class="adm-badge adm-ice-' + s.ice_remote_type + '">' + s.ice_remote_type + '</span>';
           if (s.screen_fps != null) chips += '<span class="adm-chip">' + s.screen_fps + 'fps ' + s.screen_width + 'x' + s.screen_height + '</span>';
           if (s.quality_limitation && s.quality_limitation !== "none") chips += '<span class="adm-badge adm-badge-warn">' + s.quality_limitation + '</span>';
@@ -9240,7 +10513,14 @@ async function fetchAdminHistory() {
       return;
     }
     var html = '<table class="adm-table"><thead><tr><th>Time</th><th>Event</th><th>User</th><th>Room</th><th>Duration</th></tr></thead><tbody>';
+    var lastDateKey = "";
     events.forEach(function(ev) {
+      var d = new Date(ev.timestamp * 1000);
+      var dateKey = d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+      if (dateKey !== lastDateKey) {
+        html += '<tr class="adm-date-sep"><td colspan="5">' + dateKey + '</td></tr>';
+        lastDateKey = dateKey;
+      }
       var isJoin = ev.event_type === "join";
       html += '<tr><td>' + fmtTime(ev.timestamp) + '</td><td><span class="adm-badge ' + (isJoin ? 'adm-join' : 'adm-leave') + '">' + (isJoin ? 'JOIN' : 'LEAVE') + '</span></td><td>' + escAdm(ev.name || ev.identity) + '</td><td>' + escAdm(ev.room_id) + '</td><td>' + (ev.duration_secs != null ? fmtDur(ev.duration_secs) : '') + '</td></tr>';
     });
@@ -9249,27 +10529,370 @@ async function fetchAdminHistory() {
   } catch (e) {}
 }
 
+var _admUserColors = [
+  "#e8922f","#3b9dda","#49b86d","#c75dba","#d65757","#c9b83e","#6ec4c4","#8b7dd6",
+  "#e06080","#40c090","#d4a030","#5c8de0","#c0604c","#50d0b0","#a070e0","#d09050",
+  "#60b858","#9060c0","#e07898","#44b8c8","#b8a040","#7088d8","#c87858","#48c868",
+  "#b860a8","#e0a870","#58a0d0","#a0c048","#d870a0","#60d0a0"
+];
+function _admUserColor(name) {
+  var hash = 5381;
+  for (var i = 0; i < name.length; i++) hash = ((hash << 5) + hash + name.charCodeAt(i)) >>> 0;
+  return _admUserColors[hash % _admUserColors.length];
+}
+
+var _admDashboardData = null;
+var _admBugData = null;
+var _admSelectedUser = null;
+var _admHeatmapUsers = {};
+
+function _admSelectUser(name) {
+  _admSelectedUser = (_admSelectedUser === name) ? null : name;
+  renderAdminDashboard();
+}
+
+function _admHeatCellClick(e, dateKey, hour) {
+  var old = document.getElementById("adm-heat-popup");
+  if (old) old.remove();
+  var users = (_admHeatmapUsers[dateKey] && _admHeatmapUsers[dateKey][hour]) || {};
+  var names = Object.keys(users);
+  if (names.length === 0) return;
+  names.sort(function(a, b) { return users[b] - users[a]; });
+  var dt = new Date(dateKey + "T00:00:00");
+  var dayLabel = dt.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  var hourLabel = (hour % 12 || 12) + (hour < 12 ? "a" : "p");
+  var ph = '<div class="adm-heat-popup-title">' + dayLabel + ' ' + hourLabel + '</div>';
+  names.forEach(function(n) {
+    ph += '<div class="adm-heat-popup-row"><span class="adm-heat-popup-dot" style="background:' + _admUserColor(n) + '"></span>' + escAdm(n) + '<span class="adm-heat-popup-count">' + users[n] + '</span></div>';
+  });
+  var popup = document.createElement("div");
+  popup.id = "adm-heat-popup";
+  popup.className = "adm-heat-popup";
+  popup.innerHTML = ph;
+  document.body.appendChild(popup);
+  var rect = e.target.getBoundingClientRect();
+  popup.style.top = (rect.bottom + 4) + "px";
+  popup.style.left = Math.min(rect.left, window.innerWidth - 200) + "px";
+  setTimeout(function() {
+    document.addEventListener("click", function dismiss(ev) {
+      if (!popup.contains(ev.target)) { popup.remove(); document.removeEventListener("click", dismiss); }
+    });
+  }, 0);
+}
+
+async function fetchAdminDashboardMetrics() {
+  try {
+    var res = await fetch(apiUrl("/admin/api/metrics/dashboard"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!res.ok) { console.error("[admin] dashboard metrics fetch failed:", res.status); return; }
+    _admDashboardData = await res.json();
+    // Also fetch bug data for charts
+    try {
+      var bugRes = await fetch(apiUrl("/admin/api/bugs"), {
+        headers: { "Authorization": "Bearer " + adminToken }
+      });
+      if (bugRes.ok) _admBugData = await bugRes.json();
+    } catch (e2) { console.error("[admin] bug fetch error:", e2); }
+    renderAdminDashboard();
+  } catch (e) { console.error("[admin] fetchAdminDashboardMetrics error:", e); }
+}
+
+function renderAdminDashboard() {
+  var el = document.getElementById("admin-dash-metrics");
+  if (!el || !_admDashboardData) return;
+  var d = _admDashboardData;
+  var s = d.summary || {};
+  var html = "";
+
+  // ── Summary Cards ──
+  html += '<div class="adm-cards">';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (s.total_sessions || 0) + '</div><div class="adm-card-label">Sessions (30d)</div></div>';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (s.unique_users || 0) + '</div><div class="adm-card-label">Unique Users</div></div>';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (s.total_hours || 0) + '</div><div class="adm-card-label">Total Hours</div></div>';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (s.avg_duration_mins || 0) + 'm</div><div class="adm-card-label">Avg Duration</div></div>';
+  html += '</div>';
+
+  // ── User Leaderboard (clickable) ──
+  var users = d.per_user || [];
+  if (users.length > 0) {
+    var maxCount = users[0].session_count || 1;
+    html += '<div class="adm-section"><div class="adm-section-title">User Leaderboard (30d)</div>';
+    users.forEach(function(u) {
+      var uname = u.name || u.identity;
+      var pct = Math.max(2, (u.session_count / maxCount) * 100);
+      var col = _admUserColor(uname);
+      var selClass = _admSelectedUser === uname ? " adm-lb-selected" : "";
+      html += '<div class="adm-leaderboard-bar' + selClass + '" onclick="_admSelectUser(\'' + escAdm(uname).replace(/'/g, "\\'") + '\')"><span class="adm-leaderboard-name">' + escAdm(uname) + '</span><div class="adm-leaderboard-fill" style="width:' + pct + '%;background:' + col + '"></div><span class="adm-leaderboard-count">' + u.session_count + ' (' + u.total_hours + 'h)</span></div>';
+    });
+    html += '</div>';
+  }
+
+  // ── Activity Heatmap (client-side timezone, per-user tracking) ──
+  var heatJoins = d.heatmap_joins || [];
+  if (heatJoins.length > 0) {
+    var heatmap = {};
+    _admHeatmapUsers = {};
+    heatJoins.forEach(function(j) {
+      var dt = new Date(j.timestamp * 1000);
+      var dateKey = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+      var hour = dt.getHours();
+      var name = j.name || "Unknown";
+      if (!_admHeatmapUsers[dateKey]) _admHeatmapUsers[dateKey] = {};
+      if (!_admHeatmapUsers[dateKey][hour]) _admHeatmapUsers[dateKey][hour] = {};
+      _admHeatmapUsers[dateKey][hour][name] = (_admHeatmapUsers[dateKey][hour][name] || 0) + 1;
+      if (!_admSelectedUser || name === _admSelectedUser) {
+        if (!heatmap[dateKey]) heatmap[dateKey] = {};
+        heatmap[dateKey][hour] = (heatmap[dateKey][hour] || 0) + 1;
+      }
+    });
+    var heatDays = Object.keys(_admHeatmapUsers).sort().slice(-7);
+    var heatMax = 1;
+    heatDays.forEach(function(dk) {
+      if (!heatmap[dk]) return;
+      Object.keys(heatmap[dk]).forEach(function(h) { if (heatmap[dk][h] > heatMax) heatMax = heatmap[dk][h]; });
+    });
+
+    html += '<div class="adm-section"><div class="adm-section-title">Activity Heatmap (7d)</div>';
+    if (_admSelectedUser) {
+      html += '<div style="margin-bottom:8px;"><button class="adm-show-all-btn" onclick="_admSelectUser(null)">Show All</button> Filtered: <strong>' + escAdm(_admSelectedUser) + '</strong></div>';
+    }
+    html += '<div class="adm-chart-wrap"><div class="adm-heatmap-wrap"><div class="adm-heatmap-grid">';
+    html += '<div class="adm-heatmap-label"></div>';
+    for (var h = 0; h < 24; h++) {
+      html += '<div class="adm-heatmap-hlabel">' + (h % 3 === 0 ? h + "" : "") + '</div>';
+    }
+    var selColor = _admSelectedUser ? _admUserColor(_admSelectedUser) : null;
+    heatDays.forEach(function(dk) {
+      var dayLabel = new Date(dk + "T12:00:00").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+      html += '<div class="adm-heatmap-label">' + dayLabel + '</div>';
+      for (var hr = 0; hr < 24; hr++) {
+        var count = (heatmap[dk] && heatmap[dk][hr]) || 0;
+        var intensity = count / heatMax;
+        var bg;
+        if (count === 0) {
+          bg = "rgba(255,255,255,0.03)";
+        } else if (selColor) {
+          // Use selected user's color
+          var r = parseInt(selColor.slice(1,3),16), g = parseInt(selColor.slice(3,5),16), b = parseInt(selColor.slice(5,7),16);
+          bg = "rgba(" + r + "," + g + "," + b + "," + (0.2 + intensity * 0.8).toFixed(2) + ")";
+        } else {
+          bg = "rgba(232,146,47," + (0.2 + intensity * 0.8).toFixed(2) + ")";
+        }
+        html += '<div class="adm-heatmap-cell" style="background:' + bg + ';cursor:pointer" title="' + dayLabel + ' ' + hr + ':00 — ' + count + ' joins" onclick="_admHeatCellClick(event,\'' + dk + '\',' + hr + ')"></div>';
+      }
+    });
+    html += '</div></div></div></div>';
+  }
+
+  // ── Session Timeline (today, local timezone) ──
+  var tlEvents = d.timeline_events || [];
+  if (tlEvents.length > 0) {
+    var nowDate = new Date();
+    var todayLocal = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+    var todayStartTs = todayLocal.getTime() / 1000;
+    var nowTs = Date.now() / 1000;
+    var todayEvts = tlEvents.filter(function(e) { return e.timestamp >= todayStartTs; });
+    var tlMap = {};
+    var openJoins = {};
+    todayEvts.sort(function(a, b) { return a.timestamp - b.timestamp; });
+    todayEvts.forEach(function(ev) {
+      var key = ev.name || ev.identity;
+      if (ev.event_type === "join") {
+        openJoins[ev.identity] = { ts: ev.timestamp, name: key };
+        if (!tlMap[key]) tlMap[key] = [];
+      } else if (ev.event_type === "leave") {
+        var start = openJoins[ev.identity] ? openJoins[ev.identity].ts : todayStartTs;
+        delete openJoins[ev.identity];
+        if (!tlMap[key]) tlMap[key] = [];
+        tlMap[key].push({ start: start, end: ev.timestamp });
+      }
+    });
+    Object.keys(openJoins).forEach(function(id) {
+      var oj = openJoins[id];
+      if (!tlMap[oj.name]) tlMap[oj.name] = [];
+      tlMap[oj.name].push({ start: oj.ts, end: nowTs });
+    });
+    var tlUsers = Object.keys(tlMap);
+    if (tlUsers.length > 0) {
+      html += '<div class="adm-section"><div class="adm-section-title">Today\'s Sessions</div><div class="adm-chart-wrap">';
+      html += '<div class="adm-timeline-axis">';
+      for (var th = 0; th < 24; th += 3) {
+        html += '<span>' + (th === 0 ? '12a' : th < 12 ? th + 'a' : th === 12 ? '12p' : (th - 12) + 'p') + '</span>';
+      }
+      html += '</div>';
+      tlUsers.forEach(function(uname) {
+        var col = _admUserColor(uname);
+        html += '<div class="adm-timeline-row"><span class="adm-timeline-name">' + escAdm(uname) + '</span><div class="adm-timeline-track">';
+        (tlMap[uname] || []).forEach(function(sp) {
+          var left = Math.max(0, ((sp.start - todayStartTs) / 86400) * 100);
+          var width = Math.max(0.5, ((sp.end - sp.start) / 86400) * 100);
+          html += '<div class="adm-timeline-span" style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%;background:' + col + '"></div>';
+        });
+        html += '</div></div>';
+      });
+      html += '</div></div>';
+    }
+  }
+
+  // ── Bug Reports Summary (on Metrics tab) ──
+  var bugs = (_admBugData && _admBugData.reports) || [];
+  if (bugs.length > 0) {
+    var bugsByUser = {};
+    bugs.forEach(function(b) {
+      var name = b.name || b.reporter || b.identity || "Unknown";
+      bugsByUser[name] = (bugsByUser[name] || 0) + 1;
+    });
+    var bugUserArr = Object.keys(bugsByUser).map(function(n) {
+      return { name: n, count: bugsByUser[n] };
+    }).sort(function(a, b) { return b.count - a.count; });
+    var bugMax = bugUserArr[0].count;
+
+    html += '<div class="adm-section"><div class="adm-section-title">Bug Reports by User</div>';
+    bugUserArr.forEach(function(u) {
+      var pct = (u.count / bugMax) * 100;
+      html += '<div class="adm-leaderboard-bar"><div class="adm-leaderboard-name">' + escAdm(u.name) + '</div><div class="adm-leaderboard-fill" style="width:' + pct + '%;background:' + _admUserColor(u.name) + '"></div><div class="adm-leaderboard-count">' + u.count + '</div></div>';
+    });
+    html += '</div>';
+
+    // Bugs by Day
+    var bugsByDay = {};
+    bugs.forEach(function(b) {
+      var dt = new Date(b.timestamp * 1000);
+      var dk = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+      bugsByDay[dk] = (bugsByDay[dk] || 0) + 1;
+    });
+    var bugDays = Object.keys(bugsByDay).sort();
+    var bugDayMax = Math.max.apply(null, bugDays.map(function(d) { return bugsByDay[d]; }));
+
+    html += '<div class="adm-section"><div class="adm-section-title">Bugs by Day</div>';
+    html += '<div class="adm-bugs-by-day">';
+    bugDays.forEach(function(dk) {
+      var count = bugsByDay[dk];
+      var pct = (count / bugDayMax) * 100;
+      var dt = new Date(dk + "T12:00:00");
+      var label = dt.toLocaleDateString([], { month: "short", day: "numeric" });
+      html += '<div class="adm-bug-day-col"><div class="adm-bug-day-bar" style="height:' + pct + '%" title="' + label + ': ' + count + ' bugs"></div><div class="adm-bug-day-count">' + count + '</div><div class="adm-bug-day-label">' + label + '</div></div>';
+    });
+    html += '</div></div>';
+  }
+
+  // Quality stats rendered below by renderAdminQuality
+  html += '<div id="admin-dash-metrics-quality"></div>';
+  el.innerHTML = html;
+}
+
+var _admQualityData = null;
+
 async function fetchAdminMetrics() {
   try {
     var res = await fetch(apiUrl("/admin/api/metrics"), {
       headers: { "Authorization": "Bearer " + adminToken }
     });
     if (!res.ok) return;
-    var data = await res.json();
-    var el = document.getElementById("admin-dash-metrics");
-    if (!el) return;
-    var users = data.users || [];
-    if (users.length === 0) {
-      el.innerHTML = '<div class="adm-empty">No metrics data</div>';
-      return;
-    }
-    var html = '<table class="adm-table"><thead><tr><th>User</th><th>Avg FPS</th><th>Avg Bitrate</th><th>Time</th><th>BW Limited</th><th>CPU Limited</th></tr></thead><tbody>';
-    users.forEach(function(u) {
-      html += '<tr><td>' + escAdm(u.name || u.identity) + '</td><td>' + u.avg_fps + '</td><td>' + (u.avg_bitrate_kbps / 1000).toFixed(1) + ' Mbps</td><td>' + u.total_minutes.toFixed(1) + 'm</td><td>' + u.pct_bandwidth_limited + '%</td><td>' + u.pct_cpu_limited + '%</td></tr>';
-    });
-    html += '</tbody></table>';
-    el.innerHTML = html;
+    _admQualityData = await res.json();
+    renderAdminQuality();
   } catch (e) {}
+}
+
+function renderAdminQuality() {
+  var container = document.getElementById("admin-dash-metrics-quality");
+  if (!container || !_admQualityData) return;
+  var users = _admQualityData.users || [];
+  if (users.length === 0) {
+    container.innerHTML = '<div class="adm-empty">No quality data yet</div>';
+    return;
+  }
+
+  var html = '';
+
+  // ── Quality Summary Cards ──
+  var totalFps = 0, totalBitrate = 0, totalBw = 0, totalCpu = 0, n = users.length;
+  users.forEach(function(u) {
+    totalFps += u.avg_fps;
+    totalBitrate += u.avg_bitrate_kbps;
+    totalBw += u.pct_bandwidth_limited;
+    totalCpu += u.pct_cpu_limited;
+  });
+  html += '<div class="adm-section"><div class="adm-section-title">Stream Quality Overview</div>';
+  html += '<div class="adm-cards">';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (totalFps / n).toFixed(1) + '</div><div class="adm-card-label">Avg FPS</div></div>';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (totalBitrate / n / 1000).toFixed(1) + '</div><div class="adm-card-label">Avg Mbps</div></div>';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (totalBw / n).toFixed(1) + '%</div><div class="adm-card-label">BW Limited</div></div>';
+  html += '<div class="adm-card"><div class="adm-card-value">' + (totalCpu / n).toFixed(1) + '%</div><div class="adm-card-label">CPU Limited</div></div>';
+  html += '</div></div>';
+
+  // ── Quality Score Ranking ──
+  var scored = users.map(function(u) {
+    var fpsNorm = Math.min(u.avg_fps / 60, 1);
+    var brNorm = Math.min(u.avg_bitrate_kbps / 15000, 1);
+    var cleanPct = 1 - (u.pct_bandwidth_limited + u.pct_cpu_limited) / 100;
+    if (cleanPct < 0) cleanPct = 0;
+    var score = Math.round(fpsNorm * 40 + brNorm * 30 + cleanPct * 30);
+    return { name: u.name || u.identity, score: score, u: u };
+  }).sort(function(a, b) { return b.score - a.score; });
+
+  html += '<div class="adm-section"><div class="adm-section-title">Quality Score Ranking</div>';
+  scored.forEach(function(s) {
+    var badgeClass = s.score >= 80 ? "adm-score-good" : (s.score >= 50 ? "adm-score-ok" : "adm-score-bad");
+    html += '<div class="adm-leaderboard-bar" style="cursor:default"><div class="adm-leaderboard-name">' + escAdm(s.name) + '</div><div class="adm-leaderboard-fill" style="width:' + s.score + '%;background:' + _admUserColor(s.name) + '"></div><div class="adm-score-badge ' + badgeClass + '">' + s.score + '</div></div>';
+  });
+  html += '</div>';
+
+  // ── Per-User FPS & Bitrate Bars ──
+  var maxFps = Math.max.apply(null, users.map(function(u) { return u.avg_fps || 1; }));
+  var maxBr = Math.max.apply(null, users.map(function(u) { return u.avg_bitrate_kbps || 1; }));
+
+  html += '<div class="adm-section"><div class="adm-section-title">Per-User Quality</div>';
+  html += '<div class="adm-quality-dual">';
+  html += '<div class="adm-quality-col"><div class="adm-quality-col-title">Avg FPS</div>';
+  users.slice().sort(function(a, b) { return b.avg_fps - a.avg_fps; }).forEach(function(u) {
+    var pct = maxFps > 0 ? (u.avg_fps / maxFps) * 100 : 0;
+    var name = u.name || u.identity;
+    html += '<div class="adm-leaderboard-bar" style="cursor:default"><div class="adm-leaderboard-name">' + escAdm(name) + '</div><div class="adm-leaderboard-fill" style="width:' + pct + '%;background:' + _admUserColor(name) + '"></div><div class="adm-leaderboard-count">' + u.avg_fps.toFixed(1) + '</div></div>';
+  });
+  html += '</div>';
+  html += '<div class="adm-quality-col"><div class="adm-quality-col-title">Avg Bitrate (Mbps)</div>';
+  users.slice().sort(function(a, b) { return b.avg_bitrate_kbps - a.avg_bitrate_kbps; }).forEach(function(u) {
+    var pct = maxBr > 0 ? (u.avg_bitrate_kbps / maxBr) * 100 : 0;
+    var name = u.name || u.identity;
+    html += '<div class="adm-leaderboard-bar" style="cursor:default"><div class="adm-leaderboard-name">' + escAdm(name) + '</div><div class="adm-leaderboard-fill" style="width:' + pct + '%;background:' + _admUserColor(name) + '"></div><div class="adm-leaderboard-count">' + (u.avg_bitrate_kbps / 1000).toFixed(1) + '</div></div>';
+  });
+  html += '</div></div></div>';
+
+  // ── Quality Limitation Breakdown ──
+  html += '<div class="adm-section"><div class="adm-section-title">Quality Limitations</div>';
+  users.forEach(function(u) {
+    var name = u.name || u.identity;
+    var clean = Math.max(0, 100 - u.pct_bandwidth_limited - u.pct_cpu_limited);
+    html += '<div class="adm-limit-row"><div class="adm-leaderboard-name">' + escAdm(name) + '</div>';
+    html += '<div class="adm-limit-bar">';
+    if (clean > 0) html += '<div class="adm-limit-seg adm-limit-clean" style="width:' + clean + '%" title="Clean: ' + clean.toFixed(1) + '%"></div>';
+    if (u.pct_cpu_limited > 0) html += '<div class="adm-limit-seg adm-limit-cpu" style="width:' + u.pct_cpu_limited + '%" title="CPU: ' + u.pct_cpu_limited.toFixed(1) + '%"></div>';
+    if (u.pct_bandwidth_limited > 0) html += '<div class="adm-limit-seg adm-limit-bw" style="width:' + u.pct_bandwidth_limited + '%" title="BW: ' + u.pct_bandwidth_limited.toFixed(1) + '%"></div>';
+    html += '</div></div>';
+  });
+  html += '</div>';
+
+  // ── Encoder & ICE Connection ──
+  html += '<div class="adm-section"><div class="adm-section-title">Encoder & Connection</div>';
+  html += '<table class="adm-table"><thead><tr><th>User</th><th>Encoder</th><th>Local ICE</th><th>Remote ICE</th><th>Samples</th><th>Time</th></tr></thead><tbody>';
+  users.forEach(function(u) {
+    var name = u.name || u.identity;
+    var enc = u.encoder || "\u2014";
+    var iceL = u.ice_local_type || "\u2014";
+    var iceR = u.ice_remote_type || "\u2014";
+    var iceClass = iceR === "relay" ? "adm-ice-relay" : (iceL === "host" ? "adm-ice-host" : "adm-ice-srflx");
+    html += '<tr><td><span class="adm-heat-popup-dot" style="background:' + _admUserColor(name) + ';display:inline-block;vertical-align:middle;margin-right:4px"></span>' + escAdm(name) + '</td>';
+    html += '<td><span class="adm-enc-badge">' + escAdm(enc) + '</span></td>';
+    html += '<td>' + escAdm(iceL) + '</td>';
+    html += '<td><span class="' + iceClass + '">' + escAdm(iceR) + '</span></td>';
+    html += '<td>' + u.sample_count + '</td>';
+    html += '<td>' + u.total_minutes.toFixed(1) + 'm</td></tr>';
+  });
+  html += '</tbody></table></div>';
+
+  container.innerHTML = html;
 }
 
 async function fetchAdminBugs() {
@@ -9288,7 +10911,7 @@ async function fetchAdminBugs() {
     }
     var html = "";
     reports.forEach(function(r) {
-      html += '<div class="adm-bug"><div class="adm-bug-header"><strong>' + escAdm(r.reporter || r.identity) + '</strong><span class="adm-time">' + fmtTime(r.timestamp) + '</span></div><div class="adm-bug-desc">' + escAdm(r.description) + '</div></div>';
+      html += '<div class="adm-bug"><div class="adm-bug-header"><strong>' + escAdm(r.name || r.identity) + '</strong><span class="adm-time">' + fmtTime(r.timestamp) + '</span></div><div class="adm-bug-desc">' + escAdm(r.description) + '</div></div>';
     });
     el.innerHTML = html;
   } catch (e) {}

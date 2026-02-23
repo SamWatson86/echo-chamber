@@ -148,7 +148,8 @@ async function fetchHistory() {
 // ── Render Live ──
 
 function renderDashboard(data) {
-  onlineCount.textContent = `${data.total_online || 0} online`;
+  const sv = data.server_version || '';
+  onlineCount.textContent = `${data.total_online || 0} online` + (sv ? ` · v${sv}` : '');
 
   if (!data.rooms || data.rooms.length === 0) {
     roomsContainer.innerHTML = '<div class="rooms-empty">No active rooms</div>';
@@ -157,7 +158,7 @@ function renderDashboard(data) {
 
   roomsContainer.innerHTML = data.rooms.map(room => {
     const pCount = room.participants ? room.participants.length : 0;
-    const rows = (room.participants || []).map(p => renderParticipant(p)).join('');
+    const rows = (room.participants || []).map(p => renderParticipant(p, sv)).join('');
     return `<div class="room-card">
       <div class="room-header">
         <span class="room-name">${esc(room.room_id)}</span>
@@ -168,11 +169,22 @@ function renderDashboard(data) {
   }).join('');
 }
 
-function renderParticipant(p) {
+function renderParticipant(p, serverVersion) {
   const s = p.stats;
   const time = formatDuration(p.online_seconds);
   let qualityClass = '';
   let statsHtml = '';
+
+  // Version badge
+  const vv = p.viewer_version;
+  let versionBadge = '';
+  if (!vv) {
+    versionBadge = '<span class="badge badge-bad version-badge">STALE</span>';
+  } else if (serverVersion && vv !== serverVersion) {
+    versionBadge = `<span class="badge badge-bad version-badge">STALE v${esc(vv)}</span>`;
+  } else {
+    versionBadge = `<span class="badge badge-good version-badge">v${esc(vv)}</span>`;
+  }
 
   if (s && (s.screen_fps != null || s.camera_fps != null)) {
     const chips = [];
@@ -205,6 +217,7 @@ function renderParticipant(p) {
   return `<div class="participant-row ${qualityClass}">
     <div class="participant-left">
       <span class="participant-name">${esc(p.name || p.identity)}</span>
+      ${versionBadge}
       <span class="participant-time">${time}</span>
     </div>
     <div class="participant-right">${statsHtml}</div>

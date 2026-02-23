@@ -67,6 +67,7 @@ struct ParticipantEntry {
     name: String,
     room_id: String,
     last_seen: u64,
+    viewer_version: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -122,6 +123,9 @@ struct StatsSnapshot {
     screen_fps: Option<f64>,
     screen_bitrate_kbps: Option<u32>,
     quality_limitation: Option<String>,
+    encoder: Option<String>,
+    ice_local_type: Option<String>,
+    ice_remote_type: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -374,6 +378,8 @@ struct TokenRequest {
     room: String,
     identity: String,
     name: Option<String>,
+    #[serde(default)]
+    viewer_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -736,6 +742,7 @@ async fn main() {
         .route("/admin/api/stats", post(admin_report_stats))
         .route("/admin/api/metrics", get(admin_metrics))
         .route("/admin/api/bugs", get(admin_bug_reports))
+        .route("/admin/api/metrics/dashboard", get(admin_dashboard_metrics))
         .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
@@ -1276,15 +1283,33 @@ async fn issue_token(
             );
             participants.remove(&key);
         }
-        participants.insert(
-            payload.identity.clone(),
-            ParticipantEntry {
-                identity: payload.identity.clone(),
-                name: payload.name.clone().unwrap_or_default(),
-                room_id: payload.room.clone(),
-                last_seen: now,
-            },
-        );
+        // Only update room_id if the participant is NEW or STALE (>20s since last seen).
+        // Prefetching tokens for breakout rooms (fast room switching) should NOT overwrite
+        // the participant's actual current room — that's the heartbeat's job.
+        if let Some(existing) = participants.get_mut(&payload.identity) {
+            if now.saturating_sub(existing.last_seen) >= 20 {
+                // Stale entry — treat as new join, update everything
+                existing.room_id = payload.room.clone();
+                existing.last_seen = now;
+                if let Some(ref name) = payload.name {
+                    existing.name = name.clone();
+                }
+            }
+            // Active entry: DON'T overwrite room_id (prefetch tokens shouldn't move them)
+            // Just refresh last_seen so dedup logic considers them active
+        } else {
+            // Brand new participant — register them
+            participants.insert(
+                payload.identity.clone(),
+                ParticipantEntry {
+                    identity: payload.identity.clone(),
+                    name: payload.name.clone().unwrap_or_default(),
+                    room_id: payload.room.clone(),
+                    last_seen: now,
+                    viewer_version: None,
+                },
+            );
+        }
     }
 
     Ok(Json(TokenResponse {
@@ -1381,6 +1406,9 @@ async fn participant_heartbeat(
         if let Some(name) = &payload.name {
             entry.name = name.clone();
         }
+        if payload.viewer_version.is_some() {
+            entry.viewer_version = payload.viewer_version.clone();
+        }
     } else {
         participants.insert(
             payload.identity.clone(),
@@ -1389,6 +1417,7 @@ async fn participant_heartbeat(
                 name: payload.name.clone().unwrap_or_default(),
                 room_id: payload.room.clone(),
                 last_seen: now,
+                viewer_version: payload.viewer_version.clone(),
             },
         );
     }
@@ -1503,6 +1532,7 @@ struct AdminDashboardResponse {
     ts: u64,
     rooms: Vec<AdminRoomInfo>,
     total_online: usize,
+    server_version: String,
 }
 
 #[derive(Serialize)]
@@ -1517,6 +1547,8 @@ struct AdminParticipantInfo {
     name: String,
     online_seconds: u64,
     stats: Option<ClientStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    viewer_version: Option<String>,
 }
 
 async fn admin_dashboard(
@@ -1540,6 +1572,7 @@ async fn admin_dashboard(
             name: p.name.clone(),
             online_seconds: online_secs,
             stats,
+            viewer_version: p.viewer_version.clone(),
         };
         room_map.entry(p.room_id.clone()).or_default().push(info);
     }
@@ -1557,6 +1590,7 @@ async fn admin_dashboard(
         ts: now,
         rooms,
         total_online: total,
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
     }))
 }
 
@@ -1580,11 +1614,53 @@ struct UserMetrics {
     pct_bandwidth_limited: f64,
     pct_cpu_limited: f64,
     total_minutes: f64,
+    encoder: Option<String>,
+    ice_local_type: Option<String>,
+    ice_remote_type: Option<String>,
 }
 
 #[derive(Serialize)]
 struct BugReportsResponse {
     reports: Vec<BugReport>,
+}
+
+#[derive(Clone, Serialize)]
+struct HeatmapJoin {
+    timestamp: u64,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct DashboardMetricsResponse {
+    summary: DashboardSummary,
+    per_user: Vec<UserSessionStats>,
+    heatmap_joins: Vec<HeatmapJoin>,
+    timeline_events: Vec<TimelineEvent>,
+}
+
+#[derive(Serialize)]
+struct DashboardSummary {
+    total_sessions: usize,
+    unique_users: usize,
+    total_hours: f64,
+    avg_duration_mins: f64,
+}
+
+#[derive(Serialize)]
+struct UserSessionStats {
+    name: String,
+    identity: String,
+    session_count: usize,
+    total_hours: f64,
+}
+
+#[derive(Serialize)]
+struct TimelineEvent {
+    identity: String,
+    name: String,
+    event_type: String,
+    timestamp: u64,
+    duration_secs: Option<u64>,
 }
 
 async fn admin_sessions(
@@ -1620,6 +1696,110 @@ async fn admin_sessions(
     Ok(Json(AdminSessionsResponse { events: all_events }))
 }
 
+async fn admin_dashboard_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DashboardMetricsResponse>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let today_days = now / 86400;
+    let mut all_events = Vec::new();
+
+    // Read last 30 days of session logs
+    for offset in 0..30 {
+        let days = today_days - offset;
+        let (year, month, day) = epoch_days_to_date(days);
+        let file_name = format!("sessions-{:04}-{:02}-{:02}.json", year, month, day);
+        let file_path = state.session_log_dir.join(&file_name);
+        if let Ok(data) = fs::read_to_string(&file_path) {
+            if let Ok(events) = serde_json::from_str::<Vec<SessionEvent>>(&data) {
+                all_events.extend(events);
+            }
+        }
+    }
+
+    // --- Summary ---
+    let leaves: Vec<&SessionEvent> = all_events
+        .iter()
+        .filter(|e| e.event_type == "leave")
+        .collect();
+    let total_sessions = leaves.len();
+    // Count unique users by display name (not identity, which has random suffixes)
+    let mut unique_names: HashSet<String> = HashSet::new();
+    for ev in &all_events {
+        let key = if ev.name.is_empty() { ev.identity.clone() } else { ev.name.clone() };
+        unique_names.insert(key);
+    }
+    let unique_users = unique_names.len();
+    let total_secs: u64 = leaves.iter().filter_map(|e| e.duration_secs).sum();
+    let total_hours = (total_secs as f64 / 3600.0 * 10.0).round() / 10.0;
+    let avg_duration_mins = if total_sessions > 0 {
+        ((total_secs as f64 / total_sessions as f64) / 60.0 * 10.0).round() / 10.0
+    } else {
+        0.0
+    };
+
+    // --- Per-user stats (grouped by display name, not identity) ---
+    let mut user_map: HashMap<String, (usize, u64)> = HashMap::new();
+    for ev in &leaves {
+        let key = if ev.name.is_empty() { ev.identity.clone() } else { ev.name.clone() };
+        let entry = user_map.entry(key).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += ev.duration_secs.unwrap_or(0);
+    }
+    let mut per_user: Vec<UserSessionStats> = user_map
+        .into_iter()
+        .map(|(name, (count, secs))| UserSessionStats {
+            identity: name.clone(),
+            name,
+            session_count: count,
+            total_hours: (secs as f64 / 3600.0 * 10.0).round() / 10.0,
+        })
+        .collect();
+    per_user.sort_by(|a, b| b.session_count.cmp(&a.session_count));
+
+    // --- Heatmap: send raw join timestamps (last 7 days), let frontend group by local timezone ---
+    let seven_days_ago = now.saturating_sub(7 * 86400);
+    let heatmap_joins: Vec<HeatmapJoin> = all_events
+        .iter()
+        .filter(|e| e.event_type == "join" && e.timestamp >= seven_days_ago)
+        .map(|e| HeatmapJoin {
+            timestamp: e.timestamp,
+            name: e.name.clone(),
+        })
+        .collect();
+
+    // --- Timeline: send raw events for last 24h, let frontend compute local "today" ---
+    let day_ago = now.saturating_sub(86400);
+    let timeline_events: Vec<TimelineEvent> = all_events
+        .iter()
+        .filter(|e| e.timestamp >= day_ago)
+        .map(|e| TimelineEvent {
+            identity: e.identity.clone(),
+            name: e.name.clone(),
+            event_type: e.event_type.clone(),
+            timestamp: e.timestamp,
+            duration_secs: e.duration_secs,
+        })
+        .collect();
+
+    Ok(Json(DashboardMetricsResponse {
+        summary: DashboardSummary {
+            total_sessions,
+            unique_users,
+            total_hours,
+            avg_duration_mins,
+        },
+        per_user,
+        heatmap_joins,
+        timeline_events,
+    }))
+}
+
 async fn admin_report_stats(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1638,6 +1818,9 @@ async fn admin_report_stats(
         screen_fps: entry.screen_fps,
         screen_bitrate_kbps: entry.screen_bitrate_kbps,
         quality_limitation: entry.quality_limitation.clone(),
+        encoder: entry.encoder.clone(),
+        ice_local_type: entry.ice_local_type.clone(),
+        ice_remote_type: entry.ice_remote_type.clone(),
     };
 
     stats.insert(entry.identity.clone(), entry);
@@ -1711,6 +1894,35 @@ async fn admin_metrics(
         };
         let total_minutes = (count as f64 * 2.0) / 60.0;
 
+        // Most common encoder
+        let mut enc_counts: HashMap<String, usize> = HashMap::new();
+        for s in snaps.iter() {
+            if let Some(ref e) = s.encoder {
+                *enc_counts.entry(e.clone()).or_default() += 1;
+            }
+        }
+        let encoder = enc_counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e);
+
+        // Most common ICE types
+        let mut ice_local_counts: HashMap<String, usize> = HashMap::new();
+        let mut ice_remote_counts: HashMap<String, usize> = HashMap::new();
+        for s in snaps.iter() {
+            if let Some(ref t) = s.ice_local_type {
+                *ice_local_counts.entry(t.clone()).or_default() += 1;
+            }
+            if let Some(ref t) = s.ice_remote_type {
+                *ice_remote_counts.entry(t.clone()).or_default() += 1;
+            }
+        }
+        let ice_local_type = ice_local_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(t, _)| t);
+        let ice_remote_type = ice_remote_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(t, _)| t);
+
         users.push(UserMetrics {
             identity: identity.clone(),
             name,
@@ -1720,6 +1932,9 @@ async fn admin_metrics(
             pct_bandwidth_limited: (pct_bw * 10.0).round() / 10.0,
             pct_cpu_limited: (pct_cpu * 10.0).round() / 10.0,
             total_minutes: (total_minutes * 10.0).round() / 10.0,
+            encoder,
+            ice_local_type,
+            ice_remote_type,
         });
     }
 
@@ -2932,7 +3147,7 @@ fn identity_base(identity: &str) -> &str {
 // ── Admin: kick / mute participants via LiveKit SFU REST API ─────────
 
 /// Generate a short-lived LiveKit service JWT for SFU admin API calls.
-fn livekit_service_token(api_key: &str, api_secret: &str) -> Result<String, StatusCode> {
+fn livekit_service_token(api_key: &str, api_secret: &str, room: &str) -> Result<String, StatusCode> {
     #[derive(Serialize)]
     struct ServiceClaims {
         iss: String,
@@ -2945,6 +3160,8 @@ fn livekit_service_token(api_key: &str, api_secret: &str) -> Result<String, Stat
     #[allow(non_snake_case)]
     struct ServiceGrant {
         roomAdmin: bool,
+        roomList: bool,
+        roomCreate: bool,
         room: String,
     }
     let now = now_ts();
@@ -2955,7 +3172,9 @@ fn livekit_service_token(api_key: &str, api_secret: &str) -> Result<String, Stat
         exp: (now + 60) as usize,
         video: ServiceGrant {
             roomAdmin: true,
-            room: String::new(),
+            roomList: true,
+            roomCreate: true,
+            room: room.to_string(),
         },
     };
     encode(
@@ -2980,6 +3199,7 @@ async fn admin_kick_participant(
     let token = livekit_service_token(
         &state.config.livekit_api_key,
         &state.config.livekit_api_secret,
+        &room_id,
     )?;
 
     // Call LiveKit RemoveParticipant API
@@ -3033,6 +3253,7 @@ async fn admin_mute_participant(
     let token = livekit_service_token(
         &state.config.livekit_api_key,
         &state.config.livekit_api_secret,
+        &room_id,
     )?;
 
     // First, get participant info to find their track SIDs
@@ -3079,6 +3300,7 @@ async fn admin_mute_participant(
                 let mute_token = livekit_service_token(
                     &state.config.livekit_api_key,
                     &state.config.livekit_api_secret,
+                    &room_id,
                 )?;
                 let mute_resp = state
                     .http_client
