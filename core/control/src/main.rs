@@ -198,6 +198,10 @@ struct Config {
     chat_dir: PathBuf,
     chat_uploads_dir: PathBuf,
     chat_max_upload_bytes: usize,
+    turn_user: Option<String>,
+    turn_pass: Option<String>,
+    turn_host: Option<String>,
+    turn_port: u16,
 }
 
 #[derive(Clone)]
@@ -756,6 +760,7 @@ async fn main() {
         .route("/v1/participants/heartbeat", post(participant_heartbeat))
         .route("/v1/participants/leave", post(participant_leave))
         .route("/v1/metrics", get(metrics))
+        .route("/v1/ice-servers", get(ice_servers))
         .route("/api/soundboard/list", get(soundboard_list))
         .route("/api/soundboard/file/:sound_id", get(soundboard_file))
         .route("/api/soundboard/upload", post(soundboard_upload))
@@ -1523,6 +1528,32 @@ async fn metrics(
         rooms: rooms.len() as u64,
         ts: now_ts(),
     }))
+}
+
+// ---- ICE Servers (TURN credentials) ----
+
+async fn ice_servers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    let mut servers = vec![
+        serde_json::json!({ "urls": "stun:stun.l.google.com:19302" }),
+        serde_json::json!({ "urls": "stun:stun1.l.google.com:19302" }),
+    ];
+
+    if let (Some(user), Some(pass)) = (&state.config.turn_user, &state.config.turn_pass) {
+        let host = state.config.turn_host.as_deref().unwrap_or("127.0.0.1");
+        let url = format!("turn:{}:{}?transport=udp", host, state.config.turn_port);
+        servers.push(serde_json::json!({
+            "urls": url,
+            "username": user,
+            "credential": pass,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "iceServers": servers })))
 }
 
 // ---- Admin Dashboard API ----
@@ -4044,6 +4075,14 @@ fn load_config() -> Config {
         .unwrap_or(10);
     let chat_max_upload_bytes = chat_max_upload_mb.max(1) * 1024 * 1024;
 
+    let turn_user = std::env::var("TURN_USER").ok().filter(|s| !s.is_empty());
+    let turn_pass = std::env::var("TURN_PASS").ok().filter(|s| !s.is_empty());
+    let turn_host = std::env::var("TURN_PUBLIC_IP").ok().filter(|s| !s.is_empty());
+    let turn_port = std::env::var("TURN_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3478);
+
     Config {
         host,
         port,
@@ -4060,6 +4099,10 @@ fn load_config() -> Config {
         chat_dir: resolve_path(chat_dir),
         chat_uploads_dir: resolve_path(chat_uploads_dir),
         chat_max_upload_bytes,
+        turn_user,
+        turn_pass,
+        turn_host,
+        turn_port,
     }
 }
 

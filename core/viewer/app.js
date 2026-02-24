@@ -7916,26 +7916,29 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
 
-  // Extract server hostname for TURN — window.location.hostname is wrong in Tauri (tauri.localhost)
-  var turnHost = window.location.hostname;
+  // Fetch ICE server config (STUN + TURN credentials) from control plane
+  var iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ];
   try {
-    var _u = new URL(sfuUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:"));
-    turnHost = _u.hostname;
-  } catch(e) {}
+    var iceResp = await fetch(controlUrl + "/v1/ice-servers", {
+      headers: { Authorization: "Bearer " + adminToken },
+    });
+    if (iceResp.ok) {
+      var iceData = await iceResp.json();
+      if (iceData.iceServers) iceServers = iceData.iceServers;
+      debugLog("[ice] fetched " + iceServers.length + " ICE servers from control plane");
+    } else {
+      debugLog("[ice] /v1/ice-servers returned " + iceResp.status + ", using STUN-only fallback");
+    }
+  } catch (e) {
+    debugLog("[ice] failed to fetch ICE config, using STUN-only fallback");
+  }
 
   await newRoom.connect(sfuUrl, accessToken, {
     autoSubscribe: true,
-    rtcConfig: {
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun1.l.google.com:19302" },
-        {
-          urls: "turn:" + turnHost + ":3478?transport=udp",
-          username: "echo",
-          credential: "chamber",
-        },
-      ],
-    },
+    rtcConfig: { iceServers: iceServers },
   });
   if (seq !== connectSequence) { newRoom.disconnect(); return; }
 
