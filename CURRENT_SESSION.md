@@ -41,13 +41,39 @@
 - Spencer's reports from Feb 14 now visible in admin dashboard
 - File: `core/control/src/main.rs`
 
-### GitHub Issues Triage
+### GitHub Issues — Resolved 31 of 35
 - Triaged all 35 of Spencer's issues against current code
-- **15 already fixed** — closing with comments
-- **14 still exist** — prioritized plan created
-- **3 enhancements** — kept open for future
-- **3 non-issues** — closing with explanation
-- Plan: `docs/plans/2026-02-24-power-manager-v2-design.md`, `docs/plans/2026-02-24-power-manager-v2-plan.md`
+- **15 already fixed** — closed with comments
+- **5 non-issues** — closed with explanation
+- **11 fixed in code** (6 commits):
+  - `666e51c` P1 Security: escapeHtml XSS prevention, hardcoded TURN creds removed
+  - `abf69c5` P2 User-facing: heartbeat room fix, chat race guard, jam reconnect, volume/mute fix
+  - `4749f0d` P3 Cleanup: autoplay listener leak, update-check timer leak, TURN health check, port validation
+  - `71af1b2` Per-person chime volume slider (closes #53)
+  - `c7354aa` Ghost presence fix via AbortController (closes #50)
+  - `8ca86a8` TURN credentials behind authenticated endpoint (closes #29)
+- **4 still open**: #28 (needs Tauri work), #23/#30 (enhancements), #44 (Spencer's PR #48)
+
+### TURN Credentials Security Fix (#29)
+- Added `/v1/ice-servers` endpoint to Rust control plane (JWT auth required)
+- Returns STUN servers + TURN credentials from env vars
+- Viewer now fetches ICE config at connect time instead of hardcoding
+- Falls back to STUN-only if fetch fails (graceful degradation)
+- TURN env vars (`TURN_USER`, `TURN_PASS`, `TURN_PUBLIC_IP`, `TURN_PORT`) added to `core/control/.env`
+- Both TURN binary and control plane read from same env vars (loaded by `run-core.ps1`)
+
+### Per-Person Chime Volume (New Feature)
+- Each participant card has a "Chime" slider (0-100%, default 50%)
+- Controls how loud each person's enter/exit/switch/screenshare chimes sound to you
+- Persisted per-person in localStorage alongside mic/screen volumes
+- All chime functions updated: playJoinChime, playLeaveChime, playSwitchChime, playScreenShareChime, playCustomChime
+- Mute All silences all chimes
+- Design doc: `docs/plans/2026-02-24-per-person-chime-volume-design.md`
+
+### Spencer's PRs Reviewed
+- **PR #49 (Docs)**: Requested changes — CLAUDE.md must be preserved (his redirect strips all operating instructions), wrong dir names, missing docs, generic OPERATIONS.md
+- **PR #48 (State Machines + Tests)**: Requested changes — excellent code quality, but must rebase onto current main (would overwrite our security fixes), CI workflow runs on Linux for Windows-only project, state mutations in render function
+- Ball is in Spencer's court — waiting for him to address the feedback and resubmit
 
 ---
 
