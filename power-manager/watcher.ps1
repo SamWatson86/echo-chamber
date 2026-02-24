@@ -1,8 +1,8 @@
 # ═══════════════════════════════════════════════════════════════════
-#  Echo Chamber Power Watcher
-#  Runs in the background (via Scheduled Task). Monitors GPU usage
-#  and game processes. Automatically switches between Echo Server
-#  and Echo Gaming power plans.
+#  Echo Chamber Power Watcher v2
+#  Input-aware polling. Detects user activity via GetLastInputInfo.
+#  Switches between Active (full power) and Server (low power) modes.
+#  Runs as a Scheduled Task (SYSTEM, at startup).
 # ═══════════════════════════════════════════════════════════════════
 
 $root = $PSScriptRoot
@@ -22,9 +22,30 @@ $gamingGuid       = $config.gamingPlanGuid
 $nvidiaSmi        = $config.nvidiaSmi
 $gpuMaxPower      = $config.gpuMaxPower
 $gpuServerPower   = $config.gpuServerPower
-$gpuThreshold     = $config.gpuThresholdPct
-$idleCooldown     = $config.idleCooldownSec
-$checkInterval    = $config.checkIntervalSec
+$idleTimeoutSec   = $config.idleTimeoutMin * 60
+$pollInterval     = $config.pollIntervalSec
+$inputWakeThresh  = $config.inputWakeThresholdSec
+
+# ── Win32 API: GetLastInputInfo ──
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public struct LASTINPUTINFO {
+    public uint cbSize;
+    public uint dwTime;
+}
+public class UserInput {
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    public static uint GetIdleSeconds() {
+        LASTINPUTINFO lii = new LASTINPUTINFO();
+        lii.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+        GetLastInputInfo(ref lii);
+        uint idle = ((uint)Environment.TickCount - lii.dwTime);
+        return idle / 1000;
+    }
+}
+"@
 
 # ── Load game process list ──
 $gameProcesses = @()
@@ -37,7 +58,6 @@ if (Test-Path $gamesPath) {
 
 # ── State ──
 $currentMode = "unknown"
-$lastGamingTime = [datetime]::MinValue
 
 # ── Logging ──
 function Log($msg) {
@@ -50,18 +70,6 @@ function Log($msg) {
     }
 }
 
-# ── GPU utilization check ──
-function Get-GpuUtilization {
-    if (-not $nvidiaSmi) { return 0 }
-    try {
-        $output = & $nvidiaSmi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            return [int]($output.Trim())
-        }
-    } catch {}
-    return 0
-}
-
 # ── Game process check ──
 function Test-GameRunning {
     if ($gameProcesses.Count -eq 0) { return $false }
@@ -72,16 +80,16 @@ function Test-GameRunning {
 
 # ── Switch to a power plan ──
 function Switch-Mode {
-    param([string]$Mode)
+    param([string]$Mode, [string]$Reason)
     if ($Mode -eq $currentMode) { return }
 
-    if ($Mode -eq "gaming") {
+    if ($Mode -eq "active") {
         powercfg /setactive $gamingGuid
         # Restore full GPU power
         if ($nvidiaSmi -and $gpuMaxPower -gt 0) {
             try { & $nvidiaSmi -pl $gpuMaxPower 2>&1 | Out-Null } catch {}
         }
-        Log "[MODE] Switched to GAMING (GPU: ${gpuMaxPower}W, CPU: 100%)"
+        Log "[MODE] Switched to ACTIVE (GPU: ${gpuMaxPower}W, CPU: 100%) - $Reason"
     }
     elseif ($Mode -eq "server") {
         powercfg /setactive $serverGuid
@@ -89,7 +97,7 @@ function Switch-Mode {
         if ($nvidiaSmi -and $gpuServerPower -gt 0) {
             try { & $nvidiaSmi -pl $gpuServerPower 2>&1 | Out-Null } catch {}
         }
-        Log "[MODE] Switched to SERVER (GPU: ${gpuServerPower}W, CPU: 30%)"
+        Log "[MODE] Switched to SERVER (GPU: ${gpuServerPower}W, CPU: 30%) - $Reason"
     }
     $script:currentMode = $Mode
 }
@@ -97,7 +105,7 @@ function Switch-Mode {
 # ── Detect current active plan on startup ──
 function Get-CurrentMode {
     $active = powercfg /getactivescheme
-    if ($active -match $gamingGuid) { return "gaming" }
+    if ($active -match $gamingGuid) { return "active" }
     if ($active -match $serverGuid) { return "server" }
     return "other"
 }
@@ -105,42 +113,36 @@ function Get-CurrentMode {
 # ═══════════════════════════════════════════════════════════════════
 #  Main loop
 # ═══════════════════════════════════════════════════════════════════
-Log "=== Watcher started ==="
+Log "=== Watcher v2 started ==="
 Log "Server plan: $serverGuid"
-Log "Gaming plan: $gamingGuid"
-Log "GPU threshold: ${gpuThreshold}%, cooldown: ${idleCooldown}s, check: ${checkInterval}s"
+Log "Active plan: $gamingGuid"
+Log "Idle timeout: $($config.idleTimeoutMin) min, poll: ${pollInterval}s, wake threshold: ${inputWakeThresh}s"
 Log "Game processes monitored: $($gameProcesses.Count)"
 
 $currentMode = Get-CurrentMode
 Log "Current mode on startup: $currentMode"
 
-# Start in server mode if not already in a known mode
-if ($currentMode -eq "other") {
-    Switch-Mode "server"
+# Default to active on startup (user is at PC when booting)
+if ($currentMode -ne "active") {
+    Switch-Mode "active" "startup default"
 }
 
 while ($true) {
     try {
-        $gpuUtil = Get-GpuUtilization
-        $gameDetected = Test-GameRunning
-        $gamingDetected = ($gpuUtil -gt $gpuThreshold) -or $gameDetected
+        $idleSeconds = [UserInput]::GetIdleSeconds()
+        $gameRunning = Test-GameRunning
 
-        if ($gamingDetected) {
-            $lastGamingTime = Get-Date
-
-            if ($currentMode -ne "gaming") {
-                $reason = if ($gameDetected) { "game process" } else { "GPU at ${gpuUtil}%" }
-                Log "[DETECT] Gaming activity: $reason"
-                Switch-Mode "gaming"
+        if ($currentMode -eq "server") {
+            # WAKE CHECK: user input detected?
+            if ($idleSeconds -lt $inputWakeThresh) {
+                Switch-Mode "active" "user input detected (idle ${idleSeconds}s)"
             }
         }
-        else {
-            # Check if cooldown has passed since last gaming activity
-            $idleSeconds = ((Get-Date) - $lastGamingTime).TotalSeconds
-
-            if ($currentMode -eq "gaming" -and $idleSeconds -ge $idleCooldown) {
-                Log "[DETECT] Idle for $([math]::Floor($idleSeconds))s, GPU at ${gpuUtil}%"
-                Switch-Mode "server"
+        elseif ($currentMode -eq "active") {
+            # IDLE CHECK: been idle long enough AND no game running?
+            if ($idleSeconds -ge $idleTimeoutSec -and -not $gameRunning) {
+                $idleMin = [math]::Floor($idleSeconds / 60)
+                Switch-Mode "server" "idle for ${idleMin} minutes, no game running"
             }
         }
     }
@@ -148,5 +150,5 @@ while ($true) {
         Log "[ERROR] $($_.Exception.Message)"
     }
 
-    Start-Sleep -Seconds $checkInterval
+    Start-Sleep -Seconds $pollInterval
 }

@@ -94,8 +94,8 @@ Write-Host "  Configuring Echo Server plan..." -ForegroundColor Gray
 Set-PlanSetting $serverGuid $PROC $PROC_MAX 30 30
 Set-PlanSetting $serverGuid $PROC $PROC_MIN 5 5
 
-# Display: off after 1 minute (60 seconds)
-Set-PlanSetting $serverGuid $DISPLAY $DISP_OFF 60 60
+# Display: off after 5 minutes (300 seconds) — 1 min was too aggressive, caused wake issues
+Set-PlanSetting $serverGuid $DISPLAY $DISP_OFF 300 300
 
 # Sleep: NEVER (0 = never) — critical for server operation
 Set-PlanSetting $serverGuid $SLEEP $SLEEP_TO 0 0
@@ -106,10 +106,15 @@ Set-PlanSetting $serverGuid $SLEEP $HIBER_TO 0 0
 # Hard disk: off after 20 minutes (1200 seconds)
 Set-PlanSetting $serverGuid $DISK $DISK_OFF 1200 1200
 
-# PCI Express: Maximum power savings (2)
-Set-PlanSetting $serverGuid $PCIE $PCIE_LINK 2 2
+# PCI Express: OFF (0) — prevents GPU wake failures after display off
+Set-PlanSetting $serverGuid $PCIE $PCIE_LINK 0 0
 
-Write-Host "  [OK] Echo Server: CPU 30%, display off 1min, never sleep" -ForegroundColor Green
+# USB selective suspend: Disabled (0) — ensures mouse/keyboard always wake screens
+$USB       = "2a737441-1930-4402-8d77-b2bebba308a3"  # USB settings
+$USB_SELEC = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"  # USB selective suspend
+Set-PlanSetting $serverGuid $USB $USB_SELEC 0 0
+
+Write-Host "  [OK] Echo Server: CPU 30%, display off 5min, never sleep, PCIe/USB always on" -ForegroundColor Green
 
 # ── Configure Echo Gaming plan ──
 Write-Host "  Configuring Echo Gaming plan..." -ForegroundColor Gray
@@ -187,14 +192,14 @@ Write-Host ""
 Write-Host "Step 3: Saving configuration..." -ForegroundColor Yellow
 
 $config = @{
-    serverPlanGuid  = $serverGuid
-    gamingPlanGuid  = $gamingGuid
-    nvidiaSmi       = if ($nvidiaSmi) { $nvidiaSmi } else { "" }
-    gpuMaxPower     = $gpuMaxPower
-    gpuServerPower  = $gpuServerPower
-    gpuThresholdPct = 25       # GPU usage % above this = gaming detected
-    idleCooldownSec = 180      # Seconds of low GPU before switching to server
-    checkIntervalSec = 45      # How often to check (seconds)
+    serverPlanGuid       = $serverGuid
+    gamingPlanGuid       = $gamingGuid
+    nvidiaSmi            = if ($nvidiaSmi) { $nvidiaSmi } else { "" }
+    gpuMaxPower          = $gpuMaxPower
+    gpuServerPower       = $gpuServerPower
+    idleTimeoutMin       = 60    # Minutes of no input before switching to server
+    pollIntervalSec      = 10    # How often to check for input (seconds)
+    inputWakeThresholdSec = 15   # Input within this many seconds = user is back
 }
 
 $config | ConvertTo-Json -Depth 3 | Set-Content $configPath -Encoding UTF8
@@ -230,13 +235,16 @@ if ($existingTask) {
     Write-Host "  Removed existing task" -ForegroundColor Gray
 }
 
-# Create the task: runs at system startup, as SYSTEM, hidden
+# Create the task: runs at user logon, in interactive session
+# Must run in user's session so GetLastInputInfo can detect mouse/keyboard
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
     -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watcherPath`"" `
     -WorkingDirectory $root
 
-$trigger = New-ScheduledTaskTrigger -AtStartup
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -246,7 +254,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -StartWhenAvailable
 
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
 
 Register-ScheduledTask `
     -TaskName $taskName `
@@ -254,9 +262,9 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Monitors GPU usage and switches between Echo Server/Gaming power plans" | Out-Null
+    -Description "Monitors user activity and switches between Active/Server power modes" | Out-Null
 
-Write-Host "  [OK] Scheduled task '$taskName' installed (runs at startup)" -ForegroundColor Green
+Write-Host "  [OK] Scheduled task '$taskName' installed (runs at logon as $currentUser)" -ForegroundColor Green
 
 # ===================================================================
 #  STEP 6: Start watcher now
@@ -284,9 +292,9 @@ Write-Host "  |         Setup Complete!                |" -ForegroundColor Green
 Write-Host "  +=======================================+" -ForegroundColor Green
 Write-Host ""
 Write-Host "  How it works:" -ForegroundColor White
-Write-Host "  - Background watcher checks GPU every 45 seconds" -ForegroundColor Gray
-Write-Host "  - Launch a game -> auto-switches to Gaming mode" -ForegroundColor Gray
-Write-Host "  - Close the game -> 3 minutes later, back to Server mode" -ForegroundColor Gray
+Write-Host "  - Background watcher checks for user activity every 10 seconds" -ForegroundColor Gray
+Write-Host "  - Move the mouse or press a key -> full power in under 10 seconds" -ForegroundColor Gray
+Write-Host "  - Idle for 60 minutes with no game running -> switches to server mode" -ForegroundColor Gray
 Write-Host "  - Echo Chamber runs perfectly in both modes" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  GPU power limit:" -ForegroundColor White
