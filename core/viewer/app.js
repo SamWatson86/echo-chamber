@@ -8307,6 +8307,8 @@ async function disconnect() {
   if (window._canvasRafId) { cancelAnimationFrame(window._canvasRafId); window._canvasRafId = null; }
   if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
   if (window._canvasPipeEl) { window._canvasPipeEl.remove(); window._canvasPipeEl = null; }
+  // Stop native WASAPI audio capture if active (#28)
+  if (typeof stopNativeAudioCapture === "function") await stopNativeAudioCapture();
   _screenShareVideoTrack?.mediaStreamTrack?.stop();
   _screenShareAudioTrack?.mediaStreamTrack?.stop();
   _screenShareVideoTrack = null;

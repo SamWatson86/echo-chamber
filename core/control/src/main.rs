@@ -1156,7 +1156,7 @@ async fn api_update_latest() -> axum::response::Response {
 /// or window.open in the browser.
 async fn open_url(
     State(_state): State<AppState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     _body: axum::body::Bytes,
 ) -> StatusCode {
     warn!("/api/open-url called but is disabled for security — use Tauri IPC instead");

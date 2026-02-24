@@ -41,18 +41,20 @@
 - Spencer's reports from Feb 14 now visible in admin dashboard
 - File: `core/control/src/main.rs`
 
-### GitHub Issues — Resolved 31 of 35
+### GitHub Issues — Resolved 33 of 35
 - Triaged all 35 of Spencer's issues against current code
 - **15 already fixed** — closed with comments
 - **5 non-issues** — closed with explanation
-- **11 fixed in code** (6 commits):
+- **13 fixed in code** (8 commits):
   - `666e51c` P1 Security: escapeHtml XSS prevention, hardcoded TURN creds removed
   - `abf69c5` P2 User-facing: heartbeat room fix, chat race guard, jam reconnect, volume/mute fix
   - `4749f0d` P3 Cleanup: autoplay listener leak, update-check timer leak, TURN health check, port validation
   - `71af1b2` Per-person chime volume slider (closes #53)
   - `c7354aa` Ghost presence fix via AbortController (closes #50)
   - `8ca86a8` TURN credentials behind authenticated endpoint (closes #29)
-- **4 still open**: #28 (needs Tauri work), #23/#30 (enhancements), #44 (Spencer's PR #48)
+  - `9c8e85f` Auto-create GitHub Issues from bug reports (closes #23)
+  - (pending commit) Fix native audio capture teardown on disconnect (#28) + compiler warning fix
+- **2 still open**: #30 (Spencer's PR #48 covers this), #44 (also Spencer's PR #48)
 
 ### TURN Credentials Security Fix (#29)
 - Added `/v1/ice-servers` endpoint to Rust control plane (JWT auth required)
@@ -61,6 +63,27 @@
 - Falls back to STUN-only if fetch fails (graceful degradation)
 - TURN env vars (`TURN_USER`, `TURN_PASS`, `TURN_PUBLIC_IP`, `TURN_PORT`) added to `core/control/.env`
 - Both TURN binary and control plane read from same env vars (loaded by `run-core.ps1`)
+
+### Bug Reports → GitHub Issues (#23)
+- Bug reports submitted via `/api/bug-report` now auto-create GitHub Issues
+- Fire-and-forget async (`tokio::spawn`) — never blocks the bug report response
+- Issue body includes: reporter name, room, description, WebRTC stats table, screenshot link
+- Labeled `bug-report` for easy filtering on GitHub
+- Config: `GITHUB_PAT` + `GITHUB_REPO` env vars — silently disabled if not set
+- Tested end-to-end: issue #55 created on GitHub with full formatting
+- Design doc: `docs/plans/2026-02-24-bug-reports-to-github-design.md`
+
+### Native Audio Capture Teardown (#28)
+- Added `await stopNativeAudioCapture()` to `disconnect()` in viewer JS
+- Prevents WASAPI per-process audio capture from continuing after disconnect
+- One-line fix — viewer-side only, goes live on client refresh
+
+### Compiler Warning Fix
+- Fixed unused `headers` parameter warning in `open_url` handler (`headers` → `_headers`)
+
+### Worktree Cleanup
+- Removed orphaned worktrees: `vigilant-wilson`, `vigorous-clarke`, `awesome-newton`, `lucid-joliot`
+- Deleted corresponding branches
 
 ### Per-Person Chime Volume (New Feature)
 - Each participant card has a "Chime" slider (0-100%, default 50%)
@@ -176,13 +199,12 @@ All changes deployed and running. Design doc: `docs/plans/2026-02-23-admin-dashb
 4. **35fps cap in Phase 1** — David's stream stuck at ~35fps for first 2-3 minutes even on HIGH layer, then jumps to 60fps. Correlates with ICE pair switch in SFU log.
 
 ### Minor / Cosmetic
-5. **Old worktrees** — `awesome-newton` and `lucid-joliot` worktrees are orphaned in `.claude/worktrees/`. Can be cleaned up with `git worktree remove`.
-6. **Schema file noise** — `core/client/gen/schemas/desktop-schema.json` and `windows-schema.json` show as modified but are auto-generated. Not committed.
+5. **Schema file noise** — `core/client/gen/schemas/desktop-schema.json` and `windows-schema.json` show as modified but are auto-generated. Not committed.
 
 ---
 
 ## Active Worktree
-- **vigilant-wilson**: `.claude/worktrees/vigilant-wilson/` — Used for Admin Dashboard v2 work. All changes have been copied to main repo and deployed.
+- None — all worktrees cleaned up. Working directly on main.
 
 ## Files Modified (Admin Dashboard v2)
 - `core/viewer/app.js` — 30-color palette, resize IIFE, interactive leaderboard/heatmap, bug charts, quality dashboard, admin-only reveal fix
@@ -195,12 +217,17 @@ All changes deployed and running. Design doc: `docs/plans/2026-02-23-admin-dashb
 
 ## Version History (Recent)
 
-### v0.3.1 (2026-02-14/16/23) — Current
+### v0.3.1 (2026-02-14/16/23/24) — Current
 - Admin Dashboard v2: 30 colors, resizable, interactive leaderboard/heatmap, bug charts, quality dashboard
 - Timezone fix: heatmap/timeline show local time
 - AIMD adaptive publisher bitrate control (replaces v3 layer switching)
 - Mic/screen volume boost up to 300% via WebAudio GainNode
 - Admin kick/mute fixed (3-layer bug: wrong JS var, missing JWT grants, empty room field)
+- Spencer's audit: resolved 33 of 35 issues (security, UX, cleanup, new features)
+- `9c8e85f` Auto-create GitHub Issues from in-app bug reports (#23)
+- `8ca86a8` TURN credentials behind authenticated endpoint (#29)
+- `c7354aa` Ghost presence fix via AbortController (#50)
+- `71af1b2` Per-person chime volume slider (#53)
 - `cdf87e7` Fix streaming stability, add chat message deletion, add cache-busting
 - `8c5ae4a` Move version check to server, remove GitHub dependency
 - `54cf186` Bump version to v0.3.1
