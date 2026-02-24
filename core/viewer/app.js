@@ -365,6 +365,7 @@ var _viewerVersion = (function() {
 })();
 let _latestScreenStats = null;
 let currentRoomName = "main";
+let _connectedRoomName = "main"; // Only updated after SFU connection succeeds — used by heartbeat
 let currentAccessToken = "";
 const IDENTITY_SUFFIX_KEY = "echo-core-identity-suffix";
 const DEVICE_ID_KEY = "echo-core-device-id";
@@ -3209,7 +3210,7 @@ function startHeartbeat() {
     fetch(`${controlUrl}/v1/participants/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ room: currentRoomName, identity, name, viewer_version: _viewerVersion }),
+      body: JSON.stringify({ room: _connectedRoomName, identity, name, viewer_version: _viewerVersion }),
     }).catch(() => {});
   };
   sendBeat();
@@ -7880,6 +7881,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     watchedScreens.clear();
   }
   room = newRoom;
+  _connectedRoomName = currentRoomName; // Heartbeat now safe to report this room
   // Recreate local participant card immediately so it's first in the list
   ensureParticipantCard({ identity: localIdentity, name }, true);
   startMediaReconciler();
@@ -8832,6 +8834,10 @@ async function loadChatHistory(roomName) {
     if (!response.ok) return;
 
     const history = await response.json();
+
+    // Guard: if user switched rooms while fetch was in-flight, discard stale result
+    if (roomName !== currentRoomName) return;
+
     chatHistory.length = 0;
     chatMessages.innerHTML = "";
 

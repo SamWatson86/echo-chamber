@@ -18,6 +18,8 @@ var _jamAudioWs = null;        // WebSocket connection
 var _jamAudioCtx = null;       // AudioContext for playback
 var _jamGainNode = null;       // GainNode for volume control
 var _jamNextPlayTime = 0;      // next scheduled buffer start time
+var _jamStoppingAudio = false; // true when stopJamAudioStream() initiated close
+var _jamAudioRetries = 0;      // reconnect attempt counter (max 3)
 
 // === HTML Escape ===
 function escapeHtml(str) {
@@ -532,6 +534,7 @@ function removeFromQueue(index) {
 
 function startJamAudioStream() {
   if (_jamAudioWs) return; // already connected
+  _jamStoppingAudio = false;
 
   try {
     // Build WebSocket URL from current API base (wss for https, ws for http)
@@ -578,6 +581,7 @@ function startJamAudioStream() {
 
     ws.onopen = function() {
       debugLog("[jam] audio WebSocket connected");
+      _jamAudioRetries = 0; // reset on successful connect
     };
 
     ws.onmessage = function(e) {
@@ -610,12 +614,21 @@ function startJamAudioStream() {
     ws.onclose = function() {
       debugLog("[jam] audio WebSocket closed");
       _jamAudioWs = null;
+      // Auto-recover if close was unexpected (not from stopJamAudioStream)
+      if (!_jamStoppingAudio && _jamAudioRetries < 3) {
+        _jamAudioRetries++;
+        debugLog("[jam] auto-reconnecting audio (attempt " + _jamAudioRetries + "/3)...");
+        setTimeout(function() { startJamAudioStream(); }, 3000);
+      } else if (_jamAudioRetries >= 3) {
+        debugLog("[jam] giving up on audio reconnect after 3 attempts");
+        if (typeof showToast === "function") showToast("Jam audio lost — try rejoining");
+        _jamAudioRetries = 0;
+      }
     };
 
     ws.onerror = function(e) {
       debugLog("[jam] audio WebSocket error: " + (e.message || e.type || "unknown"));
       _jamAudioWs = null;
-      if (typeof showToast === "function") showToast("Jam audio connection failed — try rejoining");
     };
   } catch (ex) {
     debugLog("[jam] startJamAudioStream exception: " + ex.message);
@@ -623,6 +636,7 @@ function startJamAudioStream() {
 }
 
 function stopJamAudioStream() {
+  _jamStoppingAudio = true;
   if (_jamAudioWs) {
     _jamAudioWs.close();
     _jamAudioWs = null;
@@ -644,7 +658,8 @@ function onJamVolumeChange(e) {
   var label = document.getElementById("jam-volume-value");
   if (label) label.textContent = _jamVolume + "%";
   if (_jamGainNode) {
-    _jamGainNode.gain.value = _jamVolume / 100;
+    // Respect Mute All — store volume but keep gain at 0 if muted
+    _jamGainNode.gain.value = (typeof roomAudioMuted !== "undefined" && roomAudioMuted) ? 0 : (_jamVolume / 100);
   }
 }
 

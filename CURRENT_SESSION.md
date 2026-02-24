@@ -1,6 +1,6 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-02-23
+**Last Updated**: 2026-02-24
 **Current Version**: v0.3.1 (control plane + client)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
@@ -15,7 +15,43 @@
 
 ---
 
-## What Changed Today (2026-02-23)
+## ROLLBACK POINT
+
+**Tag `pre-issue-fixes` = commit `a8a6e8d`** — Last known-good state before GitHub issue fixes.
+- All code committed, clean working tree
+- Server running, Power Manager v2 running (Active mode)
+- Viewer, admin dashboard, jam session all functional
+- To restore: `git reset --hard pre-issue-fixes`
+
+---
+
+## What Changed Today (2026-02-24)
+
+### Power Manager v2
+- Rewrote `watcher.ps1` — uses `GetLastInputInfo` Win32 API instead of GPU polling
+- Detects mouse/keyboard activity every 10 seconds, not GPU utilization
+- 60-minute idle timeout before switching to Server mode (was 3 minutes)
+- Wakes to full power in <10 seconds when you touch mouse/keyboard
+- Fixed Session 0 bug: scheduled task runs as user (Interactive) not SYSTEM
+- Game process detection kept as safety override
+- Files: `power-manager/watcher.ps1`, `power-manager/setup.ps1`, `power-manager/switch-mode.ps1`, `power-manager/config.json`
+
+### Bug Report Fix
+- Server endpoint now scans ALL `bugs-*.json` files (was only loading today + yesterday)
+- Spencer's reports from Feb 14 now visible in admin dashboard
+- File: `core/control/src/main.rs`
+
+### GitHub Issues Triage
+- Triaged all 35 of Spencer's issues against current code
+- **15 already fixed** — closing with comments
+- **14 still exist** — prioritized plan created
+- **3 enhancements** — kept open for future
+- **3 non-issues** — closing with explanation
+- Plan: `docs/plans/2026-02-24-power-manager-v2-design.md`, `docs/plans/2026-02-24-power-manager-v2-plan.md`
+
+---
+
+## What Changed (2026-02-23)
 
 ### Admin Dashboard v2 — Major Enhancement
 All changes deployed and running. Design doc: `docs/plans/2026-02-23-admin-dashboard-v2-design.md`
