@@ -640,9 +640,9 @@ function _getVolumePrefs() {
 function _saveVolumePrefs(prefs) {
   echoSet("echo-volume-prefs", JSON.stringify(prefs));
 }
-function saveParticipantVolume(identity, mic, screen) {
+function saveParticipantVolume(identity, mic, screen, chime) {
   var prefs = _getVolumePrefs();
-  prefs[identity] = { mic: mic, screen: screen };
+  prefs[identity] = { mic: mic, screen: screen, chime: chime };
   _saveVolumePrefs(prefs);
 }
 function getParticipantVolume(identity) {
@@ -2884,8 +2884,11 @@ function getChimeCtx() {
   return chimeAudioCtx;
 }
 
-function playJoinChime() {
+function playJoinChime(volume) {
   try {
+    var vol = (volume != null ? volume : 1);
+    if (roomAudioMuted) vol = 0;
+    if (vol <= 0) return;
     const ctx = getChimeCtx();
     const now = ctx.currentTime;
     // Cheerful ascending two-note chime
@@ -2894,7 +2897,7 @@ function playJoinChime() {
       const gain = ctx.createGain();
       osc.type = "sine";
       osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.18, now + offset);
+      gain.gain.setValueAtTime(0.18 * vol, now + offset);
       gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.35);
       osc.connect(gain).connect(ctx.destination);
       osc.start(now + offset);
@@ -2903,8 +2906,11 @@ function playJoinChime() {
   } catch {}
 }
 
-function playLeaveChime() {
+function playLeaveChime(volume) {
   try {
+    var vol = (volume != null ? volume : 1);
+    if (roomAudioMuted) vol = 0;
+    if (vol <= 0) return;
     const ctx = getChimeCtx();
     const now = ctx.currentTime;
     // Comedic descending "womp womp"
@@ -2914,9 +2920,9 @@ function playLeaveChime() {
     osc.frequency.setValueAtTime(380, now);
     osc.frequency.exponentialRampToValueAtTime(200, now + 0.3);
     osc.frequency.exponentialRampToValueAtTime(120, now + 0.55);
-    gain.gain.setValueAtTime(0.2, now);
-    gain.gain.setValueAtTime(0.05, now + 0.25);
-    gain.gain.setValueAtTime(0.18, now + 0.3);
+    gain.gain.setValueAtTime(0.2 * vol, now);
+    gain.gain.setValueAtTime(0.05 * vol, now + 0.25);
+    gain.gain.setValueAtTime(0.18 * vol, now + 0.3);
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
     osc.connect(gain).connect(ctx.destination);
     osc.start(now);
@@ -2924,8 +2930,11 @@ function playLeaveChime() {
   } catch {}
 }
 
-function playSwitchChime() {
+function playSwitchChime(volume) {
   try {
+    var vol = (volume != null ? volume : 1);
+    if (roomAudioMuted) vol = 0;
+    if (vol <= 0) return;
     const ctx = getChimeCtx();
     const now = ctx.currentTime;
     // Sci-fi teleport swoosh: quick rising sweep then a soft landing ping
@@ -2935,8 +2944,8 @@ function playSwitchChime() {
     swoosh.frequency.setValueAtTime(200, now);
     swoosh.frequency.exponentialRampToValueAtTime(1200, now + 0.15);
     swoosh.frequency.exponentialRampToValueAtTime(800, now + 0.2);
-    swooshGain.gain.setValueAtTime(0.08, now);
-    swooshGain.gain.linearRampToValueAtTime(0.12, now + 0.08);
+    swooshGain.gain.setValueAtTime(0.08 * vol, now);
+    swooshGain.gain.linearRampToValueAtTime(0.12 * vol, now + 0.08);
     swooshGain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
     swoosh.connect(swooshGain).connect(ctx.destination);
     swoosh.start(now);
@@ -2946,7 +2955,7 @@ function playSwitchChime() {
     const pingGain = ctx.createGain();
     ping.type = "sine";
     ping.frequency.value = 880;
-    pingGain.gain.setValueAtTime(0.15, now + 0.18);
+    pingGain.gain.setValueAtTime(0.15 * vol, now + 0.18);
     pingGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
     ping.connect(pingGain).connect(ctx.destination);
     ping.start(now + 0.18);
@@ -2954,8 +2963,11 @@ function playSwitchChime() {
   } catch {}
 }
 
-function playScreenShareChime() {
+function playScreenShareChime(volume) {
   try {
+    var vol = (volume != null ? volume : 1);
+    if (roomAudioMuted) vol = 0;
+    if (vol <= 0) return;
     const ctx = getChimeCtx();
     const now = ctx.currentTime;
     // Digital broadcast alert: three-note ascending sparkle with a shimmer tail
@@ -2968,7 +2980,7 @@ function playScreenShareChime() {
       osc.frequency.value = freq;
       var onset = i * 0.08; // 80ms between notes — quick arpeggio
       gain.gain.setValueAtTime(0.001, now + onset);
-      gain.gain.linearRampToValueAtTime(0.16, now + onset + 0.02);
+      gain.gain.linearRampToValueAtTime(0.16 * vol, now + onset + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.001, now + onset + 0.35);
       osc.connect(gain).connect(ctx.destination);
       osc.start(now + onset);
@@ -2980,7 +2992,7 @@ function playScreenShareChime() {
     shimmer.type = "sine";
     shimmer.frequency.value = 2349.32; // D7 — one octave above the last note
     shimmerGain.gain.setValueAtTime(0.001, now + 0.2);
-    shimmerGain.gain.linearRampToValueAtTime(0.06, now + 0.25);
+    shimmerGain.gain.linearRampToValueAtTime(0.06 * vol, now + 0.25);
     shimmerGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
     shimmer.connect(shimmerGain).connect(ctx.destination);
     shimmer.start(now + 0.2);
@@ -3006,29 +3018,36 @@ async function fetchChimeBuffer(identityBase, kind) {
   }
 }
 
-function playCustomChime(buffer) {
+function playCustomChime(buffer, volume) {
   try {
+    var vol = (volume != null ? volume : 1);
+    if (roomAudioMuted) vol = 0;
+    if (vol <= 0) return;
     const ctx = getChimeCtx();
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     const gain = ctx.createGain();
-    gain.gain.value = 0.5;
+    gain.gain.value = 0.5 * vol;
     source.connect(gain).connect(ctx.destination);
     source.start(0);
   } catch {}
 }
 
 async function playChimeForIdentities(identities, kind) {
+  // Look up chime volume from first identity
+  var volId = identities.length > 0 ? getIdentityBase(identities[0]) : null;
+  var volState = volId ? participantState.get(volId) : null;
+  var vol = (volState && volState.chimeVolume != null) ? volState.chimeVolume : 0.5;
   for (const id of identities) {
     var chimeKey = getChimeKey(id);
     const buffer = await fetchChimeBuffer(chimeKey, kind);
     if (buffer) {
-      playCustomChime(buffer);
+      playCustomChime(buffer, vol);
       return;
     }
   }
-  if (kind === "enter") playJoinChime();
-  else playLeaveChime();
+  if (kind === "enter") playJoinChime(vol);
+  else playLeaveChime(vol);
 }
 
 // Get the chime lookup key for a participant — deviceId if known, else identityBase (fallback)
@@ -3053,13 +3072,17 @@ function prefetchChimeBuffersForRoom() {
 // Play chime for a single participant — instant if pre-fetched, async fetch otherwise
 async function playChimeForParticipant(identity, kind) {
   var chimeKey = getChimeKey(identity);
+  // Look up this participant's chime volume preference
+  var identityBase = getIdentityBase(identity);
+  var pState = participantState.get(identityBase);
+  var vol = (pState && pState.chimeVolume != null) ? pState.chimeVolume : 0.5;
   var buffer = await fetchChimeBuffer(chimeKey, kind);
   if (buffer) {
-    playCustomChime(buffer);
+    playCustomChime(buffer, vol);
   } else if (kind === "enter") {
-    playJoinChime();
+    playJoinChime(vol);
   } else {
-    playLeaveChime();
+    playLeaveChime(vol);
   }
 }
 
@@ -4343,6 +4366,8 @@ function ensureParticipantCard(participant, isLocal = false) {
   let screenMuteButton = null;
   let micSlider = null;
   let screenSlider = null;
+  let chimeSlider = null;
+  let chimePct = null;
   let micPct = null;
   let screenPct = null;
   let micRow = null;
@@ -4595,7 +4620,21 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenPct.className = "vol-pct";
     screenPct.textContent = "100%";
     screenRow.append(screenLabel, screenSlider, screenPct);
-    audioControls.append(micRow, screenRow);
+    var chimeRow = document.createElement("div");
+    chimeRow.className = "audio-row";
+    const chimeLabel = document.createElement("span");
+    chimeLabel.textContent = "Chime";
+    chimeSlider = document.createElement("input");
+    chimeSlider.type = "range";
+    chimeSlider.min = "0";
+    chimeSlider.max = "1";
+    chimeSlider.step = "0.01";
+    chimeSlider.value = "0.5";
+    chimePct = document.createElement("span");
+    chimePct.className = "vol-pct";
+    chimePct.textContent = "50%";
+    chimeRow.append(chimeLabel, chimeSlider, chimePct);
+    audioControls.append(micRow, screenRow, chimeRow);
     meta.append(indicators, audioControls);
 
     // ─── Camera Overlay Bar (for has-camera mode) ───
@@ -4835,6 +4874,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     micMuted: false,
     micVolume: 1,
     screenVolume: 1,
+    chimeVolume: 0.5,  // default 50% — halves built-in chime loudness
     micUserMuted: false,
     screenUserMuted: false,
     micAudioEls: new Set(),
@@ -4900,7 +4940,7 @@ function ensureParticipantCard(participant, isLocal = false) {
       if (popMicSlider) popMicSlider.value = state.micVolume;
       if (popMicPct) { popMicPct.textContent = Math.round(state.micVolume * 100) + "%"; popMicPct.classList.toggle("boosted", state.micVolume > 1); }
       applyParticipantAudioVolumes(state);
-      saveParticipantVolume(key, state.micVolume, state.screenVolume);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
   if (screenSlider) {
@@ -4912,7 +4952,14 @@ function ensureParticipantCard(participant, isLocal = false) {
       if (popScreenSlider) popScreenSlider.value = state.screenVolume;
       if (popScreenPct) { popScreenPct.textContent = Math.round(state.screenVolume * 100) + "%"; popScreenPct.classList.toggle("boosted", state.screenVolume > 1); }
       applyParticipantAudioVolumes(state);
-      saveParticipantVolume(key, state.micVolume, state.screenVolume);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
+    });
+  }
+  if (chimeSlider) {
+    chimeSlider.addEventListener("input", () => {
+      state.chimeVolume = Number(chimeSlider.value);
+      if (chimePct) chimePct.textContent = Math.round(state.chimeVolume * 100) + "%";
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
   // Popup slider handlers (sync back to original sliders)
@@ -4925,7 +4972,7 @@ function ensureParticipantCard(participant, isLocal = false) {
       if (popMicPct) { popMicPct.textContent = pctText; popMicPct.classList.toggle("boosted", val > 1); }
       if (micPct) { micPct.textContent = pctText; micPct.classList.toggle("boosted", val > 1); }
       applyParticipantAudioVolumes(state);
-      saveParticipantVolume(key, state.micVolume, state.screenVolume);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
   if (popScreenSlider) {
@@ -4937,7 +4984,7 @@ function ensureParticipantCard(participant, isLocal = false) {
       if (popScreenPct) { popScreenPct.textContent = pctText; popScreenPct.classList.toggle("boosted", val > 1); }
       if (screenPct) { screenPct.textContent = pctText; screenPct.classList.toggle("boosted", val > 1); }
       applyParticipantAudioVolumes(state);
-      saveParticipantVolume(key, state.micVolume, state.screenVolume);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
   // Restore saved volume preferences for this participant
@@ -4962,8 +5009,13 @@ function ensureParticipantCard(participant, isLocal = false) {
         if (popScreenSlider) popScreenSlider.value = savedVol.screen;
         if (popScreenPct) { popScreenPct.textContent = Math.round(savedVol.screen * 100) + "%"; popScreenPct.classList.toggle("boosted", savedVol.screen > 1); }
       }
+      if (savedVol.chime != null && chimeSlider) {
+        state.chimeVolume = savedVol.chime;
+        chimeSlider.value = savedVol.chime;
+        if (chimePct) chimePct.textContent = Math.round(savedVol.chime * 100) + "%";
+      }
       applyParticipantAudioVolumes(state);
-      debugLog("[vol-prefs] restored " + key + " mic=" + (savedVol.mic || 1) + " screen=" + (savedVol.screen || 1));
+      debugLog("[vol-prefs] restored " + key + " mic=" + (savedVol.mic || 1) + " screen=" + (savedVol.screen || 1) + " chime=" + (savedVol.chime != null ? savedVol.chime : 0.5));
     }
   }
 
@@ -4976,6 +5028,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenStatusEl,
     micSlider,
     screenSlider,
+    chimeSlider,
     micMuteButton,
     screenMuteButton,
     micRow,
@@ -7500,7 +7553,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         }
         // Play screen share chime for video track only (not audio), and not during room switches
         if (!_isRoomSwitch && pubSource === LK.Track.Source.ScreenShare) {
-          playScreenShareChime();
+          var ssState = participantState.get(participant.identity);
+          var ssVol = (ssState && ssState.chimeVolume != null) ? ssState.chimeVolume : 0.5;
+          playScreenShareChime(ssVol);
         }
         var cardRef = participantCards.get(participant.identity);
         if (cardRef && cardRef.watchToggleBtn) {
@@ -7641,7 +7696,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
               }
             }
             if (inAnotherRoom) {
-              playSwitchChime();
+              var swState = participantState.get(key);
+              var swVol = (swState && swState.chimeVolume != null) ? swState.chimeVolume : 0.5;
+              playSwitchChime(swVol);
             } else {
               playChimeForParticipant(key, "exit");
           }
