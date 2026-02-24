@@ -14,14 +14,23 @@ import (
 )
 
 func main() {
-	// Configuration — edit these to match your setup
-	publicIP := envOrDefault("TURN_PUBLIC_IP", "99.111.153.69")
+	// Configuration — set via environment variables
+	publicIP := envOrDefault("TURN_PUBLIC_IP", "")
+	if publicIP == "" {
+		log.Fatal("TURN_PUBLIC_IP is required (set env var)")
+	}
 	listenPort := envOrDefaultInt("TURN_PORT", 3478)
 	relayMinPort := envOrDefaultInt("TURN_RELAY_MIN", 40000)
 	relayMaxPort := envOrDefaultInt("TURN_RELAY_MAX", 40099)
 	realm := envOrDefault("TURN_REALM", "echo-chamber")
-	username := envOrDefault("TURN_USER", "echo")
-	password := envOrDefault("TURN_PASS", "chamber")
+	username := envOrDefault("TURN_USER", "")
+	if username == "" {
+		log.Fatal("TURN_USER is required (set env var)")
+	}
+	password := envOrDefault("TURN_PASS", "")
+	if password == "" {
+		log.Fatal("TURN_PASS is required (set env var)")
+	}
 
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", listenPort)
 

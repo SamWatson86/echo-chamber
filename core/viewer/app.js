@@ -498,8 +498,8 @@ function renderOnlineUsers(users) {
     return;
   }
   const pills = users.map(u => {
-    const name = u.name || "Unknown";
-    const room = u.room || "";
+    const name = escapeHtml(u.name || "Unknown");
+    const room = escapeHtml(u.room || "");
     const title = room ? `In room: ${room}` : "";
     return `<span class="online-user-pill" title="${title}">${name}</span>`;
   }).join("");
@@ -8291,9 +8291,15 @@ const EMOJI_LIST = [
   "🔳", "🔲", "🏁", "🚩", "🎌", "🏴", "🏳️", "🏳️‍🌈", "🏳️‍⚧️", "🏴‍☠️", "🇺🇳"
 ];
 
+function escapeHtml(str) {
+  if (!str) return "";
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 function linkifyText(text) {
+  const escaped = escapeHtml(text);
   const urlRegex = /(https?:\/\/[^\s]+)/g;
-  return text.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+  return escaped.replace(urlRegex, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
 }
 
 // Open external links in system browser
@@ -8460,7 +8466,7 @@ function renderChatMessage(message) {
       dlLink.className = "chat-message-file";
       dlLink.style.marginTop = "4px";
       dlLink.style.cursor = "pointer";
-      dlLink.innerHTML = '<div class="chat-message-file-icon">💾</div><div class="chat-message-file-name">' + (message.fileName || "Video") + '</div>';
+      dlLink.innerHTML = '<div class="chat-message-file-icon">💾</div><div class="chat-message-file-name">' + escapeHtml(message.fileName || "Video") + '</div>';
       dlLink.addEventListener("click", async () => {
         try {
           const token = currentAccessToken || adminToken;
