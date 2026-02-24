@@ -8178,6 +8178,14 @@ async function connect() {
       }
     };
 
+    // Remove old listeners before adding new ones (prevents accumulation on reconnect)
+    if (window._enableAllMedia) {
+      const oldHandler = window._enableAllMedia;
+      ['click', 'touchstart', 'keydown', 'mousedown'].forEach(event => {
+        document.removeEventListener(event, oldHandler, { capture: true });
+      });
+    }
+
     // Make enableAllMedia globally accessible for the refresh button
     window._enableAllMedia = enableAllMedia;
 
@@ -8219,6 +8227,8 @@ async function disconnect() {
   sendLeaveNotification();
   stopHeartbeat();
   stopRoomStatusPolling();
+  // Clear update-check polling timer (#37)
+  if (_updateCheckTimer) { clearInterval(_updateCheckTimer); _updateCheckTimer = null; }
   // Clean up canvas pipeline before disconnecting
   if (window._canvasFrameWorker) {
     try { window._canvasFrameWorker.postMessage("stop"); window._canvasFrameWorker.terminate(); } catch {}

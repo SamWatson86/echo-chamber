@@ -22,6 +22,12 @@ func main() {
 	listenPort := envOrDefaultInt("TURN_PORT", 3478)
 	relayMinPort := envOrDefaultInt("TURN_RELAY_MIN", 40000)
 	relayMaxPort := envOrDefaultInt("TURN_RELAY_MAX", 40099)
+	if relayMinPort < 1 || relayMinPort > 65535 || relayMaxPort < 1 || relayMaxPort > 65535 {
+		log.Fatalf("Relay port range out of bounds: %d-%d (must be 1-65535)", relayMinPort, relayMaxPort)
+	}
+	if relayMinPort > relayMaxPort {
+		log.Fatalf("TURN_RELAY_MIN (%d) must be <= TURN_RELAY_MAX (%d)", relayMinPort, relayMaxPort)
+	}
 	realm := envOrDefault("TURN_REALM", "echo-chamber")
 	username := envOrDefault("TURN_USER", "")
 	if username == "" {
