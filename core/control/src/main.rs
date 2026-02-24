@@ -2003,22 +2003,24 @@ async fn admin_bug_reports(
     let mut all: Vec<BugReport> = in_mem.clone();
     drop(in_mem);
 
-    // Also load from disk for persistence across restarts
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let today_days = now / 86400;
-    for offset in [0, 1] {
-        let days = today_days - offset;
-        let (year, month, day) = epoch_days_to_date(days);
-        let file_name = format!("bugs-{:04}-{:02}-{:02}.json", year, month, day);
-        let file_path = state.bug_log_dir.join(&file_name);
-        if let Ok(data) = fs::read_to_string(&file_path) {
-            if let Ok(disk_reports) = serde_json::from_str::<Vec<BugReport>>(&data) {
-                for dr in disk_reports {
-                    if !all.iter().any(|r| r.id == dr.id) {
-                        all.push(dr);
+    // Load all bug report files from disk for persistence across restarts
+    if let Ok(entries) = fs::read_dir(&state.bug_log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json")
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("bugs-"))
+                    .unwrap_or(false)
+            {
+                if let Ok(data) = fs::read_to_string(&path) {
+                    if let Ok(disk_reports) = serde_json::from_str::<Vec<BugReport>>(&data) {
+                        for dr in disk_reports {
+                            if !all.iter().any(|r| r.id == dr.id) {
+                                all.push(dr);
+                            }
+                        }
                     }
                 }
             }
