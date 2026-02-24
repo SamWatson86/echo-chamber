@@ -202,6 +202,8 @@ struct Config {
     turn_pass: Option<String>,
     turn_host: Option<String>,
     turn_port: u16,
+    github_pat: Option<String>,
+    github_repo: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2011,6 +2013,18 @@ async fn submit_bug_report(
     };
 
     append_bug_report(&state.bug_log_dir, &report);
+
+    // Fire-and-forget: create GitHub Issue if configured
+    if let (Some(pat), Some(repo)) = (
+        state.config.github_pat.clone(),
+        state.config.github_repo.clone(),
+    ) {
+        let client = state.http_client.clone();
+        let gh_report = report.clone();
+        tokio::spawn(async move {
+            create_github_issue(client, pat, repo, gh_report).await;
+        });
+    }
 
     {
         let mut reports = state.bug_reports.lock().unwrap_or_else(|e| e.into_inner());
@@ -4083,6 +4097,9 @@ fn load_config() -> Config {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3478);
 
+    let github_pat = std::env::var("GITHUB_PAT").ok().filter(|s| !s.is_empty());
+    let github_repo = std::env::var("GITHUB_REPO").ok().filter(|s| !s.is_empty());
+
     Config {
         host,
         port,
@@ -4103,6 +4120,8 @@ fn load_config() -> Config {
         turn_pass,
         turn_host,
         turn_port,
+        github_pat,
+        github_repo,
     }
 }
 
@@ -4178,6 +4197,91 @@ fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
 
     if let Ok(json) = serde_json::to_string_pretty(&reports) {
         let _ = fs::write(&file_path, json);
+    }
+}
+
+/// Fire-and-forget: create a GitHub Issue from a bug report.
+/// Silently does nothing if GITHUB_PAT or GITHUB_REPO are not configured.
+async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport) {
+    let title = if report.description.len() > 80 {
+        format!("Bug: {}...", &report.description[..77])
+    } else {
+        format!("Bug: {}", report.description)
+    };
+
+    let mut body = format!(
+        "**Reporter:** {}\n**Room:** {}\n\n{}\n",
+        report.name, report.room, report.description
+    );
+
+    // Add WebRTC stats table if any stats are present
+    let has_stats = report.screen_fps.is_some()
+        || report.screen_bitrate_kbps.is_some()
+        || report.bwe_kbps.is_some()
+        || report.quality_limitation.is_some()
+        || report.encoder.is_some()
+        || report.ice_local_type.is_some();
+
+    if has_stats {
+        body.push_str("\n### WebRTC Stats\n| Metric | Value |\n|--------|-------|\n");
+        if let Some(fps) = report.screen_fps {
+            body.push_str(&format!("| FPS | {:.1} |\n", fps));
+        }
+        if let Some(kbps) = report.screen_bitrate_kbps {
+            body.push_str(&format!("| Bitrate | {} kbps |\n", kbps));
+        }
+        if let Some(bwe) = report.bwe_kbps {
+            body.push_str(&format!("| Bandwidth Est. | {} kbps |\n", bwe));
+        }
+        if let Some(ref ql) = report.quality_limitation {
+            body.push_str(&format!("| Quality Limit | {} |\n", ql));
+        }
+        if let Some(ref enc) = report.encoder {
+            body.push_str(&format!("| Encoder | {} |\n", enc));
+        }
+        if let Some(ref ice) = report.ice_local_type {
+            body.push_str(&format!("| ICE Local | {} |\n", ice));
+        }
+        if let Some(ref ice) = report.ice_remote_type {
+            body.push_str(&format!("| ICE Remote | {} |\n", ice));
+        }
+    }
+
+    if let Some(ref url) = report.screenshot_url {
+        body.push_str(&format!("\n### Screenshot\n{}\n", url));
+    }
+
+    body.push_str("\n---\n*Auto-created from in-app bug report*");
+
+    let url = format!("https://api.github.com/repos/{}/issues", repo);
+    let payload = serde_json::json!({
+        "title": title,
+        "body": body,
+        "labels": ["bug-report"],
+    });
+
+    match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", pat))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "echo-chamber-server")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                info!("GitHub Issue created for bug report from {}", report.name);
+            } else {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                warn!("GitHub Issue creation failed ({}): {}", status, body);
+            }
+        }
+        Err(e) => {
+            warn!("GitHub Issue creation request failed: {}", e);
+        }
     }
 }
 
