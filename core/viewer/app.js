@@ -3223,17 +3223,22 @@ function showUpdateBanner(version) {
   document.body.appendChild(banner);
 }
 
+var _heartbeatAbort = null; // AbortController for in-flight heartbeat — prevents ghost presence (#50)
+
 function startHeartbeat() {
   stopHeartbeat();
   const controlUrl = controlUrlInput.value.trim();
   if (!controlUrl || !adminToken) return;
+  _heartbeatAbort = new AbortController();
   const sendBeat = () => {
+    if (!_heartbeatAbort || _heartbeatAbort.signal.aborted) return;
     const identity = identityInput ? identityInput.value : "";
     const name = nameInput.value.trim() || "Viewer";
     fetch(`${controlUrl}/v1/participants/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
       body: JSON.stringify({ room: _connectedRoomName, identity, name, viewer_version: _viewerVersion }),
+      signal: _heartbeatAbort.signal,
     }).catch(() => {});
   };
   sendBeat();
@@ -3244,6 +3249,11 @@ function stopHeartbeat() {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
+  }
+  // Abort any in-flight heartbeat request to prevent ghost presence after disconnect
+  if (_heartbeatAbort) {
+    _heartbeatAbort.abort();
+    _heartbeatAbort = null;
   }
 }
 
