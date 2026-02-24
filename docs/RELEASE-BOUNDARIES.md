@@ -32,13 +32,12 @@ Practical implication:
 
 ---
 
-## Deployment mode caveat
+## Deployment reality (current)
 
-### If users connect to a central shared server
-Most server + viewer changes can ship without desktop binary updates.
+Current operating model is a central shared server.
+In this model, most server + viewer changes ship without a desktop binary release.
 
-### If users run local desktop-hosted runtime
-Changes to that locally packaged runtime may require a new desktop release.
+Local desktop-hosted runtime should be treated as a development/edge case, not the default production path. If someone is running that mode, packaged-runtime changes may require a desktop release.
 
 When unsure, answer this question:
 

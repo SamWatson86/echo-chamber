@@ -17,7 +17,7 @@ The key operational reality: some changes are **server/runtime** only, while oth
 - `core/viewer` (JS/HTML)
   - Client UX (rooms, media controls, jam/audio interactions)
   - Connects to control/media surfaces and renders participant state
-- `core/desktop` (Tauri)
+- `core/client` (Tauri)
   - Native shell/runtime integration
   - App lifecycle, platform integration, updater IPC
 - `tools/*`

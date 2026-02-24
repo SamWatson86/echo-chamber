@@ -1,66 +1,65 @@
 # Operations Runbook
 
-This runbook is intentionally short and practical for a friend-group service.
+This runbook reflects the current Core stack reality (central host/server model).
 
-## Deployment modes
+## Start / stop
 
-### Mode A: Central/shared server
-- One host runs the control runtime.
-- Clients (browser or desktop) connect to that host.
-- Most behavior changes are deployed server-side.
+From repo root:
 
-### Mode B: Local desktop-hosted runtime
-- A desktop app instance runs the runtime locally for usage.
-- Updates may require desktop binary refresh depending on what changed.
+```powershell
+# Start SFU + control plane + TURN (if binaries exist)
+powershell -ExecutionPolicy Bypass -File .\core\run-core.ps1
 
-Use [Release Boundaries](./RELEASE-BOUNDARIES.md) to decide whether a binary release is required.
+# Stop all core services
+powershell -ExecutionPolicy Bypass -File .\core\stop-core.ps1
+```
 
----
+## Default local URLs
 
-## Daily operator checklist
+(From `core/control/.env.example` defaults)
 
-1. Confirm service is reachable.
-2. Confirm logs are being written.
-3. Verify a basic room join + audio path.
-4. Spot-check room switch and jam join/leave flows.
+- Viewer: `https://127.0.0.1:9443/viewer`
+- Admin dashboard: `https://127.0.0.1:9443/admin`
+- Health: `https://127.0.0.1:9443/health`
 
----
+## Process + PID management
 
-## Incident triage (quick flow)
+The scripts manage PID files and will stop old processes before restart:
 
-1. **Classify**
-   - Server/API failure
-   - Client state regression
-   - Media transport issue
-2. **Scope**
-   - One user vs everyone
-   - One room vs all rooms
-3. **Gather evidence**
-   - timestamps
-   - user action sequence
-   - relevant logs/console output
-4. **Contain**
-   - rollback or restart affected component
-5. **Document**
-   - open/update issue with repro steps and impact
+- Control plane PID: `core/control/core-control.pid`
+- LiveKit PID: `core/sfu/livekit-server.pid`
+- TURN PID: `core/turn/echo-turn.pid`
 
----
+Manual check (PowerShell):
 
-## Logs and diagnostics
+```powershell
+Get-Process -Id (Get-Content .\core\control\core-control.pid)
+Get-Process -Id (Get-Content .\core\sfu\livekit-server.pid)
+Get-Process -Id (Get-Content .\core\turn\echo-turn.pid)
+```
 
-Capture enough to reproduce, not just enough to speculate.
+## Logs
 
-Recommended minimum in issue reports:
-- environment (desktop/browser, OS, app version)
-- exact actions performed
-- expected vs actual behavior
-- timestamps + relevant logs
+Core runtime logs are written under `core/logs/`:
 
----
+- `core/logs/run-core.log`
+- `core/logs/core-control.out.log`
+- `core/logs/core-control.err.log`
+- `core/logs/livekit.out.log`
+- `core/logs/livekit.err.log`
+- `core/logs/turn.out.log`
+- `core/logs/turn.err.log`
+
+## Quick incident flow
+
+1. Confirm health endpoint and viewer/admin reachability.
+2. Check `core/logs/core-control.err.log` first.
+3. Validate PID files are present and processes are alive.
+4. If needed, run `stop-core.ps1` then `run-core.ps1` for clean restart.
+5. Capture timestamps + action sequence + relevant logs in the issue.
 
 ## Change management
 
-- No direct pushes to `main`/`master`.
-- PRs only.
-- Verification checks must pass before merge.
-- Prefer small, focused PRs after foundation lands.
+- PRs only (no direct `main`/`master` pushes).
+- Keep release impact explicit (server-only vs desktop-binary).
+- For behavior changes in state/race-prone paths, include verification evidence.

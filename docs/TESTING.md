@@ -6,17 +6,17 @@ Goal: make regressions hard and PR review lightweight by relying on automated ve
 
 - Deterministic tests first (state machines, transition guards, reconcile logic).
 - Integration checks for async/race-heavy user flows.
-- Keep default checks cheap so they run on every PR.
+- Keep default checks cheap so they can run frequently.
 - Keep deeper checks available for risky changes.
 
-## Test layers
+## Verification layers
 
-### Layer 1 — Quick PR checks (required)
+### Layer 1 — Fast checks (current baseline)
 - Syntax/lint/style basics
 - Deterministic viewer state tests
 - Fast compile/check steps
 
-### Layer 2 — Extended checks (manual or scheduled)
+### Layer 2 — Extended checks (manual/scheduled)
 - Broader test sets
 - Slower integration scenarios
 - Stress/race-focused checks
@@ -34,9 +34,17 @@ Goal: make regressions hard and PR review lightweight by relying on automated ve
 
 ## PR expectations
 
-Every behavior-changing PR should include at least one of:
+Behavior-changing PRs should include at least one of:
 - a new test proving the expected behavior, or
 - an update to existing tests covering the changed path.
+
+## CI policy status
+
+Current state:
+- Verification checks exist, but "required status checks" are not yet fully enforced as branch protection policy.
+
+Target state:
+- Make a lean fast-check set required on PRs once the team confirms runtime cost and reliability.
 
 ## Cost-awareness
 
