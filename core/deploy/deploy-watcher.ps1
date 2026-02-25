@@ -75,6 +75,27 @@ function Set-LastDeployedSha([string]$sha) {
     [System.IO.File]::WriteAllText($stateFile, $sha)
 }
 
+function Write-DeployEvent([string]$sha, [string]$status, [int]$durationSec, [string]$errorMsg) {
+    $historyFile = Join-Path $deployDir "deploy-history.json"
+    $history = @()
+    if (Test-Path $historyFile) {
+        try { $history = @(Get-Content $historyFile -Raw | ConvertFrom-Json) } catch { $history = @() }
+    }
+    $entry = @{
+        sha = $sha.Substring(0, [Math]::Min(7, $sha.Length))
+        status = $status
+        timestamp = (Get-Date).ToString("s")
+        duration_seconds = $durationSec
+        error = $errorMsg
+    }
+    $history = @($entry) + @($history)
+    if ($history.Count -gt 50) { $history = $history[0..49] }
+    $json = $history | ConvertTo-Json -Depth 3
+    if ($history.Count -eq 1) { $json = "[$json]" }
+    [System.IO.File]::WriteAllText($historyFile, $json)
+    Write-Log "Deploy event recorded: $status ($sha)"
+}
+
 function Test-Health {
     try {
         $result = curl.exe -sk --max-time $healthTimeout $healthUrl 2>&1
@@ -239,26 +260,34 @@ do {
             $consecutiveFailures++
         } else {
             Write-Log "Pull successful"
+            $deployStart = Get-Date
 
             # Test
             $testsPassed = Run-Tests
             if (-not $testsPassed) {
                 Write-Log "Skipping deploy - tests failed" "ERROR"
+                $dur = [int]((Get-Date) - $deployStart).TotalSeconds
+                Write-DeployEvent $remoteSha "failed" $dur "Tests failed"
                 $consecutiveFailures++
             } else {
                 # Build
                 $buildPassed = Build-Control
                 if (-not $buildPassed) {
                     Write-Log "Skipping deploy - build failed" "ERROR"
+                    $dur = [int]((Get-Date) - $deployStart).TotalSeconds
+                    Write-DeployEvent $remoteSha "failed" $dur "Build failed"
                     $consecutiveFailures++
                 } else {
                     # Deploy
                     $deployed = Deploy-BlueGreen
+                    $dur = [int]((Get-Date) - $deployStart).TotalSeconds
                     if ($deployed) {
                         Set-LastDeployedSha $remoteSha
                         $consecutiveFailures = 0
+                        Write-DeployEvent $remoteSha "success" $dur $null
                         Write-Log "Deploy complete: $shortRemote"
                     } else {
+                        Write-DeployEvent $remoteSha "rollback" $dur "Health check failed - rolled back"
                         $consecutiveFailures++
                     }
                 }
