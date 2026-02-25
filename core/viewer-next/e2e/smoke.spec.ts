@@ -467,6 +467,27 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
   await expect(page.locator('#chat-panel')).toHaveCount(1);
   await expect(page.locator('#soundboard')).toBeHidden();
 
+  const captureParityEvidence = process.env.PARITY_EVIDENCE === '1';
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const proofDir = path.resolve(process.cwd(), '../../docs/proof/parity');
+  const screenshots: string[] = [];
+  let shotIndex = 0;
+
+  if (captureParityEvidence) {
+    await fs.mkdir(proofDir, { recursive: true });
+  }
+
+  const captureState = async (label: string) => {
+    if (!captureParityEvidence) return;
+    shotIndex += 1;
+    const filePath = path.join(
+      proofDir,
+      `${timestamp}-${String(shotIndex).padStart(2, '0')}-${label}.png`,
+    );
+    await page.screenshot({ path: filePath, fullPage: true });
+    screenshots.push(filePath);
+  };
+
   await page.locator('#connect').click();
 
   await expect(page.locator('#status')).toHaveText(/Connected/i);
@@ -475,30 +496,23 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
 
   await page.locator('#room-list button:has-text("Breakout 2")').first().click();
   await expect.poll(() => tokenRoomRequests[tokenRoomRequests.length - 1]).toBe('breakout-2');
+  await captureState('room-switched-breakout2');
 
   await page.locator('#disconnect').click();
   await expect(page.locator('#status')).toHaveText(/Idle/i);
   await page.locator('#connect').click();
   await expect(page.locator('#status')).toHaveText(/Connected/i);
   await expect.poll(() => tokenRoomRequests[tokenRoomRequests.length - 1]).toBe('breakout-2');
+  await captureState('reconnected-breakout2');
 
-  const captureParityEvidence = process.env.PARITY_EVIDENCE === '1';
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const proofDir = path.resolve(process.cwd(), '../../docs/proof/parity');
-  if (captureParityEvidence) {
-    await fs.mkdir(proofDir, { recursive: true });
-  }
-
-  const shellShot = path.join(proofDir, `${timestamp}-01-connected-shell.png`);
-  if (captureParityEvidence) {
-    await page.screenshot({ path: shellShot, fullPage: true });
-  }
+  await captureState('connected-shell');
 
   // Chat send/upload/delete handling.
   await page.getByRole('button', { name: /^Chat$/ }).click();
   await page.locator('#chat-input').fill('React parity chat smoke message');
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(page.locator('#chat-messages')).toContainText('React parity chat smoke message');
+  await captureState('chat-open-message-sent');
 
   await page.setInputFiles('#chat-file-input', {
     name: 'chat-attachment.txt',
@@ -508,34 +522,35 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
 
   await expect.poll(() => chatUploadCalled).toBeTruthy();
   await expect(page.locator('#chat-messages')).toContainText('chat-attachment.txt');
+  await captureState('chat-with-upload');
 
   await page.locator('.chat-message-delete').first().evaluate((button) => {
     (button as HTMLButtonElement).click();
   });
   await expect.poll(() => chatDeleteCalled).toBeTruthy();
-
-  const chatShot = path.join(proofDir, `${timestamp}-02-chat-open.png`);
-  if (captureParityEvidence) {
-    await page.screenshot({ path: chatShot, fullPage: true });
-  }
+  await captureState('chat-after-delete');
 
   // Theme/settings shell parity.
   await page.getByRole('button', { name: 'Theme' }).click();
   await expect(page.locator('#theme-panel')).toBeVisible();
   await page.getByRole('button', { name: 'Cyberpunk' }).click();
   await expect(page.locator('body')).toHaveAttribute('data-theme', 'cyberpunk');
+  await captureState('theme-panel-cyberpunk');
   await page.locator('#close-theme').click();
 
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#chime-settings-section')).toBeVisible();
+  await captureState('settings-chime');
   await page.locator('#close-settings').click();
 
   // Soundboard play/edit/upload/update.
   await page.locator('#open-soundboard').click();
   await expect(page.locator('#soundboard-compact')).toBeVisible();
+  await captureState('soundboard-compact');
 
   await page.locator('#open-soundboard-edit').click();
   await expect(page.locator('#soundboard')).toBeVisible();
+  await captureState('soundboard-edit-open');
   await page.locator('#soundboard-grid .sound-tile-main').first().evaluate((button) => {
     (button as HTMLButtonElement).click();
   });
@@ -558,6 +573,7 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
   await page.locator('#sound-upload-button').click();
   await expect.poll(() => soundUploadCalled).toBeTruthy();
   await expect(page.locator('#soundboard-grid')).toContainText('Bell Upload');
+  await captureState('soundboard-after-upload');
   await page.locator('#back-to-soundboard').click();
   await page.locator('#close-soundboard').click();
   await expect(page.locator('#soundboard')).toBeHidden();
@@ -565,26 +581,25 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
   // Jam controls (start/queue/skip/stop).
   await page.locator('#open-jam').click();
   await expect(page.locator('#jam-panel')).toBeVisible();
+  await captureState('jam-panel-open');
 
   await page.locator('#jam-start-btn').click();
   await expect.poll(() => jamStartCalled).toBeTruthy();
   await expect(page.locator('#jam-now-playing')).toContainText('Lo-fi Focus');
+  await captureState('jam-started-now-playing');
 
   await page.locator('#jam-search-input').fill('lofi');
   await expect(page.locator('.jam-result-item')).toBeVisible();
   await page.locator('.jam-result-add').first().click();
   await expect.poll(() => jamQueueCalled).toBeTruthy();
+  await captureState('jam-search-queue');
 
   await page.locator('#jam-skip-btn').click();
   await expect.poll(() => jamSkipCalled).toBeTruthy();
 
   await page.locator('#jam-stop-btn').click();
   await expect.poll(() => jamStopCalled).toBeTruthy();
-
-  const jamShot = path.join(proofDir, `${timestamp}-03-jam-open.png`);
-  if (captureParityEvidence) {
-    await page.screenshot({ path: jamShot, fullPage: true });
-  }
+  await captureState('jam-stopped');
 
   // Bug report flow.
   await page.locator('#open-bug-report').click();
@@ -598,11 +613,13 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
   await expect.poll(() => bugUploadCalled).toBeTruthy();
   await expect.poll(() => bugReportCalled).toBeTruthy();
   await expect(page.locator('#bug-report-status')).toContainText(/report sent/i);
+  await captureState('bug-report-submitted');
   await page.locator('#close-bug-report').click();
 
   // Admin tabs parity (live/history/metrics/bugs/deploys).
   await page.locator('#open-admin-dash').click();
   await expect(page.locator('#admin-dash-panel')).toBeVisible();
+  await captureState('admin-live-tab');
   await expect(page.getByRole('button', { name: 'Live' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'History' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Metrics' })).toBeVisible();
@@ -611,20 +628,21 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
 
   await page.getByRole('button', { name: 'History' }).click();
   await expect(page.locator('#admin-dash-history')).toContainText('Sam');
+  await captureState('admin-history-tab');
 
   await page.getByRole('button', { name: 'Metrics' }).click();
   await expect(page.locator('#admin-dash-metrics')).toContainText('Sessions (30d)');
+  await captureState('admin-metrics-tab');
 
   await page.getByRole('button', { name: 'Bugs' }).click();
   await expect(page.locator('#admin-dash-bugs')).toContainText('Parity bug report smoke test issue details');
+  await captureState('admin-bugs-tab');
 
   await page.getByRole('button', { name: 'Deploys' }).click();
   await expect(page.locator('#admin-dash-deploys')).toContainText('viewer-next parity release candidate');
+  await captureState('admin-deploys-tab');
 
-  const adminShot = path.join(proofDir, `${timestamp}-04-admin-open.png`);
   if (captureParityEvidence) {
-    await page.screenshot({ path: adminShot, fullPage: true });
-
     const evidencePath = path.join(proofDir, `${timestamp}-behavior.json`);
     await fs.writeFile(
       evidencePath,
@@ -640,6 +658,7 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
             'jam controls (search/queue/start/skip/stop)',
             'bug report submit with screenshot upload',
             'admin dashboard tabs present and populated (live/history/metrics/bugs/deploys)',
+            'multi-state screenshot gallery captured across major UI panels',
           ],
           assertions: {
             tokenRoomRequests,
@@ -655,7 +674,7 @@ test('legacy workflow parity journey (mocked APIs)', async ({ page }) => {
             jamStopCalled,
             jamQueueCalled,
           },
-          screenshots: [shellShot, chatShot, jamShot, adminShot],
+          screenshots,
         },
         null,
         2,

@@ -1,6 +1,6 @@
 # Viewer-Next Parity Checklist (Draft PR #62)
 
-Last updated: 2026-02-25 08:24 ET  
+Last updated: 2026-02-25 08:31 ET  
 Branch: `feat/viewer-next-parity-finish`
 
 > Truth status: **DONE for the scoped parity criteria in this task**.
@@ -17,11 +17,8 @@ Branch: `feat/viewer-next-parity-finish`
 
 ## Latest parity evidence artifacts (`PARITY_EVIDENCE=1`)
 
-- `docs/proof/parity/2026-02-25T13-23-51-117Z-behavior.json`
-- `docs/proof/parity/2026-02-25T13-23-51-117Z-01-connected-shell.png`
-- `docs/proof/parity/2026-02-25T13-23-51-117Z-02-chat-open.png`
-- `docs/proof/parity/2026-02-25T13-23-51-117Z-03-jam-open.png`
-- `docs/proof/parity/2026-02-25T13-23-51-117Z-04-admin-open.png`
+- `docs/proof/parity/2026-02-25T13-30-47-790Z-behavior.json`
+- `docs/proof/parity/2026-02-25T13-30-47-790Z-01-room-switched-breakout2.png` ... `docs/proof/parity/2026-02-25T13-30-47-790Z-21-admin-deploys-tab.png` (21 screenshots)
 
 ## Verification command status (latest run)
 
