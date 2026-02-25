@@ -1,6 +1,6 @@
 # Viewer-Next Parity Checklist (Draft PR #62)
 
-Last updated: 2026-02-25 08:31 ET  
+Last updated: 2026-02-25 08:38 ET  
 Branch: `feat/viewer-next-parity-finish`
 
 > Truth status: **DONE for the scoped parity criteria in this task**.
@@ -19,6 +19,7 @@ Branch: `feat/viewer-next-parity-finish`
 
 - `docs/proof/parity/2026-02-25T13-30-47-790Z-behavior.json`
 - `docs/proof/parity/2026-02-25T13-30-47-790Z-01-room-switched-breakout2.png` ... `docs/proof/parity/2026-02-25T13-30-47-790Z-21-admin-deploys-tab.png` (21 screenshots)
+- Legacy baseline capture for visual before/after pairing: `docs/proof/parity/2026-02-25T13-37-35-934Z-legacy-before-behavior.json` + 12 state screenshots.
 
 ## Verification command status (latest run)
 

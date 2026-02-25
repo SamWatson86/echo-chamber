@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-02-25T13-37-35-934Z-legacy-before",
+  "type": "legacy-before-states",
+  "screenshots": [
+    "2026-02-25T13-37-35-934Z-legacy-before-01-connected-shell.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-02-chat-open-message-sent.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-03-theme-panel-cyberpunk.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-04-settings-chime.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-05-soundboard-compact.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-06-soundboard-edit-open.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-07-jam-panel-open.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-08-jam-started-now-playing.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-09-bug-report-submitted.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-10-admin-live-tab.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-11-admin-metrics-tab.png",
+    "2026-02-25T13-37-35-934Z-legacy-before-12-admin-deploys-tab.png"
+  ],
+  "notes": "Legacy static UI state captures for before/after visual comparison against viewer-next parity evidence."
+}
