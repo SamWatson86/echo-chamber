@@ -429,6 +429,7 @@ export function App() {
   const [soundSearch, setSoundSearch] = useState('');
   const [soundboardSounds, setSoundboardSounds] = useState<SoundboardSound[]>([]);
   const [soundboardHint, setSoundboardHint] = useState('');
+  const [soundboardReloadTick, setSoundboardReloadTick] = useState(0);
   const [soundboardEditingId, setSoundboardEditingId] = useState<string | null>(null);
   const [soundboardSelectedIcon, setSoundboardSelectedIcon] = useState<string>(SOUNDBOARD_ICONS[0]);
   const [soundFileLabel, setSoundFileLabel] = useState('Select audio');
@@ -1017,6 +1018,7 @@ export function App() {
 
           if (message.type === 'sound-added' || message.type === 'sound-updated') {
             setSoundboardHint('Soundboard updated.');
+            setSoundboardReloadTick((tick) => tick + 1);
             return;
           }
 
@@ -1652,7 +1654,7 @@ export function App() {
     if (soundboardCompactOpen || soundboardEditOpen) {
       void loadSoundboard();
     }
-  }, [soundboardCompactOpen, soundboardEditOpen, loadSoundboard]);
+  }, [soundboardCompactOpen, soundboardEditOpen, soundboardReloadTick, loadSoundboard]);
 
   const jamApplyVolume = useCallback(() => {
     const gain = jamGainRef.current;
