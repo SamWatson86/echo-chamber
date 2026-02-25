@@ -42,6 +42,16 @@ import {
 import { BweWatchdog, applyBweActionToSender } from '@/features/media/bweWatchdog';
 import { RnnoiseMicProcessor, type RnnoiseSuppressionLevel } from '@/features/media/rnnoiseParity';
 import { ParticipantVolumeBoostManager } from '@/features/media/participantVolumeBoost';
+import {
+  buildSoundboardBroadcastPayloads,
+  formatSoundboardHint,
+  parseSoundboardPlayMessage,
+  sortSoundboardByOrder,
+} from '@/features/media/soundboardParity';
+import { ensureLocalDeviceId, resolveChimeIdentity } from '@/features/media/deviceProfileParity';
+import { migrateLegacyViewerPreferences } from '@/features/media/legacyPreferenceMigration';
+import { installSdpCodecHintParity } from '@/features/media/sdpCodecHintParity';
+import { CameraRecoveryMonitor } from '@/features/media/cameraRecoveryParity';
 
 const FIXED_ROOMS = ['main', 'breakout-1', 'breakout-2', 'breakout-3'] as const;
 const ROOM_DISPLAY_NAMES: Record<(typeof FIXED_ROOMS)[number], string> = {
@@ -58,6 +68,8 @@ const CHAT_FILE_TYPE = 'chat-file';
 const RNNOISE_ENABLED_KEY = 'echo-noise-cancel-enabled';
 const RNNOISE_LEVEL_KEY = 'echo-noise-cancel-level';
 const PARTICIPANT_VOLUME_STORAGE_KEY = 'echo-participant-volumes';
+const SOUNDBOARD_CLIP_VOLUME_STORAGE_KEY = 'echo-soundboard-clip-volume';
+const SOUNDBOARD_ORDER_STORAGE_KEY = 'echo-core-soundboard-order';
 
 const THEMES = [
   { id: 'frost', label: 'Frost', previewClass: 'frost-preview' },
@@ -130,6 +142,7 @@ type ParticipantView = {
   speaking: boolean;
   micTrack: LocalTrack | RemoteTrack | null;
   cameraTrack: LocalTrack | RemoteTrack | null;
+  cameraPublication?: TrackPublication;
   screenTrack: LocalTrack | RemoteTrack | null;
   screenAudioTrack: LocalTrack | RemoteTrack | null;
 };
@@ -454,6 +467,7 @@ function buildParticipantViews(room: Room): ParticipantView[] {
       speaking: participant.isSpeaking,
       micTrack: classifyTrack(micPublication),
       cameraTrack: classifyTrack(cameraPublication),
+      cameraPublication,
       screenTrack: classifyTrack(screenPublication),
       screenAudioTrack: classifyTrack(screenAudioPublication),
     };
@@ -533,6 +547,9 @@ function getTrackMediaStreamTrack(track: LocalTrack | RemoteTrack | null | undef
   return mediaStreamTrack ?? null;
 }
 
+migrateLegacyViewerPreferences(globalThis.localStorage as Storage | undefined);
+installSdpCodecHintParity();
+
 export function App() {
   const actorRef = useActorRef(connectionMachine);
   const snapshot = useSelector(actorRef, (state) => state);
@@ -571,7 +588,13 @@ export function App() {
   const [soundboardSelectedIcon, setSoundboardSelectedIcon] = useState<string>(SOUNDBOARD_ICONS[0]);
   const [soundFileLabel, setSoundFileLabel] = useState('Select audio');
   const [soundNameInput, setSoundNameInput] = useState('');
-  const [soundClipVolume, setSoundClipVolume] = useState(100);
+  const [soundClipVolume, setSoundClipVolume] = useState(() => {
+    const raw = Number.parseInt(getStoredValue(SOUNDBOARD_CLIP_VOLUME_STORAGE_KEY) ?? '100', 10);
+    return Number.isFinite(raw) ? Math.max(0, Math.min(200, raw)) : 100;
+  });
+  const [soundboardCustomOrder] = useState<string[]>(() =>
+    safeJsonParse<string[]>(getStoredValue(SOUNDBOARD_ORDER_STORAGE_KEY), []),
+  );
   const soundUploadFileRef = useRef<File | null>(null);
 
   const [chimeStatus, setChimeStatus] = useState<{ enter: string; exit: string }>({ enter: '', exit: '' });
@@ -579,6 +602,16 @@ export function App() {
   const chimeFileRef = useRef<{ enter: File | null; exit: File | null }>({ enter: null, exit: null });
   const chimeAudioCtxRef = useRef<AudioContext | null>(null);
   const chimeBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
+  const soundboardAudioCtxRef = useRef<AudioContext | null>(null);
+  const soundboardMasterGainRef = useRef<GainNode | null>(null);
+  const soundboardBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
+  const soundboardCurrentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const soundboardSoundsRef = useRef<SoundboardSound[]>([]);
+  const soundClipVolumeRef = useRef(100);
+  const playSoundByIdRef = useRef<(soundId: string, clipVolume?: number) => Promise<boolean>>(async () => false);
+  const fetchChimeBufferRef = useRef<(targetIdentity: string, kind: 'enter' | 'exit') => Promise<AudioBuffer | null>>(async () => null);
+  const deviceIdByIdentityRef = useRef<Map<string, string>>(new Map());
+  const localDeviceIdRef = useRef('');
 
   const [cameraLobbyOpen, setCameraLobbyOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -676,6 +709,8 @@ export function App() {
   const volumeBoostRef = useRef(new ParticipantVolumeBoostManager());
   const participantVolumesRef = useRef<Record<string, { mic: number; screen: number }>>(loadParticipantVolumes());
   const mediaBindingRef = useRef<Map<HTMLMediaElement, { identity: string; kind: 'mic' | 'screen' }>>(new Map());
+  const cameraRecoveryMonitorRef = useRef(new CameraRecoveryMonitor());
+  const cameraRecoveryDetachRef = useRef<Map<string, () => void>>(new Map());
 
   const jamAudioWsRef = useRef<WebSocket | null>(null);
   const jamAudioCtxRef = useRef<AudioContext | null>(null);
@@ -693,6 +728,15 @@ export function App() {
 
   const activeRoom = stableRoomId((room || 'main').trim());
   const localIdentity = snapshot.context.session?.identity ?? '';
+  const localDeviceId = useMemo(
+    () =>
+      ensureLocalDeviceId(
+        globalThis.localStorage as Storage | undefined,
+        (globalThis as { crypto?: Crypto }).crypto,
+      ),
+    [],
+  );
+  localDeviceIdRef.current = localDeviceId;
   const viewerVersion = 'viewer-next-react';
   const isAdminMode = useMemo(() => {
     const candidate = (globalThis as { __ECHO_ADMIN__?: unknown }).__ECHO_ADMIN__;
@@ -727,6 +771,7 @@ export function App() {
           speaking: false,
           micTrack: null,
           cameraTrack: null,
+          cameraPublication: undefined,
           screenTrack: null,
           screenAudioTrack: null,
         });
@@ -742,6 +787,7 @@ export function App() {
       speaking: false,
       micTrack: null,
       cameraTrack: null,
+      cameraPublication: undefined,
       screenTrack: null,
       screenAudioTrack: null,
     }));
@@ -752,13 +798,12 @@ export function App() {
     [participantViews],
   );
 
-  const filteredSoundboard = useMemo(
-    () =>
-      soundboardSounds.filter((sound) =>
-        sound.name.toLowerCase().includes(soundSearch.toLowerCase().trim()),
-      ),
-    [soundSearch, soundboardSounds],
-  );
+  const filteredSoundboard = useMemo(() => {
+    const filtered = soundboardSounds.filter((sound) =>
+      sound.name.toLowerCase().includes(soundSearch.toLowerCase().trim()),
+    );
+    return sortSoundboardByOrder(filtered, soundboardCustomOrder);
+  }, [soundSearch, soundboardSounds, soundboardCustomOrder]);
 
   const jamHostIdentityBase = jamState?.host_identity ? identityBase(jamState.host_identity) : '';
   const localIdentityBase = identityBase(localIdentity);
@@ -936,9 +981,17 @@ export function App() {
     [controlUrl, adminToken, ensureChimeAudioContext],
   );
 
+  useEffect(() => {
+    fetchChimeBufferRef.current = fetchChimeBuffer;
+  }, [fetchChimeBuffer]);
+
   const playParticipantChime = useCallback(
     async (participantIdentity: string, kind: 'enter' | 'exit') => {
-      const chimeIdentity = identityBase(participantIdentity);
+      const chimeIdentity = resolveChimeIdentity(
+        participantIdentity,
+        identityBase,
+        deviceIdByIdentityRef.current,
+      );
       const context = await ensureChimeAudioContext();
       const gain = context.createGain();
       gain.gain.value = 0.5;
@@ -1196,7 +1249,22 @@ export function App() {
 
   useEffect(() => {
     setStoredValue('echo-core-soundboard-volume', String(soundboardVolume));
+    if (soundboardMasterGainRef.current) {
+      soundboardMasterGainRef.current.gain.value = Math.max(0, Math.min(100, soundboardVolume)) / 100;
+    }
   }, [soundboardVolume]);
+
+  useEffect(() => {
+    setStoredValue(SOUNDBOARD_CLIP_VOLUME_STORAGE_KEY, String(soundClipVolume));
+  }, [soundClipVolume]);
+
+  useEffect(() => {
+    soundboardSoundsRef.current = soundboardSounds;
+  }, [soundboardSounds]);
+
+  useEffect(() => {
+    soundClipVolumeRef.current = soundClipVolume;
+  }, [soundClipVolume]);
 
   useEffect(() => {
     setStoredValue('echo-device-mic', selectedMicId);
@@ -1254,6 +1322,17 @@ export function App() {
     screenSharePipelineRef.current?.stop();
     screenSharePipelineRef.current = null;
     volumeBoostRef.current.cleanupAll();
+    cameraRecoveryMonitorRef.current.reset();
+    cameraRecoveryDetachRef.current.forEach((detach) => detach());
+    cameraRecoveryDetachRef.current.clear();
+    const soundboardContext = soundboardAudioCtxRef.current;
+    soundboardAudioCtxRef.current = null;
+    soundboardMasterGainRef.current = null;
+    soundboardCurrentSourceRef.current = null;
+    soundboardBufferCacheRef.current.clear();
+    if (soundboardContext) {
+      void soundboardContext.close().catch(() => undefined);
+    }
     void rnnoiseProcessorRef.current.disable();
   }, []);
 
@@ -1460,6 +1539,10 @@ export function App() {
     remoteMediaElementsRef.current.clear();
     mediaBindingRef.current.clear();
     volumeBoostRef.current.cleanupAll();
+    cameraRecoveryMonitorRef.current.reset();
+    cameraRecoveryDetachRef.current.forEach((detach) => detach());
+    cameraRecoveryDetachRef.current.clear();
+    deviceIdByIdentityRef.current.clear();
     void rnnoiseProcessorRef.current.disable();
 
     setRoomVersion((v) => v + 1);
@@ -1573,6 +1656,13 @@ export function App() {
         void logStatsEvent('room-connected', activeRoom);
         setRoomConnectError(null);
         setConnectedRoomName(activeRoom);
+        window.setTimeout(() => {
+          void broadcastDeviceId();
+          prefetchRoomChimeBuffers();
+        }, 250);
+        window.setTimeout(() => {
+          void broadcastDeviceId();
+        }, 1500);
         bump();
       })
       .on(RoomEvent.Disconnected, () => {
@@ -1583,6 +1673,9 @@ export function App() {
       .on(RoomEvent.ParticipantConnected, (participant) => {
         appendDebug(`Participant joined: ${participant.name || participant.identity}`);
         void playParticipantChime(participant.identity, 'enter');
+        window.setTimeout(() => {
+          void broadcastDeviceId();
+        }, 200);
         bump();
       })
       .on(RoomEvent.ParticipantDisconnected, (participant) => {
@@ -1612,6 +1705,10 @@ export function App() {
             fileUrl?: string;
             fileName?: string;
             fileType?: string;
+            soundId?: string;
+            soundName?: string;
+            senderName?: string;
+            deviceId?: string;
             [key: string]: unknown;
           };
 
@@ -1683,8 +1780,34 @@ export function App() {
             return;
           }
 
-          if (message.type === 'soundboard-play') {
-            setSoundboardHint(`${message.name || 'Someone'} played ${message.text || 'a sound'}.`);
+          const soundboardPlay = parseSoundboardPlayMessage(message);
+          if (soundboardPlay) {
+            const sounds = soundboardSoundsRef.current;
+            const resolvedSoundId =
+              soundboardPlay.soundId ??
+              sounds.find((sound) =>
+                sound.name.trim().toLowerCase() === soundboardPlay.soundName.trim().toLowerCase(),
+              )?.id ??
+              null;
+
+            if (resolvedSoundId) {
+              const clipVolume =
+                sounds.find((sound) => sound.id === resolvedSoundId)?.volume ??
+                soundClipVolumeRef.current;
+              void playSoundByIdRef.current(resolvedSoundId, clipVolume);
+            }
+            setSoundboardHint(formatSoundboardHint(soundboardPlay.senderName, soundboardPlay.soundName));
+            return;
+          }
+
+          if (message.type === 'device-id' && message.identityBase && message.deviceId) {
+            const idBase = String(message.identityBase || '').trim();
+            const deviceId = String(message.deviceId || '').trim();
+            if (!idBase || !deviceId) return;
+            deviceIdByIdentityRef.current.set(idBase, deviceId);
+            appendDebug(`[device-profile] mapped ${idBase} -> ${deviceId}`);
+            void fetchChimeBufferRef.current(deviceId, 'enter');
+            void fetchChimeBufferRef.current(deviceId, 'exit');
             return;
           }
 
@@ -1991,6 +2114,38 @@ export function App() {
     [roomAudioMuted],
   );
 
+  const attachCameraRecovery = useCallback(
+    (
+      identity: string,
+      publication: TrackPublication | undefined,
+      track: LocalTrack | RemoteTrack | null,
+      element: HTMLMediaElement,
+    ) => {
+      if (!(element instanceof HTMLVideoElement)) return;
+
+      const key = `${identity}-camera`;
+      cameraRecoveryDetachRef.current.get(key)?.();
+      const detach = cameraRecoveryMonitorRef.current.attach({
+        key,
+        video: element,
+        publication: publication as unknown as { setSubscribed?: (value: boolean) => void; videoTrack?: { requestKeyFrame?: () => void } } | undefined,
+        track: track as unknown as { requestKeyFrame?: () => void } | null,
+        onDebug: appendDebug,
+      });
+      cameraRecoveryDetachRef.current.set(key, detach);
+    },
+    [appendDebug],
+  );
+
+  const detachCameraRecovery = useCallback((identity: string) => {
+    const key = `${identity}-camera`;
+    const detach = cameraRecoveryDetachRef.current.get(key);
+    if (detach) {
+      detach();
+      cameraRecoveryDetachRef.current.delete(key);
+    }
+  }, []);
+
   const saveChatMessage = useCallback(
     async (message: ChatMessage) => {
       if (!adminToken) return;
@@ -2037,6 +2192,41 @@ export function App() {
       await publishData(payload);
     }
   }, [publishData]);
+
+  async function broadcastDeviceId() {
+    const room = roomRef.current;
+    if (!room?.localParticipant) return;
+
+    const identity = room.localParticipant.identity;
+    const payload = {
+      type: 'device-id',
+      identityBase: identityBase(identity),
+      deviceId: localDeviceIdRef.current,
+    };
+
+    try {
+      await room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(payload)), {
+        reliable: true,
+      });
+    } catch {
+      // best effort
+    }
+  }
+
+  function prefetchRoomChimeBuffers() {
+    const room = roomRef.current;
+    if (!room) return;
+
+    room.remoteParticipants.forEach((participant) => {
+      const chimeIdentity = resolveChimeIdentity(
+        participant.identity,
+        identityBase,
+        deviceIdByIdentityRef.current,
+      );
+      void fetchChimeBufferRef.current(chimeIdentity, 'enter');
+      void fetchChimeBufferRef.current(chimeIdentity, 'exit');
+    });
+  }
 
   const getLocalScreenSender = useCallback((): RTCRtpSender | null => {
     if (screenShareVideoTrackRef.current?.sender) return screenShareVideoTrackRef.current.sender;
@@ -2701,50 +2891,121 @@ export function App() {
     });
   }, []);
 
+  const ensureSoundboardAudioContext = useCallback(async () => {
+    let context = soundboardAudioCtxRef.current;
+    if (!context || context.state === 'closed') {
+      context = new AudioContext();
+      soundboardAudioCtxRef.current = context;
+      const gain = context.createGain();
+      gain.connect(context.destination);
+      soundboardMasterGainRef.current = gain;
+    }
+
+    if (context.state === 'suspended') {
+      await context.resume();
+    }
+
+    if (soundboardMasterGainRef.current) {
+      soundboardMasterGainRef.current.gain.value = Math.max(0, Math.min(100, soundboardVolume)) / 100;
+    }
+
+    return context;
+  }, [soundboardVolume]);
+
+  const fetchSoundboardBuffer = useCallback(
+    async (soundId: string) => {
+      if (soundboardBufferCacheRef.current.has(soundId)) {
+        return soundboardBufferCacheRef.current.get(soundId) ?? null;
+      }
+
+      if (!adminToken) return null;
+
+      const context = await ensureSoundboardAudioContext();
+      const response = await fetch(apiUrl(`/api/soundboard/file/${encodeURIComponent(soundId)}`), {
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      });
+
+      if (!response.ok) return null;
+
+      const buffer = await response.arrayBuffer();
+      const decoded = await context.decodeAudioData(buffer.slice(0));
+      soundboardBufferCacheRef.current.set(soundId, decoded);
+      return decoded;
+    },
+    [adminToken, apiUrl, ensureSoundboardAudioContext],
+  );
+
+  const playSoundById = useCallback(
+    async (soundId: string, clipVolume = 100) => {
+      const context = await ensureSoundboardAudioContext();
+      const masterGain = soundboardMasterGainRef.current;
+      if (!masterGain) return false;
+
+      const buffer = await fetchSoundboardBuffer(soundId);
+      if (!buffer) return false;
+
+      const previousSource = soundboardCurrentSourceRef.current;
+      if (previousSource) {
+        try {
+          previousSource.stop();
+        } catch {
+          // ignore stop failures
+        }
+      }
+
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      const clipGain = context.createGain();
+      clipGain.gain.value = Math.max(0, Math.min(200, clipVolume)) / 100;
+      source.connect(clipGain);
+      clipGain.connect(masterGain);
+
+      source.onended = () => {
+        if (soundboardCurrentSourceRef.current === source) {
+          soundboardCurrentSourceRef.current = null;
+        }
+      };
+
+      soundboardCurrentSourceRef.current = source;
+      source.start(0);
+      return true;
+    },
+    [ensureSoundboardAudioContext, fetchSoundboardBuffer],
+  );
+
+  useEffect(() => {
+    playSoundByIdRef.current = playSoundById;
+  }, [playSoundById]);
+
   const playSound = useCallback(
     async (sound: SoundboardSound) => {
-      if (!adminToken) return;
-
-      try {
-        const response = await fetch(apiUrl(`/api/soundboard/file/${encodeURIComponent(sound.id)}`), {
-          headers: {
-            Authorization: `Bearer ${adminToken}`,
-          },
-        });
-
-        if (!response.ok) {
-          setSoundboardHint(`Failed to play sound (${response.status})`);
-          return;
-        }
-
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audio.volume = (Math.max(0, Math.min(100, soundboardVolume)) / 100) *
-          (Math.max(0, Math.min(200, sound.volume)) / 100);
-        await audio.play();
-
-        setSoundboardHint(`Played ${sound.name}`);
-        await publishData({
-          type: 'soundboard-play',
-          name: roomRef.current?.localParticipant?.name || name || 'Viewer',
-          text: sound.name,
-          room: activeRoom,
-        });
-
-        setTimeout(() => URL.revokeObjectURL(url), 3000);
-      } catch (error) {
-        setSoundboardHint(`Sound play failed: ${(error as Error).message}`);
+      const played = await playSoundById(sound.id, sound.volume);
+      if (!played) {
+        setSoundboardHint('Unable to play sound.');
+        return;
       }
+
+      const senderName = roomRef.current?.localParticipant?.name || name || 'Viewer';
+      setSoundboardHint(`Played ${sound.name}`);
+
+      const payloads = buildSoundboardBroadcastPayloads({
+        room: activeRoom,
+        soundId: sound.id,
+        senderName,
+        soundName: sound.name,
+      });
+
+      await Promise.all(payloads.map((payload) => publishData(payload)));
     },
-    [adminToken, apiUrl, soundboardVolume, publishData, name, activeRoom],
+    [playSoundById, name, activeRoom, publishData],
   );
 
   const exitSoundboardEditMode = useCallback(() => {
     setSoundboardEditingId(null);
     setSoundboardSelectedIcon(SOUNDBOARD_ICONS[0]);
     setSoundNameInput('');
-    setSoundClipVolume(100);
     setSoundFileLabel('Select audio');
     soundUploadFileRef.current = null;
     setSoundboardHint('');
@@ -2903,6 +3164,12 @@ export function App() {
     if (!localChimeIdentity) return;
     void loadLocalAvatar();
   }, [connected, localChimeIdentity, loadLocalAvatar]);
+
+  useEffect(() => {
+    if (!connected) return;
+    void broadcastDeviceId();
+    prefetchRoomChimeBuffers();
+  }, [connected, localIdentityBase]);
 
   const jamApplyVolume = useCallback(() => {
     const gain = jamGainRef.current;
@@ -3917,6 +4184,7 @@ export function App() {
                     type="button"
                     disabled={!connected}
                     onClick={() => {
+                      void ensureSoundboardAudioContext().catch(() => undefined);
                       setSoundboardCompactOpen(true);
                       setSoundboardEditOpen(false);
                     }}
@@ -3957,10 +4225,21 @@ export function App() {
                           className="h-full w-full object-cover"
                           muted={participant.isLocal}
                           onMounted={(element) => {
-                            if (!participant.isLocal) registerRemoteMediaElement(element, true);
+                            if (!participant.isLocal) {
+                              registerRemoteMediaElement(element, true);
+                              attachCameraRecovery(
+                                participant.identity,
+                                participant.cameraPublication,
+                                participant.cameraTrack,
+                                element,
+                              );
+                            }
                           }}
                           onUnmounted={(element) => {
-                            if (!participant.isLocal) registerRemoteMediaElement(element, false);
+                            if (!participant.isLocal) {
+                              registerRemoteMediaElement(element, false);
+                              detachCameraRecovery(participant.identity);
+                            }
                           }}
                         />
                       ) : resolveAvatarUrl(participant.identity) ? (
@@ -4349,9 +4628,10 @@ export function App() {
           </div>
         </div>
         <div id="soundboard-compact-grid" className="soundboard-compact-grid">
-          {soundboardSounds
-            .filter((sound) => sound.favorite)
-            .map((sound) => (
+          {sortSoundboardByOrder(
+            soundboardSounds.filter((sound) => sound.favorite),
+            soundboardCustomOrder,
+          ).map((sound) => (
               <button
                 key={`compact-${sound.id}`}
                 className="sound-icon-btn is-favorite"
