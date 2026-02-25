@@ -2013,6 +2013,23 @@ video {
   gap: 12px;
 }
 
+.feedback-type-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.feedback-type-option {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(255,255,255,0.85);
+  font-size: 13px;
+  cursor: pointer;
+}
+.feedback-type-option input[type="radio"] {
+  accent-color: var(--accent, #60a5fa);
+}
+
 .bug-report-textarea {
   width: 100%;
   padding: 10px 12px;

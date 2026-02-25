@@ -333,7 +333,7 @@ let room = null;
 let micEnabled = false;
 let camEnabled = false;
 let screenEnabled = false;
-let noiseCancelEnabled = echoGet("echo-noise-cancel") === "true";
+let noiseCancelEnabled = echoGet("echo-noise-cancel") !== "false"; // Default ON (#59)
 let ncSuppressionLevel = parseInt(echoGet("echo-nc-level") || "1", 10); // 0=light, 1=medium, 2=strong
 let rnnoiseNode = null;
 let rnnoiseCtx = null;
@@ -7700,6 +7700,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       }
     } else {
       setTimeout(() => {
+        if (!room) return; // Guard against disconnect during timeout (#68)
         attachParticipantTracks(participant);
         resubscribeParticipantTracks(participant);
         if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
@@ -7715,6 +7716,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     // Re-broadcast own avatar so new participant receives it
     var _avatarDelay = _isRoomSwitch ? 200 : 1000;
     setTimeout(() => {
+      if (!room || !room.localParticipant) return; // Guard against disconnect during timeout (#68)
       const identityBase = getIdentityBase(room.localParticipant.identity);
       var savedAvatar = echoGet("echo-avatar-device") || echoGet("echo-avatar-" + identityBase);
       if (savedAvatar) {
@@ -8375,6 +8377,8 @@ async function connect() {
 
 async function disconnect() {
   if (!room) return;
+  // Invalidate any in-flight connect/switch attempts (#67)
+  connectSequence++;
   sendLeaveNotification();
   stopHeartbeat();
   stopRoomStatusPolling();
@@ -10399,7 +10403,7 @@ async function sendBugReport() {
   if (!bugReportDesc) return;
   var desc = bugReportDesc.value.trim();
   if (!desc) {
-    if (bugReportStatusEl) bugReportStatusEl.textContent = "Please describe the issue.";
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Please describe your feedback.";
     return;
   }
   var token = adminToken;
@@ -10407,8 +10411,12 @@ async function sendBugReport() {
     if (bugReportStatusEl) bugReportStatusEl.textContent = "Not connected.";
     return;
   }
+  var feedbackType = "bug";
+  var checkedRadio = document.querySelector('input[name="feedback-type"]:checked');
+  if (checkedRadio) feedbackType = checkedRadio.value;
   var payload = {
     description: desc,
+    feedback_type: feedbackType,
     identity: room?.localParticipant?.identity || "",
     name: room?.localParticipant?.name || "",
     room: currentRoomName || "",
@@ -10428,7 +10436,7 @@ async function sendBugReport() {
       body: JSON.stringify(payload),
     });
     if (res.ok) {
-      if (bugReportStatusEl) bugReportStatusEl.textContent = "Report sent! Thank you.";
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Feedback sent! Thank you.";
       bugReportDesc.value = "";
       setTimeout(closeBugReportModal, 1500);
     } else {
