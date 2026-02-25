@@ -15,8 +15,7 @@ Adopt React + TypeScript + Tailwind for the viewer/admin frontend migration.
 ### Phase 0 (this PR)
 - Scaffold `core/viewer-next` with Vite + React + TS + Tailwind
 - Add test tooling (Vitest + Playwright)
-- Establish strict parity mode by embedding legacy viewer runtime 1:1 inside a same-origin frame
-- Implement initial connection/auth machine + health/rooms queries for incremental internal cutover
+- Implement initial connection/auth machine + health/rooms queries
 
 ### Phase 1
 - Port connection/session UI from legacy viewer

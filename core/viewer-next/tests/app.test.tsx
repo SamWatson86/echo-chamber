@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from '@/app/App';
 
 describe('App', () => {
-  it('renders legacy parity iframe', () => {
+  it('renders title', () => {
     const queryClient = new QueryClient();
     render(
       <QueryClientProvider client={queryClient}>
@@ -12,8 +12,6 @@ describe('App', () => {
       </QueryClientProvider>,
     );
 
-    const frame = screen.getByTitle('Echo Chamber Viewer') as HTMLIFrameElement;
-    expect(frame).toBeInTheDocument();
-    expect(frame.getAttribute('src')).toContain('/legacy/index.html');
+    expect(screen.getByText(/Echo Chamber Frontend Refactor/i)).toBeInTheDocument();
   });
 });
