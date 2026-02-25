@@ -160,7 +160,10 @@ async function detectSimdSupport() {
 }
 
 // Noise cancellation applies ONLY to the microphone track — never screen share audio
+// Skip on mobile — too CPU-heavy and .wasm fetch triggers Samsung download interceptor
+var _isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 async function enableNoiseCancellation() {
+  if (_isMobileDevice) { debugLog("[noise-cancel] Skipped on mobile device"); return; }
   if (!room || !micEnabled) return;
   var LK = getLiveKitClient();
   if (!LK) { debugLog("[noise-cancel] LiveKit SDK not loaded"); return; }
@@ -182,7 +185,7 @@ async function enableNoiseCancellation() {
     // Fetch the WASM binary (SIMD if supported)
     var simd = await detectSimdSupport();
     var wasmUrl = simd ? "rnnoise_simd.wasm" : "rnnoise.wasm";
-    var wasmResp = await fetch(wasmUrl);
+    var wasmResp = await fetch(wasmUrl, { headers: { 'Accept': 'application/wasm' }, cache: 'force-cache' });
     var wasmBinary = await wasmResp.arrayBuffer();
 
     // Create source from mic track
@@ -3012,7 +3015,9 @@ async function fetchChimeBuffer(identityBase, kind) {
   if (cached && (Date.now() - cached.ts) < CHIME_CACHE_TTL_MS) return cached.buffer;
   try {
     // Add cache-buster to bypass browser cache — chimes may be updated at any time
-    const res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind + "?v=" + Date.now()));
+    const res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(identityBase) + "/" + kind + "?v=" + Date.now()), {
+      headers: { 'Accept': 'application/octet-stream' }
+    });
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     const ctx = getChimeCtx();
@@ -3065,7 +3070,9 @@ function getChimeKey(identity) {
 }
 
 // Pre-fetch chime buffers for all participants in the current room so playback is instant
+// Skip on mobile — burst of audio fetches triggers Samsung download interceptor
 function prefetchChimeBuffersForRoom() {
+  if (_isMobileDevice) return;
   if (!room || !room.remoteParticipants) return;
   room.remoteParticipants.forEach(function(participant) {
     var chimeKey = getChimeKey(participant.identity);
@@ -3076,7 +3083,15 @@ function prefetchChimeBuffersForRoom() {
 }
 
 // Play chime for a single participant — instant if pre-fetched, async fetch otherwise
+// On mobile, skip custom chime fetch entirely — Samsung intercepts audio/mpeg downloads
 async function playChimeForParticipant(identity, kind) {
+  if (_isMobileDevice) {
+    var identityBase = getIdentityBase(identity);
+    var pState = participantState.get(identityBase);
+    var vol = (pState && pState.chimeVolume != null) ? pState.chimeVolume : 0.5;
+    if (kind === "enter") playJoinChime(vol); else playLeaveChime(vol);
+    return;
+  }
   var chimeKey = getChimeKey(identity);
   // Look up this participant's chime volume preference
   var identityBase = getIdentityBase(identity);
@@ -6530,7 +6545,8 @@ async function fetchSoundboardBuffer(soundId) {
   if (!ctx || !currentAccessToken) return null;
   const res = await fetch(apiUrl(`/api/soundboard/file/${encodeURIComponent(soundId)}`), {
     headers: {
-      Authorization: `Bearer ${currentAccessToken}`
+      Authorization: `Bearer ${currentAccessToken}`,
+      Accept: 'application/octet-stream'
     }
   });
   if (!res.ok) return null;
@@ -8185,7 +8201,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       setTimeout(() => broadcastAvatar(identityBase, relativePath), avatarDelay);
     }
     // One-time server-side avatar migration: copy from old identityBase key to deviceId key
-    if (!reuseAdmin) {
+    // Skip on mobile — binary fetches trigger Samsung download interceptor
+    if (!reuseAdmin && !_isMobileDevice) {
       var _deviceId = getLocalDeviceId();
       (async function() {
         try {
@@ -8522,7 +8539,8 @@ async function fetchImageAsBlob(url) {
 
     const response = await fetch(url, {
       headers: {
-        "Authorization": `Bearer ${token}`
+        "Authorization": `Bearer ${token}`,
+        "Accept": "image/*"
       }
     });
 
@@ -8626,20 +8644,41 @@ function renderChatMessage(message) {
       videoEl.style.maxWidth = "100%";
       videoEl.style.maxHeight = "300px";
       videoEl.style.borderRadius = "var(--radius-sm)";
-      // Fetch with auth and set blob src
-      (async () => {
-        try {
-          const token = currentAccessToken || adminToken;
-          const response = await fetch(videoUrl, {
-            headers: { "Authorization": `Bearer ${token}` }
-          });
-          const blob = await response.blob();
-          videoEl.src = URL.createObjectURL(blob);
-        } catch (err) {
-          debugLog(`Failed to load video: ${err.message}`);
-        }
-      })();
-      messageEl.appendChild(videoEl);
+      // On mobile, show tap-to-load placeholder instead of auto-fetching
+      if (_isMobileDevice) {
+        videoEl.setAttribute("poster", "");
+        const tapOverlay = document.createElement("div");
+        tapOverlay.className = "chat-message-file";
+        tapOverlay.style.cursor = "pointer";
+        tapOverlay.innerHTML = '<div class="chat-message-file-icon">\u25B6\uFE0F</div><div class="chat-message-file-name">Tap to load video: ' + escapeHtml(message.fileName || "Video") + '</div>';
+        tapOverlay.addEventListener("click", async () => {
+          try {
+            const token = currentAccessToken || adminToken;
+            const response = await fetch(videoUrl, {
+              headers: { "Authorization": `Bearer ${token}`, "Accept": "application/octet-stream" }
+            });
+            const blob = await response.blob();
+            videoEl.src = URL.createObjectURL(blob);
+            tapOverlay.replaceWith(videoEl);
+          } catch (err) { debugLog(`Failed to load video: ${err.message}`); }
+        }, { once: true });
+        messageEl.appendChild(tapOverlay);
+      } else {
+        // Fetch with auth and set blob src
+        (async () => {
+          try {
+            const token = currentAccessToken || adminToken;
+            const response = await fetch(videoUrl, {
+              headers: { "Authorization": `Bearer ${token}` }
+            });
+            const blob = await response.blob();
+            videoEl.src = URL.createObjectURL(blob);
+          } catch (err) {
+            debugLog(`Failed to load video: ${err.message}`);
+          }
+        })();
+        messageEl.appendChild(videoEl);
+      }
 
       // Download link below video
       const dlLink = document.createElement("div");
@@ -8676,19 +8715,39 @@ function renderChatMessage(message) {
       audioEl.controls = true;
       audioEl.preload = "metadata";
       audioEl.style.width = "100%";
-      (async () => {
-        try {
-          const token = currentAccessToken || adminToken;
-          const response = await fetch(audioUrl, {
-            headers: { "Authorization": `Bearer ${token}` }
-          });
-          const blob = await response.blob();
-          audioEl.src = URL.createObjectURL(blob);
-        } catch (err) {
-          debugLog(`Failed to load audio: ${err.message}`);
-        }
-      })();
-      messageEl.appendChild(audioEl);
+      // On mobile, show tap-to-load placeholder instead of auto-fetching
+      if (_isMobileDevice) {
+        const tapOverlay = document.createElement("div");
+        tapOverlay.className = "chat-message-file";
+        tapOverlay.style.cursor = "pointer";
+        tapOverlay.innerHTML = '<div class="chat-message-file-icon">\uD83C\uDFB5</div><div class="chat-message-file-name">Tap to play: ' + escapeHtml(message.fileName || "Audio") + '</div>';
+        tapOverlay.addEventListener("click", async () => {
+          try {
+            const token = currentAccessToken || adminToken;
+            const response = await fetch(audioUrl, {
+              headers: { "Authorization": `Bearer ${token}`, "Accept": "application/octet-stream" }
+            });
+            const blob = await response.blob();
+            audioEl.src = URL.createObjectURL(blob);
+            tapOverlay.replaceWith(audioEl);
+          } catch (err) { debugLog(`Failed to load audio: ${err.message}`); }
+        }, { once: true });
+        messageEl.appendChild(tapOverlay);
+      } else {
+        (async () => {
+          try {
+            const token = currentAccessToken || adminToken;
+            const response = await fetch(audioUrl, {
+              headers: { "Authorization": `Bearer ${token}` }
+            });
+            const blob = await response.blob();
+            audioEl.src = URL.createObjectURL(blob);
+          } catch (err) {
+            debugLog(`Failed to load audio: ${err.message}`);
+          }
+        })();
+        messageEl.appendChild(audioEl);
+      }
     } else {
       const fileEl = document.createElement("div");
       fileEl.className = "chat-message-file";
