@@ -10826,14 +10826,14 @@ function renderAdminDashboard() {
         heatmap[dateKey][hour] = (heatmap[dateKey][hour] || 0) + 1;
       }
     });
-    var heatDays = Object.keys(_admHeatmapUsers).sort().slice(-7);
+    var heatDays = Object.keys(_admHeatmapUsers).sort().slice(-30);
     var heatMax = 1;
     heatDays.forEach(function(dk) {
       if (!heatmap[dk]) return;
       Object.keys(heatmap[dk]).forEach(function(h) { if (heatmap[dk][h] > heatMax) heatMax = heatmap[dk][h]; });
     });
 
-    html += '<div class="adm-section"><div class="adm-section-title">Activity Heatmap (7d)</div>';
+    html += '<div class="adm-section"><div class="adm-section-title">Activity Heatmap (30d)</div>';
     if (_admSelectedUser) {
       html += '<div style="margin-bottom:8px;"><button class="adm-show-all-btn" onclick="_admSelectUser(null)">Show All</button> Filtered: <strong>' + escAdm(_admSelectedUser) + '</strong></div>';
     }
