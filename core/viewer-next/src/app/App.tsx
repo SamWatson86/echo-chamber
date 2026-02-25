@@ -1802,6 +1802,48 @@ export function App() {
     }
   }, [adminToken, apiUrl]);
 
+  const adminKick = useCallback(
+    async (roomId: string, participantIdentity: string) => {
+      if (!adminToken) return;
+      try {
+        await fetch(
+          apiUrl(`/v1/rooms/${encodeURIComponent(roomId)}/kick/${encodeURIComponent(participantIdentity)}`),
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+            },
+          },
+        );
+        await fetchAdminDashboard();
+      } catch {
+        // silent admin action failure
+      }
+    },
+    [adminToken, apiUrl, fetchAdminDashboard],
+  );
+
+  const adminMute = useCallback(
+    async (roomId: string, participantIdentity: string) => {
+      if (!adminToken) return;
+      try {
+        await fetch(
+          apiUrl(`/v1/rooms/${encodeURIComponent(roomId)}/mute/${encodeURIComponent(participantIdentity)}`),
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+            },
+          },
+        );
+        await fetchAdminDashboard();
+      } catch {
+        // silent admin action failure
+      }
+    },
+    [adminToken, apiUrl, fetchAdminDashboard],
+  );
+
   const fetchAdminHistory = useCallback(async () => {
     if (!adminToken) return;
     try {
@@ -3058,6 +3100,20 @@ export function App() {
                         {stats?.quality_limitation && stats.quality_limitation !== 'none' ? (
                           <span className="adm-badge adm-badge-warn">{stats.quality_limitation}</span>
                         ) : null}
+                        <button
+                          type="button"
+                          className="adm-show-all-btn"
+                          onClick={() => void adminMute(roomEntry.room_id, participant.identity)}
+                        >
+                          Mute
+                        </button>
+                        <button
+                          type="button"
+                          className="adm-show-all-btn"
+                          onClick={() => void adminKick(roomEntry.room_id, participant.identity)}
+                        >
+                          Kick
+                        </button>
                       </div>
                     );
                   })}
