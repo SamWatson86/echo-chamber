@@ -3,6 +3,10 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 
 test('login + core shell journey (mocked APIs)', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__ECHO_ADMIN__ = true;
+  });
+
   await page.route('**/v1/auth/login', async (route) => {
     await route.fulfill({
       status: 200,
@@ -58,6 +62,94 @@ test('login + core shell journey (mocked APIs)', async ({ page }) => {
     });
   });
 
+  await page.route('**/v1/ice-servers', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      }),
+    });
+  });
+
+  await page.route('**/api/chime/**', async (route) => {
+    const req = route.request();
+    if (req.method() === 'HEAD') {
+      await route.fulfill({ status: 404, body: '' });
+      return;
+    }
+    await route.fulfill({ status: 404, body: '' });
+  });
+
+  await page.route('**/api/soundboard/list**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        sounds: [
+          { id: 'sound-1', name: 'Airhorn', icon: '🎺', roomId: 'main', volume: 100 },
+          { id: 'sound-2', name: 'Applause', icon: '👏', roomId: 'main', volume: 90 },
+        ],
+      }),
+    });
+  });
+
+  let soundUpdateCalled = false;
+  await page.route('**/api/soundboard/update', async (route) => {
+    soundUpdateCalled = true;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, sound: { id: 'sound-1', name: 'Airhorn v2', icon: '🔥', volume: 95 } }),
+    });
+  });
+
+  await page.route('**/admin/api/dashboard', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        total_online: 2,
+        server_version: '2026.2.24',
+        rooms: [{ room_id: 'main', participants: [{ identity: 'sam-1000', name: 'Sam' }] }],
+      }),
+    });
+  });
+
+  await page.route('**/admin/api/sessions', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ events: [{ timestamp: 1700000000, event_type: 'join', identity: 'sam-1000', name: 'Sam', room_id: 'main' }] }),
+    });
+  });
+
+  await page.route('**/admin/api/metrics', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        users: [{ identity: 'sam-1000', name: 'Sam', avg_fps: 29.8, avg_bitrate_kbps: 1800, pct_bandwidth_limited: 3.1, pct_cpu_limited: 1.2, sample_count: 12, total_minutes: 5 }],
+      }),
+    });
+  });
+
+  await page.route('**/admin/api/bugs', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ reports: [] }),
+    });
+  });
+
+  await page.route('**/api/version', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ latest_client: '0.0.0' }),
+    });
+  });
+
   await page.goto('/');
 
   await page.getByLabel('Control URL').fill('https://control.mock.local');
@@ -95,6 +187,29 @@ test('login + core shell journey (mocked APIs)', async ({ page }) => {
   await expect(page.locator('#theme-panel')).toBeVisible();
   await page.getByRole('button', { name: 'Cyberpunk' }).click();
   await expect(page.locator('body')).toHaveAttribute('data-theme', 'cyberpunk');
+  await page.locator('#close-theme').click();
+  await expect(page.locator('#theme-panel')).toBeHidden();
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#chime-settings-section')).toBeVisible();
+
+  await page.locator('#open-soundboard').click();
+  await page.locator('#open-soundboard-edit').click();
+  await expect(page.locator('#soundboard')).toBeVisible();
+  await page.locator('.sound-edit').first().click();
+  await expect(page.locator('#sound-cancel-edit')).toBeVisible();
+  await expect(page.locator('#sound-upload-button')).toHaveText('Save');
+  await page.locator('#sound-name').fill('Airhorn v2');
+  await page.locator('.sound-icon-btn').nth(2).click();
+  await page.locator('#sound-upload-button').click();
+  await expect.poll(() => soundUpdateCalled).toBeTruthy();
+  await page.locator('#back-to-soundboard').click();
+  await page.locator('#close-soundboard').click();
+  await expect(page.locator('#soundboard')).toBeHidden();
+
+  await page.locator('#open-admin-dash').click();
+  await expect(page.locator('#admin-dash-panel')).toBeVisible();
+  await expect(page.locator('#admin-dash-live')).toContainText('Sam');
 
   const themeShot = path.join(proofDir, `${timestamp}-03-theme-open.png`);
   if (captureParityEvidence) {
@@ -111,6 +226,9 @@ test('login + core shell journey (mocked APIs)', async ({ page }) => {
             'connected shell render with room status + online users',
             'chat panel open + send message',
             'theme panel open + apply cyberpunk',
+            'settings chime section visible',
+            'soundboard edit/save flow hits /api/soundboard/update',
+            'admin dashboard opens and renders live participant data',
           ],
           screenshots: [shellShot, chatShot, themeShot],
         },
