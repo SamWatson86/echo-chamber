@@ -418,6 +418,8 @@ export function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
+  const [avatarUrls, setAvatarUrls] = useState<Record<string, string>>({});
+  const localAvatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const [soundboardCompactOpen, setSoundboardCompactOpen] = useState(false);
   const [soundboardEditOpen, setSoundboardEditOpen] = useState(false);
@@ -1188,6 +1190,8 @@ export function App() {
             name?: string;
             identity?: string;
             host?: string;
+            identityBase?: string;
+            avatarUrl?: string;
           };
 
           if (message.type === CHAT_MESSAGE_TYPE || message.type === CHAT_FILE_TYPE) {
@@ -1231,6 +1235,16 @@ export function App() {
           if (message.type === 'sound-added' || message.type === 'sound-updated') {
             setSoundboardHint('Soundboard updated.');
             setSoundboardReloadTick((tick) => tick + 1);
+            return;
+          }
+
+          if (message.type === 'avatar-update' && message.identityBase && message.avatarUrl) {
+            const idBase = String(message.identityBase || '');
+            if (!idBase) return;
+            const resolved = message.avatarUrl.startsWith('http://') || message.avatarUrl.startsWith('https://')
+              ? message.avatarUrl
+              : `${resolveControlUrl(controlUrl)}${message.avatarUrl}`;
+            setAvatarUrls((prev) => ({ ...prev, [idBase]: resolved }));
             return;
           }
 
@@ -1626,6 +1640,77 @@ export function App() {
     [controlUrl],
   );
 
+  const resolveAvatarUrl = useCallback(
+    (participantIdentity: string) => {
+      const key = identityBase(participantIdentity);
+      return avatarUrls[key] || '';
+    },
+    [avatarUrls],
+  );
+
+  const loadLocalAvatar = useCallback(async () => {
+    if (!adminToken || !localChimeIdentity) return;
+    try {
+      const response = await fetch(
+        `${resolveControlUrl(controlUrl)}/api/avatar/${encodeURIComponent(localChimeIdentity)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        },
+      );
+      if (!response.ok) return;
+      const relativePath = `/api/avatar/${encodeURIComponent(localChimeIdentity)}?t=${Date.now()}`;
+      const resolved = resolveFileUrl(relativePath);
+      setAvatarUrls((prev) => ({ ...prev, [localChimeIdentity]: resolved }));
+    } catch {
+      // ignore avatar load failures
+    }
+  }, [adminToken, localChimeIdentity, controlUrl, resolveFileUrl]);
+
+  const uploadAvatar = useCallback(
+    async (file: File) => {
+      if (!adminToken || !localChimeIdentity) return;
+      try {
+        const response = await fetch(
+          `${resolveControlUrl(controlUrl)}/api/avatar/upload?identity=${encodeURIComponent(localChimeIdentity)}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+              'Content-Type': file.type || 'application/octet-stream',
+            },
+            body: await file.arrayBuffer(),
+          },
+        );
+        const payload = (await response.json().catch(() => ({}))) as { ok?: boolean; url?: string };
+        if (!response.ok || !payload.ok) {
+          appendDebug(`Avatar upload failed (${response.status})`);
+          return;
+        }
+
+        const relativePath = payload.url || `/api/avatar/${encodeURIComponent(localChimeIdentity)}`;
+        const resolved = resolveFileUrl(relativePath) + (relativePath.includes('?') ? '&' : '?') + `t=${Date.now()}`;
+        setAvatarUrls((prev) => ({ ...prev, [localChimeIdentity]: resolved }));
+
+        const room = roomRef.current;
+        if (room?.localParticipant) {
+          const payloadData = JSON.stringify({
+            type: 'avatar-update',
+            identityBase: localChimeIdentity,
+            avatarUrl: relativePath,
+          });
+          await room.localParticipant.publishData(new TextEncoder().encode(payloadData), {
+            reliable: true,
+          });
+        }
+      } catch (error) {
+        appendDebug(`Avatar upload failed: ${(error as Error).message}`);
+      }
+    },
+    [adminToken, localChimeIdentity, controlUrl, resolveFileUrl, appendDebug],
+  );
+
   const loadSoundboard = useCallback(async () => {
     if (!adminToken) return;
 
@@ -1875,6 +1960,12 @@ export function App() {
     void checkLocalChimeState('enter');
     void checkLocalChimeState('exit');
   }, [settingsOpen, connected, localChimeIdentity, checkLocalChimeState]);
+
+  useEffect(() => {
+    if (!connected) return;
+    if (!localChimeIdentity) return;
+    void loadLocalAvatar();
+  }, [connected, localChimeIdentity, loadLocalAvatar]);
 
   const jamApplyVolume = useCallback(() => {
     const gain = jamGainRef.current;
@@ -2841,7 +2932,16 @@ export function App() {
               {participantViews.map((participant) => (
                 <article key={participant.identity} className={`user-card${participant.cameraTrack ? ' has-camera' : ''}`}>
                   <div className="user-header">
-                    <div className="user-avatar">
+                    <div
+                      className={`user-avatar${participant.isLocal ? ' user-avatar-local' : ''}`}
+                      title={participant.isLocal ? 'Click to upload avatar' : undefined}
+                      style={participant.isLocal ? { cursor: participant.cameraTrack ? 'default' : 'pointer' } : undefined}
+                      onClick={() => {
+                        if (!participant.isLocal) return;
+                        if (participant.cameraTrack) return;
+                        localAvatarInputRef.current?.click();
+                      }}
+                    >
                       {participant.cameraTrack ? (
                         <TrackRenderer
                           track={participant.cameraTrack}
@@ -2854,9 +2954,26 @@ export function App() {
                             if (!participant.isLocal) registerRemoteMediaElement(element, false);
                           }}
                         />
+                      ) : resolveAvatarUrl(participant.identity) ? (
+                        <img className="avatar-img" src={resolveAvatarUrl(participant.identity)} alt={participant.name} />
                       ) : (
                         getInitials(participant.name)
                       )}
+                      {participant.isLocal ? (
+                        <input
+                          ref={localAvatarInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(event) => {
+                            const file = event.target.files?.[0];
+                            if (file) {
+                              void uploadAvatar(file);
+                            }
+                            event.currentTarget.value = '';
+                          }}
+                        />
+                      ) : null}
                     </div>
                     <div className="user-meta">
                       <h3 className="user-name">{participant.name}</h3>
@@ -3334,6 +3451,8 @@ export function App() {
                       if (!participant.isLocal) registerRemoteMediaElement(element, false);
                     }}
                   />
+                ) : resolveAvatarUrl(participant.identity) ? (
+                  <img className="avatar-img" src={resolveAvatarUrl(participant.identity)} alt={participant.name} />
                 ) : (
                   <div className="avatar-placeholder">{getInitials(participant.name)}</div>
                 )}
