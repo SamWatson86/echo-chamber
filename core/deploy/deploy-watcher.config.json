@@ -1,0 +1,6 @@
+{
+  "pollIntervalSeconds": 180,
+  "healthCheckUrl": "https://127.0.0.1:9443/health",
+  "healthCheckTimeoutSeconds": 10,
+  "maxConsecutiveFailures": 3
+}
