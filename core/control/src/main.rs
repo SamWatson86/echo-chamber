@@ -1711,7 +1711,7 @@ async fn admin_sessions(
     let today_days = now / 86400;
     let mut all_events = Vec::new();
 
-    for offset in [0, 1] {
+    for offset in 0..30 {
         let days = today_days - offset;
         let (year, month, day) = epoch_days_to_date(days);
         let file_name = format!("sessions-{:04}-{:02}-{:02}.json", year, month, day);
@@ -1723,9 +1723,9 @@ async fn admin_sessions(
         }
     }
 
-    // Sort by timestamp descending (most recent first), limit to 200
+    // Sort by timestamp descending (most recent first), limit to 1000
     all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    all_events.truncate(200);
+    all_events.truncate(1000);
 
     Ok(Json(AdminSessionsResponse { events: all_events }))
 }
@@ -1796,8 +1796,8 @@ async fn admin_dashboard_metrics(
         .collect();
     per_user.sort_by(|a, b| b.session_count.cmp(&a.session_count));
 
-    // --- Heatmap: send raw join timestamps (last 7 days), let frontend group by local timezone ---
-    let seven_days_ago = now.saturating_sub(7 * 86400);
+    // --- Heatmap: send raw join timestamps (last 30 days), let frontend group by local timezone ---
+    let seven_days_ago = now.saturating_sub(30 * 86400);
     let heatmap_joins: Vec<HeatmapJoin> = all_events
         .iter()
         .filter(|e| e.event_type == "join" && e.timestamp >= seven_days_ago)
@@ -1864,12 +1864,15 @@ async fn admin_report_stats(
             .stats_history
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        history.push(snapshot);
+        history.push(snapshot.clone());
         if history.len() > 1000 {
             let excess = history.len() - 1000;
             history.drain(0..excess);
         }
     }
+
+    // Persist to disk
+    append_stats_snapshot(&state.session_log_dir, &snapshot);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1879,13 +1882,44 @@ async fn admin_metrics(
     headers: HeaderMap,
 ) -> Result<Json<AdminMetricsResponse>, StatusCode> {
     ensure_admin(&state, &headers)?;
-    let history = state
-        .stats_history
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+
+    // Load persisted stats from last 30 days of files
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let today_days = now / 86400;
+    let mut all_snapshots: Vec<StatsSnapshot> = Vec::new();
+
+    for offset in 0..30 {
+        let days = today_days - offset;
+        let (year, month, day) = epoch_days_to_date(days);
+        let file_name = format!("stats-{:04}-{:02}-{:02}.json", year, month, day);
+        let file_path = state.session_log_dir.join(&file_name);
+        if let Ok(data) = fs::read_to_string(&file_path) {
+            if let Ok(snapshots) = serde_json::from_str::<Vec<StatsSnapshot>>(&data) {
+                all_snapshots.extend(snapshots);
+            }
+        }
+    }
+
+    // Also include any in-memory snapshots not yet written to today's file
+    {
+        let history = state
+            .stats_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for snap in history.iter() {
+            all_snapshots.push(snap.clone());
+        }
+    }
+
+    // Dedup by timestamp+identity (in-memory may overlap with file)
+    let mut seen = std::collections::HashSet::new();
+    all_snapshots.retain(|s| seen.insert((s.timestamp, s.identity.clone())));
 
     let mut grouped: HashMap<String, Vec<&StatsSnapshot>> = HashMap::new();
-    for snap in history.iter() {
+    for snap in all_snapshots.iter() {
         grouped.entry(snap.identity.clone()).or_default().push(snap);
     }
 
@@ -4277,6 +4311,28 @@ fn append_session_event(dir: &std::path::Path, event: &SessionEvent) {
     events.push(event.clone());
 
     if let Ok(json) = serde_json::to_string_pretty(&events) {
+        let _ = fs::write(&file_path, json);
+    }
+}
+
+fn append_stats_snapshot(dir: &std::path::Path, snapshot: &StatsSnapshot) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days_since_epoch = now / 86400;
+    let (year, month, day) = epoch_days_to_date(days_since_epoch);
+    let file_name = format!("stats-{:04}-{:02}-{:02}.json", year, month, day);
+    let file_path = dir.join(&file_name);
+
+    let mut snapshots: Vec<StatsSnapshot> = if let Ok(data) = fs::read_to_string(&file_path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    snapshots.push(snapshot.clone());
+
+    if let Ok(json) = serde_json::to_string(&snapshots) {
         let _ = fs::write(&file_path, json);
     }
 }
