@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 
-test('shows refactor shell', async ({ page }) => {
+test('loads legacy viewer in parity frame', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Echo Chamber Frontend Refactor' })).toBeVisible();
-  await expect(page.getByText('Viewer Next (React + TS)')).toBeVisible();
+
+  const frame = page.frameLocator('iframe[title="Echo Chamber Viewer"]');
+  await expect(frame.getByRole('heading', { name: 'Echo Chamber' })).toBeVisible();
+  await expect(frame.locator('#connect')).toBeVisible();
 });

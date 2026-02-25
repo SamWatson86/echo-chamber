@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Echo Chamber</title>
+    <link rel="stylesheet" href="style.css?v=0.3.1" />
+    <link rel="stylesheet" href="jam.css?v=0.3.1" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <div class="header-brand">
+          <img src="badge.jpg" alt="Fellowship Badge" class="header-badge" />
+          <div>
+            <h1>Echo Chamber</h1>
+            <p>The Fellowship of the Boatrace</p>
+          </div>
+        </div>
+      </header>
+
+      <section id="connect-panel" class="panel">
+        <div class="grid">
+          <label>
+            Control URL
+            <input id="control-url" type="text" placeholder="https://192.168.5.70:9443" />
+          </label>
+          <label>
+            SFU URL
+            <input id="sfu-url" type="text" placeholder="ws://127.0.0.1:7880" />
+          </label>
+          <input id="room" type="hidden" value="main" />
+          <input id="identity" type="hidden" value="" />
+          <label>
+            Name
+            <input id="name" type="text" value="Viewer" />
+          </label>
+          <label>
+            Admin password
+            <input id="admin-password" type="password" placeholder="Enter admin password" />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="connect">Connect</button>
+          <button id="disconnect" disabled>Disconnect</button>
+        </div>
+        <div class="actions publish-actions hidden">
+          <button id="toggle-mic" disabled>Enable Mic</button>
+          <button id="toggle-cam" disabled>Enable Camera</button>
+          <button id="toggle-screen" disabled>Share Screen</button>
+        </div>
+        <div class="actions device-actions">
+          <label class="device-field">
+            Mic
+            <select id="mic-select" disabled></select>
+          </label>
+          <label class="device-field">
+            Camera
+            <select id="cam-select" disabled></select>
+          </label>
+          <label class="device-field">
+            Output
+            <select id="speaker-select" disabled></select>
+          </label>
+          <button id="refresh-devices" disabled>Refresh Devices</button>
+        </div>
+        <div id="device-status" class="status device-status"></div>
+        <div id="status" class="status">Idle</div>
+        <div id="online-users" class="online-users"></div>
+      </section>
+
+      <section class="panel room-panel">
+        <div class="room-top">
+          <div>
+            <div class="room-title">Rooms</div>
+            <div id="room-list" class="room-list hidden"></div>
+          </div>
+          <div id="jam-banner" class="jam-banner hidden"></div>
+          <div class="room-actions">
+            <button id="open-admin-dash" type="button" class="admin-only hidden" onclick="toggleAdminDash()">Admin</button>
+            <button id="open-settings" type="button" disabled>Settings</button>
+            <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Report Bug</button>
+            <button id="disconnect-top" type="button" disabled>Disconnect</button>
+          </div>
+        </div>
+        <div class="room-layout">
+          <div class="room-main">
+            <div class="grid-header">
+              <h2>Screens</h2>
+            </div>
+            <div id="screen-grid" class="media-grid screens-grid"></div>
+          </div>
+          <aside class="room-sidebar">
+            <div class="sidebar-header">
+              <div class="sidebar-title-row">
+                <h2>Active Users</h2>
+                <div class="sidebar-actions">
+                  <button id="refresh-videos" type="button" class="hidden" style="background: #10b981; color: white;">Enable Videos</button>
+                  <button id="debug-toggle" type="button">Debug</button>
+                  <button id="open-chat" type="button" disabled>Chat<span id="chat-badge" class="chat-badge hidden"></span></button>
+                  <button id="toggle-room-audio" type="button" disabled>Mute All</button>
+                </div>
+                <div class="sidebar-actions">
+                  <button id="open-soundboard" type="button" disabled>Soundboard</button>
+                  <button id="open-camera-lobby" type="button" disabled>Camera Lobby</button>
+                  <button id="open-theme" type="button">Theme</button>
+                  <button id="open-jam" type="button" disabled>Jam</button>
+                </div>
+              </div>
+            </div>
+            <div id="user-list" class="user-list"></div>
+          </aside>
+          <div id="chat-panel" class="chat-panel hidden" role="dialog" aria-label="Chat">
+            <div class="chat-header">
+              <h3>Chat</h3>
+              <div class="chat-actions">
+                <button id="close-chat" type="button">Close</button>
+              </div>
+            </div>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div class="chat-input-container">
+              <button id="chat-upload-btn" type="button" class="chat-upload-btn" title="Upload file or image">📎</button>
+              <button id="chat-emoji-btn" type="button" class="chat-emoji-btn" title="Add emoji">😊</button>
+              <input type="file" id="chat-file-input" class="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
+              <div id="chat-emoji-picker" class="chat-emoji-picker hidden"></div>
+              <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="2"></textarea>
+              <button id="chat-send-btn" type="button" class="chat-send-btn">Send</button>
+            </div>
+          </div>
+        </div>
+        <div id="audio-bucket" class="audio-bucket"></div>
+      </section>
+      <div id="settings-panel" class="settings-panel hidden" role="dialog" aria-label="Settings">
+        <div class="settings-header">
+          <h3>Settings</h3>
+          <button id="close-settings" type="button">Close</button>
+        </div>
+        <div id="settings-device-panel" class="settings-body"></div>
+      </div>
+      <!-- Soundboard Compact (Quick Play) -->
+      <div id="soundboard-compact" class="soundboard-compact hidden" role="dialog" aria-label="Soundboard Quick Play">
+        <div class="soundboard-compact-header">
+          <h3>Soundboard</h3>
+          <button id="close-soundboard" type="button" class="soundboard-compact-close" title="Close">Back</button>
+        </div>
+        <button id="open-soundboard-edit" type="button" class="soundboard-compact-btn">Edit Soundboard</button>
+        <button id="toggle-soundboard-volume-compact" type="button" class="soundboard-compact-btn"
+          aria-expanded="false" aria-controls="soundboard-volume-panel-compact">Soundboard Volume</button>
+        <div id="soundboard-volume-panel-compact" class="soundboard-volume-compact hidden" aria-hidden="true">
+          <div class="soundboard-volume-row">
+            <input id="soundboard-volume" type="range" min="0" max="100" value="100" />
+            <span id="soundboard-volume-value" class="soundboard-volume-value">100%</span>
+          </div>
+        </div>
+        <div id="soundboard-compact-grid" class="soundboard-compact-grid"></div>
+      </div>
+
+      <!-- Soundboard Edit (Full Screen) -->
+      <div id="soundboard" class="soundboard soundboard-edit hidden" role="dialog" aria-label="Soundboard Edit">
+        <div class="soundboard-header">
+          <h3>Soundboard</h3>
+          <div class="soundboard-actions">
+            <button
+              id="toggle-soundboard-volume"
+              type="button"
+              aria-expanded="false"
+              aria-controls="soundboard-volume-panel"
+            >
+              Soundboard Volume
+            </button>
+            <button id="back-to-soundboard" type="button">Back to Soundboard</button>
+          </div>
+        </div>
+        <div id="soundboard-volume-panel" class="soundboard-volume hidden" aria-hidden="true">
+          <div class="soundboard-volume-row">
+            <input id="soundboard-volume-edit" type="range" min="0" max="100" value="100" />
+            <span id="soundboard-volume-value-edit" class="soundboard-volume-value">100%</span>
+          </div>
+        </div>
+        <div class="soundboard-search">
+          <input id="sound-search" type="text" placeholder="Find the perfect sound" />
+        </div>
+        <div id="soundboard-grid" class="soundboard-grid"></div>
+        <div class="soundboard-upload">
+          <div class="soundboard-upload-row">
+            <input id="sound-name" type="text" maxlength="60" placeholder="Name (e.g. Hooray!)" />
+            <button id="sound-upload-button" type="button">Upload</button>
+            <button id="sound-cancel-edit" type="button" class="hidden">Cancel</button>
+            <label class="sound-file">
+              <input id="sound-file" type="file" accept="audio/*" />
+              <span id="sound-file-label">Select audio</span>
+            </label>
+          </div>
+          <div class="soundboard-upload-volume">
+            <div class="soundboard-upload-volume-label">Clip volume</div>
+            <input id="sound-clip-volume" type="range" min="0" max="200" value="100" />
+            <div id="sound-clip-volume-value" class="soundboard-volume-value">100%</div>
+          </div>
+          <div class="soundboard-icons hidden" id="soundboard-icons-section">
+            <div class="soundboard-icons-label">Pick an icon</div>
+            <div id="soundboard-icon-grid" class="soundboard-icon-grid"></div>
+          </div>
+          <div id="soundboard-hint" class="hint"></div>
+        </div>
+      </div>
+      <div id="camera-lobby" class="camera-lobby hidden" role="dialog" aria-label="Camera Lobby">
+        <div class="camera-lobby-header">
+          <h3>Camera Lobby</h3>
+          <div class="camera-lobby-actions">
+            <button id="lobby-toggle-mic" type="button" class="lobby-control-btn">
+              <span class="mic-icon">🎤</span> Mute Mic
+            </button>
+            <button id="lobby-toggle-camera" type="button" class="lobby-control-btn">
+              <span class="camera-icon">📹</span> Turn Off Camera
+            </button>
+            <button id="close-camera-lobby" type="button">Close</button>
+          </div>
+        </div>
+        <div id="camera-lobby-grid" class="camera-lobby-grid"></div>
+      </div>
+      <div id="theme-panel" class="theme-panel hidden" role="dialog" aria-label="Theme">
+        <div class="theme-header">
+          <h3>Theme</h3>
+          <button id="close-theme" type="button">Close</button>
+        </div>
+        <div class="theme-grid">
+          <button class="theme-card" data-theme="frost">
+            <div class="theme-preview frost-preview"></div>
+            <span class="theme-name">Frost</span>
+          </button>
+          <button class="theme-card" data-theme="cyberpunk">
+            <div class="theme-preview cyberpunk-preview"></div>
+            <span class="theme-name">Cyberpunk</span>
+          </button>
+          <button class="theme-card" data-theme="aurora">
+            <div class="theme-preview aurora-preview"></div>
+            <span class="theme-name">Aurora</span>
+          </button>
+          <button class="theme-card" data-theme="ember">
+            <div class="theme-preview ember-preview"></div>
+            <span class="theme-name">Ember</span>
+          </button>
+          <button class="theme-card" data-theme="matrix">
+            <div class="theme-preview matrix-preview"></div>
+            <span class="theme-name">Matrix</span>
+          </button>
+          <button class="theme-card" data-theme="midnight">
+            <div class="theme-preview midnight-preview"></div>
+            <span class="theme-name">Midnight</span>
+          </button>
+          <button class="theme-card" data-theme="ultra-instinct">
+            <div class="theme-preview ultra-instinct-preview"></div>
+            <span class="theme-name">Ultra Instinct</span>
+          </button>
+        </div>
+        <div class="theme-opacity">
+          <div class="theme-opacity-label">UI Transparency</div>
+          <div class="theme-opacity-row">
+            <input id="ui-opacity-slider" type="range" min="20" max="100" value="100" />
+            <span id="ui-opacity-value" class="theme-opacity-value">100%</span>
+          </div>
+        </div>
+      </div>
+  <div id="bug-report-modal" class="bug-report-modal hidden" role="dialog" aria-label="Bug Report">
+    <div class="bug-report-content">
+      <div class="bug-report-header">
+        <h3>Report a Bug</h3>
+        <button id="close-bug-report" type="button">Close</button>
+      </div>
+      <div class="bug-report-body">
+        <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Describe what happened..." rows="4" maxlength="1000"></textarea>
+        <div class="bug-report-screenshot-row">
+          <button id="bug-report-screenshot-btn" type="button" class="bug-report-screenshot-btn">Attach Screenshot</button>
+          <input type="file" id="bug-report-file" class="hidden" accept="image/*" />
+          <span id="bug-report-file-name" class="bug-report-file-name"></span>
+        </div>
+        <div id="bug-report-screenshot-preview" class="bug-report-screenshot-preview hidden"></div>
+        <div id="bug-report-stats" class="bug-report-stats"></div>
+        <div class="bug-report-actions">
+          <button id="submit-bug-report" type="button">Send Report</button>
+        </div>
+        <div id="bug-report-status" class="bug-report-status"></div>
+      </div>
+    </div>
+  </div>
+      <div id="jam-panel" class="jam-panel hidden" role="dialog" aria-label="Jam Session">
+        <div class="jam-header">
+          <h3>Jam Session</h3>
+          <button id="close-jam" type="button">Close</button>
+        </div>
+        <div class="jam-body">
+          <div class="jam-spotify-row">
+            <span id="jam-spotify-status" class="jam-spotify-status">Not Connected</span>
+            <button id="jam-connect-spotify" type="button" class="jam-connect-btn">Connect Spotify</button>
+          </div>
+          <div id="jam-host-controls" class="jam-host-controls" style="display:none">
+            <button id="jam-start-btn" type="button" class="jam-start-btn">Start Jam</button>
+            <button id="jam-stop-btn" type="button" class="jam-stop-btn" style="display:none">End Jam</button>
+            <button id="jam-skip-btn" type="button" class="jam-skip-btn" style="display:none">Skip</button>
+          </div>
+          <div id="jam-now-playing" class="jam-now-playing">
+            <div class="jam-now-playing-empty">No music playing</div>
+          </div>
+          <div id="jam-actions-section" class="jam-actions" style="display:none">
+            <button id="jam-join-btn" type="button" class="jam-join-btn">Join Jam</button>
+            <button id="jam-leave-btn" type="button" class="jam-leave-btn" style="display:none">Leave Jam</button>
+            <span id="jam-listener-count" class="jam-listener-count">0 listening</span>
+          </div>
+          <div class="jam-volume-section">
+            <label class="jam-volume-label">Jam Volume</label>
+            <div class="jam-volume-row">
+              <input id="jam-volume-slider" type="range" min="0" max="100" value="50" />
+              <span id="jam-volume-value" class="jam-volume-value">50%</span>
+            </div>
+          </div>
+          <div class="jam-search-queue-row">
+            <div id="jam-search-section" class="jam-search-section" style="display:none">
+              <input id="jam-search-input" type="text" class="jam-search-input" placeholder="Search for a song..." />
+              <div id="jam-results" class="jam-results"></div>
+            </div>
+            <div id="jam-queue-section" class="jam-queue-section" style="display:none">
+              <div class="jam-queue-title">Queue</div>
+              <div id="jam-queue-list" class="jam-queue-list">
+                <div class="jam-queue-empty">Queue is empty</div>
+              </div>
+            </div>
+          </div>
+          <div id="jam-status" class="jam-status"></div>
+        </div>
+      </div>
+      <!-- Admin Dashboard Panel (admin-only) -->
+      <div id="admin-dash-panel" class="admin-only hidden admin-dash-panel">
+        <div class="admin-dash-header">
+          <h3>Admin Dashboard</h3>
+          <button type="button" class="admin-dash-close" onclick="toggleAdminDash()">&times;</button>
+        </div>
+        <div class="admin-dash-tabs">
+          <button type="button" class="adm-tab active" onclick="switchAdminTab(this,'admin-dash-live')">Live</button>
+          <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-history')">History</button>
+          <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-metrics')">Metrics</button>
+          <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-bugs')">Bugs</button>
+        </div>
+        <div id="admin-dash-live" class="admin-dash-content"><div class="adm-empty">Loading...</div></div>
+        <div id="admin-dash-history" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
+        <div id="admin-dash-metrics" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
+        <div id="admin-dash-bugs" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
+      </div>
+    </main>
+    <div id="debug-panel" class="debug-panel hidden">
+      <div class="debug-panel-header">
+        <div>Debug Log</div>
+        <div class="debug-panel-actions">
+          <button id="debug-copy" type="button">Copy</button>
+          <button id="debug-clear" type="button">Clear</button>
+          <button id="debug-close" type="button">Close</button>
+        </div>
+      </div>
+      <pre id="debug-log"></pre>
+    </div>
+
+    <script src="livekit-client.umd.js?v=0.3.1"></script>
+    <script src="app.js?v=0.3.1"></script>
+    <script src="jam.js?v=0.3.1"></script>
+    <script src="changelog.js?v=0.3.1"></script>
+  </body>
+</html>

@@ -12,25 +12,30 @@ This directory is the staged frontend migration for Echo Chamber.
 - Vitest + Testing Library (unit/component tests)
 - Playwright (browser smoke/e2e)
 
-## Why this exists
+## Parity strategy (current)
 
-The current viewer (`core/viewer/app.js`) has grown into a large, real-time, stateful codebase.
-This refactor introduces framework structure without forcing a risky big-bang cutover.
+To guarantee user-visible 1:1 behavior while refactoring, the current app runs in **parity mode**:
+
+- `viewer-next` renders `core/viewer` (legacy app) inside a same-origin iframe
+- legacy UI/UX and runtime behavior remain unchanged for end users
+- new React/XState/Zustand/TanStack code remains in this package for incremental cutover
+
+This keeps production behavior stable while allowing internal migration to progress safely.
 
 ## Current scope in this PR
 
+- Full UI parity surface via embedded legacy viewer (`public/legacy/*`)
 - Functional connection workflow machine for auth + room-token provisioning (`connectionMachine.ts`)
-- Zustand-backed viewer preferences store (ready for persistence middleware)
+- Zustand-backed viewer preferences store
 - Health polling and room listing via TanStack Query
-- Tailwind-based shell UI
 - Baseline test harness (Vitest + Playwright)
 
-## Not migrated yet
+## Not migrated yet (internal cutover pending)
 
-- Full LiveKit media/session lifecycle
-- Jam subsystem UI/audio state wiring
-- Chat/media/soundboard panels
-- Admin dashboard feature parity
+- LiveKit media/session lifecycle is still owned by legacy `app.js`
+- Jam subsystem still owned by legacy `jam.js`
+- Chat/media/soundboard internals still owned by legacy code
+- Admin dashboard parity still via legacy app runtime
 
 ## Run locally
 
@@ -50,7 +55,7 @@ npm run test:e2e
 
 ## Migration plan (high-level)
 
-1. Land foundation and CI (this PR)
-2. Port connection + participant/session rendering with parity checks
-3. Port jam and publish/reconcile paths behind feature flag
-4. Flip default viewer route when parity + reliability checks pass
+1. Parity mode gate (this PR): no visual/behavior drift vs current viewer
+2. Replace subsystems behind feature flags one-by-one (connection, participants, media, jam)
+3. Expand parity tests for each subsystem before flipping ownership
+4. Remove iframe + legacy runtime only after full parity validation
