@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-02-25T12-50-58-589Z",
+  "scenarios": [
+    "mock login via /v1/auth/login",
+    "connected shell render with room status + online users",
+    "chat panel open + send message",
+    "theme panel open + apply cyberpunk",
+    "settings chime section visible",
+    "soundboard edit/save flow hits /api/soundboard/update",
+    "admin dashboard opens and renders live participant data",
+    "admin metrics dashboard summary renders",
+    "admin deploys tab renders commit history"
+  ],
+  "screenshots": [
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T12-50-58-589Z-01-connected-shell.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T12-50-58-589Z-02-chat-open.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T12-50-58-589Z-03-theme-open.png"
+  ]
+}

@@ -1,6 +1,6 @@
 # React Parity Checklist (PR #58)
 
-Last updated: 2026-02-24 22:18 ET
+Last updated: 2026-02-25 07:50 ET
 Branch: `feat/react-tailwind-viewer-foundation`
 
 > Truth status: **NOT DONE**. This checklist tracks progress; hard requirements are not yet fully met.
@@ -29,17 +29,17 @@ Branch: `feat/react-tailwind-viewer-foundation`
 | `jam.js` jam panel | Spotify connect/start/join/leave/search/queue/audio stream | 🟡 | React now wires jam APIs (state/poll/search/queue/start/stop/join/leave/spotify auth) + WS audio stream; still needs deeper parity validation. |
 | `app.js` bug report | Bug modal + screenshot + submit | 🟡 | React now posts to `/api/bug-report` with optional screenshot upload; native stats capture + admin bug workflows still partial. |
 | `app.js` debug panel | open/copy/clear debug logs | ✅ | Panel + copy/clear/close actions ported. |
-| `app.js` admin dashboards | Admin tabs, metrics, history, bug moderation | ❌ | Placeholder only. |
+| `app.js` admin dashboards | Admin tabs, metrics, history, bug moderation, deploy history | 🟡 | React now has Live/History/Metrics/Bugs/Deploys tabs with `/admin/api/dashboard`, `/admin/api/sessions`, `/admin/api/metrics`, `/admin/api/metrics/dashboard`, `/admin/api/bugs`, and `/admin/api/deploys`; deeper chart-interaction parity still in progress. |
 | `app.js` reconnect/session/media reliability | reconcile loops, watchdogs, track recovery, RNNoise, native capture | ❌ | Not yet ported to React runtime. |
 | legacy runtime removal requirement | React as active runtime with no iframe/legacy embed | 🟡 | React UI is active for viewer-next dev flow; legacy runtime still primary for full functionality. |
 
 ## Verification artifacts (latest run)
 
-- Behavior JSON: `docs/proof/parity/2026-02-25T03-16-27-599Z-behavior.json`
+- Behavior JSON: `docs/proof/parity/2026-02-25T12-50-58-589Z-behavior.json`
 - Screenshots:
-  - `docs/proof/parity/2026-02-25T03-16-27-599Z-01-connected-shell.png`
-  - `docs/proof/parity/2026-02-25T03-16-27-599Z-02-chat-open.png`
-  - `docs/proof/parity/2026-02-25T03-16-27-599Z-03-theme-open.png`
+  - `docs/proof/parity/2026-02-25T12-50-58-589Z-01-connected-shell.png`
+  - `docs/proof/parity/2026-02-25T12-50-58-589Z-02-chat-open.png`
+  - `docs/proof/parity/2026-02-25T12-50-58-589Z-03-theme-open.png`
 
 ## Required command run status (this run)
 

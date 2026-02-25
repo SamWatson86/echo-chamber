@@ -134,11 +134,49 @@ test('login + core shell journey (mocked APIs)', async ({ page }) => {
     });
   });
 
+  await page.route('**/admin/api/metrics/dashboard', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        summary: {
+          total_sessions: 12,
+          unique_users: 3,
+          total_hours: 18,
+          avg_duration_mins: 22,
+        },
+        per_user: [
+          { identity: 'sam-1000', name: 'Sam', session_count: 8, total_hours: 10 },
+          { identity: 'alex-1001', name: 'Alex', session_count: 4, total_hours: 8 },
+        ],
+      }),
+    });
+  });
+
   await page.route('**/admin/api/bugs', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ reports: [] }),
+    });
+  });
+
+  await page.route('**/admin/api/deploys', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        commits: [
+          {
+            short_sha: 'abc1234',
+            message: 'viewer-next parity release candidate',
+            author: 'Sam',
+            timestamp: new Date().toISOString(),
+            deploy_status: 'success',
+            deploy_duration: 42,
+          },
+        ],
+      }),
     });
   });
 
@@ -210,6 +248,10 @@ test('login + core shell journey (mocked APIs)', async ({ page }) => {
   await page.locator('#open-admin-dash').click();
   await expect(page.locator('#admin-dash-panel')).toBeVisible();
   await expect(page.locator('#admin-dash-live')).toContainText('Sam');
+  await page.getByRole('button', { name: 'Metrics' }).click();
+  await expect(page.locator('#admin-dash-metrics')).toContainText('Sessions (30d)');
+  await page.getByRole('button', { name: 'Deploys' }).click();
+  await expect(page.locator('#admin-dash-deploys')).toContainText('viewer-next parity release candidate');
 
   const themeShot = path.join(proofDir, `${timestamp}-03-theme-open.png`);
   if (captureParityEvidence) {
@@ -229,6 +271,8 @@ test('login + core shell journey (mocked APIs)', async ({ page }) => {
             'settings chime section visible',
             'soundboard edit/save flow hits /api/soundboard/update',
             'admin dashboard opens and renders live participant data',
+            'admin metrics dashboard summary renders',
+            'admin deploys tab renders commit history',
           ],
           screenshots: [shellShot, chatShot, themeShot],
         },

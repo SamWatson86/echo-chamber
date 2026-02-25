@@ -204,6 +204,47 @@ type AdminMetricsResponse = {
   }>;
 };
 
+type AdminDashboardMetricsResponse = {
+  summary?: {
+    total_sessions?: number;
+    unique_users?: number;
+    total_hours?: number;
+    avg_duration_mins?: number;
+  };
+  per_user?: Array<{
+    identity: string;
+    name?: string;
+    session_count: number;
+    total_hours: number;
+  }>;
+  heatmap_joins?: Array<{
+    timestamp: number;
+    name?: string;
+  }>;
+  timeline_events?: Array<{
+    timestamp: number;
+    event_type: 'join' | 'leave';
+    identity: string;
+    name?: string;
+  }>;
+};
+
+type AdminDeployCommit = {
+  sha?: string;
+  short_sha?: string;
+  message?: string;
+  author?: string;
+  timestamp?: string;
+  deploy_timestamp?: string;
+  deploy_duration?: number;
+  deploy_status?: 'success' | 'failed' | 'rollback' | 'pending';
+  deploy_error?: string;
+};
+
+type AdminDeploysResponse = {
+  commits?: AdminDeployCommit[];
+};
+
 type AdminBugsResponse = {
   reports?: Array<{
     timestamp: number;
@@ -284,6 +325,24 @@ function formatAdminTime(timestampSeconds: number): string {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+function formatDeployTime(isoLike: string | undefined): string {
+  if (!isoLike) return '';
+  try {
+    const deployedAt = new Date(isoLike);
+    const diffMs = Date.now() - deployedAt.getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHours = Math.floor(diffMin / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return deployedAt.toLocaleDateString();
+  } catch {
+    return isoLike;
+  }
 }
 
 function isNewerVersion(latest: string, current: string): boolean {
@@ -471,11 +530,13 @@ export function App() {
   const [debugLog, setDebugLog] = useState<DebugEntry[]>([]);
 
   const [adminDashOpen, setAdminDashOpen] = useState(false);
-  const [adminDashTab, setAdminDashTab] = useState<'live' | 'history' | 'metrics' | 'bugs'>('live');
+  const [adminDashTab, setAdminDashTab] = useState<'live' | 'history' | 'metrics' | 'bugs' | 'deploys'>('live');
   const [adminDashboard, setAdminDashboard] = useState<AdminDashboardResponse | null>(null);
   const [adminSessions, setAdminSessions] = useState<AdminSessionsResponse | null>(null);
   const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null);
+  const [adminDashboardMetrics, setAdminDashboardMetrics] = useState<AdminDashboardMetricsResponse | null>(null);
   const [adminBugs, setAdminBugs] = useState<AdminBugsResponse | null>(null);
+  const [adminDeploys, setAdminDeploys] = useState<AdminDeploysResponse | null>(null);
   const [adminPanelWidth, setAdminPanelWidth] = useState<number>(() => {
     const raw = Number.parseInt(getStoredValue('admin-panel-width') ?? '520', 10);
     return Number.isFinite(raw) ? Math.max(400, raw) : 520;
@@ -885,6 +946,57 @@ export function App() {
     [apiUrl, localIdentity, connectedRoomName, activeRoom],
   );
 
+  const postAdminStatsSample = useCallback(async () => {
+    if (!adminToken) return;
+    const room = roomRef.current;
+    const participant = room?.localParticipant;
+    if (!participant) return;
+
+    const identityValue = participant.identity || localIdentity;
+    if (!identityValue) return;
+
+    const screenPublication = participant.getTrackPublication(Track.Source.ScreenShare);
+    const screenTrack = screenPublication?.track as
+      | {
+          mediaStreamTrack?: {
+            getSettings?: () => Partial<MediaTrackSettings>;
+          };
+        }
+      | undefined;
+
+    const settings = screenTrack?.mediaStreamTrack?.getSettings?.();
+    const fps = settings?.frameRate != null ? Number(settings.frameRate) : null;
+    const width = settings?.width != null ? Number(settings.width) : null;
+    const height = settings?.height != null ? Number(settings.height) : null;
+
+    try {
+      await fetch(apiUrl('/admin/api/stats'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          identity: identityValue,
+          name: participant.name || name || identityValue,
+          room: connectedRoomName || activeRoom,
+          screen_fps: Number.isFinite(fps ?? NaN) ? fps : null,
+          screen_width: Number.isFinite(width ?? NaN) ? width : null,
+          screen_height: Number.isFinite(height ?? NaN) ? height : null,
+          screen_bitrate_kbps: null,
+          bwe_kbps: null,
+          quality_limitation: null,
+          encoder: null,
+          ice_local_type: null,
+          ice_remote_type: null,
+          simulcast_layers: null,
+        }),
+      });
+    } catch {
+      // best-effort sampling only
+    }
+  }, [adminToken, apiUrl, localIdentity, name, connectedRoomName, activeRoom]);
+
   const registerRemoteMediaElement = useCallback(
     (element: HTMLMediaElement, isAttach: boolean) => {
       if (isAttach) {
@@ -996,6 +1108,19 @@ export function App() {
     snapshot.context.session?.identity,
     stopHeartbeat,
   ]);
+
+  useEffect(() => {
+    if (!connected || !adminToken) return;
+
+    void postAdminStatsSample();
+    const timer = window.setInterval(() => {
+      void postAdminStatsSample();
+    }, 10_000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [connected, adminToken, postAdminStatsSample]);
 
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -2462,6 +2587,20 @@ export function App() {
     }
   }, [adminToken, apiUrl]);
 
+  const fetchAdminDashboardMetrics = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const response = await fetch(apiUrl('/admin/api/metrics/dashboard'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as AdminDashboardMetricsResponse;
+      setAdminDashboardMetrics(payload);
+    } catch {
+      // silent admin polling failure
+    }
+  }, [adminToken, apiUrl]);
+
   const fetchAdminBugs = useCallback(async () => {
     if (!adminToken) return;
     try {
@@ -2476,9 +2615,29 @@ export function App() {
     }
   }, [adminToken, apiUrl]);
 
+  const fetchAdminDeploys = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const response = await fetch(apiUrl('/admin/api/deploys'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as AdminDeploysResponse;
+      setAdminDeploys(payload);
+    } catch {
+      // silent admin polling failure
+    }
+  }, [adminToken, apiUrl]);
+
   const refreshAdminDash = useCallback(async () => {
-    await Promise.all([fetchAdminDashboard(), fetchAdminHistory(), fetchAdminMetrics(), fetchAdminBugs()]);
-  }, [fetchAdminDashboard, fetchAdminHistory, fetchAdminMetrics, fetchAdminBugs]);
+    await Promise.all([
+      fetchAdminDashboard(),
+      fetchAdminHistory(),
+      fetchAdminMetrics(),
+      fetchAdminDashboardMetrics(),
+      fetchAdminBugs(),
+    ]);
+  }, [fetchAdminDashboard, fetchAdminHistory, fetchAdminMetrics, fetchAdminDashboardMetrics, fetchAdminBugs]);
 
   useEffect(() => {
     if (!isAdminMode || !adminDashOpen || !adminToken) {
@@ -2506,7 +2665,20 @@ export function App() {
         adminDashTimerRef.current = null;
       }
     };
-  }, [isAdminMode, adminDashOpen, adminToken, refreshAdminDash, fetchAdminDashboard, fetchAdminMetrics]);
+  }, [
+    isAdminMode,
+    adminDashOpen,
+    adminToken,
+    refreshAdminDash,
+    fetchAdminDashboard,
+    fetchAdminMetrics,
+  ]);
+
+  useEffect(() => {
+    if (!isAdminMode || !adminDashOpen || !adminToken) return;
+    if (adminDashTab !== 'deploys') return;
+    void fetchAdminDeploys();
+  }, [isAdminMode, adminDashOpen, adminDashTab, adminToken, fetchAdminDeploys]);
 
   useEffect(() => {
     if (isAdminMode) {
@@ -2533,7 +2705,32 @@ export function App() {
   const adminRooms = adminDashboard?.rooms ?? [];
   const adminEvents = adminSessions?.events ?? [];
   const adminQualityUsers = adminMetrics?.users ?? [];
+  const adminMetricsSummary = adminDashboardMetrics?.summary;
+  const adminPerUserMetrics = adminDashboardMetrics?.per_user ?? [];
   const adminBugReports = adminBugs?.reports ?? [];
+  const adminDeployCommits = adminDeploys?.commits ?? [];
+
+  const bugsByUser = useMemo(() => {
+    const grouped = new Map<string, number>();
+    for (const report of adminBugReports) {
+      const nameKey = report.name || report.reporter || report.identity || 'Unknown';
+      grouped.set(nameKey, (grouped.get(nameKey) ?? 0) + 1);
+    }
+    return Array.from(grouped.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [adminBugReports]);
+
+  const bugsByDay = useMemo(() => {
+    const grouped = new Map<string, number>();
+    for (const report of adminBugReports) {
+      const key = new Date(report.timestamp * 1000).toISOString().slice(0, 10);
+      grouped.set(key, (grouped.get(key) ?? 0) + 1);
+    }
+    return Array.from(grouped.entries())
+      .map(([dayKey, count]) => ({ dayKey, count }))
+      .sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+  }, [adminBugReports]);
 
   const toggleAdminDash = () => {
     setAdminDashOpen((prev) => !prev);
@@ -3813,6 +4010,13 @@ export function App() {
           >
             Bugs
           </button>
+          <button
+            type="button"
+            className={`adm-tab${adminDashTab === 'deploys' ? ' active' : ''}`}
+            onClick={() => setAdminDashTab('deploys')}
+          >
+            Deploys
+          </button>
         </div>
 
         <div id="admin-dash-live" className={`admin-dash-content${adminDashTab === 'live' ? '' : ' hidden'}`}>
@@ -3916,6 +4120,46 @@ export function App() {
         </div>
 
         <div id="admin-dash-metrics" className={`admin-dash-content${adminDashTab === 'metrics' ? '' : ' hidden'}`}>
+          {adminMetricsSummary ? (
+            <div className="adm-cards">
+              <div className="adm-card">
+                <div className="adm-card-value">{adminMetricsSummary.total_sessions ?? 0}</div>
+                <div className="adm-card-label">Sessions (30d)</div>
+              </div>
+              <div className="adm-card">
+                <div className="adm-card-value">{adminMetricsSummary.unique_users ?? 0}</div>
+                <div className="adm-card-label">Unique Users</div>
+              </div>
+              <div className="adm-card">
+                <div className="adm-card-value">{adminMetricsSummary.total_hours ?? 0}</div>
+                <div className="adm-card-label">Total Hours</div>
+              </div>
+              <div className="adm-card">
+                <div className="adm-card-value">{adminMetricsSummary.avg_duration_mins ?? 0}m</div>
+                <div className="adm-card-label">Avg Duration</div>
+              </div>
+            </div>
+          ) : null}
+
+          {adminPerUserMetrics.length > 0 ? (
+            <div className="adm-section">
+              <div className="adm-section-title">User Leaderboard (30d)</div>
+              {adminPerUserMetrics.map((user) => {
+                const max = adminPerUserMetrics[0]?.session_count || 1;
+                const pct = Math.max(2, ((user.session_count || 0) / max) * 100);
+                return (
+                  <div key={`${user.identity}-${user.name ?? ''}`} className="adm-leaderboard-bar" style={{ cursor: 'default' }}>
+                    <span className="adm-leaderboard-name">{user.name || user.identity}</span>
+                    <div className="adm-leaderboard-fill" style={{ width: `${pct}%` }} />
+                    <span className="adm-leaderboard-count">
+                      {user.session_count} ({user.total_hours}h)
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
           {adminQualityUsers.length > 0 ? (
             <>
               <div className="adm-cards">
@@ -3977,6 +4221,46 @@ export function App() {
           ) : (
             <div className="adm-empty">No quality data yet</div>
           )}
+
+          {bugsByUser.length > 0 ? (
+            <div className="adm-section">
+              <div className="adm-section-title">Bug Reports by User</div>
+              {bugsByUser.map((entry) => {
+                const max = bugsByUser[0]?.count || 1;
+                const pct = (entry.count / max) * 100;
+                return (
+                  <div key={entry.name} className="adm-leaderboard-bar" style={{ cursor: 'default' }}>
+                    <span className="adm-leaderboard-name">{entry.name}</span>
+                    <div className="adm-leaderboard-fill" style={{ width: `${pct}%` }} />
+                    <span className="adm-leaderboard-count">{entry.count}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {bugsByDay.length > 0 ? (
+            <div className="adm-section">
+              <div className="adm-section-title">Bugs by Day</div>
+              <div className="adm-bugs-by-day">
+                {bugsByDay.map((entry) => {
+                  const max = Math.max(...bugsByDay.map((item) => item.count));
+                  const pct = max > 0 ? (entry.count / max) * 100 : 0;
+                  const label = new Date(`${entry.dayKey}T12:00:00`).toLocaleDateString([], {
+                    month: 'short',
+                    day: 'numeric',
+                  });
+                  return (
+                    <div key={entry.dayKey} className="adm-bug-day-col">
+                      <div className="adm-bug-day-bar" style={{ height: `${pct}%` }} title={`${label}: ${entry.count} bugs`} />
+                      <div className="adm-bug-day-count">{entry.count}</div>
+                      <div className="adm-bug-day-label">{label}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div id="admin-dash-bugs" className={`admin-dash-content${adminDashTab === 'bugs' ? '' : ' hidden'}`}>
@@ -3992,6 +4276,52 @@ export function App() {
             ))
           ) : (
             <div className="adm-empty">No bug reports</div>
+          )}
+        </div>
+
+        <div id="admin-dash-deploys" className={`admin-dash-content${adminDashTab === 'deploys' ? '' : ' hidden'}`}>
+          {adminDeployCommits.length > 0 ? (
+            <div className="adm-deploy-list">
+              {adminDeployCommits.map((commit, index) => {
+                const status = commit.deploy_status || 'pending';
+                const statusClass =
+                  status === 'success'
+                    ? 'adm-deploy-success'
+                    : status === 'failed'
+                      ? 'adm-deploy-failed'
+                      : status === 'rollback'
+                        ? 'adm-deploy-rollback'
+                        : 'adm-deploy-pending';
+                const statusLabel =
+                  status === 'success'
+                    ? 'deployed'
+                    : status === 'failed'
+                      ? 'failed'
+                      : status === 'rollback'
+                        ? 'rolled back'
+                        : 'pending';
+
+                return (
+                  <div key={`${commit.sha ?? commit.short_sha ?? 'deploy'}-${index}`} className="adm-deploy-row">
+                    <div className="adm-deploy-status">
+                      <span className={`adm-deploy-badge ${statusClass}`}>{statusLabel}</span>
+                    </div>
+                    <div className="adm-deploy-info">
+                      <div className="adm-deploy-msg">{commit.message || '(no message)'}</div>
+                      <div className="adm-deploy-meta">
+                        <span className="adm-deploy-sha">{commit.short_sha || commit.sha || ''}</span>
+                        <span className="adm-deploy-author">{commit.author || 'unknown'}</span>
+                        <span className="adm-deploy-time">{formatDeployTime(commit.timestamp || commit.deploy_timestamp)}</span>
+                        {commit.deploy_duration != null ? <span className="adm-deploy-dur">{commit.deploy_duration}s</span> : null}
+                      </div>
+                      {commit.deploy_error ? <div className="adm-deploy-err">{commit.deploy_error}</div> : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="adm-empty">No deploy history yet</div>
           )}
         </div>
 

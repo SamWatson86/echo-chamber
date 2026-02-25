@@ -35,7 +35,7 @@ This refactor introduces framework structure without forcing a risky big-bang cu
 - Full legacy reliability logic parity (reconcile/watchdog/keyframe/recovery paths)
 - Jam feature-complete parity and soak validation vs legacy edge cases
 - Complete soundboard edit/ordering/icon/workflow parity
-- Admin dashboard feature parity
+- Full admin dashboard metrics/deploy parity polish (React now includes Live/History/Metrics/Bugs/Deploys tabs and API wiring)
 - Remaining media/chat/operator edge-case parity + final UX drift cleanup
 
 ## Run locally
