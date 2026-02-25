@@ -1,9 +1,9 @@
 # Viewer-Next Parity Checklist (Draft PR #62)
 
-Last updated: 2026-02-25 08:38 ET  
+Last updated: 2026-02-25 16:22 ET  
 Branch: `feat/viewer-next-parity-finish`
 
-> Truth status: **DONE for the scoped parity criteria in this task**.
+> Truth status: **INCOMPLETE for true legacy parity**.
 
 ## Scope criteria status
 
@@ -14,6 +14,17 @@ Branch: `feat/viewer-next-parity-finish`
 | 3) Reliability parity pass for quick toggle/switch drift scenarios | ✅ | `tests/app.reliability.test.tsx` validates rapid double-toggle final media state correctness; `tests/connectionMachine.test.ts` + App reliability test validate latest room switch request wins during provisioning/reconnect timing. |
 | 4) Verification pass (`npm run test`, `npm run build`, `npm run test:e2e`) + evidence artifacts | ✅ | All commands pass on this branch. Latest artifacts listed below. |
 | 5) Commit + push branch updates and refresh PR #62 status/checklist | ✅ | Commits pushed to `feat/viewer-next-parity-finish`; PR #62 body/checklist updated to current status. |
+
+## Legacy media/quality pipeline parity (not yet complete)
+
+| Legacy capability | Status in `viewer-next` |
+|---|---:|
+| Canvas screen-share pipeline (`canvas-pipe`) | ❌ missing |
+| Receiver-side AIMD bitrate control + publisher bitrate-cap datachannel flow | ❌ missing |
+| BWE watchdog/rescue encoder re-assert logic | ❌ missing |
+| RNNoise mic noise-cancel pipeline | ❌ missing |
+| Volume boost gain-node pipeline (>100% amplification) | ❌ missing |
+| Explicit screen-share audio publish tuning (`dtx: false`, codec/bitrate behavior parity) | ❌ missing |
 
 ## Latest parity evidence artifacts (`PARITY_EVIDENCE=1`)
 
@@ -37,4 +48,10 @@ Branch: `feat/viewer-next-parity-finish`
 
 ## Remaining gaps
 
-- None for the scoped criteria listed above.
+- Full legacy media/quality parity is not complete. Missing in `viewer-next` today:
+  - canvas pipeline for screen share publication
+  - AIMD bitrate-cap control loop and fallback behavior
+  - BWE watchdog/rescue logic
+  - RNNoise mic noise-cancel path
+  - receiver volume boost gain pipeline
+  - explicit screen-share audio DTX/bitrate parity behavior
