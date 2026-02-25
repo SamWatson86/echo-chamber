@@ -3,6 +3,22 @@ export type RoomSummary = {
   participant_count?: number;
 };
 
+export type OnlineUser = {
+  identity?: string;
+  name?: string;
+  room?: string;
+};
+
+export type RoomStatusParticipant = {
+  identity: string;
+  name?: string;
+};
+
+export type RoomStatus = {
+  room_id: string;
+  participants?: RoomStatusParticipant[];
+};
+
 export type HealthStatus = {
   status?: string;
   ok?: boolean;
@@ -84,4 +100,28 @@ export async function fetchRooms(baseUrl: string, adminToken: string): Promise<R
   }
 
   return (await response.json()) as RoomSummary[];
+}
+
+export async function fetchRoomStatus(baseUrl: string, adminToken: string): Promise<RoomStatus[]> {
+  const response = await fetch(`${baseUrl}/v1/room-status`, {
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Room status fetch failed (${response.status})`);
+  }
+
+  return (await response.json()) as RoomStatus[];
+}
+
+export async function fetchOnlineUsers(baseUrl: string): Promise<OnlineUser[]> {
+  const response = await fetch(`${baseUrl}/api/online`);
+
+  if (!response.ok) {
+    throw new Error(`Online users fetch failed (${response.status})`);
+  }
+
+  return (await response.json()) as OnlineUser[];
 }

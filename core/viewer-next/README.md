@@ -21,15 +21,17 @@ This refactor introduces framework structure without forcing a risky big-bang cu
 
 - Functional connection workflow machine for auth + room-token provisioning (`connectionMachine.ts`)
 - Zustand-backed viewer preferences store (ready for persistence middleware)
-- Health polling and room listing via TanStack Query
-- Tailwind-based shell UI
+- React shell now mirrors legacy viewer DOM layout/classes (connect panel, room list, side panels, chat/soundboard/theme/jam/debug modals)
+- Room-status and online-user polling hooks (`/v1/room-status`, `/api/online`)
+- Playwright mocked journey for login + core shell interactions with screenshot evidence output to `docs/proof/parity/`
 - Baseline test harness (Vitest + Playwright)
 
 ## Not migrated yet
 
-- Full LiveKit media/session lifecycle
-- Jam subsystem UI/audio state wiring
-- Chat/media/soundboard panels
+- Full LiveKit media/session lifecycle (track subscribe/publish/reconcile/recovery)
+- Jam subsystem functional Spotify/audio runtime wiring
+- Chat/media transport parity over LiveKit data channels + file upload persistence
+- Soundboard upload/edit persistence and playback transport parity
 - Admin dashboard feature parity
 
 ## Run locally

@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from '@/app/App';
 
 describe('App', () => {
-  it('renders title', () => {
+  it('renders legacy shell heading', () => {
     const queryClient = new QueryClient();
     render(
       <QueryClientProvider client={queryClient}>
@@ -12,6 +12,8 @@ describe('App', () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText(/Echo Chamber Frontend Refactor/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /echo chamber/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Jam' })).toBeInTheDocument();
   });
 });
