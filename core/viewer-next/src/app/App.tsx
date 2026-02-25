@@ -67,6 +67,20 @@ const EMOJI_LIST = [
   '🤖',
 ] as const;
 
+const SOUNDBOARD_ICONS = [
+  '🔊',
+  '😂',
+  '🔥',
+  '👏',
+  '🎉',
+  '👀',
+  '💯',
+  '✅',
+  '🎺',
+  '🤖',
+  '🎧',
+] as const;
+
 type SoundboardSound = {
   id: string;
   name: string;
@@ -415,6 +429,8 @@ export function App() {
   const [soundSearch, setSoundSearch] = useState('');
   const [soundboardSounds, setSoundboardSounds] = useState<SoundboardSound[]>([]);
   const [soundboardHint, setSoundboardHint] = useState('');
+  const [soundboardEditingId, setSoundboardEditingId] = useState<string | null>(null);
+  const [soundboardSelectedIcon, setSoundboardSelectedIcon] = useState<string>(SOUNDBOARD_ICONS[0]);
   const [soundFileLabel, setSoundFileLabel] = useState('Select audio');
   const [soundNameInput, setSoundNameInput] = useState('');
   const [soundClipVolume, setSoundClipVolume] = useState(100);
@@ -999,6 +1015,11 @@ export function App() {
             return;
           }
 
+          if (message.type === 'sound-added' || message.type === 'sound-updated') {
+            setSoundboardHint('Soundboard updated.');
+            return;
+          }
+
           if (message.type === 'jam-started') {
             setJamStatus(`${message.host || 'Host'} started a jam session.`);
             return;
@@ -1482,8 +1503,104 @@ export function App() {
     [adminToken, apiUrl, soundboardVolume, publishData, name, activeRoom],
   );
 
+  const exitSoundboardEditMode = useCallback(() => {
+    setSoundboardEditingId(null);
+    setSoundboardSelectedIcon(SOUNDBOARD_ICONS[0]);
+    setSoundNameInput('');
+    setSoundClipVolume(100);
+    setSoundFileLabel('Select audio');
+    soundUploadFileRef.current = null;
+    setSoundboardHint('');
+  }, []);
+
+  const enterSoundboardEditMode = useCallback((sound: SoundboardSound) => {
+    setSoundboardEditingId(sound.id);
+    setSoundNameInput(sound.name || '');
+    setSoundboardSelectedIcon(sound.icon || SOUNDBOARD_ICONS[0]);
+    setSoundClipVolume(Number.isFinite(sound.volume) ? sound.volume : 100);
+    setSoundboardHint(`Editing "${sound.name || 'Sound'}". Update name/icon/volume and click Save.`);
+    setSoundFileLabel('Select audio');
+    soundUploadFileRef.current = null;
+  }, []);
+
+  const updateSound = useCallback(async () => {
+    if (!adminToken || !soundboardEditingId) return;
+
+    const name = (soundNameInput.trim() || 'Sound').slice(0, 60);
+    const icon = soundboardSelectedIcon || SOUNDBOARD_ICONS[0];
+    const volume = Math.max(0, Math.min(200, Math.round(soundClipVolume)));
+
+    try {
+      const response = await fetch(apiUrl('/api/soundboard/update'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          roomId: activeRoom,
+          soundId: soundboardEditingId,
+          name,
+          icon,
+          volume,
+        }),
+      });
+
+      if (!response.ok) {
+        setSoundboardHint(`Save failed (${response.status})`);
+        return;
+      }
+
+      const payload = (await response.json().catch(() => ({}))) as { sound?: { id: string; name: string; icon?: string; volume?: number } };
+      if (payload.sound?.id) {
+        setSoundboardSounds((prev) =>
+          prev.map((sound) =>
+            sound.id === payload.sound!.id
+              ? {
+                  ...sound,
+                  name: payload.sound!.name,
+                  icon: payload.sound!.icon || sound.icon,
+                  volume: payload.sound!.volume ?? sound.volume,
+                }
+              : sound,
+          ),
+        );
+      } else {
+        await loadSoundboard();
+      }
+
+      await publishData({
+        type: 'sound-updated',
+        room: activeRoom,
+        soundId: soundboardEditingId,
+      });
+
+      setSoundboardHint('Saved!');
+      exitSoundboardEditMode();
+    } catch (error) {
+      setSoundboardHint(`Save failed: ${(error as Error).message}`);
+    }
+  }, [
+    adminToken,
+    soundboardEditingId,
+    soundNameInput,
+    soundboardSelectedIcon,
+    soundClipVolume,
+    apiUrl,
+    activeRoom,
+    loadSoundboard,
+    publishData,
+    exitSoundboardEditMode,
+  ]);
+
   const uploadSound = useCallback(async () => {
     if (!adminToken) return;
+
+    if (soundboardEditingId) {
+      await updateSound();
+      return;
+    }
+
     if (!soundUploadFileRef.current) {
       setSoundboardHint('Choose a sound file first.');
       return;
@@ -1492,8 +1609,8 @@ export function App() {
     const qs = new URLSearchParams();
     qs.set('roomId', activeRoom);
     if (soundNameInput.trim()) qs.set('name', soundNameInput.trim());
-    qs.set('icon', '🔊');
-    qs.set('volume', String(soundClipVolume));
+    qs.set('icon', soundboardSelectedIcon || SOUNDBOARD_ICONS[0]);
+    qs.set('volume', String(Math.max(0, Math.min(200, Math.round(soundClipVolume)))));
 
     try {
       const response = await fetch(apiUrl(`/api/soundboard/upload?${qs.toString()}`), {
@@ -1514,11 +1631,22 @@ export function App() {
       soundUploadFileRef.current = null;
       setSoundFileLabel('Select audio');
       setSoundNameInput('');
+      setSoundboardSelectedIcon(SOUNDBOARD_ICONS[0]);
       await loadSoundboard();
     } catch (error) {
       setSoundboardHint(`Upload failed: ${(error as Error).message}`);
     }
-  }, [adminToken, activeRoom, soundNameInput, soundClipVolume, apiUrl, loadSoundboard]);
+  }, [
+    adminToken,
+    soundboardEditingId,
+    updateSound,
+    activeRoom,
+    soundNameInput,
+    soundboardSelectedIcon,
+    soundClipVolume,
+    apiUrl,
+    loadSoundboard,
+  ]);
 
   useEffect(() => {
     if (soundboardCompactOpen || soundboardEditOpen) {
@@ -2685,6 +2813,7 @@ export function App() {
             onClick={() => {
               setSoundboardCompactOpen(false);
               setSoundboardEditOpen(false);
+              exitSoundboardEditMode();
             }}
           >
             Back
@@ -2766,6 +2895,7 @@ export function App() {
               onClick={() => {
                 setSoundboardEditOpen(false);
                 setSoundboardCompactOpen(true);
+                exitSoundboardEditMode();
               }}
             >
               Back to Soundboard
@@ -2796,7 +2926,10 @@ export function App() {
         </div>
         <div id="soundboard-grid" className="soundboard-grid">
           {filteredSoundboard.map((sound) => (
-            <div key={sound.id} className={`sound-tile${sound.favorite ? ' is-favorite' : ''}`}>
+            <div
+              key={sound.id}
+              className={`sound-tile${sound.favorite ? ' is-favorite' : ''}${soundboardEditingId === sound.id ? ' is-editing' : ''}`}
+            >
               <button type="button" className="sound-tile-main" onClick={() => void playSound(sound)}>
                 <span className="sound-icon">{sound.icon}</span>
                 <span className="sound-name">{sound.name}</span>
@@ -2808,6 +2941,17 @@ export function App() {
                 onClick={() => toggleSoundFavorite(sound.id)}
               >
                 ★
+              </button>
+              <button
+                type="button"
+                className="sound-edit"
+                title="Edit"
+                onClick={() => enterSoundboardEditMode(sound)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 20h9"></path>
+                  <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+                </svg>
               </button>
             </div>
           ))}
@@ -2823,9 +2967,14 @@ export function App() {
               onChange={(event) => setSoundNameInput(event.target.value)}
             />
             <button id="sound-upload-button" type="button" onClick={() => void uploadSound()}>
-              Upload
+              {soundboardEditingId ? 'Save' : 'Upload'}
             </button>
-            <button id="sound-cancel-edit" type="button" className="hidden">
+            <button
+              id="sound-cancel-edit"
+              type="button"
+              className={soundboardEditingId ? '' : 'hidden'}
+              onClick={exitSoundboardEditMode}
+            >
               Cancel
             </button>
             <label className="sound-file">
@@ -2856,9 +3005,20 @@ export function App() {
               {soundClipVolume}%
             </div>
           </div>
-          <div className="soundboard-icons hidden" id="soundboard-icons-section">
+          <div className={`soundboard-icons${soundboardEditingId ? '' : ' hidden'}`} id="soundboard-icons-section">
             <div className="soundboard-icons-label">Pick an icon</div>
-            <div id="soundboard-icon-grid" className="soundboard-icon-grid"></div>
+            <div id="soundboard-icon-grid" className="soundboard-icon-grid">
+              {SOUNDBOARD_ICONS.map((icon) => (
+                <button
+                  key={icon}
+                  type="button"
+                  className={`sound-icon-btn${soundboardSelectedIcon === icon ? ' is-selected' : ''}`}
+                  onClick={() => setSoundboardSelectedIcon(icon)}
+                >
+                  {icon}
+                </button>
+              ))}
+            </div>
           </div>
           <div id="soundboard-hint" className="hint">
             {soundboardHint || 'Tip: favorite sounds appear in quick play.'}
