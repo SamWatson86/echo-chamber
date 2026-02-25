@@ -272,6 +272,31 @@ function formatAdminTime(timestampSeconds: number): string {
   });
 }
 
+function isNewerVersion(latest: string, current: string): boolean {
+  const a = latest.split('.').map((part) => Number(part) || 0);
+  const b = current.split('.').map((part) => Number(part) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+
+function hasTauriIPC(): boolean {
+  const tauri = (globalThis as { __TAURI__?: { core?: { invoke?: unknown } } }).__TAURI__;
+  return Boolean(tauri?.core && typeof tauri.core.invoke === 'function');
+}
+
+async function tauriInvoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const tauri = (globalThis as { __TAURI__?: { core?: { invoke?: (c: string, a?: Record<string, unknown>) => Promise<T> } } }).__TAURI__;
+  if (!tauri?.core?.invoke) {
+    throw new Error('Tauri IPC not available');
+  }
+  return tauri.core.invoke(cmd, args);
+}
+
 function identityBase(identity: string): string {
   const dash = identity.lastIndexOf('-');
   if (dash <= 0) return identity;
@@ -444,6 +469,8 @@ export function App() {
   const [roomAudioMuted, setRoomAudioMuted] = useState(false);
   const [roomConnectError, setRoomConnectError] = useState<string | null>(null);
   const [connectedRoomName, setConnectedRoomName] = useState<string>('main');
+  const [updateBannerVersion, setUpdateBannerVersion] = useState<string | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
 
   const roomRef = useRef<Room | null>(null);
   const remoteMediaElementsRef = useRef<Set<HTMLMediaElement>>(new Set());
@@ -751,6 +778,55 @@ export function App() {
       stopHeartbeat();
     };
   }, [sendLeaveNotification, stopHeartbeat]);
+
+  useEffect(() => {
+    if (updateDismissed) return;
+    if (!(globalThis as { __ECHO_NATIVE__?: unknown }).__ECHO_NATIVE__) return;
+
+    let cancelled = false;
+
+    const checkForUpdate = async () => {
+      if (cancelled || updateDismissed) return;
+      let currentVersion = '';
+
+      if (hasTauriIPC()) {
+        try {
+          const info = await tauriInvoke<{ version?: string }>('get_app_info');
+          currentVersion = info?.version || '';
+        } catch {
+          currentVersion = '';
+        }
+      }
+
+      if (!currentVersion) return;
+
+      try {
+        const response = await fetch(`${resolveControlUrl(controlUrl)}/api/version`);
+        if (!response.ok) return;
+        const payload = (await response.json()) as { latest_client?: string };
+        const latestClient = payload.latest_client || '';
+        if (latestClient && isNewerVersion(latestClient, currentVersion)) {
+          setUpdateBannerVersion(latestClient);
+        }
+      } catch {
+        // silent update-check failure
+      }
+    };
+
+    const timeoutHandle = window.setTimeout(() => {
+      void checkForUpdate();
+    }, 10_000);
+
+    const intervalHandle = window.setInterval(() => {
+      void checkForUpdate();
+    }, 5 * 60 * 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutHandle);
+      window.clearInterval(intervalHandle);
+    };
+  }, [controlUrl, updateDismissed]);
 
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {
@@ -2047,6 +2123,49 @@ export function App() {
 
   return (
     <main className="app">
+      {updateBannerVersion && !updateDismissed ? (
+        <div
+          id="update-banner"
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 500,
+            background: 'linear-gradient(90deg, rgba(56,189,248,0.15), rgba(139,92,246,0.15))',
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            borderBottom: '1px solid rgba(56,189,248,0.3)',
+            padding: '8px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '12px',
+            fontSize: '13px',
+            color: 'var(--text, #e2e8f0)',
+          }}
+        >
+          <span>
+            Update available: <strong>v{updateBannerVersion}</strong> — restart the app to update
+          </span>
+          <button
+            type="button"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--muted, #94a3b8)',
+              cursor: 'pointer',
+              fontSize: '16px',
+              padding: '2px 6px',
+            }}
+            title="Dismiss"
+            onClick={() => setUpdateDismissed(true)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+
       <header>
         <div className="header-brand">
           <img src="/badge.jpg" alt="Fellowship Badge" className="header-badge" />
