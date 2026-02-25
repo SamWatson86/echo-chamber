@@ -112,7 +112,7 @@ function Start-OldProcess {
     $errLog = Join-Path $logDir "core-control.err.log"
     Load-Env $envFile
     Write-Log "Restarting control plane..."
-    $proc = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     if ($proc) {
         [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
         Write-Log "Control plane restarted (PID $($proc.Id))"
@@ -188,9 +188,9 @@ function Deploy-BlueGreen {
     # Load env vars for the new process
     Load-Env $envFile
 
-    # Start new process
+    # Start new process (working dir must be core/ to match run-core.ps1 behavior)
     Write-Log "Starting new control plane..."
-    $proc = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     if ($proc) {
         [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
         Write-Log "New control plane started (PID $($proc.Id))"
@@ -227,7 +227,7 @@ function Deploy-BlueGreen {
         if (Test-Path $bak) {
             Copy-Item $bak $exe -Force
             Write-Log "Restored backup binary"
-            $proc2 = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+            $proc2 = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
             if ($proc2) {
                 [System.IO.File]::WriteAllText($pidFile, "$($proc2.Id)")
                 Write-Log "Rollback complete - old binary restarted (PID $($proc2.Id))"
