@@ -129,12 +129,11 @@ function Test-Health {
 
 function Run-Tests {
     Write-Log "Running test suite..."
-    $bashExe = "C:\Program Files\Git\usr\bin\bash.exe"
-    if (!(Test-Path $bashExe)) { $bashExe = "bash" }
 
     $env:VERIFY_SKIP_RUST = "1"  # We do our own cargo build separately
+    # Run node tests directly instead of bash — avoids Git bash CWD issues
     Push-Location $root
-    $testOutput = & $bashExe "tools/verify/quick.sh" 2>&1 | Out-String
+    $testOutput = & node --test tools/verify/tests/*.test.js 2>&1 | Out-String
     $testExitCode = $LASTEXITCODE
     Pop-Location
 

@@ -11091,7 +11091,9 @@ async function fetchAdminBugs() {
     }
     var html = "";
     reports.forEach(function(r) {
-      html += '<div class="adm-bug"><div class="adm-bug-header"><strong>' + escAdm(r.name || r.identity) + '</strong><span class="adm-time">' + fmtTime(r.timestamp) + '</span></div><div class="adm-bug-desc">' + escAdm(r.description) + '</div></div>';
+      var dt = new Date(r.timestamp * 1000);
+      var dateStr = dt.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      html += '<div class="adm-bug"><div class="adm-bug-header"><strong>' + escAdm(r.name || r.identity) + '</strong><span class="adm-time">' + dateStr + '</span></div><div class="adm-bug-desc">' + escAdm(r.description) + '</div></div>';
     });
     el.innerHTML = html;
   } catch (e) {}
@@ -11124,11 +11126,12 @@ function renderAdminDeploys(commits, container) {
   }
   var html = '<div class="adm-deploy-list">';
   commits.forEach(function(c) {
-    var statusClass = "adm-deploy-pending";
-    var statusLabel = "pending";
+    var statusClass = "adm-deploy-historical";
+    var statusLabel = "historical";
     if (c.deploy_status === "success") { statusClass = "adm-deploy-success"; statusLabel = "deployed"; }
     else if (c.deploy_status === "failed") { statusClass = "adm-deploy-failed"; statusLabel = "failed"; }
     else if (c.deploy_status === "rollback") { statusClass = "adm-deploy-rollback"; statusLabel = "rolled back"; }
+    else if (c.deploy_status === "pending") { statusClass = "adm-deploy-pending"; statusLabel = "pending"; }
 
     html += '<div class="adm-deploy-row">';
     html += '<div class="adm-deploy-status"><span class="adm-deploy-badge ' + statusClass + '">' + escAdm(statusLabel) + '</span></div>';
