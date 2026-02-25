@@ -1,4 +1,22 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from 'react';
+import {
+  FormEvent,
+  KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  LocalParticipant,
+  Participant,
+  Room,
+  RoomEvent,
+  Track,
+  type RemoteTrack,
+  type LocalTrack,
+  type TrackPublication,
+} from 'livekit-client';
 import { useActorRef, useSelector } from '@xstate/react';
 import { connectionMachine } from '@/features/connection/connectionMachine';
 import { useViewerPrefsStore } from '@/stores/viewerPrefsStore';
@@ -14,6 +32,11 @@ const ROOM_DISPLAY_NAMES: Record<(typeof FIXED_ROOMS)[number], string> = {
   'breakout-3': 'Breakout 3',
 };
 
+const THEME_STORAGE_KEY = 'echo-core-theme';
+const UI_OPACITY_KEY = 'echo-core-ui-opacity';
+const CHAT_MESSAGE_TYPE = 'chat-message';
+const CHAT_FILE_TYPE = 'chat-file';
+
 const THEMES = [
   { id: 'frost', label: 'Frost', previewClass: 'frost-preview' },
   { id: 'cyberpunk', label: 'Cyberpunk', previewClass: 'cyberpunk-preview' },
@@ -24,19 +47,93 @@ const THEMES = [
   { id: 'ultra-instinct', label: 'Ultra Instinct', previewClass: 'ultra-instinct-preview' },
 ] as const;
 
-const EMOJI_LIST = ['😀', '😂', '🔥', '👏', '🎉', '👀', '🫡', '🤝', '🎧', '🛶', '💯', '✅'];
-const DEFAULT_SOUNDS = [
-  { id: 'airhorn', name: 'Airhorn', icon: '📣', favorite: true },
-  { id: 'laugh', name: 'Laugh Track', icon: '😂', favorite: true },
-  { id: 'drumroll', name: 'Drumroll', icon: '🥁', favorite: false },
-  { id: 'applause', name: 'Applause', icon: '👏', favorite: true },
-  { id: 'sad', name: 'Sad Trombone', icon: '🎺', favorite: false },
-  { id: 'win', name: 'Victory', icon: '🏆', favorite: false },
-];
+const EMOJI_LIST = [
+  '😀',
+  '😂',
+  '🔥',
+  '👏',
+  '🎉',
+  '👀',
+  '🫡',
+  '🤝',
+  '🎧',
+  '🛶',
+  '💯',
+  '✅',
+  '🥶',
+  '🎺',
+  '🔊',
+  '🤖',
+] as const;
+
+type SoundboardSound = {
+  id: string;
+  name: string;
+  icon: string;
+  volume: number;
+  favorite: boolean;
+};
+
+type ChatMessage = {
+  id: string;
+  type: typeof CHAT_MESSAGE_TYPE | typeof CHAT_FILE_TYPE;
+  identity: string;
+  name: string;
+  text: string;
+  timestamp: number;
+  room: string;
+  fileUrl?: string;
+  fileName?: string;
+  fileType?: string;
+};
+
+type ParticipantView = {
+  identity: string;
+  name: string;
+  isLocal: boolean;
+  speaking: boolean;
+  micTrack: LocalTrack | RemoteTrack | null;
+  cameraTrack: LocalTrack | RemoteTrack | null;
+  screenTrack: LocalTrack | RemoteTrack | null;
+};
+
+type JamTrack = {
+  spotify_uri: string;
+  name: string;
+  artist: string;
+  album_art_url: string;
+  duration_ms: number;
+  added_by: string;
+};
+
+type JamState = {
+  active: boolean;
+  host_identity: string;
+  queue: JamTrack[];
+  now_playing: {
+    name: string;
+    artist: string;
+    album_art_url: string;
+    duration_ms: number;
+    progress_ms: number;
+    is_playing: boolean;
+  } | null;
+  listeners: string[];
+  listener_count: number;
+  spotify_connected: boolean;
+  bot_connected: boolean;
+};
+
+type DebugEntry = {
+  id: number;
+  text: string;
+};
 
 function getStoredValue(key: string): string | null {
   try {
-    const storage = globalThis.localStorage as { getItem?: (k: string) => string | null } | undefined;
+    const storage = globalThis.localStorage as
+      | { getItem?: (k: string) => string | null }
+      | undefined;
     if (!storage || typeof storage.getItem !== 'function') return null;
     return storage.getItem(key);
   } catch {
@@ -46,7 +143,9 @@ function getStoredValue(key: string): string | null {
 
 function setStoredValue(key: string, value: string): void {
   try {
-    const storage = globalThis.localStorage as { setItem?: (k: string, v: string) => void } | undefined;
+    const storage = globalThis.localStorage as
+      | { setItem?: (k: string, v: string) => void }
+      | undefined;
     if (!storage || typeof storage.setItem !== 'function') return;
     storage.setItem(key, value);
   } catch {
@@ -54,30 +153,13 @@ function setStoredValue(key: string, value: string): void {
   }
 }
 
-type ChatMessage = {
-  id: string;
-  author: string;
-  text: string;
-  timestamp: number;
-  self: boolean;
-};
-
-type DebugEntry = {
-  id: number;
-  text: string;
-};
-
-function getInitials(name: string): string {
-  return name
-    .split(/\s+/)
-    .map((part) => part[0] ?? '')
-    .join('')
-    .slice(0, 2)
-    .toUpperCase() || '??';
-}
-
-function formatChatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function safeJsonParse<T>(value: string | null, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 function stableRoomId(room: string): (typeof FIXED_ROOMS)[number] {
@@ -87,16 +169,121 @@ function stableRoomId(room: string): (typeof FIXED_ROOMS)[number] {
   return 'main';
 }
 
+function getInitials(name: string): string {
+  return (
+    name
+      .split(/\s+/)
+      .map((part) => part[0] ?? '')
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || '??'
+  );
+}
+
+function formatChatTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function identityBase(identity: string): string {
+  const dash = identity.lastIndexOf('-');
+  if (dash <= 0) return identity;
+  const suffix = identity.slice(dash + 1);
+  return /^\d{3,6}$/.test(suffix) ? identity.slice(0, dash) : identity;
+}
+
+function classifyTrack(
+  publication: TrackPublication | undefined,
+): LocalTrack | RemoteTrack | null {
+  return (publication?.track as LocalTrack | RemoteTrack | undefined) ?? null;
+}
+
+function buildParticipantViews(room: Room): ParticipantView[] {
+  const all: Participant[] = [room.localParticipant, ...Array.from(room.remoteParticipants.values())];
+
+  return all.map((participant) => {
+    const micPublication = participant.getTrackPublication(Track.Source.Microphone);
+    const cameraPublication = participant.getTrackPublication(Track.Source.Camera);
+    const screenPublication = participant.getTrackPublication(Track.Source.ScreenShare);
+
+    return {
+      identity: participant.identity,
+      name: participant.name || participant.identity,
+      isLocal: participant instanceof LocalParticipant,
+      speaking: participant.isSpeaking,
+      micTrack: classifyTrack(micPublication),
+      cameraTrack: classifyTrack(cameraPublication),
+      screenTrack: classifyTrack(screenPublication),
+    };
+  });
+}
+
+function resolveControlUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed) return trimmed;
+  if (typeof window !== 'undefined' && window.location.host) {
+    return `https://${window.location.host}`;
+  }
+  return 'https://127.0.0.1:9443';
+}
+
+type TrackRendererProps = {
+  track: LocalTrack | RemoteTrack | null;
+  className?: string;
+  muted?: boolean;
+  onMounted?: (element: HTMLMediaElement) => void;
+  onUnmounted?: (element: HTMLMediaElement) => void;
+};
+
+function TrackRenderer({
+  track,
+  className,
+  muted,
+  onMounted,
+  onUnmounted,
+}: TrackRendererProps) {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!track || !mountRef.current) return;
+
+    const element = track.attach();
+    element.autoplay = true;
+    (element as HTMLVideoElement).playsInline = true;
+    element.controls = false;
+    element.muted = Boolean(muted);
+    element.className = className ?? '';
+
+    mountRef.current.innerHTML = '';
+    mountRef.current.appendChild(element);
+    onMounted?.(element);
+
+    return () => {
+      onUnmounted?.(element);
+      try {
+        track.detach(element);
+      } catch {
+        // ignore detach errors
+      }
+      element.remove();
+    };
+  }, [track, className, muted, onMounted, onUnmounted]);
+
+  return <div ref={mountRef} className="h-full w-full" />;
+}
+
 export function App() {
   const actorRef = useActorRef(connectionMachine);
   const snapshot = useSelector(actorRef, (state) => state);
 
-  const { controlUrl, sfuUrl, room, name, identity, adminPassword, setField } = useViewerPrefsStore();
-
-  const [micEnabled, setMicEnabled] = useState(false);
-  const [camEnabled, setCamEnabled] = useState(false);
-  const [screenEnabled, setScreenEnabled] = useState(false);
-  const [roomAudioMuted, setRoomAudioMuted] = useState(false);
+  const {
+    controlUrl,
+    sfuUrl,
+    room,
+    name,
+    identity,
+    adminPassword,
+    setField,
+  } = useViewerPrefsStore();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -108,29 +295,39 @@ export function App() {
   const [soundboardCompactOpen, setSoundboardCompactOpen] = useState(false);
   const [soundboardEditOpen, setSoundboardEditOpen] = useState(false);
   const [soundboardVolumeOpen, setSoundboardVolumeOpen] = useState(false);
-  const [soundboardVolume, setSoundboardVolume] = useState(100);
+  const [soundboardVolume, setSoundboardVolume] = useState<number>(() => {
+    const raw = Number.parseInt(getStoredValue('echo-core-soundboard-volume') ?? '100', 10);
+    return Number.isNaN(raw) ? 100 : Math.max(0, Math.min(100, raw));
+  });
   const [soundSearch, setSoundSearch] = useState('');
-  const [sounds, setSounds] = useState(DEFAULT_SOUNDS);
+  const [soundboardSounds, setSoundboardSounds] = useState<SoundboardSound[]>([]);
   const [soundboardHint, setSoundboardHint] = useState('');
+  const [soundFileLabel, setSoundFileLabel] = useState('Select audio');
+  const [soundNameInput, setSoundNameInput] = useState('');
+  const [soundClipVolume, setSoundClipVolume] = useState(100);
+  const soundUploadFileRef = useRef<File | null>(null);
 
   const [cameraLobbyOpen, setCameraLobbyOpen] = useState(false);
-  const [lobbyMicMuted, setLobbyMicMuted] = useState(false);
-  const [lobbyCameraMuted, setLobbyCameraMuted] = useState(false);
-
   const [themeOpen, setThemeOpen] = useState(false);
-  const [activeTheme, setActiveTheme] = useState<string>(() => getStoredValue('echo-core-theme') ?? 'frost');
+  const [activeTheme, setActiveTheme] = useState<string>(() => getStoredValue(THEME_STORAGE_KEY) ?? 'frost');
   const [uiOpacity, setUiOpacity] = useState<number>(() => {
-    const raw = Number.parseInt(getStoredValue('echo-core-ui-opacity') ?? '100', 10);
-    if (Number.isNaN(raw)) return 100;
-    return Math.max(20, Math.min(100, raw));
+    const raw = Number.parseInt(getStoredValue(UI_OPACITY_KEY) ?? '100', 10);
+    return Number.isNaN(raw) ? 100 : Math.max(20, Math.min(100, raw));
   });
 
   const [bugReportOpen, setBugReportOpen] = useState(false);
   const [bugDescription, setBugDescription] = useState('');
   const [bugStatus, setBugStatus] = useState('');
+  const [bugScreenshotFile, setBugScreenshotFile] = useState<File | null>(null);
+  const [bugScreenshotUrl, setBugScreenshotUrl] = useState<string | null>(null);
 
   const [jamOpen, setJamOpen] = useState(false);
   const [jamVolume, setJamVolume] = useState(50);
+  const [jamStatus, setJamStatus] = useState('');
+  const [jamError, setJamError] = useState('');
+  const [jamState, setJamState] = useState<JamState | null>(null);
+  const [jamSearch, setJamSearch] = useState('');
+  const [jamSearchResults, setJamSearchResults] = useState<JamTrack[]>([]);
 
   const [debugOpen, setDebugOpen] = useState(false);
   const [debugLog, setDebugLog] = useState<DebugEntry[]>([]);
@@ -139,12 +336,33 @@ export function App() {
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [camDevices, setCamDevices] = useState<MediaDeviceInfo[]>([]);
   const [speakerDevices, setSpeakerDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedMicId, setSelectedMicId] = useState<string>(() => getStoredValue('echo-device-mic') ?? '');
+  const [selectedCamId, setSelectedCamId] = useState<string>(() => getStoredValue('echo-device-cam') ?? '');
+  const [selectedSpeakerId, setSelectedSpeakerId] = useState<string>(() => getStoredValue('echo-device-speaker') ?? '');
 
-  const onlineUsersQuery = useOnlineUsersQuery(controlUrl.trim());
+  const [roomVersion, setRoomVersion] = useState(0);
+  const [roomAudioMuted, setRoomAudioMuted] = useState(false);
+  const [roomConnectError, setRoomConnectError] = useState<string | null>(null);
 
+  const roomRef = useRef<Room | null>(null);
+  const remoteMediaElementsRef = useRef<Set<HTMLMediaElement>>(new Set());
+
+  const jamAudioWsRef = useRef<WebSocket | null>(null);
+  const jamAudioCtxRef = useRef<AudioContext | null>(null);
+  const jamGainRef = useRef<GainNode | null>(null);
+  const jamNextPlayRef = useRef(0);
+  const jamStoppingRef = useRef(false);
+  const jamRetriesRef = useRef(0);
+
+  const spotifyAuthStateRef = useRef<string | null>(null);
+  const spotifyVerifierRef = useRef<string | null>(null);
+
+  const onlineUsersQuery = useOnlineUsersQuery(resolveControlUrl(controlUrl));
   const adminToken = snapshot.context.session?.adminToken ?? null;
-  const roomStatusQuery = useRoomStatusQuery(controlUrl.trim(), adminToken);
+  const roomStatusQuery = useRoomStatusQuery(resolveControlUrl(controlUrl), adminToken);
+
   const activeRoom = stableRoomId((room || 'main').trim());
+  const localIdentity = snapshot.context.session?.identity ?? '';
 
   const roomStatusMap = useMemo(() => {
     const map = new Map<string, RoomStatusParticipant[]>();
@@ -154,37 +372,153 @@ export function App() {
     return map;
   }, [roomStatusQuery.data]);
 
-  const activeParticipants = roomStatusMap.get(activeRoom) ?? [];
   const connected = snapshot.matches('connected');
   const provisioning = snapshot.matches('provisioning');
-  const canUseRoomControls = connected && Boolean(adminToken);
 
-  const filteredSounds = useMemo(
-    () => sounds.filter((sound) => sound.name.toLowerCase().includes(soundSearch.toLowerCase())),
-    [soundSearch, sounds],
+  const participantViews = useMemo(() => {
+    const liveRoom = roomRef.current;
+    const fallbackParticipants = roomStatusMap.get(activeRoom) ?? [];
+
+    if (liveRoom) {
+      const live = buildParticipantViews(liveRoom);
+      const seen = new Set(live.map((participant) => participant.identity));
+
+      fallbackParticipants.forEach((participant) => {
+        if (seen.has(participant.identity)) return;
+        live.push({
+          identity: participant.identity,
+          name: participant.name ?? participant.identity,
+          isLocal: false,
+          speaking: false,
+          micTrack: null,
+          cameraTrack: null,
+          screenTrack: null,
+        });
+      });
+
+      return live;
+    }
+
+    return fallbackParticipants.map((participant) => ({
+      identity: participant.identity,
+      name: participant.name ?? participant.identity,
+      isLocal: false,
+      speaking: false,
+      micTrack: null,
+      cameraTrack: null,
+      screenTrack: null,
+    }));
+  }, [roomVersion, roomStatusMap, activeRoom]);
+
+  const screenParticipants = useMemo(
+    () => participantViews.filter((participant) => Boolean(participant.screenTrack)),
+    [participantViews],
   );
 
+  const filteredSoundboard = useMemo(
+    () =>
+      soundboardSounds.filter((sound) =>
+        sound.name.toLowerCase().includes(soundSearch.toLowerCase().trim()),
+      ),
+    [soundSearch, soundboardSounds],
+  );
+
+  const jamHostIdentityBase = jamState?.host_identity ? identityBase(jamState.host_identity) : '';
+  const localIdentityBase = identityBase(localIdentity);
+  const isJamHost = Boolean(jamHostIdentityBase && jamHostIdentityBase === localIdentityBase);
+  const isJamListening = Boolean(
+    jamState?.listeners?.some((listener) => identityBase(listener) === localIdentityBase),
+  );
+
+  const micEnabled = useMemo(() => {
+    const local = participantViews.find((participant) => participant.isLocal);
+    return Boolean(local?.micTrack);
+  }, [participantViews]);
+
+  const camEnabled = useMemo(() => {
+    const local = participantViews.find((participant) => participant.isLocal);
+    return Boolean(local?.cameraTrack);
+  }, [participantViews]);
+
+  const screenEnabled = useMemo(() => {
+    const local = participantViews.find((participant) => participant.isLocal);
+    return Boolean(local?.screenTrack);
+  }, [participantViews]);
+
   const statusText = useMemo(() => {
-    if (snapshot.matches('connected')) return 'Connected';
+    if (snapshot.matches('connected')) {
+      return roomConnectError ? `Connected (media warning: ${roomConnectError})` : 'Connected';
+    }
     if (snapshot.matches('provisioning')) return 'Connecting…';
     if (snapshot.matches('failed')) return `Connection failed: ${snapshot.context.lastError ?? 'Unknown error'}`;
     return 'Idle';
-  }, [snapshot]);
+  }, [snapshot, roomConnectError]);
 
-  function appendDebug(text: string): void {
-    setDebugLog((prev) => [...prev, { id: Date.now() + Math.random(), text: `[${new Date().toLocaleTimeString()}] ${text}` }]);
-  }
+  const appendDebug = useCallback((text: string) => {
+    setDebugLog((prev) => [
+      ...prev,
+      { id: Date.now() + Math.floor(Math.random() * 1000), text: `[${new Date().toLocaleTimeString()}] ${text}` },
+    ]);
+  }, []);
+
+  const apiUrl = useCallback(
+    (path: string) => `${resolveControlUrl(controlUrl)}${path}`,
+    [controlUrl],
+  );
+
+  const registerRemoteMediaElement = useCallback(
+    (element: HTMLMediaElement, isAttach: boolean) => {
+      if (isAttach) {
+        remoteMediaElementsRef.current.add(element);
+      } else {
+        remoteMediaElementsRef.current.delete(element);
+      }
+
+      if (typeof (element as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId === 'function') {
+        const maybeSink = (element as HTMLMediaElement & {
+          setSinkId?: (id: string) => Promise<void>;
+        }).setSinkId;
+        if (maybeSink && selectedSpeakerId) {
+          maybeSink.call(element as HTMLMediaElement & { setSinkId: (id: string) => Promise<void> }, selectedSpeakerId).catch(
+            () => {
+              // ignore sink-id errors
+            },
+          );
+        }
+      }
+
+      element.muted = roomAudioMuted;
+      element.volume = roomAudioMuted ? 0 : 1;
+    },
+    [roomAudioMuted, selectedSpeakerId],
+  );
 
   useEffect(() => {
     document.body.dataset.theme = activeTheme;
-    setStoredValue('echo-core-theme', activeTheme);
+    setStoredValue(THEME_STORAGE_KEY, activeTheme);
   }, [activeTheme]);
 
   useEffect(() => {
     const clamped = Math.max(20, Math.min(100, uiOpacity));
     document.documentElement.style.setProperty('--ui-bg-alpha', `${clamped / 100}`);
-    setStoredValue('echo-core-ui-opacity', String(clamped));
+    setStoredValue(UI_OPACITY_KEY, String(clamped));
   }, [uiOpacity]);
+
+  useEffect(() => {
+    setStoredValue('echo-core-soundboard-volume', String(soundboardVolume));
+  }, [soundboardVolume]);
+
+  useEffect(() => {
+    setStoredValue('echo-device-mic', selectedMicId);
+  }, [selectedMicId]);
+
+  useEffect(() => {
+    setStoredValue('echo-device-cam', selectedCamId);
+  }, [selectedCamId]);
+
+  useEffect(() => {
+    setStoredValue('echo-device-speaker', selectedSpeakerId);
+  }, [selectedSpeakerId]);
 
   useEffect(() => {
     if (chatOpen) {
@@ -193,33 +527,22 @@ export function App() {
   }, [chatOpen]);
 
   useEffect(() => {
-    if (connected) {
-      appendDebug(`Connected as ${snapshot.context.session?.identity ?? 'unknown'} in ${activeRoom}`);
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: `sys-${Date.now()}`,
-          author: 'System',
-          text: `Connected to ${ROOM_DISPLAY_NAMES[activeRoom]}.`,
-          timestamp: Date.now(),
-          self: false,
-        },
-      ]);
-    }
-  }, [connected]);
+    remoteMediaElementsRef.current.forEach((element) => {
+      element.muted = roomAudioMuted;
+      element.volume = roomAudioMuted ? 0 : 1;
+    });
+  }, [roomAudioMuted]);
 
-  async function refreshDevices(): Promise<void> {
+  const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {
       setDeviceStatus('Device enumeration is not supported in this browser.');
       return;
     }
 
     try {
-      const stream = await navigator.mediaDevices
-        .getUserMedia({ audio: true, video: true })
-        .catch(() => null);
-
+      await navigator.mediaDevices.getUserMedia({ audio: true, video: true }).catch(() => null);
       const devices = await navigator.mediaDevices.enumerateDevices();
+
       const mics = devices.filter((device) => device.kind === 'audioinput');
       const cams = devices.filter((device) => device.kind === 'videoinput');
       const speakers = devices.filter((device) => device.kind === 'audiooutput');
@@ -227,107 +550,1020 @@ export function App() {
       setMicDevices(mics);
       setCamDevices(cams);
       setSpeakerDevices(speakers);
+
+      if (!selectedMicId && mics[0]) setSelectedMicId(mics[0].deviceId);
+      if (!selectedCamId && cams[0]) setSelectedCamId(cams[0].deviceId);
+      if (!selectedSpeakerId && speakers[0]) setSelectedSpeakerId(speakers[0].deviceId);
+
       setDeviceStatus(`Found ${mics.length} mic(s), ${cams.length} camera(s), ${speakers.length} speaker(s).`);
-
-      if (!identity && mics.length > 0) {
-        setField('identity', `${name.toLowerCase().replace(/\s+/g, '-')}-${Math.floor(Math.random() * 10000)}`);
-      }
-
-      stream?.getTracks().forEach((track) => track.stop());
     } catch (error) {
       setDeviceStatus(`Unable to refresh devices: ${(error as Error).message}`);
     }
-  }
+  }, [selectedMicId, selectedCamId, selectedSpeakerId]);
 
-  function buildConnectionRequest(nextRoom = activeRoom) {
-    return {
-      controlUrl: controlUrl.trim(),
+  const buildConnectionRequest = useCallback(
+    (nextRoom = activeRoom) => ({
+      controlUrl: resolveControlUrl(controlUrl),
       sfuUrl: sfuUrl.trim(),
       room: nextRoom,
       name: name.trim() || 'Viewer',
       identity: identity.trim(),
       adminPassword,
-    };
-  }
+    }),
+    [activeRoom, controlUrl, sfuUrl, name, identity, adminPassword],
+  );
 
-  function onConnect(): void {
-    actorRef.send({ type: 'CONNECT', request: buildConnectionRequest() });
-  }
-
-  function onDisconnect(): void {
-    actorRef.send({ type: 'DISCONNECT' });
-    setMicEnabled(false);
-    setCamEnabled(false);
-    setScreenEnabled(false);
-    setRoomAudioMuted(false);
-    appendDebug('Disconnected from room');
-  }
-
-  function onSwitchRoom(roomId: (typeof FIXED_ROOMS)[number]): void {
-    setField('room', roomId);
-    appendDebug(`Room selected: ${roomId}`);
-
-    if (connected) {
-      actorRef.send({ type: 'CONNECT', request: buildConnectionRequest(roomId) });
+  const disconnectRoom = useCallback(async () => {
+    if (roomRef.current) {
+      try {
+        await roomRef.current.disconnect();
+      } catch {
+        // ignore disconnect errors
+      }
+      roomRef.current.removeAllListeners();
+      roomRef.current = null;
     }
-  }
+    remoteMediaElementsRef.current.clear();
+    setRoomVersion((v) => v + 1);
+  }, []);
 
-  function sendChatMessage(event?: FormEvent<HTMLFormElement>): void {
-    event?.preventDefault();
-    const text = chatInput.trim();
-    if (!text || !connected) return;
+  const loadChatHistory = useCallback(async () => {
+    if (!adminToken) return;
 
-    const nextMessage: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      author: name || 'Viewer',
-      text,
-      timestamp: Date.now(),
-      self: true,
-    };
+    try {
+      const response = await fetch(
+        `${resolveControlUrl(controlUrl)}/api/chat/history/${encodeURIComponent(activeRoom)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        },
+      );
 
-    setChatMessages((prev) => [...prev, nextMessage]);
-    setChatInput('');
-    setEmojiPickerOpen(false);
-    appendDebug(`Chat message sent (${text.length} chars)`);
-  }
+      if (!response.ok) return;
 
-  function onChatKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      sendChatMessage();
+      const payload = (await response.json()) as ChatMessage[];
+      setChatMessages(payload.filter((entry) => entry.room === activeRoom));
+      appendDebug(`Loaded ${payload.length} chat history messages for ${activeRoom}`);
+    } catch (error) {
+      appendDebug(`Failed to load chat history: ${(error as Error).message}`);
     }
-  }
+  }, [adminToken, controlUrl, activeRoom, appendDebug]);
 
-  function addEmoji(emoji: string): void {
-    setChatInput((prev) => `${prev}${emoji}`);
-    setEmojiPickerOpen(false);
-  }
-
-  function playSound(soundId: string): void {
-    const sound = sounds.find((item) => item.id === soundId);
-    if (!sound) return;
-    setSoundboardHint(`Played ${sound.name} (${soundboardVolume}%).`);
-    appendDebug(`Soundboard: ${sound.name}`);
-  }
-
-  function toggleFavorite(soundId: string): void {
-    setSounds((prev) => prev.map((sound) => (sound.id === soundId ? { ...sound, favorite: !sound.favorite } : sound)));
-  }
-
-  function submitBugReport(): void {
-    if (!bugDescription.trim()) {
-      setBugStatus('Please describe the issue before sending.');
+  useEffect(() => {
+    if (!snapshot.context.session) {
+      setRoomConnectError(null);
+      void disconnectRoom();
       return;
     }
 
-    setBugStatus('Bug report queued in React viewer (server submission not wired yet).');
-    appendDebug(`Bug report captured (${bugDescription.length} chars)`);
-  }
+    const session = snapshot.context.session;
+    let cancelled = false;
 
-  async function copyDebugLog(): Promise<void> {
+    const nextRoom = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+    });
+
+    const bump = () => setRoomVersion((version) => version + 1);
+
+    nextRoom
+      .on(RoomEvent.Connected, () => {
+        appendDebug('LiveKit room connected');
+        setRoomConnectError(null);
+        bump();
+      })
+      .on(RoomEvent.Disconnected, () => {
+        appendDebug('LiveKit room disconnected');
+        bump();
+      })
+      .on(RoomEvent.ParticipantConnected, (participant) => {
+        appendDebug(`Participant joined: ${participant.name || participant.identity}`);
+        bump();
+      })
+      .on(RoomEvent.ParticipantDisconnected, (participant) => {
+        appendDebug(`Participant left: ${participant.name || participant.identity}`);
+        bump();
+      })
+      .on(RoomEvent.TrackSubscribed, () => bump())
+      .on(RoomEvent.TrackUnsubscribed, () => bump())
+      .on(RoomEvent.LocalTrackPublished, () => bump())
+      .on(RoomEvent.LocalTrackUnpublished, () => bump())
+      .on(RoomEvent.ActiveSpeakersChanged, () => bump())
+      .on(RoomEvent.DataReceived, (payload, participant) => {
+        try {
+          const text = new TextDecoder().decode(payload);
+          const message = JSON.parse(text) as ChatMessage & {
+            type?: string;
+            room?: string;
+            id?: string;
+            name?: string;
+            identity?: string;
+            host?: string;
+          };
+
+          if (message.type === CHAT_MESSAGE_TYPE || message.type === CHAT_FILE_TYPE) {
+            if (message.room && message.room !== activeRoom) return;
+
+            const incoming: ChatMessage = {
+              id:
+                message.id ||
+                `${message.identity || participant?.identity || 'unknown'}-${message.timestamp || Date.now()}`,
+              type: message.type,
+              identity: message.identity || participant?.identity || 'unknown',
+              name:
+                message.name || participant?.name || participant?.identity || message.identity || 'Unknown',
+              text: message.text || '',
+              timestamp: message.timestamp || Date.now(),
+              room: message.room || activeRoom,
+              fileUrl: message.fileUrl,
+              fileName: message.fileName,
+              fileType: message.fileType,
+            };
+
+            if (incoming.identity === localIdentity) return;
+
+            setChatMessages((prev) => [...prev, incoming]);
+            if (!chatOpen) {
+              setUnreadChatCount((count) => count + 1);
+            }
+            return;
+          }
+
+          if (message.type === 'soundboard-play') {
+            setSoundboardHint(`${message.name || 'Someone'} played ${message.text || 'a sound'}.`);
+            return;
+          }
+
+          if (message.type === 'jam-started') {
+            setJamStatus(`${message.host || 'Host'} started a jam session.`);
+            return;
+          }
+
+          if (message.type === 'jam-stopped') {
+            setJamStatus('Jam session ended.');
+          }
+        } catch {
+          // ignore non-json data messages
+        }
+      });
+
+    roomRef.current = nextRoom;
+
+    const run = async () => {
+      try {
+        await disconnectRoom();
+        roomRef.current = nextRoom;
+
+        await nextRoom.connect(session.request.sfuUrl, session.roomToken);
+        if (cancelled) {
+          await nextRoom.disconnect();
+          return;
+        }
+
+        bump();
+        await refreshDevices();
+        await loadChatHistory();
+      } catch (error) {
+        setRoomConnectError((error as Error).message);
+        appendDebug(`LiveKit connect failed: ${(error as Error).message}`);
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+      nextRoom.removeAllListeners();
+      void nextRoom.disconnect().catch(() => undefined);
+      if (roomRef.current === nextRoom) {
+        roomRef.current = null;
+      }
+    };
+  }, [
+    snapshot.context.session?.roomToken,
+    snapshot.context.session?.request.sfuUrl,
+    activeRoom,
+    localIdentity,
+    chatOpen,
+    appendDebug,
+    disconnectRoom,
+    refreshDevices,
+    loadChatHistory,
+  ]);
+
+  const onConnect = useCallback(() => {
+    actorRef.send({ type: 'CONNECT', request: buildConnectionRequest() });
+  }, [actorRef, buildConnectionRequest]);
+
+  const onDisconnect = useCallback(() => {
+    actorRef.send({ type: 'DISCONNECT' });
+    void disconnectRoom();
+    setRoomAudioMuted(false);
+    appendDebug('Disconnected by user');
+  }, [actorRef, disconnectRoom, appendDebug]);
+
+  const onSwitchRoom = useCallback(
+    (roomId: (typeof FIXED_ROOMS)[number]) => {
+      setField('room', roomId);
+      appendDebug(`Switching room to ${roomId}`);
+      if (connected) {
+        actorRef.send({ type: 'CONNECT', request: buildConnectionRequest(roomId) });
+      }
+    },
+    [appendDebug, connected, actorRef, buildConnectionRequest, setField],
+  );
+
+  const toggleMic = useCallback(async () => {
+    const room = roomRef.current;
+    if (!room) return;
+
+    const desired = !micEnabled;
+    try {
+      await room.localParticipant.setMicrophoneEnabled(desired, {
+        deviceId: selectedMicId || undefined,
+      });
+      appendDebug(desired ? 'Microphone enabled' : 'Microphone disabled');
+      setRoomVersion((v) => v + 1);
+    } catch (error) {
+      appendDebug(`Mic toggle failed: ${(error as Error).message}`);
+      setDeviceStatus(`Mic toggle failed: ${(error as Error).message}`);
+    }
+  }, [appendDebug, micEnabled, selectedMicId]);
+
+  const toggleCamera = useCallback(async () => {
+    const room = roomRef.current;
+    if (!room) return;
+
+    const desired = !camEnabled;
+    try {
+      await room.localParticipant.setCameraEnabled(desired, {
+        deviceId: selectedCamId || undefined,
+      });
+      appendDebug(desired ? 'Camera enabled' : 'Camera disabled');
+      setRoomVersion((v) => v + 1);
+    } catch (error) {
+      appendDebug(`Camera toggle failed: ${(error as Error).message}`);
+      setDeviceStatus(`Camera toggle failed: ${(error as Error).message}`);
+    }
+  }, [appendDebug, camEnabled, selectedCamId]);
+
+  const toggleScreenShare = useCallback(async () => {
+    const room = roomRef.current;
+    if (!room) return;
+
+    const desired = !screenEnabled;
+    try {
+      await room.localParticipant.setScreenShareEnabled(desired, {
+        audio: true,
+      });
+      appendDebug(desired ? 'Screen share started' : 'Screen share stopped');
+      setRoomVersion((v) => v + 1);
+    } catch (error) {
+      appendDebug(`Screen share toggle failed: ${(error as Error).message}`);
+      setDeviceStatus(`Screen share toggle failed: ${(error as Error).message}`);
+    }
+  }, [appendDebug, screenEnabled]);
+
+  const switchMicDevice = useCallback(
+    async (deviceId: string) => {
+      setSelectedMicId(deviceId);
+      if (!micEnabled || !roomRef.current) return;
+
+      try {
+        await roomRef.current.localParticipant.setMicrophoneEnabled(true, {
+          deviceId,
+        });
+        appendDebug(`Switched microphone: ${deviceId}`);
+      } catch (error) {
+        setDeviceStatus(`Mic switch failed: ${(error as Error).message}`);
+      }
+    },
+    [appendDebug, micEnabled],
+  );
+
+  const switchCamDevice = useCallback(
+    async (deviceId: string) => {
+      setSelectedCamId(deviceId);
+      if (!camEnabled || !roomRef.current) return;
+
+      try {
+        await roomRef.current.localParticipant.setCameraEnabled(true, {
+          deviceId,
+        });
+        appendDebug(`Switched camera: ${deviceId}`);
+      } catch (error) {
+        setDeviceStatus(`Camera switch failed: ${(error as Error).message}`);
+      }
+    },
+    [appendDebug, camEnabled],
+  );
+
+  const saveChatMessage = useCallback(
+    async (message: ChatMessage) => {
+      if (!adminToken) return;
+      try {
+        await fetch(`${resolveControlUrl(controlUrl)}/api/chat/message`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(message),
+        });
+      } catch (error) {
+        appendDebug(`Failed to save chat message: ${(error as Error).message}`);
+      }
+    },
+    [adminToken, controlUrl, appendDebug],
+  );
+
+  const publishData = useCallback(async (payload: object) => {
+    const room = roomRef.current;
+    if (!room) return;
+    try {
+      const encoded = new TextEncoder().encode(JSON.stringify(payload));
+      await room.localParticipant.publishData(encoded, { reliable: true });
+    } catch (error) {
+      appendDebug(`Data publish failed: ${(error as Error).message}`);
+    }
+  }, [appendDebug]);
+
+  const sendChatMessage = useCallback(
+    async (event?: FormEvent<HTMLFormElement>) => {
+      event?.preventDefault();
+      const text = chatInput.trim();
+      if (!text || !connected) return;
+
+      const localName = roomRef.current?.localParticipant?.name || name || 'Viewer';
+      const localIdentityValue = roomRef.current?.localParticipant?.identity || localIdentity || 'viewer';
+
+      const message: ChatMessage = {
+        id: `${localIdentityValue}-${Date.now()}`,
+        type: CHAT_MESSAGE_TYPE,
+        identity: localIdentityValue,
+        name: localName,
+        text,
+        timestamp: Date.now(),
+        room: activeRoom,
+      };
+
+      setChatMessages((prev) => [...prev, message]);
+      setChatInput('');
+      setEmojiPickerOpen(false);
+
+      await publishData(message);
+      await saveChatMessage(message);
+    },
+    [chatInput, connected, name, localIdentity, activeRoom, publishData, saveChatMessage],
+  );
+
+  const uploadChatFile = useCallback(
+    async (file: File) => {
+      if (!adminToken) {
+        appendDebug('Cannot upload chat file without admin token');
+        return null;
+      }
+
+      try {
+        const bytes = await file.arrayBuffer();
+        const response = await fetch(
+          `${resolveControlUrl(controlUrl)}/api/chat/upload?room=${encodeURIComponent(activeRoom)}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: bytes,
+          },
+        );
+
+        if (!response.ok) return null;
+        const payload = (await response.json()) as { ok?: boolean; url?: string };
+        if (!payload.ok || !payload.url) return null;
+
+        return {
+          url: payload.url,
+          name: file.name,
+          type: file.type,
+        };
+      } catch (error) {
+        appendDebug(`Chat upload failed: ${(error as Error).message}`);
+        return null;
+      }
+    },
+    [adminToken, controlUrl, activeRoom, appendDebug],
+  );
+
+  const onChatUploadChange = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file || !connected) return;
+      const upload = await uploadChatFile(file);
+      if (!upload) return;
+
+      const localName = roomRef.current?.localParticipant?.name || name || 'Viewer';
+      const localIdentityValue = roomRef.current?.localParticipant?.identity || localIdentity || 'viewer';
+
+      const message: ChatMessage = {
+        id: `${localIdentityValue}-${Date.now()}`,
+        type: CHAT_FILE_TYPE,
+        identity: localIdentityValue,
+        name: localName,
+        text: chatInput.trim(),
+        timestamp: Date.now(),
+        room: activeRoom,
+        fileUrl: upload.url,
+        fileName: upload.name,
+        fileType: upload.type,
+      };
+
+      setChatMessages((prev) => [...prev, message]);
+      setChatInput('');
+      await publishData(message);
+      await saveChatMessage(message);
+      event.target.value = '';
+    },
+    [activeRoom, chatInput, connected, localIdentity, name, publishData, saveChatMessage, uploadChatFile],
+  );
+
+  const onChatKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        void sendChatMessage();
+      }
+    },
+    [sendChatMessage],
+  );
+
+  const addEmoji = useCallback((emoji: string) => {
+    setChatInput((prev) => `${prev}${emoji}`);
+    setEmojiPickerOpen(false);
+  }, []);
+
+  const resolveFileUrl = useCallback(
+    (path: string) => {
+      if (!path) return '';
+      if (path.startsWith('http://') || path.startsWith('https://')) return path;
+      return `${resolveControlUrl(controlUrl)}${path}`;
+    },
+    [controlUrl],
+  );
+
+  const loadSoundboard = useCallback(async () => {
+    if (!adminToken) return;
+
+    try {
+      const response = await fetch(
+        apiUrl(`/api/soundboard/list?roomId=${encodeURIComponent(activeRoom)}`),
+        {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        setSoundboardHint(`Failed to load soundboard (${response.status})`);
+        return;
+      }
+
+      const payload = (await response.json()) as {
+        sounds?: Array<{ id: string; name: string; icon?: string; volume?: number }>;
+      };
+
+      const favorites = safeJsonParse<string[]>(getStoredValue('echo-soundboard-favorites'), []);
+
+      setSoundboardSounds(
+        (payload.sounds ?? []).map((sound) => ({
+          id: sound.id,
+          name: sound.name,
+          icon: sound.icon || '🔊',
+          volume: sound.volume ?? 100,
+          favorite: favorites.includes(sound.id),
+        })),
+      );
+
+      setSoundboardHint('');
+    } catch (error) {
+      setSoundboardHint(`Failed to load soundboard: ${(error as Error).message}`);
+    }
+  }, [adminToken, activeRoom, apiUrl]);
+
+  const toggleSoundFavorite = useCallback((id: string) => {
+    setSoundboardSounds((prev) => {
+      const next = prev.map((sound) =>
+        sound.id === id ? { ...sound, favorite: !sound.favorite } : sound,
+      );
+      setStoredValue(
+        'echo-soundboard-favorites',
+        JSON.stringify(next.filter((sound) => sound.favorite).map((sound) => sound.id)),
+      );
+      return next;
+    });
+  }, []);
+
+  const playSound = useCallback(
+    async (sound: SoundboardSound) => {
+      if (!adminToken) return;
+
+      try {
+        const response = await fetch(apiUrl(`/api/soundboard/file/${encodeURIComponent(sound.id)}`), {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        });
+
+        if (!response.ok) {
+          setSoundboardHint(`Failed to play sound (${response.status})`);
+          return;
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.volume = (Math.max(0, Math.min(100, soundboardVolume)) / 100) *
+          (Math.max(0, Math.min(200, sound.volume)) / 100);
+        await audio.play();
+
+        setSoundboardHint(`Played ${sound.name}`);
+        await publishData({
+          type: 'soundboard-play',
+          name: roomRef.current?.localParticipant?.name || name || 'Viewer',
+          text: sound.name,
+          room: activeRoom,
+        });
+
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+      } catch (error) {
+        setSoundboardHint(`Sound play failed: ${(error as Error).message}`);
+      }
+    },
+    [adminToken, apiUrl, soundboardVolume, publishData, name, activeRoom],
+  );
+
+  const uploadSound = useCallback(async () => {
+    if (!adminToken) return;
+    if (!soundUploadFileRef.current) {
+      setSoundboardHint('Choose a sound file first.');
+      return;
+    }
+
+    const qs = new URLSearchParams();
+    qs.set('roomId', activeRoom);
+    if (soundNameInput.trim()) qs.set('name', soundNameInput.trim());
+    qs.set('icon', '🔊');
+    qs.set('volume', String(soundClipVolume));
+
+    try {
+      const response = await fetch(apiUrl(`/api/soundboard/upload?${qs.toString()}`), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': soundUploadFileRef.current.type || 'application/octet-stream',
+        },
+        body: await soundUploadFileRef.current.arrayBuffer(),
+      });
+
+      if (!response.ok) {
+        setSoundboardHint(`Upload failed (${response.status})`);
+        return;
+      }
+
+      setSoundboardHint('Sound uploaded.');
+      soundUploadFileRef.current = null;
+      setSoundFileLabel('Select audio');
+      setSoundNameInput('');
+      await loadSoundboard();
+    } catch (error) {
+      setSoundboardHint(`Upload failed: ${(error as Error).message}`);
+    }
+  }, [adminToken, activeRoom, soundNameInput, soundClipVolume, apiUrl, loadSoundboard]);
+
+  useEffect(() => {
+    if (soundboardCompactOpen || soundboardEditOpen) {
+      void loadSoundboard();
+    }
+  }, [soundboardCompactOpen, soundboardEditOpen, loadSoundboard]);
+
+  const jamApplyVolume = useCallback(() => {
+    const gain = jamGainRef.current;
+    if (!gain) return;
+    gain.gain.value = roomAudioMuted ? 0 : Math.max(0, Math.min(100, jamVolume)) / 100;
+  }, [roomAudioMuted, jamVolume]);
+
+  const stopJamAudioStream = useCallback(() => {
+    jamStoppingRef.current = true;
+
+    if (jamAudioWsRef.current) {
+      try {
+        jamAudioWsRef.current.close();
+      } catch {
+        // ignore
+      }
+      jamAudioWsRef.current = null;
+    }
+
+    if (jamAudioCtxRef.current) {
+      void jamAudioCtxRef.current.close().catch(() => undefined);
+      jamAudioCtxRef.current = null;
+      jamGainRef.current = null;
+    }
+
+    jamNextPlayRef.current = 0;
+  }, []);
+
+  const startJamAudioStream = useCallback(() => {
+    if (!adminToken || !connected) return;
+    if (jamAudioWsRef.current) return;
+
+    jamStoppingRef.current = false;
+
+    const url = new URL(apiUrl('/api/jam/audio'));
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('token', adminToken);
+
+    const audioCtx = new AudioContext();
+    const gain = audioCtx.createGain();
+    gain.connect(audioCtx.destination);
+    jamAudioCtxRef.current = audioCtx;
+    jamGainRef.current = gain;
+    jamNextPlayRef.current = audioCtx.currentTime;
+
+    const ws = new WebSocket(url.toString());
+    ws.binaryType = 'arraybuffer';
+    jamAudioWsRef.current = ws;
+
+    ws.onopen = () => {
+      jamRetriesRef.current = 0;
+      setJamStatus('Jam audio stream connected.');
+      jamApplyVolume();
+    };
+
+    ws.onmessage = (event) => {
+      const context = jamAudioCtxRef.current;
+      const gainNode = jamGainRef.current;
+      if (!context || !gainNode) return;
+
+      if (!(event.data instanceof ArrayBuffer)) return;
+
+      void context.decodeAudioData(event.data.slice(0)).then((buffer) => {
+        if (!jamAudioCtxRef.current || !jamGainRef.current) return;
+
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(gainNode);
+
+        const now = context.currentTime;
+        const startAt = Math.max(now + 0.05, jamNextPlayRef.current || now + 0.05);
+        source.start(startAt);
+        jamNextPlayRef.current = startAt + buffer.duration;
+      }).catch(() => undefined);
+    };
+
+    ws.onclose = () => {
+      jamAudioWsRef.current = null;
+      if (jamStoppingRef.current) return;
+
+      if (jamRetriesRef.current >= 3) {
+        setJamError('Jam audio stream disconnected.');
+        return;
+      }
+
+      jamRetriesRef.current += 1;
+      const delay = 1000 * jamRetriesRef.current;
+      setTimeout(() => {
+        if (!jamStoppingRef.current) startJamAudioStream();
+      }, delay);
+    };
+
+    ws.onerror = () => {
+      setJamError('Jam audio stream error.');
+    };
+  }, [adminToken, apiUrl, connected, jamApplyVolume]);
+
+  useEffect(() => {
+    jamApplyVolume();
+  }, [jamApplyVolume]);
+
+  const fetchJamState = useCallback(async () => {
+    if (!adminToken) return;
+
+    try {
+      const response = await fetch(apiUrl('/api/jam/state'), {
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      });
+
+      if (!response.ok) return;
+
+      const payload = (await response.json()) as JamState;
+      setJamState(payload);
+
+      if (payload.active && payload.listeners.some((listener) => identityBase(listener) === localIdentityBase)) {
+        startJamAudioStream();
+      } else {
+        stopJamAudioStream();
+      }
+    } catch (error) {
+      setJamError(`Jam state failed: ${(error as Error).message}`);
+    }
+  }, [adminToken, apiUrl, localIdentityBase, startJamAudioStream, stopJamAudioStream]);
+
+  useEffect(() => {
+    if (!jamOpen || !adminToken) return;
+
+    void fetchJamState();
+    const timer = window.setInterval(() => {
+      void fetchJamState();
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [jamOpen, adminToken, fetchJamState]);
+
+  useEffect(() => {
+    if (!jamOpen || !adminToken) return;
+
+    if (jamSearch.trim().length < 2) {
+      setJamSearchResults([]);
+      return;
+    }
+
+    const handle = window.setTimeout(async () => {
+      try {
+        const response = await fetch(apiUrl('/api/jam/search'), {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ query: jamSearch.trim() }),
+        });
+
+        if (!response.ok) return;
+        const payload = (await response.json()) as JamTrack[];
+        setJamSearchResults(payload);
+      } catch {
+        // ignore search errors
+      }
+    }, 300);
+
+    return () => window.clearTimeout(handle);
+  }, [jamSearch, jamOpen, adminToken, apiUrl]);
+
+  const generateRandomString = (length: number) => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    const bytes = new Uint8Array(length);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (value) => chars[value % chars.length]).join('');
+  };
+
+  const generateCodeChallenge = async (verifier: string) => {
+    const data = new TextEncoder().encode(verifier);
+    const digest = await crypto.subtle.digest('SHA-256', data);
+    const base64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+
+  const connectSpotify = useCallback(async () => {
+    if (!adminToken) return;
+
+    try {
+      setJamError('');
+      setJamStatus('Connecting to Spotify…');
+
+      const state = generateRandomString(32);
+      const verifier = generateRandomString(128);
+      const challenge = await generateCodeChallenge(verifier);
+
+      spotifyAuthStateRef.current = state;
+      spotifyVerifierRef.current = verifier;
+
+      const initResponse = await fetch(apiUrl('/api/jam/spotify-init'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ state, verifier, challenge }),
+      });
+
+      if (!initResponse.ok) {
+        setJamError(`Spotify init failed (${initResponse.status})`);
+        return;
+      }
+
+      const initData = (await initResponse.json()) as { auth_url?: string };
+      if (!initData.auth_url) {
+        setJamError('Spotify auth URL missing');
+        return;
+      }
+
+      window.open(initData.auth_url, '_blank', 'noopener');
+
+      let tries = 0;
+      const poll = window.setInterval(async () => {
+        tries += 1;
+        if (tries > 90) {
+          window.clearInterval(poll);
+          setJamError('Spotify login timed out');
+          return;
+        }
+
+        const authState = spotifyAuthStateRef.current;
+        const authVerifier = spotifyVerifierRef.current;
+        if (!authState || !authVerifier) return;
+
+        try {
+          const codeResponse = await fetch(
+            `${apiUrl('/api/jam/spotify-code')}?state=${encodeURIComponent(authState)}`,
+            {
+              headers: {
+                Authorization: `Bearer ${adminToken}`,
+              },
+            },
+          );
+
+          if (!codeResponse.ok) return;
+
+          const codePayload = (await codeResponse.json()) as { code?: string };
+          if (!codePayload.code) return;
+
+          window.clearInterval(poll);
+
+          const tokenResponse = await fetch(apiUrl('/api/jam/spotify-token'), {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ code: codePayload.code, verifier: authVerifier }),
+          });
+
+          if (!tokenResponse.ok) {
+            setJamError(`Spotify token exchange failed (${tokenResponse.status})`);
+            return;
+          }
+
+          setJamStatus('Spotify connected.');
+          void fetchJamState();
+        } catch {
+          // ignore polling errors
+        }
+      }, 2000);
+    } catch (error) {
+      setJamError(`Spotify connect error: ${(error as Error).message}`);
+    }
+  }, [adminToken, apiUrl, fetchJamState]);
+
+  const jamAction = useCallback(
+    async (
+      endpoint: string,
+      options?: {
+        method?: 'POST' | 'GET';
+        body?: unknown;
+        onSuccess?: () => void;
+      },
+    ) => {
+      if (!adminToken) return;
+
+      try {
+        const response = await fetch(apiUrl(endpoint), {
+          method: options?.method ?? 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: options?.body ? JSON.stringify(options.body) : undefined,
+        });
+
+        if (!response.ok) {
+          setJamError(`${endpoint} failed (${response.status})`);
+          return;
+        }
+
+        options?.onSuccess?.();
+        setJamError('');
+        await fetchJamState();
+      } catch (error) {
+        setJamError(`${endpoint} failed: ${(error as Error).message}`);
+      }
+    },
+    [adminToken, apiUrl, fetchJamState],
+  );
+
+  const addJamTrack = useCallback(
+    async (track: JamTrack) => {
+      await jamAction('/api/jam/queue', {
+        body: {
+          ...track,
+          added_by: localIdentity || name || 'viewer',
+        },
+      });
+    },
+    [jamAction, localIdentity, name],
+  );
+
+  const removeJamTrack = useCallback(
+    async (index: number) => {
+      await jamAction('/api/jam/queue-remove', {
+        body: {
+          index,
+          identity: localIdentity,
+        },
+      });
+    },
+    [jamAction, localIdentity],
+  );
+
+  const uploadBugScreenshot = useCallback(async () => {
+    if (!bugScreenshotFile || !adminToken) return null;
+
+    try {
+      const formData = new FormData();
+      formData.append('file', bugScreenshotFile);
+
+      const response = await fetch(apiUrl('/api/chat/upload'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) return null;
+      const payload = (await response.json()) as { ok?: boolean; url?: string };
+      if (!payload.ok || !payload.url) return null;
+
+      setBugScreenshotUrl(payload.url);
+      return payload.url;
+    } catch {
+      return null;
+    }
+  }, [bugScreenshotFile, adminToken, apiUrl]);
+
+  const submitBugReport = useCallback(async () => {
+    if (!adminToken) {
+      setBugStatus('Not connected.');
+      return;
+    }
+
+    if (!bugDescription.trim()) {
+      setBugStatus('Please describe the issue.');
+      return;
+    }
+
+    setBugStatus('Sending...');
+
+    const screenshotUrl = bugScreenshotUrl || (await uploadBugScreenshot());
+
+    try {
+      const response = await fetch(apiUrl('/api/bug-report'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          description: bugDescription.trim(),
+          identity: localIdentity,
+          name: name || localIdentity || 'Viewer',
+          room: activeRoom,
+          screenshot_url: screenshotUrl || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        setBugStatus(`Failed (${response.status})`);
+        return;
+      }
+
+      setBugStatus('Report sent! Thank you.');
+      setBugDescription('');
+      setBugScreenshotFile(null);
+      setBugScreenshotUrl(null);
+    } catch (error) {
+      setBugStatus(`Error: ${(error as Error).message}`);
+    }
+  }, [
+    adminToken,
+    bugDescription,
+    bugScreenshotUrl,
+    uploadBugScreenshot,
+    apiUrl,
+    localIdentity,
+    name,
+    activeRoom,
+  ]);
+
+  const copyDebugLog = useCallback(async () => {
     const text = debugLog.map((line) => line.text).join('\n');
     await navigator.clipboard.writeText(text);
-  }
+  }, [debugLog]);
+
+  const canUseRoomControls = connected && Boolean(adminToken);
 
   return (
     <main className="app">
@@ -355,13 +1591,24 @@ export function App() {
           </label>
           <label>
             SFU URL
-            <input id="sfu-url" type="text" value={sfuUrl} placeholder="ws://127.0.0.1:7880" onChange={(event) => setField('sfuUrl', event.target.value)} />
+            <input
+              id="sfu-url"
+              type="text"
+              value={sfuUrl}
+              placeholder="ws://127.0.0.1:7880"
+              onChange={(event) => setField('sfuUrl', event.target.value)}
+            />
           </label>
           <input id="room" type="hidden" value={activeRoom} readOnly />
           <input id="identity" type="hidden" value={identity} readOnly />
           <label>
             Name
-            <input id="name" type="text" value={name} onChange={(event) => setField('name', event.target.value)} />
+            <input
+              id="name"
+              type="text"
+              value={name}
+              onChange={(event) => setField('name', event.target.value)}
+            />
           </label>
           <label>
             Admin password
@@ -385,17 +1632,17 @@ export function App() {
         </div>
 
         <div className="actions publish-actions">
-          <button id="toggle-mic" disabled={!canUseRoomControls} className={micEnabled ? 'is-on' : ''} onClick={() => setMicEnabled((prev) => !prev)}>
+          <button id="toggle-mic" disabled={!canUseRoomControls} className={micEnabled ? 'is-on' : ''} onClick={() => void toggleMic()}>
             {micEnabled ? 'Disable Mic' : 'Enable Mic'}
           </button>
-          <button id="toggle-cam" disabled={!canUseRoomControls} className={camEnabled ? 'is-on' : ''} onClick={() => setCamEnabled((prev) => !prev)}>
+          <button id="toggle-cam" disabled={!canUseRoomControls} className={camEnabled ? 'is-on' : ''} onClick={() => void toggleCamera()}>
             {camEnabled ? 'Disable Camera' : 'Enable Camera'}
           </button>
           <button
             id="toggle-screen"
             disabled={!canUseRoomControls}
             className={screenEnabled ? 'is-on' : ''}
-            onClick={() => setScreenEnabled((prev) => !prev)}
+            onClick={() => void toggleScreenShare()}
           >
             {screenEnabled ? 'Stop Screen' : 'Share Screen'}
           </button>
@@ -404,7 +1651,13 @@ export function App() {
         <div className="actions device-actions">
           <label className="device-field">
             Mic
-            <select id="mic-select" disabled={!connected}>
+            <select
+              id="mic-select"
+              disabled={!connected}
+              value={selectedMicId}
+              onChange={(event) => void switchMicDevice(event.target.value)}
+            >
+              <option value="">Default</option>
               {micDevices.map((device) => (
                 <option key={device.deviceId || device.label} value={device.deviceId}>
                   {device.label || 'Microphone'}
@@ -414,7 +1667,13 @@ export function App() {
           </label>
           <label className="device-field">
             Camera
-            <select id="cam-select" disabled={!connected}>
+            <select
+              id="cam-select"
+              disabled={!connected}
+              value={selectedCamId}
+              onChange={(event) => void switchCamDevice(event.target.value)}
+            >
+              <option value="">Default</option>
               {camDevices.map((device) => (
                 <option key={device.deviceId || device.label} value={device.deviceId}>
                   {device.label || 'Camera'}
@@ -424,7 +1683,13 @@ export function App() {
           </label>
           <label className="device-field">
             Output
-            <select id="speaker-select" disabled={!connected}>
+            <select
+              id="speaker-select"
+              disabled={!connected}
+              value={selectedSpeakerId}
+              onChange={(event) => setSelectedSpeakerId(event.target.value)}
+            >
+              <option value="">Default</option>
               {speakerDevices.map((device) => (
                 <option key={device.deviceId || device.label} value={device.deviceId}>
                   {device.label || 'Speaker'}
@@ -451,7 +1716,11 @@ export function App() {
               <div className="online-users-header">Currently Online ({onlineUsersQuery.data.length})</div>
               <div className="online-users-list">
                 {onlineUsersQuery.data.map((user, index) => (
-                  <span key={`${user.identity ?? user.name ?? 'online'}-${index}`} className="online-user-pill" title={user.room ? `In room: ${user.room}` : ''}>
+                  <span
+                    key={`${user.identity ?? user.name ?? 'online'}-${index}`}
+                    className="online-user-pill"
+                    title={user.room ? `In room: ${user.room}` : ''}
+                  >
                     {user.name ?? user.identity ?? 'Unknown'}
                   </span>
                 ))}
@@ -496,11 +1765,19 @@ export function App() {
             </div>
           </div>
 
-          <div id="jam-banner" className={`jam-banner${canUseRoomControls ? '' : ' hidden'}`}>
-            <img className="jam-banner-art" src="/badge.jpg" alt="" />
+          <div id="jam-banner" className={`jam-banner${jamState?.active ? '' : ' hidden'}`}>
+            {jamState?.now_playing?.album_art_url ? (
+              <img className="jam-banner-art" src={jamState.now_playing.album_art_url} alt="Now playing" />
+            ) : (
+              <img className="jam-banner-art" src="/badge.jpg" alt="Now playing" />
+            )}
             <div className="jam-banner-info">
-              <div className="jam-banner-title">Jam ready in React viewer</div>
-              <div className="jam-banner-artist">Open Jam to connect Spotify controls</div>
+              <div className="jam-banner-title">
+                {jamState?.now_playing?.name || 'Jam active'}
+              </div>
+              <div className="jam-banner-artist">
+                {jamState?.now_playing?.artist || `${jamState?.listener_count || 0} listening`}
+              </div>
             </div>
             <span className="jam-banner-live">JAM</span>
           </div>
@@ -527,18 +1804,28 @@ export function App() {
               <h2>Screens</h2>
             </div>
             <div id="screen-grid" className="media-grid screens-grid">
-              {activeParticipants.length > 0 ? (
-                activeParticipants.map((participant) => (
-                  <div key={`${participant.identity}-screen`} className="tile">
-                    <h3>{participant.name ?? participant.identity}</h3>
-                    <div className="hint">No active screen share</div>
-                  </div>
+              {screenParticipants.length > 0 ? (
+                screenParticipants.map((participant) => (
+                  <article key={`${participant.identity}-screen`} className="tile">
+                    <h3>{participant.name}</h3>
+                    <TrackRenderer
+                      track={participant.screenTrack}
+                      className="h-full w-full rounded-lg bg-black object-contain"
+                      muted={participant.isLocal || roomAudioMuted}
+                      onMounted={(element) => {
+                        if (!participant.isLocal) registerRemoteMediaElement(element, true);
+                      }}
+                      onUnmounted={(element) => {
+                        if (!participant.isLocal) registerRemoteMediaElement(element, false);
+                      }}
+                    />
+                  </article>
                 ))
               ) : (
-                <div className="tile">
+                <article className="tile">
                   <h3>Room preview</h3>
                   <div className="hint">No shared screens yet.</div>
-                </div>
+                </article>
               )}
             </div>
           </div>
@@ -554,7 +1841,13 @@ export function App() {
                   <button id="debug-toggle" type="button" onClick={() => setDebugOpen(true)}>
                     Debug
                   </button>
-                  <button id="open-chat" type="button" disabled={!connected} onClick={() => setChatOpen(true)} className={unreadChatCount > 0 ? 'has-unread' : ''}>
+                  <button
+                    id="open-chat"
+                    type="button"
+                    disabled={!connected}
+                    onClick={() => setChatOpen(true)}
+                    className={unreadChatCount > 0 ? 'has-unread' : ''}
+                  >
                     Chat
                     <span id="chat-badge" className={`chat-badge${unreadChatCount > 0 ? '' : ' hidden'}`}>
                       {unreadChatCount > 99 ? '99+' : unreadChatCount}
@@ -590,23 +1883,42 @@ export function App() {
             </div>
 
             <div id="user-list" className="user-list">
-              {activeParticipants.length === 0 ? <div className="hint">No active users in this room yet.</div> : null}
-              {activeParticipants.map((participant) => (
-                <article key={participant.identity} className="user-card">
+              {participantViews.length === 0 ? <div className="hint">No active users in this room yet.</div> : null}
+              {participantViews.map((participant) => (
+                <article key={participant.identity} className={`user-card${participant.cameraTrack ? ' has-camera' : ''}`}>
                   <div className="user-header">
-                    <div className="user-avatar">{getInitials(participant.name ?? participant.identity)}</div>
+                    <div className="user-avatar">
+                      {participant.cameraTrack ? (
+                        <TrackRenderer
+                          track={participant.cameraTrack}
+                          className="h-full w-full object-cover"
+                          muted={participant.isLocal}
+                          onMounted={(element) => {
+                            if (!participant.isLocal) registerRemoteMediaElement(element, true);
+                          }}
+                          onUnmounted={(element) => {
+                            if (!participant.isLocal) registerRemoteMediaElement(element, false);
+                          }}
+                        />
+                      ) : (
+                        getInitials(participant.name)
+                      )}
+                    </div>
                     <div className="user-meta">
-                      <h3 className="user-name">{participant.name ?? participant.identity}</h3>
+                      <h3 className="user-name">{participant.name}</h3>
                       <div className="user-status">
-                        <span className="pill is-on">Connected</span>
-                        <span className="pill">Mic unknown</span>
+                        <span className={`pill${participant.micTrack ? ' is-on' : ''}`}>
+                          {participant.micTrack ? 'Mic On' : 'Mic Off'}
+                        </span>
+                        <span className={`pill${participant.screenTrack ? ' is-active' : ''}`}>
+                          {participant.screenTrack ? 'Sharing' : 'No Screen'}
+                        </span>
+                        {participant.speaking ? <span className="pill is-active">Speaking</span> : null}
                       </div>
                     </div>
                   </div>
                   <div className="user-controls">
-                    <button className="mute-button" type="button">
-                      Mute
-                    </button>
+                    {!participant.isLocal ? <button className="mute-button" type="button" onClick={() => setRoomAudioMuted((prev) => !prev)}>{roomAudioMuted ? 'Unmute' : 'Mute'}</button> : null}
                   </div>
                 </article>
               ))}
@@ -624,24 +1936,55 @@ export function App() {
             </div>
             <div id="chat-messages" className="chat-messages">
               {chatMessages.map((message) => (
-                <article key={message.id} className="chat-message">
+                <article key={message.id} className="chat-message" data-msg-id={message.id}>
                   <div className="chat-message-header">
-                    <span className={`chat-message-author${message.self ? ' self' : ''}`}>{message.author}</span>
+                    <span className={`chat-message-author${message.identity === localIdentity ? ' self' : ''}`}>{message.name || message.identity}</span>
                     <span className="chat-message-time">{formatChatTime(message.timestamp)}</span>
                   </div>
-                  <div className="chat-message-content">{message.text}</div>
+                  {message.fileUrl ? (
+                    <>
+                      {message.fileType?.startsWith('image/') ? (
+                        <img className="chat-message-image" src={resolveFileUrl(message.fileUrl)} alt={message.fileName || 'Chat upload'} />
+                      ) : null}
+                      {message.fileType?.startsWith('audio/') ? (
+                        <audio className="chat-message-audio" controls src={resolveFileUrl(message.fileUrl)} />
+                      ) : null}
+                      {message.fileType?.startsWith('video/') ? (
+                        <video className="chat-message-image" controls src={resolveFileUrl(message.fileUrl)} />
+                      ) : null}
+                      {!message.fileType?.startsWith('image/') && !message.fileType?.startsWith('audio/') && !message.fileType?.startsWith('video/') ? (
+                        <a className="chat-message-file" href={resolveFileUrl(message.fileUrl)} target="_blank" rel="noreferrer">
+                          <div className="chat-message-file-icon">📄</div>
+                          <div className="chat-message-file-name">{message.fileName || 'File'}</div>
+                        </a>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {message.text ? <div className="chat-message-content">{message.text}</div> : null}
                 </article>
               ))}
               {chatMessages.length === 0 ? <div className="hint">No messages yet.</div> : null}
             </div>
             <form className="chat-input-container" onSubmit={sendChatMessage}>
-              <button id="chat-upload-btn" type="button" className="chat-upload-btn" title="Upload file or image" disabled>
+              <label htmlFor="chat-file-input" id="chat-upload-btn" className="chat-upload-btn" title="Upload file or image">
                 📎
-              </button>
-              <button id="chat-emoji-btn" type="button" className="chat-emoji-btn" title="Add emoji" onClick={() => setEmojiPickerOpen((prev) => !prev)}>
+              </label>
+              <button
+                id="chat-emoji-btn"
+                type="button"
+                className="chat-emoji-btn"
+                title="Add emoji"
+                onClick={() => setEmojiPickerOpen((prev) => !prev)}
+              >
                 😊
               </button>
-              <input type="file" id="chat-file-input" className="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
+              <input
+                type="file"
+                id="chat-file-input"
+                className="hidden"
+                accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt"
+                onChange={(event) => void onChatUploadChange(event)}
+              />
               <div id="chat-emoji-picker" className={`chat-emoji-picker${emojiPickerOpen ? '' : ' hidden'}`}>
                 {EMOJI_LIST.map((emoji) => (
                   <button key={emoji} type="button" className="chat-emoji" onClick={() => addEmoji(emoji)}>
@@ -679,9 +2022,10 @@ export function App() {
           <div className="device-actions">
             <label className="device-field">
               Mic
-              <select disabled={!connected}>
+              <select value={selectedMicId} onChange={(event) => void switchMicDevice(event.target.value)}>
+                <option value="">Default</option>
                 {micDevices.map((device) => (
-                  <option key={`settings-${device.deviceId || device.label}`} value={device.deviceId}>
+                  <option key={`settings-mic-${device.deviceId}`} value={device.deviceId}>
                     {device.label || 'Microphone'}
                   </option>
                 ))}
@@ -689,9 +2033,10 @@ export function App() {
             </label>
             <label className="device-field">
               Camera
-              <select disabled={!connected}>
+              <select value={selectedCamId} onChange={(event) => void switchCamDevice(event.target.value)}>
+                <option value="">Default</option>
                 {camDevices.map((device) => (
-                  <option key={`settings-${device.deviceId || device.label}`} value={device.deviceId}>
+                  <option key={`settings-cam-${device.deviceId}`} value={device.deviceId}>
                     {device.label || 'Camera'}
                   </option>
                 ))}
@@ -699,15 +2044,16 @@ export function App() {
             </label>
             <label className="device-field">
               Output
-              <select disabled={!connected}>
+              <select value={selectedSpeakerId} onChange={(event) => setSelectedSpeakerId(event.target.value)}>
+                <option value="">Default</option>
                 {speakerDevices.map((device) => (
-                  <option key={`settings-${device.deviceId || device.label}`} value={device.deviceId}>
+                  <option key={`settings-speaker-${device.deviceId}`} value={device.deviceId}>
                     {device.label || 'Speaker'}
                   </option>
                 ))}
               </select>
             </label>
-            <button type="button" onClick={() => void refreshDevices()} disabled={!connected}>
+            <button type="button" onClick={() => void refreshDevices()}>
               Refresh Devices
             </button>
           </div>
@@ -751,7 +2097,11 @@ export function App() {
         >
           Soundboard Volume
         </button>
-        <div id="soundboard-volume-panel-compact" className={`soundboard-volume-compact${soundboardVolumeOpen ? '' : ' hidden'}`} aria-hidden={!soundboardVolumeOpen}>
+        <div
+          id="soundboard-volume-panel-compact"
+          className={`soundboard-volume-compact${soundboardVolumeOpen ? '' : ' hidden'}`}
+          aria-hidden={!soundboardVolumeOpen}
+        >
           <div className="soundboard-volume-row">
             <input
               id="soundboard-volume"
@@ -767,11 +2117,19 @@ export function App() {
           </div>
         </div>
         <div id="soundboard-compact-grid" className="soundboard-compact-grid">
-          {sounds.filter((sound) => sound.favorite).map((sound) => (
-            <button key={`compact-${sound.id}`} className="sound-icon-btn is-favorite" type="button" title={sound.name} onClick={() => playSound(sound.id)}>
-              {sound.icon}
-            </button>
-          ))}
+          {soundboardSounds
+            .filter((sound) => sound.favorite)
+            .map((sound) => (
+              <button
+                key={`compact-${sound.id}`}
+                className="sound-icon-btn is-favorite"
+                type="button"
+                title={sound.name}
+                onClick={() => void playSound(sound)}
+              >
+                {sound.icon}
+              </button>
+            ))}
         </div>
       </div>
 
@@ -779,7 +2137,13 @@ export function App() {
         <div className="soundboard-header">
           <h3>Soundboard</h3>
           <div className="soundboard-actions">
-            <button id="toggle-soundboard-volume" type="button" aria-expanded={soundboardVolumeOpen} aria-controls="soundboard-volume-panel" onClick={() => setSoundboardVolumeOpen((prev) => !prev)}>
+            <button
+              id="toggle-soundboard-volume"
+              type="button"
+              aria-expanded={soundboardVolumeOpen}
+              aria-controls="soundboard-volume-panel"
+              onClick={() => setSoundboardVolumeOpen((prev) => !prev)}
+            >
               Soundboard Volume
             </button>
             <button
@@ -794,7 +2158,11 @@ export function App() {
             </button>
           </div>
         </div>
-        <div id="soundboard-volume-panel" className={`soundboard-volume${soundboardVolumeOpen ? '' : ' hidden'}`} aria-hidden={!soundboardVolumeOpen}>
+        <div
+          id="soundboard-volume-panel"
+          className={`soundboard-volume${soundboardVolumeOpen ? '' : ' hidden'}`}
+          aria-hidden={!soundboardVolumeOpen}
+        >
           <div className="soundboard-volume-row">
             <input
               id="soundboard-volume-edit"
@@ -813,13 +2181,18 @@ export function App() {
           <input id="sound-search" type="text" placeholder="Find the perfect sound" value={soundSearch} onChange={(event) => setSoundSearch(event.target.value)} />
         </div>
         <div id="soundboard-grid" className="soundboard-grid">
-          {filteredSounds.map((sound) => (
+          {filteredSoundboard.map((sound) => (
             <div key={sound.id} className={`sound-tile${sound.favorite ? ' is-favorite' : ''}`}>
-              <button type="button" className="sound-tile-main" onClick={() => playSound(sound.id)}>
+              <button type="button" className="sound-tile-main" onClick={() => void playSound(sound)}>
                 <span className="sound-icon">{sound.icon}</span>
                 <span className="sound-name">{sound.name}</span>
               </button>
-              <button type="button" className={`sound-fav${sound.favorite ? ' is-active' : ''}`} title="Favorite" onClick={() => toggleFavorite(sound.id)}>
+              <button
+                type="button"
+                className={`sound-fav${sound.favorite ? ' is-active' : ''}`}
+                title="Favorite"
+                onClick={() => toggleSoundFavorite(sound.id)}
+              >
                 ★
               </button>
             </div>
@@ -827,28 +2200,51 @@ export function App() {
         </div>
         <div className="soundboard-upload">
           <div className="soundboard-upload-row">
-            <input id="sound-name" type="text" maxLength={60} placeholder="Name (e.g. Hooray!)" disabled />
-            <button id="sound-upload-button" type="button" disabled>
+            <input
+              id="sound-name"
+              type="text"
+              maxLength={60}
+              placeholder="Name (e.g. Hooray!)"
+              value={soundNameInput}
+              onChange={(event) => setSoundNameInput(event.target.value)}
+            />
+            <button id="sound-upload-button" type="button" onClick={() => void uploadSound()}>
               Upload
             </button>
-            <button id="sound-cancel-edit" type="button" className="hidden" disabled>
+            <button id="sound-cancel-edit" type="button" className="hidden">
               Cancel
             </button>
             <label className="sound-file">
-              <input id="sound-file" type="file" accept="audio/*" disabled />
-              <span id="sound-file-label">Select audio</span>
+              <input
+                id="sound-file"
+                type="file"
+                accept="audio/*"
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null;
+                  soundUploadFileRef.current = file;
+                  setSoundFileLabel(file ? file.name : 'Select audio');
+                }}
+              />
+              <span id="sound-file-label">{soundFileLabel}</span>
             </label>
           </div>
           <div className="soundboard-upload-volume">
             <div className="soundboard-upload-volume-label">Clip volume</div>
-            <input id="sound-clip-volume" type="range" min="0" max="200" value="100" readOnly />
+            <input
+              id="sound-clip-volume"
+              type="range"
+              min="0"
+              max="200"
+              value={soundClipVolume}
+              onChange={(event) => setSoundClipVolume(Number(event.target.value))}
+            />
             <div id="sound-clip-volume-value" className="soundboard-volume-value">
-              100%
+              {soundClipVolume}%
             </div>
           </div>
           <div className="soundboard-icons hidden" id="soundboard-icons-section">
             <div className="soundboard-icons-label">Pick an icon</div>
-            <div id="soundboard-icon-grid" className="soundboard-icon-grid" />
+            <div id="soundboard-icon-grid" className="soundboard-icon-grid"></div>
           </div>
           <div id="soundboard-hint" className="hint">
             {soundboardHint || 'Tip: favorite sounds appear in quick play.'}
@@ -860,23 +2256,41 @@ export function App() {
         <div className="camera-lobby-header">
           <h3>Camera Lobby</h3>
           <div className="camera-lobby-actions">
-            <button id="lobby-toggle-mic" type="button" className={`lobby-control-btn${lobbyMicMuted ? ' active' : ''}`} onClick={() => setLobbyMicMuted((prev) => !prev)}>
-              <span className="mic-icon">🎤</span> {lobbyMicMuted ? 'Unmute Mic' : 'Mute Mic'}
+            <button id="lobby-toggle-mic" type="button" className={`lobby-control-btn${micEnabled ? '' : ' active'}`} onClick={() => void toggleMic()}>
+              <span className="mic-icon">🎤</span> {micEnabled ? 'Mute Mic' : 'Unmute Mic'}
             </button>
-            <button id="lobby-toggle-camera" type="button" className={`lobby-control-btn${lobbyCameraMuted ? ' active' : ''}`} onClick={() => setLobbyCameraMuted((prev) => !prev)}>
-              <span className="camera-icon">📹</span> {lobbyCameraMuted ? 'Turn On Camera' : 'Turn Off Camera'}
+            <button id="lobby-toggle-camera" type="button" className={`lobby-control-btn${camEnabled ? '' : ' active'}`} onClick={() => void toggleCamera()}>
+              <span className="camera-icon">📹</span> {camEnabled ? 'Turn Off Camera' : 'Turn On Camera'}
             </button>
             <button id="close-camera-lobby" type="button" onClick={() => setCameraLobbyOpen(false)}>
               Close
             </button>
           </div>
         </div>
-        <div id="camera-lobby-grid" className="camera-lobby-grid" data-count={Math.max(activeParticipants.length, 1)}>
-          {activeParticipants.length > 0 ? (
-            activeParticipants.map((participant) => (
-              <div key={`lobby-${participant.identity}`} className="camera-lobby-tile">
-                <div className="avatar-placeholder">{getInitials(participant.name ?? participant.identity)}</div>
-                <div className="name-label">{participant.name ?? participant.identity}</div>
+        <div
+          id="camera-lobby-grid"
+          className="camera-lobby-grid"
+          data-count={Math.max(participantViews.length, 1)}
+        >
+          {participantViews.length > 0 ? (
+            participantViews.map((participant) => (
+              <div key={`lobby-${participant.identity}`} className={`camera-lobby-tile${participant.speaking ? ' speaking' : ''}`}>
+                {participant.cameraTrack ? (
+                  <TrackRenderer
+                    track={participant.cameraTrack}
+                    className="h-full w-full object-contain"
+                    muted={participant.isLocal}
+                    onMounted={(element) => {
+                      if (!participant.isLocal) registerRemoteMediaElement(element, true);
+                    }}
+                    onUnmounted={(element) => {
+                      if (!participant.isLocal) registerRemoteMediaElement(element, false);
+                    }}
+                  />
+                ) : (
+                  <div className="avatar-placeholder">{getInitials(participant.name)}</div>
+                )}
+                <div className="name-label">{participant.name}</div>
               </div>
             ))
           ) : (
@@ -930,14 +2344,7 @@ export function App() {
         <div className="bug-report-content">
           <div className="bug-report-header">
             <h3>Report a Bug</h3>
-            <button
-              id="close-bug-report"
-              type="button"
-              onClick={() => {
-                setBugReportOpen(false);
-                setBugStatus('');
-              }}
-            >
+            <button id="close-bug-report" type="button" onClick={() => setBugReportOpen(false)}>
               Close
             </button>
           </div>
@@ -952,18 +2359,31 @@ export function App() {
               onChange={(event) => setBugDescription(event.target.value)}
             />
             <div className="bug-report-screenshot-row">
-              <button id="bug-report-screenshot-btn" type="button" className="bug-report-screenshot-btn" disabled>
+              <label htmlFor="bug-report-file" id="bug-report-screenshot-btn" className="bug-report-screenshot-btn">
                 Attach Screenshot
-              </button>
-              <input type="file" id="bug-report-file" className="hidden" accept="image/*" />
-              <span id="bug-report-file-name" className="bug-report-file-name"></span>
+              </label>
+              <input
+                type="file"
+                id="bug-report-file"
+                className="hidden"
+                accept="image/*"
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null;
+                  setBugScreenshotFile(file);
+                }}
+              />
+              <span id="bug-report-file-name" className="bug-report-file-name">
+                {bugScreenshotFile?.name || ''}
+              </span>
             </div>
-            <div id="bug-report-screenshot-preview" className="bug-report-screenshot-preview hidden"></div>
+            <div id="bug-report-screenshot-preview" className={`bug-report-screenshot-preview${bugScreenshotFile ? '' : ' hidden'}`}>
+              {bugScreenshotFile ? <img src={URL.createObjectURL(bugScreenshotFile)} alt="Screenshot preview" /> : null}
+            </div>
             <div id="bug-report-stats" className="bug-stats-preview">
-              Runtime summary: room {ROOM_DISPLAY_NAMES[activeRoom]}, users {activeParticipants.length}, chat messages {chatMessages.length}.
+              Runtime: room={activeRoom} users={participantViews.length} chat={chatMessages.length} screens={screenParticipants.length}
             </div>
             <div className="bug-report-actions">
-              <button id="submit-bug-report" type="button" onClick={submitBugReport}>
+              <button id="submit-bug-report" type="button" onClick={() => void submitBugReport()}>
                 Send Report
               </button>
             </div>
@@ -983,61 +2403,206 @@ export function App() {
         </div>
         <div className="jam-body">
           <div className="jam-spotify-row">
-            <span id="jam-spotify-status" className="jam-spotify-status">
-              Not Connected
+            <span id="jam-spotify-status" className={`jam-spotify-status${jamState?.spotify_connected ? ' connected' : ''}`}>
+              {jamState?.spotify_connected ? 'Connected' : 'Not Connected'}
             </span>
-            <button id="jam-connect-spotify" type="button" className="jam-connect-btn" disabled>
+            <button
+              id="jam-connect-spotify"
+              type="button"
+              className="jam-connect-btn"
+              disabled={!canUseRoomControls}
+              onClick={() => void connectSpotify()}
+            >
               Connect Spotify
             </button>
           </div>
-          <div id="jam-host-controls" className="jam-host-controls">
-            <button id="jam-start-btn" type="button" className="jam-start-btn" disabled>
+
+          <div id="jam-host-controls" className="jam-host-controls" style={{ display: isJamHost || !jamState?.active ? 'flex' : 'none' }}>
+            <button
+              id="jam-start-btn"
+              type="button"
+              className="jam-start-btn"
+              style={{ display: jamState?.active ? 'none' : 'block' }}
+              disabled={!canUseRoomControls || !jamState?.spotify_connected}
+              onClick={() =>
+                void jamAction('/api/jam/start', {
+                  body: { identity: localIdentity },
+                  onSuccess: () => {
+                    setJamStatus('Jam started.');
+                    void publishData({
+                      type: 'jam-started',
+                      host: name || localIdentity || 'Host',
+                      room: activeRoom,
+                    });
+                  },
+                })
+              }
+            >
               Start Jam
             </button>
-            <button id="jam-stop-btn" type="button" className="jam-stop-btn" style={{ display: 'none' }}>
+            <button
+              id="jam-stop-btn"
+              type="button"
+              className="jam-stop-btn"
+              style={{ display: jamState?.active ? 'block' : 'none' }}
+              onClick={() =>
+                void jamAction('/api/jam/stop', {
+                  body: { identity: localIdentity },
+                  onSuccess: () => {
+                    setJamStatus('Jam ended.');
+                    stopJamAudioStream();
+                    void publishData({ type: 'jam-stopped', room: activeRoom });
+                  },
+                })
+              }
+            >
               End Jam
             </button>
-            <button id="jam-skip-btn" type="button" className="jam-skip-btn" disabled>
+            <button
+              id="jam-skip-btn"
+              type="button"
+              className="jam-skip-btn"
+              style={{ display: jamState?.active ? 'block' : 'none' }}
+              disabled={!isJamHost}
+              onClick={() => void jamAction('/api/jam/skip')}
+            >
               Skip
             </button>
           </div>
+
           <div id="jam-now-playing" className="jam-now-playing">
-            <div className="jam-now-playing-empty">No music playing</div>
+            {jamState?.now_playing ? (
+              <>
+                <img className="jam-now-playing-art" src={jamState.now_playing.album_art_url} alt={jamState.now_playing.name} />
+                <div className="jam-now-playing-info">
+                  <div className="jam-now-playing-name">{jamState.now_playing.name}</div>
+                  <div className="jam-now-playing-artist">{jamState.now_playing.artist}</div>
+                  <div className="jam-progress">
+                    <div
+                      className="jam-progress-bar"
+                      style={{
+                        width: jamState.now_playing.duration_ms
+                          ? `${Math.min(100, (jamState.now_playing.progress_ms / jamState.now_playing.duration_ms) * 100)}%`
+                          : '0%',
+                      }}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="jam-now-playing-empty">No music playing</div>
+            )}
           </div>
-          <div id="jam-actions-section" className="jam-actions">
-            <button id="jam-join-btn" type="button" className="jam-join-btn" disabled>
+
+          <div id="jam-actions-section" className="jam-actions" style={{ display: jamState?.active ? 'flex' : 'none' }}>
+            <button
+              id="jam-join-btn"
+              type="button"
+              className="jam-join-btn"
+              style={{ display: isJamListening ? 'none' : 'inline-flex' }}
+              onClick={() =>
+                void jamAction('/api/jam/join', {
+                  body: { identity: localIdentity },
+                  onSuccess: () => {
+                    startJamAudioStream();
+                    setJamStatus('Joined jam.');
+                  },
+                })
+              }
+            >
               Join Jam
             </button>
-            <button id="jam-leave-btn" type="button" className="jam-leave-btn" style={{ display: 'none' }}>
+            <button
+              id="jam-leave-btn"
+              type="button"
+              className="jam-leave-btn"
+              style={{ display: isJamListening ? 'inline-flex' : 'none' }}
+              onClick={() =>
+                void jamAction('/api/jam/leave', {
+                  body: { identity: localIdentity },
+                  onSuccess: () => {
+                    stopJamAudioStream();
+                    setJamStatus('Left jam.');
+                  },
+                })
+              }
+            >
               Leave Jam
             </button>
             <span id="jam-listener-count" className="jam-listener-count">
-              0 listening
+              {jamState?.listener_count || 0} listening
             </span>
           </div>
+
           <div className="jam-volume-section">
             <label className="jam-volume-label">Jam Volume</label>
             <div className="jam-volume-row">
-              <input id="jam-volume-slider" type="range" min="0" max="100" value={jamVolume} onChange={(event) => setJamVolume(Number(event.target.value))} />
+              <input
+                id="jam-volume-slider"
+                type="range"
+                min="0"
+                max="100"
+                value={jamVolume}
+                onChange={(event) => setJamVolume(Number(event.target.value))}
+              />
               <span id="jam-volume-value" className="jam-volume-value">
                 {jamVolume}%
               </span>
             </div>
           </div>
+
           <div className="jam-search-queue-row">
-            <div id="jam-search-section" className="jam-search-section">
-              <input id="jam-search-input" type="text" className="jam-search-input" placeholder="Search for a song..." disabled />
-              <div id="jam-results" className="jam-results"></div>
+            <div id="jam-search-section" className="jam-search-section" style={{ display: isJamHost ? 'flex' : 'none' }}>
+              <input
+                id="jam-search-input"
+                type="text"
+                className="jam-search-input"
+                placeholder="Search for a song..."
+                value={jamSearch}
+                onChange={(event) => setJamSearch(event.target.value)}
+              />
+              <div id="jam-results" className="jam-results">
+                {jamSearchResults.map((track) => (
+                  <div key={track.spotify_uri} className="jam-result-item">
+                    <img className="jam-result-art" src={track.album_art_url} alt={track.name} />
+                    <div className="jam-result-info">
+                      <div className="jam-result-name">{track.name}</div>
+                      <div className="jam-result-artist">{track.artist}</div>
+                    </div>
+                    <button className="jam-result-add" type="button" onClick={() => void addJamTrack(track)}>
+                      +
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div id="jam-queue-section" className="jam-queue-section">
+            <div id="jam-queue-section" className="jam-queue-section" style={{ display: jamState?.active ? 'flex' : 'none' }}>
               <div className="jam-queue-title">Queue</div>
               <div id="jam-queue-list" className="jam-queue-list">
-                <div className="jam-queue-empty">Queue is empty</div>
+                {jamState?.queue?.length ? (
+                  jamState.queue.map((track, index) => (
+                    <div key={`${track.spotify_uri}-${index}`} className="jam-queue-item">
+                      <img className="jam-result-art" src={track.album_art_url} alt={track.name} />
+                      <div className="jam-result-info">
+                        <div className="jam-result-name">{track.name}</div>
+                        <div className="jam-result-artist">{track.artist}</div>
+                      </div>
+                      {isJamHost ? (
+                        <button className="jam-queue-remove" type="button" onClick={() => void removeJamTrack(index)}>
+                          ✕
+                        </button>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <div className="jam-queue-empty">Queue is empty</div>
+                )}
               </div>
             </div>
           </div>
-          <div id="jam-status" className="jam-status">
-            Jam wiring in progress in React viewer.
+
+          <div id="jam-status" className={`jam-status${jamError ? ' error' : ''}`}>
+            {jamError || jamStatus}
           </div>
         </div>
       </div>

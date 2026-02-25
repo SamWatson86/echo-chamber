@@ -23,16 +23,20 @@ This refactor introduces framework structure without forcing a risky big-bang cu
 - Zustand-backed viewer preferences store (ready for persistence middleware)
 - React shell now mirrors legacy viewer DOM layout/classes (connect panel, room list, side panels, chat/soundboard/theme/jam/debug modals)
 - Room-status and online-user polling hooks (`/v1/room-status`, `/api/online`)
+- LiveKit room wiring in React for connect/disconnect, participant rendering, camera/screen attach, and media publish toggles
+- Chat data-channel + server history/upload persistence path in React
+- Jam API wiring (state/search/queue/start-stop/join-leave/Spotify auth) plus WebSocket audio playback path
+- Soundboard API wiring for list/play/upload baseline behavior
 - Playwright mocked journey for login + core shell interactions with screenshot evidence output to `docs/proof/parity/`
 - Baseline test harness (Vitest + Playwright)
 
 ## Not migrated yet
 
-- Full LiveKit media/session lifecycle (track subscribe/publish/reconcile/recovery)
-- Jam subsystem functional Spotify/audio runtime wiring
-- Chat/media transport parity over LiveKit data channels + file upload persistence
-- Soundboard upload/edit persistence and playback transport parity
+- Full legacy reliability logic parity (reconcile/watchdog/keyframe/recovery paths)
+- Jam feature-complete parity and soak validation vs legacy edge cases
+- Complete soundboard edit/ordering/icon/workflow parity
 - Admin dashboard feature parity
+- Remaining media/chat/operator edge-case parity + final UX drift cleanup
 
 ## Run locally
 
