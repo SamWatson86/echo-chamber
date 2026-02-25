@@ -1,6 +1,7 @@
 import {
   FormEvent,
   KeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -129,6 +130,76 @@ type DebugEntry = {
   text: string;
 };
 
+type IceServerConfig = {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+};
+
+type AdminDashboardParticipant = {
+  identity: string;
+  name?: string;
+  online_seconds?: number;
+  viewer_version?: string;
+  stats?: {
+    ice_remote_type?: string;
+    screen_fps?: number;
+    screen_width?: number;
+    screen_height?: number;
+    quality_limitation?: string;
+  };
+};
+
+type AdminDashboardRoom = {
+  room_id: string;
+  participants?: AdminDashboardParticipant[];
+};
+
+type AdminDashboardResponse = {
+  total_online?: number;
+  server_version?: string;
+  rooms?: AdminDashboardRoom[];
+};
+
+type AdminSessionEvent = {
+  timestamp: number;
+  event_type: 'join' | 'leave';
+  identity: string;
+  name?: string;
+  room_id: string;
+  duration_secs?: number;
+};
+
+type AdminSessionsResponse = {
+  events?: AdminSessionEvent[];
+};
+
+type AdminMetricsResponse = {
+  users?: Array<{
+    identity: string;
+    name?: string;
+    avg_fps: number;
+    avg_bitrate_kbps: number;
+    pct_bandwidth_limited: number;
+    pct_cpu_limited: number;
+    encoder?: string;
+    ice_local_type?: string;
+    ice_remote_type?: string;
+    sample_count: number;
+    total_minutes: number;
+  }>;
+};
+
+type AdminBugsResponse = {
+  reports?: Array<{
+    timestamp: number;
+    identity?: string;
+    name?: string;
+    reporter?: string;
+    description: string;
+  }>;
+};
+
 function getStoredValue(key: string): string | null {
   try {
     const storage = globalThis.localStorage as
@@ -182,6 +253,23 @@ function getInitials(name: string): string {
 
 function formatChatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDuration(seconds?: number): string {
+  if (seconds == null || Number.isNaN(seconds)) return '';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.max(1, Math.floor(seconds))}s`;
+}
+
+function formatAdminTime(timestampSeconds: number): string {
+  return new Date(timestampSeconds * 1000).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 function identityBase(identity: string): string {
@@ -332,6 +420,18 @@ export function App() {
   const [debugOpen, setDebugOpen] = useState(false);
   const [debugLog, setDebugLog] = useState<DebugEntry[]>([]);
 
+  const [adminDashOpen, setAdminDashOpen] = useState(false);
+  const [adminDashTab, setAdminDashTab] = useState<'live' | 'history' | 'metrics' | 'bugs'>('live');
+  const [adminDashboard, setAdminDashboard] = useState<AdminDashboardResponse | null>(null);
+  const [adminSessions, setAdminSessions] = useState<AdminSessionsResponse | null>(null);
+  const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null);
+  const [adminBugs, setAdminBugs] = useState<AdminBugsResponse | null>(null);
+  const [adminPanelWidth, setAdminPanelWidth] = useState<number>(() => {
+    const raw = Number.parseInt(getStoredValue('admin-panel-width') ?? '520', 10);
+    return Number.isFinite(raw) ? Math.max(400, raw) : 520;
+  });
+  const adminDashTimerRef = useRef<number | null>(null);
+
   const [deviceStatus, setDeviceStatus] = useState('');
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [camDevices, setCamDevices] = useState<MediaDeviceInfo[]>([]);
@@ -343,9 +443,12 @@ export function App() {
   const [roomVersion, setRoomVersion] = useState(0);
   const [roomAudioMuted, setRoomAudioMuted] = useState(false);
   const [roomConnectError, setRoomConnectError] = useState<string | null>(null);
+  const [connectedRoomName, setConnectedRoomName] = useState<string>('main');
 
   const roomRef = useRef<Room | null>(null);
   const remoteMediaElementsRef = useRef<Set<HTMLMediaElement>>(new Set());
+  const heartbeatTimerRef = useRef<number | null>(null);
+  const heartbeatAbortRef = useRef<AbortController | null>(null);
 
   const jamAudioWsRef = useRef<WebSocket | null>(null);
   const jamAudioCtxRef = useRef<AudioContext | null>(null);
@@ -363,6 +466,11 @@ export function App() {
 
   const activeRoom = stableRoomId((room || 'main').trim());
   const localIdentity = snapshot.context.session?.identity ?? '';
+  const viewerVersion = 'viewer-next-react';
+  const isAdminMode = useMemo(() => {
+    const candidate = (globalThis as { __ECHO_ADMIN__?: unknown }).__ECHO_ADMIN__;
+    return Boolean(candidate);
+  }, []);
 
   const roomStatusMap = useMemo(() => {
     const map = new Map<string, RoomStatusParticipant[]>();
@@ -466,6 +574,35 @@ export function App() {
     [controlUrl],
   );
 
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimerRef.current) {
+      window.clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+    if (heartbeatAbortRef.current) {
+      heartbeatAbortRef.current.abort();
+      heartbeatAbortRef.current = null;
+    }
+  }, []);
+
+  const sendLeaveNotification = useCallback(
+    (identityOverride?: string) => {
+      const control = resolveControlUrl(controlUrl);
+      const participantIdentity = identityOverride || snapshot.context.session?.identity || localIdentity || identity.trim();
+      if (!control || !adminToken || !participantIdentity) return;
+
+      fetch(`${control}/v1/participants/leave`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ identity: participantIdentity }),
+      }).catch(() => undefined);
+    },
+    [adminToken, controlUrl, snapshot.context.session?.identity, localIdentity, identity],
+  );
+
   const registerRemoteMediaElement = useCallback(
     (element: HTMLMediaElement, isAttach: boolean) => {
       if (isAttach) {
@@ -532,6 +669,62 @@ export function App() {
       element.volume = roomAudioMuted ? 0 : 1;
     });
   }, [roomAudioMuted]);
+
+  useEffect(() => {
+    stopHeartbeat();
+
+    const participantIdentity = snapshot.context.session?.identity || identity.trim();
+    if (!connected || !adminToken || !participantIdentity) return;
+
+    const control = resolveControlUrl(controlUrl);
+    const ac = new AbortController();
+    heartbeatAbortRef.current = ac;
+
+    const sendBeat = () => {
+      if (ac.signal.aborted) return;
+      fetch(`${control}/v1/participants/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          room: connectedRoomName || activeRoom,
+          identity: participantIdentity,
+          name: name.trim() || 'Viewer',
+          viewer_version: viewerVersion,
+        }),
+        signal: ac.signal,
+      }).catch(() => undefined);
+    };
+
+    sendBeat();
+    heartbeatTimerRef.current = window.setInterval(sendBeat, 10_000);
+
+    return stopHeartbeat;
+  }, [
+    connected,
+    adminToken,
+    controlUrl,
+    connectedRoomName,
+    activeRoom,
+    identity,
+    name,
+    viewerVersion,
+    snapshot.context.session?.identity,
+    stopHeartbeat,
+  ]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      sendLeaveNotification();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      stopHeartbeat();
+    };
+  }, [sendLeaveNotification, stopHeartbeat]);
 
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) {
@@ -613,6 +806,7 @@ export function App() {
   useEffect(() => {
     if (!snapshot.context.session) {
       setRoomConnectError(null);
+      setConnectedRoomName(activeRoom);
       void disconnectRoom();
       return;
     }
@@ -631,6 +825,7 @@ export function App() {
       .on(RoomEvent.Connected, () => {
         appendDebug('LiveKit room connected');
         setRoomConnectError(null);
+        setConnectedRoomName(activeRoom);
         bump();
       })
       .on(RoomEvent.Disconnected, () => {
@@ -715,12 +910,43 @@ export function App() {
         await disconnectRoom();
         roomRef.current = nextRoom;
 
-        await nextRoom.connect(session.request.sfuUrl, session.roomToken);
+        let iceServers: IceServerConfig[] = [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ];
+
+        try {
+          const iceResponse = await fetch(`${resolveControlUrl(controlUrl)}/v1/ice-servers`, {
+            headers: {
+              Authorization: `Bearer ${session.adminToken}`,
+            },
+          });
+
+          if (iceResponse.ok) {
+            const icePayload = (await iceResponse.json()) as { iceServers?: IceServerConfig[] };
+            if (Array.isArray(icePayload.iceServers) && icePayload.iceServers.length > 0) {
+              iceServers = icePayload.iceServers;
+              appendDebug(`[ice] fetched ${iceServers.length} ICE servers from control plane`);
+            }
+          } else {
+            appendDebug(`[ice] /v1/ice-servers returned ${iceResponse.status}, using STUN fallback`);
+          }
+        } catch {
+          appendDebug('[ice] failed to fetch ICE config, using STUN fallback');
+        }
+
+        await nextRoom.connect(session.request.sfuUrl, session.roomToken, {
+          autoSubscribe: true,
+          rtcConfig: {
+            iceServers,
+          },
+        });
         if (cancelled) {
           await nextRoom.disconnect();
           return;
         }
 
+        setConnectedRoomName(activeRoom);
         bump();
         await refreshDevices();
         await loadChatHistory();
@@ -743,9 +969,11 @@ export function App() {
   }, [
     snapshot.context.session?.roomToken,
     snapshot.context.session?.request.sfuUrl,
+    snapshot.context.session?.adminToken,
     activeRoom,
     localIdentity,
     chatOpen,
+    controlUrl,
     appendDebug,
     disconnectRoom,
     refreshDevices,
@@ -757,11 +985,13 @@ export function App() {
   }, [actorRef, buildConnectionRequest]);
 
   const onDisconnect = useCallback(() => {
+    sendLeaveNotification();
+    stopHeartbeat();
     actorRef.send({ type: 'DISCONNECT' });
     void disconnectRoom();
     setRoomAudioMuted(false);
     appendDebug('Disconnected by user');
-  }, [actorRef, disconnectRoom, appendDebug]);
+  }, [actorRef, disconnectRoom, appendDebug, sendLeaveNotification, stopHeartbeat]);
 
   const onSwitchRoom = useCallback(
     (roomId: (typeof FIXED_ROOMS)[number]) => {
@@ -1558,12 +1788,147 @@ export function App() {
     activeRoom,
   ]);
 
+  const fetchAdminDashboard = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const response = await fetch(apiUrl('/admin/api/dashboard'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as AdminDashboardResponse;
+      setAdminDashboard(payload);
+    } catch {
+      // silent admin polling failure
+    }
+  }, [adminToken, apiUrl]);
+
+  const fetchAdminHistory = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const response = await fetch(apiUrl('/admin/api/sessions'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as AdminSessionsResponse;
+      setAdminSessions(payload);
+    } catch {
+      // silent admin polling failure
+    }
+  }, [adminToken, apiUrl]);
+
+  const fetchAdminMetrics = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const response = await fetch(apiUrl('/admin/api/metrics'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as AdminMetricsResponse;
+      setAdminMetrics(payload);
+    } catch {
+      // silent admin polling failure
+    }
+  }, [adminToken, apiUrl]);
+
+  const fetchAdminBugs = useCallback(async () => {
+    if (!adminToken) return;
+    try {
+      const response = await fetch(apiUrl('/admin/api/bugs'), {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      if (!response.ok) return;
+      const payload = (await response.json()) as AdminBugsResponse;
+      setAdminBugs(payload);
+    } catch {
+      // silent admin polling failure
+    }
+  }, [adminToken, apiUrl]);
+
+  const refreshAdminDash = useCallback(async () => {
+    await Promise.all([fetchAdminDashboard(), fetchAdminHistory(), fetchAdminMetrics(), fetchAdminBugs()]);
+  }, [fetchAdminDashboard, fetchAdminHistory, fetchAdminMetrics, fetchAdminBugs]);
+
+  useEffect(() => {
+    if (!isAdminMode || !adminDashOpen || !adminToken) {
+      if (adminDashTimerRef.current) {
+        window.clearInterval(adminDashTimerRef.current);
+        adminDashTimerRef.current = null;
+      }
+      return;
+    }
+
+    void refreshAdminDash();
+
+    if (adminDashTimerRef.current) {
+      window.clearInterval(adminDashTimerRef.current);
+    }
+
+    adminDashTimerRef.current = window.setInterval(() => {
+      void fetchAdminDashboard();
+      void fetchAdminMetrics();
+    }, 3_000);
+
+    return () => {
+      if (adminDashTimerRef.current) {
+        window.clearInterval(adminDashTimerRef.current);
+        adminDashTimerRef.current = null;
+      }
+    };
+  }, [isAdminMode, adminDashOpen, adminToken, refreshAdminDash, fetchAdminDashboard, fetchAdminMetrics]);
+
+  useEffect(() => {
+    if (isAdminMode) {
+      document.body.classList.add('admin-mode');
+    } else {
+      document.body.classList.remove('admin-mode');
+    }
+    return () => {
+      document.body.classList.remove('admin-mode');
+    };
+  }, [isAdminMode]);
+
+  useEffect(() => {
+    setStoredValue('admin-panel-width', String(Math.round(adminPanelWidth)));
+  }, [adminPanelWidth]);
+
   const copyDebugLog = useCallback(async () => {
     const text = debugLog.map((line) => line.text).join('\n');
     await navigator.clipboard.writeText(text);
   }, [debugLog]);
 
   const canUseRoomControls = connected && Boolean(adminToken);
+
+  const adminRooms = adminDashboard?.rooms ?? [];
+  const adminEvents = adminSessions?.events ?? [];
+  const adminQualityUsers = adminMetrics?.users ?? [];
+  const adminBugReports = adminBugs?.reports ?? [];
+
+  const toggleAdminDash = () => {
+    setAdminDashOpen((prev) => !prev);
+  };
+
+  const startAdminResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+
+    const onMove = (moveEvent: MouseEvent) => {
+      const maxWidth = window.innerWidth * 0.8;
+      const minWidth = 400;
+      const next = Math.max(minWidth, Math.min(maxWidth, window.innerWidth - moveEvent.clientX));
+      setAdminPanelWidth(next);
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   return (
     <main className="app">
@@ -1783,7 +2148,12 @@ export function App() {
           </div>
 
           <div className="room-actions">
-            <button id="open-admin-dash" type="button" className="admin-only hidden" disabled>
+            <button
+              id="open-admin-dash"
+              type="button"
+              className={`admin-only${isAdminMode ? '' : ' hidden'}`}
+              onClick={toggleAdminDash}
+            >
               Admin
             </button>
             <button id="open-settings" type="button" disabled={!connected} onClick={() => setSettingsOpen(true)}>
@@ -2607,30 +2977,215 @@ export function App() {
         </div>
       </div>
 
-      <div id="admin-dash-panel" className="admin-only hidden admin-dash-panel">
+      <div
+        id="admin-dash-panel"
+        className={`admin-only admin-dash-panel${isAdminMode && adminDashOpen ? '' : ' hidden'}`}
+        style={{ ['--admin-panel-width' as any]: `${adminPanelWidth}px` }}
+      >
         <div className="admin-dash-header">
           <h3>Admin Dashboard</h3>
-          <button type="button" className="admin-dash-close" disabled>
+          <button type="button" className="admin-dash-close" onClick={toggleAdminDash}>
             &times;
           </button>
         </div>
         <div className="admin-dash-tabs">
-          <button type="button" className="adm-tab active">
+          <button
+            type="button"
+            className={`adm-tab${adminDashTab === 'live' ? ' active' : ''}`}
+            onClick={() => setAdminDashTab('live')}
+          >
             Live
           </button>
-          <button type="button" className="adm-tab">
+          <button
+            type="button"
+            className={`adm-tab${adminDashTab === 'history' ? ' active' : ''}`}
+            onClick={() => setAdminDashTab('history')}
+          >
             History
           </button>
-          <button type="button" className="adm-tab">
+          <button
+            type="button"
+            className={`adm-tab${adminDashTab === 'metrics' ? ' active' : ''}`}
+            onClick={() => setAdminDashTab('metrics')}
+          >
             Metrics
           </button>
-          <button type="button" className="adm-tab">
+          <button
+            type="button"
+            className={`adm-tab${adminDashTab === 'bugs' ? ' active' : ''}`}
+            onClick={() => setAdminDashTab('bugs')}
+          >
             Bugs
           </button>
         </div>
-        <div id="admin-dash-live" className="admin-dash-content">
-          <div className="adm-empty">Admin parity in progress.</div>
+
+        <div id="admin-dash-live" className={`admin-dash-content${adminDashTab === 'live' ? '' : ' hidden'}`}>
+          <div className="adm-stat-row">
+            <span className="adm-stat-label">
+              Online
+              {adminDashboard?.server_version ? ` · v${adminDashboard.server_version}` : ''}
+            </span>
+            <span className="adm-stat-value">{adminDashboard?.total_online ?? 0}</span>
+          </div>
+          {adminRooms.length > 0 ? (
+            adminRooms.map((roomEntry) => {
+              const participants = roomEntry.participants ?? [];
+              return (
+                <div key={roomEntry.room_id} className="adm-room-card">
+                  <div className="adm-room-header">
+                    {roomEntry.room_id}{' '}
+                    <span className="adm-room-count">{participants.length}</span>
+                  </div>
+                  {participants.map((participant) => {
+                    const stats = participant.stats;
+                    return (
+                      <div key={participant.identity} className="adm-participant">
+                        <span>{participant.name || participant.identity}</span>
+                        <span className="adm-time">{formatDuration(participant.online_seconds)}</span>
+                        {participant.viewer_version ? (
+                          <span className="adm-badge adm-badge-ok">v{participant.viewer_version}</span>
+                        ) : (
+                          <span className="adm-badge adm-badge-bad">STALE</span>
+                        )}
+                        {stats?.ice_remote_type ? (
+                          <span className={`adm-badge adm-ice-${stats.ice_remote_type}`}>{stats.ice_remote_type}</span>
+                        ) : null}
+                        {stats?.screen_fps != null ? (
+                          <span className="adm-chip">
+                            {stats.screen_fps}fps {stats.screen_width}x{stats.screen_height}
+                          </span>
+                        ) : null}
+                        {stats?.quality_limitation && stats.quality_limitation !== 'none' ? (
+                          <span className="adm-badge adm-badge-warn">{stats.quality_limitation}</span>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })
+          ) : (
+            <div className="adm-empty">No active rooms</div>
+          )}
         </div>
+
+        <div id="admin-dash-history" className={`admin-dash-content${adminDashTab === 'history' ? '' : ' hidden'}`}>
+          {adminEvents.length > 0 ? (
+            <table className="adm-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Event</th>
+                  <th>User</th>
+                  <th>Room</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {adminEvents.map((event, index) => {
+                  const isJoin = event.event_type === 'join';
+                  return (
+                    <tr key={`${event.identity}-${event.timestamp}-${index}`}>
+                      <td>{formatAdminTime(event.timestamp)}</td>
+                      <td>
+                        <span className={`adm-badge ${isJoin ? 'adm-join' : 'adm-leave'}`}>
+                          {isJoin ? 'JOIN' : 'LEAVE'}
+                        </span>
+                      </td>
+                      <td>{event.name || event.identity}</td>
+                      <td>{event.room_id}</td>
+                      <td>{event.duration_secs != null ? formatDuration(event.duration_secs) : ''}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <div className="adm-empty">No session history</div>
+          )}
+        </div>
+
+        <div id="admin-dash-metrics" className={`admin-dash-content${adminDashTab === 'metrics' ? '' : ' hidden'}`}>
+          {adminQualityUsers.length > 0 ? (
+            <>
+              <div className="adm-cards">
+                <div className="adm-card">
+                  <div className="adm-card-value">
+                    {(adminQualityUsers.reduce((sum, user) => sum + user.avg_fps, 0) / adminQualityUsers.length).toFixed(1)}
+                  </div>
+                  <div className="adm-card-label">Avg FPS</div>
+                </div>
+                <div className="adm-card">
+                  <div className="adm-card-value">
+                    {(
+                      adminQualityUsers.reduce((sum, user) => sum + user.avg_bitrate_kbps, 0) /
+                      adminQualityUsers.length /
+                      1000
+                    ).toFixed(1)}
+                  </div>
+                  <div className="adm-card-label">Avg Mbps</div>
+                </div>
+                <div className="adm-card">
+                  <div className="adm-card-value">
+                    {(adminQualityUsers.reduce((sum, user) => sum + user.pct_bandwidth_limited, 0) / adminQualityUsers.length).toFixed(1)}%
+                  </div>
+                  <div className="adm-card-label">BW Limited</div>
+                </div>
+                <div className="adm-card">
+                  <div className="adm-card-value">
+                    {(adminQualityUsers.reduce((sum, user) => sum + user.pct_cpu_limited, 0) / adminQualityUsers.length).toFixed(1)}%
+                  </div>
+                  <div className="adm-card-label">CPU Limited</div>
+                </div>
+              </div>
+
+              <table className="adm-table">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Avg FPS</th>
+                    <th>Avg Mbps</th>
+                    <th>Encoder</th>
+                    <th>ICE</th>
+                    <th>Samples</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {adminQualityUsers.map((user) => (
+                    <tr key={`${user.identity}-${user.name ?? ''}`}>
+                      <td>{user.name || user.identity}</td>
+                      <td>{user.avg_fps.toFixed(1)}</td>
+                      <td>{(user.avg_bitrate_kbps / 1000).toFixed(1)}</td>
+                      <td>{user.encoder || '—'}</td>
+                      <td>{user.ice_remote_type || user.ice_local_type || '—'}</td>
+                      <td>{user.sample_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          ) : (
+            <div className="adm-empty">No quality data yet</div>
+          )}
+        </div>
+
+        <div id="admin-dash-bugs" className={`admin-dash-content${adminDashTab === 'bugs' ? '' : ' hidden'}`}>
+          {adminBugReports.length > 0 ? (
+            adminBugReports.map((report, index) => (
+              <div key={`${report.timestamp}-${index}`} className="adm-bug">
+                <div className="adm-bug-header">
+                  <strong>{report.name || report.reporter || report.identity || 'Unknown'}</strong>
+                  <span className="adm-time">{formatAdminTime(report.timestamp)}</span>
+                </div>
+                <div className="adm-bug-desc">{report.description}</div>
+              </div>
+            ))
+          ) : (
+            <div className="adm-empty">No bug reports</div>
+          )}
+        </div>
+
+        <div className="admin-dash-resize-handle" onMouseDown={startAdminResize} />
       </div>
 
       <div id="debug-panel" className={`debug-panel${debugOpen ? '' : ' hidden'}`}>
