@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-02-25T13-23-51-117Z",
+  "scenarios": [
+    "connect/disconnect/reconnect flow with room switch token refresh",
+    "legacy control IDs/classes present for connect/media/chat/soundboard shells",
+    "chat send/upload/delete handling",
+    "theme + settings shell parity checks",
+    "soundboard play/edit/upload/update workflows",
+    "jam controls (search/queue/start/skip/stop)",
+    "bug report submit with screenshot upload",
+    "admin dashboard tabs present and populated (live/history/metrics/bugs/deploys)"
+  ],
+  "assertions": {
+    "tokenRoomRequests": [
+      "main",
+      "breakout-2",
+      "breakout-2"
+    ],
+    "soundUpdateCalled": true,
+    "soundUploadCalled": true,
+    "soundPlayFetches": 1,
+    "chatUploadCalled": true,
+    "chatDeleteCalled": true,
+    "bugUploadCalled": true,
+    "bugReportCalled": true,
+    "jamStartCalled": true,
+    "jamSkipCalled": true,
+    "jamStopCalled": true,
+    "jamQueueCalled": true
+  },
+  "screenshots": [
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T13-23-51-117Z-01-connected-shell.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T13-23-51-117Z-02-chat-open.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T13-23-51-117Z-03-jam-open.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T13-23-51-117Z-04-admin-open.png"
+  ]
+}

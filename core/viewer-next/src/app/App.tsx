@@ -555,8 +555,19 @@ export function App() {
   const [roomAudioMuted, setRoomAudioMuted] = useState(false);
   const [roomConnectError, setRoomConnectError] = useState<string | null>(null);
   const [connectedRoomName, setConnectedRoomName] = useState<string>('main');
+  const [pendingMicDesired, setPendingMicDesired] = useState<boolean | null>(null);
+  const [pendingCamDesired, setPendingCamDesired] = useState<boolean | null>(null);
+  const [pendingScreenDesired, setPendingScreenDesired] = useState<boolean | null>(null);
   const [updateBannerVersion, setUpdateBannerVersion] = useState<string | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+
+  const micToggleSeqRef = useRef(0);
+  const camToggleSeqRef = useRef(0);
+  const screenToggleSeqRef = useRef(0);
+  const pendingMicDesiredRef = useRef<boolean | null>(null);
+  const pendingCamDesiredRef = useRef<boolean | null>(null);
+  const pendingScreenDesiredRef = useRef<boolean | null>(null);
+  const mediaIntentRef = useRef({ mic: false, cam: false, screen: false });
 
   const roomRef = useRef<Room | null>(null);
   const remoteMediaElementsRef = useRef<Set<HTMLMediaElement>>(new Set());
@@ -651,20 +662,27 @@ export function App() {
     jamState?.listeners?.some((listener) => identityBase(listener) === localIdentityBase),
   );
 
-  const micEnabled = useMemo(() => {
-    const local = participantViews.find((participant) => participant.isLocal);
-    return Boolean(local?.micTrack);
-  }, [participantViews]);
+  const localMediaState = useMemo(() => {
+    const localParticipant = roomRef.current?.localParticipant;
+    if (localParticipant) {
+      return {
+        mic: localParticipant.isMicrophoneEnabled,
+        cam: localParticipant.isCameraEnabled,
+        screen: localParticipant.isScreenShareEnabled,
+      };
+    }
 
-  const camEnabled = useMemo(() => {
     const local = participantViews.find((participant) => participant.isLocal);
-    return Boolean(local?.cameraTrack);
-  }, [participantViews]);
+    return {
+      mic: Boolean(local?.micTrack),
+      cam: Boolean(local?.cameraTrack),
+      screen: Boolean(local?.screenTrack),
+    };
+  }, [participantViews, roomVersion]);
 
-  const screenEnabled = useMemo(() => {
-    const local = participantViews.find((participant) => participant.isLocal);
-    return Boolean(local?.screenTrack);
-  }, [participantViews]);
+  const micEnabled = pendingMicDesired ?? localMediaState.mic;
+  const camEnabled = pendingCamDesired ?? localMediaState.cam;
+  const screenEnabled = pendingScreenDesired ?? localMediaState.screen;
 
   const statusText = useMemo(() => {
     if (snapshot.matches('connected')) {
@@ -674,6 +692,28 @@ export function App() {
     if (snapshot.matches('failed')) return `Connection failed: ${snapshot.context.lastError ?? 'Unknown error'}`;
     return 'Idle';
   }, [snapshot, roomConnectError]);
+
+  useEffect(() => {
+    if (pendingMicDesired == null) mediaIntentRef.current.mic = micEnabled;
+    if (pendingCamDesired == null) mediaIntentRef.current.cam = camEnabled;
+    if (pendingScreenDesired == null) mediaIntentRef.current.screen = screenEnabled;
+  }, [micEnabled, camEnabled, screenEnabled, pendingMicDesired, pendingCamDesired, pendingScreenDesired]);
+
+  useEffect(() => {
+    pendingMicDesiredRef.current = pendingMicDesired;
+    pendingCamDesiredRef.current = pendingCamDesired;
+    pendingScreenDesiredRef.current = pendingScreenDesired;
+  }, [pendingMicDesired, pendingCamDesired, pendingScreenDesired]);
+
+  useEffect(() => {
+    if (connected || provisioning) return;
+    pendingMicDesiredRef.current = null;
+    pendingCamDesiredRef.current = null;
+    pendingScreenDesiredRef.current = null;
+    setPendingMicDesired(null);
+    setPendingCamDesired(null);
+    setPendingScreenDesired(null);
+  }, [connected, provisioning]);
 
   const appendDebug = useCallback((text: string) => {
     setDebugLog((prev) => [
@@ -1236,6 +1276,57 @@ export function App() {
     setRoomVersion((v) => v + 1);
   }, []);
 
+  const reconcileMediaIntent = useCallback(async (room?: Room | null) => {
+    const liveRoom = room ?? roomRef.current;
+    if (!liveRoom) return;
+
+    const localParticipant = liveRoom.localParticipant;
+    const intent = mediaIntentRef.current;
+
+    if (localParticipant.isMicrophoneEnabled !== intent.mic) {
+      try {
+        await localParticipant.setMicrophoneEnabled(intent.mic, {
+          deviceId: intent.mic ? (selectedMicId || undefined) : undefined,
+        });
+      } catch (error) {
+        appendDebug(`Mic reconcile failed: ${(error as Error).message}`);
+      }
+    }
+
+    if (localParticipant.isCameraEnabled !== intent.cam) {
+      try {
+        await localParticipant.setCameraEnabled(intent.cam, {
+          deviceId: intent.cam ? (selectedCamId || undefined) : undefined,
+        });
+      } catch (error) {
+        appendDebug(`Camera reconcile failed: ${(error as Error).message}`);
+      }
+    }
+
+    if (localParticipant.isScreenShareEnabled !== intent.screen) {
+      try {
+        await localParticipant.setScreenShareEnabled(intent.screen, intent.screen ? { audio: true } : undefined);
+      } catch (error) {
+        appendDebug(`Screen-share reconcile failed: ${(error as Error).message}`);
+      }
+    }
+
+    if (localParticipant.isMicrophoneEnabled === intent.mic) {
+      pendingMicDesiredRef.current = null;
+      setPendingMicDesired(null);
+    }
+    if (localParticipant.isCameraEnabled === intent.cam) {
+      pendingCamDesiredRef.current = null;
+      setPendingCamDesired(null);
+    }
+    if (localParticipant.isScreenShareEnabled === intent.screen) {
+      pendingScreenDesiredRef.current = null;
+      setPendingScreenDesired(null);
+    }
+
+    setRoomVersion((v) => v + 1);
+  }, [appendDebug, selectedMicId, selectedCamId]);
+
   const loadChatHistory = useCallback(async () => {
     if (!adminToken) return;
 
@@ -1430,6 +1521,7 @@ export function App() {
         }
 
         setConnectedRoomName(activeRoom);
+        await reconcileMediaIntent(nextRoom);
         bump();
         await refreshDevices();
         await loadChatHistory();
@@ -1461,6 +1553,7 @@ export function App() {
     disconnectRoom,
     refreshDevices,
     loadChatHistory,
+    reconcileMediaIntent,
     logStatsEvent,
     playParticipantChime,
   ]);
@@ -1483,66 +1576,106 @@ export function App() {
     (roomId: (typeof FIXED_ROOMS)[number]) => {
       setField('room', roomId);
       appendDebug(`Switching room to ${roomId}`);
-      if (connected) {
+      if (connected || provisioning) {
         actorRef.send({ type: 'CONNECT', request: buildConnectionRequest(roomId) });
       }
     },
-    [appendDebug, connected, actorRef, buildConnectionRequest, setField],
+    [appendDebug, connected, provisioning, actorRef, buildConnectionRequest, setField],
   );
 
   const toggleMic = useCallback(async () => {
     const room = roomRef.current;
+    const current = pendingMicDesiredRef.current ?? room?.localParticipant.isMicrophoneEnabled ?? localMediaState.mic;
+    const desired = !current;
+
+    mediaIntentRef.current.mic = desired;
+    const seq = micToggleSeqRef.current + 1;
+    micToggleSeqRef.current = seq;
+    pendingMicDesiredRef.current = desired;
+    setPendingMicDesired(desired);
+    setRoomVersion((v) => v + 1);
+
     if (!room) return;
 
-    const desired = !micEnabled;
     try {
       await room.localParticipant.setMicrophoneEnabled(desired, {
-        deviceId: selectedMicId || undefined,
+        deviceId: desired ? (selectedMicId || undefined) : undefined,
       });
       appendDebug(desired ? 'Microphone enabled' : 'Microphone disabled');
       void logStatsEvent(desired ? 'mic-enabled' : 'mic-disabled');
-      setRoomVersion((v) => v + 1);
     } catch (error) {
       appendDebug(`Mic toggle failed: ${(error as Error).message}`);
       setDeviceStatus(`Mic toggle failed: ${(error as Error).message}`);
+    } finally {
+      if (micToggleSeqRef.current === seq) {
+        pendingMicDesiredRef.current = null;
+        setPendingMicDesired(null);
+        setRoomVersion((v) => v + 1);
+      }
     }
-  }, [appendDebug, micEnabled, selectedMicId, logStatsEvent]);
+  }, [appendDebug, localMediaState.mic, selectedMicId, logStatsEvent]);
 
   const toggleCamera = useCallback(async () => {
     const room = roomRef.current;
+    const current = pendingCamDesiredRef.current ?? room?.localParticipant.isCameraEnabled ?? localMediaState.cam;
+    const desired = !current;
+
+    mediaIntentRef.current.cam = desired;
+    const seq = camToggleSeqRef.current + 1;
+    camToggleSeqRef.current = seq;
+    pendingCamDesiredRef.current = desired;
+    setPendingCamDesired(desired);
+    setRoomVersion((v) => v + 1);
+
     if (!room) return;
 
-    const desired = !camEnabled;
     try {
       await room.localParticipant.setCameraEnabled(desired, {
-        deviceId: selectedCamId || undefined,
+        deviceId: desired ? (selectedCamId || undefined) : undefined,
       });
       appendDebug(desired ? 'Camera enabled' : 'Camera disabled');
       void logStatsEvent(desired ? 'camera-enabled' : 'camera-disabled');
-      setRoomVersion((v) => v + 1);
     } catch (error) {
       appendDebug(`Camera toggle failed: ${(error as Error).message}`);
       setDeviceStatus(`Camera toggle failed: ${(error as Error).message}`);
+    } finally {
+      if (camToggleSeqRef.current === seq) {
+        pendingCamDesiredRef.current = null;
+        setPendingCamDesired(null);
+        setRoomVersion((v) => v + 1);
+      }
     }
-  }, [appendDebug, camEnabled, selectedCamId, logStatsEvent]);
+  }, [appendDebug, localMediaState.cam, selectedCamId, logStatsEvent]);
 
   const toggleScreenShare = useCallback(async () => {
     const room = roomRef.current;
+    const current = pendingScreenDesiredRef.current ?? room?.localParticipant.isScreenShareEnabled ?? localMediaState.screen;
+    const desired = !current;
+
+    mediaIntentRef.current.screen = desired;
+    const seq = screenToggleSeqRef.current + 1;
+    screenToggleSeqRef.current = seq;
+    pendingScreenDesiredRef.current = desired;
+    setPendingScreenDesired(desired);
+    setRoomVersion((v) => v + 1);
+
     if (!room) return;
 
-    const desired = !screenEnabled;
     try {
-      await room.localParticipant.setScreenShareEnabled(desired, {
-        audio: true,
-      });
+      await room.localParticipant.setScreenShareEnabled(desired, desired ? { audio: true } : undefined);
       appendDebug(desired ? 'Screen share started' : 'Screen share stopped');
       void logStatsEvent(desired ? 'screen-share-start' : 'screen-share-stop');
-      setRoomVersion((v) => v + 1);
     } catch (error) {
       appendDebug(`Screen share toggle failed: ${(error as Error).message}`);
       setDeviceStatus(`Screen share toggle failed: ${(error as Error).message}`);
+    } finally {
+      if (screenToggleSeqRef.current === seq) {
+        pendingScreenDesiredRef.current = null;
+        setPendingScreenDesired(null);
+        setRoomVersion((v) => v + 1);
+      }
     }
-  }, [appendDebug, screenEnabled, logStatsEvent]);
+  }, [appendDebug, localMediaState.screen, logStatsEvent]);
 
   const switchMicDevice = useCallback(
     async (deviceId: string) => {

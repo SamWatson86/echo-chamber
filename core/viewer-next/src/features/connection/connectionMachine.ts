@@ -107,6 +107,14 @@ const machine = setup({
         },
       },
       on: {
+        CONNECT: {
+          target: 'provisioning',
+          reenter: true,
+          actions: assign({
+            lastRequest: ({ event }) => event.request,
+            lastError: () => null,
+          }),
+        },
         DISCONNECT: {
           target: 'idle',
           actions: assign({ session: () => null }),
