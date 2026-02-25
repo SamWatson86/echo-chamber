@@ -41,6 +41,7 @@ Tip: share a room link like `http://HOST:PORT/?room=main` and your friends will 
 - docs/BACKUPS.md
 - docs/GITHUB.md
 - docs/WORKFLOW.md
+- docs/VALIDATION.md
 
 ## HTTPS for screen sharing
 Screen capture in browsers requires a secure context (HTTPS or localhost).
