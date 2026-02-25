@@ -4516,6 +4516,7 @@ body.admin-mode .room-top {
 .adm-deploy-failed { background: rgba(214,87,87,0.2); color: #d65757; }
 .adm-deploy-rollback { background: rgba(201,184,62,0.2); color: #c9b83e; }
 .adm-deploy-pending { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.5); }
+.adm-deploy-historical { background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.25); font-style: italic; }
 .adm-deploy-info { flex: 1; min-width: 0; }
 .adm-deploy-msg { font-size: 12px; color: rgba(255,255,255,0.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
 .adm-deploy-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: rgba(255,255,255,0.4); align-items: center; }
@@ -4523,3 +4524,9 @@ body.admin-mode .room-top {
 .adm-deploy-author { color: rgba(255,255,255,0.55); }
 .adm-deploy-dur { color: rgba(255,255,255,0.35); }
 .adm-deploy-err { margin-top: 4px; font-size: 11px; color: #d65757; background: rgba(214,87,87,0.08); padding: 4px 8px; border-radius: 4px; }
+.adm-deploy-link { color: #7eb8ff; text-decoration: none; }
+.adm-deploy-link:hover { text-decoration: underline; color: #a8d4ff; }
+.adm-deploy-toggle { cursor: pointer; color: rgba(255,255,255,0.45); font-size: 11px; margin-left: 8px; user-select: none; }
+.adm-deploy-toggle:hover { color: rgba(255,255,255,0.75); }
+.adm-deploy-body { margin-top: 6px; font-size: 11px; color: rgba(255,255,255,0.6); background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; font-family: monospace; max-height: 200px; overflow-y: auto; }
+.adm-deploy-body.hidden { display: none; }

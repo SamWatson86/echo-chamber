@@ -11136,7 +11136,11 @@ function renderAdminDeploys(commits, container) {
     html += '<div class="adm-deploy-row">';
     html += '<div class="adm-deploy-status"><span class="adm-deploy-badge ' + statusClass + '">' + escAdm(statusLabel) + '</span></div>';
     html += '<div class="adm-deploy-info">';
-    html += '<div class="adm-deploy-msg">' + escAdm(c.message || "(no message)") + '</div>';
+    if (c.pr_number) {
+      html += '<div class="adm-deploy-msg"><a href="https://github.com/SamWatson86/echo-chamber/pull/' + c.pr_number + '" target="_blank" class="adm-deploy-link">' + escAdm(c.message || "(no message)") + '</a></div>';
+    } else {
+      html += '<div class="adm-deploy-msg">' + escAdm(c.message || "(no message)") + '</div>';
+    }
     html += '<div class="adm-deploy-meta">';
     html += '<span class="adm-deploy-sha">' + escAdm(c.short_sha || c.sha || "") + '</span>';
     html += '<span class="adm-deploy-author">' + escAdm(c.author || "unknown") + '</span>';
@@ -11146,6 +11150,11 @@ function renderAdminDeploys(commits, container) {
     }
     if (c.deploy_error) {
       html += '<div class="adm-deploy-err">' + escAdm(c.deploy_error) + '</div>';
+    }
+    if (c.body) {
+      var bodyId = 'deploy-body-' + escAdm(c.short_sha || c.sha || "");
+      html += '<span class="adm-deploy-toggle" onclick="var el=document.getElementById(\'' + bodyId + '\');el.classList.toggle(\'hidden\');this.textContent=el.classList.contains(\'hidden\')?\'\u25B6 Details\':\'\u25BC Details\'">&#9654; Details</span>';
+      html += '<pre class="adm-deploy-body hidden" id="' + bodyId + '">' + escAdm(c.body) + '</pre>';
     }
     html += '</div></div></div>';
   });
