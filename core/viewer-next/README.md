@@ -53,6 +53,14 @@ npx playwright install   # one-time browser install
 npm run test:e2e
 ```
 
+### Capturing parity proof screenshots
+
+The Playwright smoke suite includes a mocked login/connect flow test that writes screenshots into `docs/proof/parity/`.
+
+```bash
+PARITY_EVIDENCE_STAMP=$(date +%Y-%m-%dT%H-%M-%S) npm run test:e2e
+```
+
 ## Migration plan (high-level)
 
 1. Parity mode gate (this PR): no visual/behavior drift vs current viewer
