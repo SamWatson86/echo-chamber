@@ -7,6 +7,8 @@ This is separate from the existing web build (Echo Chamber Web). Do not mix file
 ## Components
 - sfu: Media routing (LiveKit server). Runs on the host PC.
 - control: Rust control plane (auth, rooms, admin).
+- viewer: Current production web viewer (vanilla JS).
+- viewer-next: In-progress React + TypeScript refactor foundation.
 - client: Native desktop app (Windows + macOS).
 
 ## Target

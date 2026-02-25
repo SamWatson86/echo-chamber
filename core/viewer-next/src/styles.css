@@ -1,0 +1,29 @@
+/* React-specific compatibility tweaks layered on top of legacy CSS. */
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button.sound-tile-main,
+button.chat-emoji {
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.chat-emoji {
+  display: grid;
+  place-items: center;
+}
+
+.chat-emoji-picker button {
+  border: none;
+}
+
+#debug-log {
+  min-height: 140px;
+}
