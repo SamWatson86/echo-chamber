@@ -437,6 +437,12 @@ export function App() {
   const [soundClipVolume, setSoundClipVolume] = useState(100);
   const soundUploadFileRef = useRef<File | null>(null);
 
+  const [chimeStatus, setChimeStatus] = useState<{ enter: string; exit: string }>({ enter: '', exit: '' });
+  const [chimeExists, setChimeExists] = useState<{ enter: boolean; exit: boolean }>({ enter: false, exit: false });
+  const chimeFileRef = useRef<{ enter: File | null; exit: File | null }>({ enter: null, exit: null });
+  const chimeAudioCtxRef = useRef<AudioContext | null>(null);
+  const chimeBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
+
   const [cameraLobbyOpen, setCameraLobbyOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
   const [activeTheme, setActiveTheme] = useState<string>(() => getStoredValue(THEME_STORAGE_KEY) ?? 'frost');
@@ -645,6 +651,210 @@ export function App() {
       }).catch(() => undefined);
     },
     [adminToken, controlUrl, snapshot.context.session?.identity, localIdentity, identity],
+  );
+
+  const localChimeIdentity = useMemo(
+    () => identityBase(localIdentity || identity.trim() || name.trim() || 'viewer'),
+    [localIdentity, identity, name],
+  );
+
+  const ensureChimeAudioContext = useCallback(async (): Promise<AudioContext> => {
+    let context = chimeAudioCtxRef.current;
+    if (!context) {
+      context = new AudioContext();
+      chimeAudioCtxRef.current = context;
+    }
+    if (context.state === 'suspended') {
+      await context.resume();
+    }
+    return context;
+  }, []);
+
+  const playBuiltInChime = useCallback(
+    async (kind: 'enter' | 'exit', volume = 0.5) => {
+      const context = await ensureChimeAudioContext();
+      const gain = context.createGain();
+      gain.gain.value = Math.max(0, Math.min(1, volume));
+      gain.connect(context.destination);
+
+      const o1 = context.createOscillator();
+      const o2 = context.createOscillator();
+      const base = kind === 'enter' ? 680 : 540;
+      o1.frequency.value = base;
+      o2.frequency.value = base * 1.33;
+      o1.type = 'sine';
+      o2.type = 'triangle';
+      o1.connect(gain);
+      o2.connect(gain);
+
+      const now = context.currentTime;
+      o1.start(now);
+      o2.start(now + 0.05);
+      o1.stop(now + 0.22);
+      o2.stop(now + 0.28);
+    },
+    [ensureChimeAudioContext],
+  );
+
+  const fetchChimeBuffer = useCallback(
+    async (targetIdentity: string, kind: 'enter' | 'exit'): Promise<AudioBuffer | null> => {
+      const cacheKey = `${targetIdentity}-${kind}`;
+      if (chimeBufferCacheRef.current.has(cacheKey)) {
+        return chimeBufferCacheRef.current.get(cacheKey) ?? null;
+      }
+
+      try {
+        const response = await fetch(
+          `${resolveControlUrl(controlUrl)}/api/chime/${encodeURIComponent(targetIdentity)}/${kind}?v=${Date.now()}`,
+          {
+            headers: adminToken
+              ? {
+                  Authorization: `Bearer ${adminToken}`,
+                }
+              : undefined,
+          },
+        );
+        if (!response.ok) return null;
+
+        const context = await ensureChimeAudioContext();
+        const arrayBuffer = await response.arrayBuffer();
+        const decoded = await context.decodeAudioData(arrayBuffer.slice(0));
+        chimeBufferCacheRef.current.set(cacheKey, decoded);
+        return decoded;
+      } catch {
+        return null;
+      }
+    },
+    [controlUrl, adminToken, ensureChimeAudioContext],
+  );
+
+  const playParticipantChime = useCallback(
+    async (participantIdentity: string, kind: 'enter' | 'exit') => {
+      const chimeIdentity = identityBase(participantIdentity);
+      const context = await ensureChimeAudioContext();
+      const gain = context.createGain();
+      gain.gain.value = 0.5;
+      gain.connect(context.destination);
+
+      const buffer = await fetchChimeBuffer(chimeIdentity, kind);
+      if (buffer) {
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(gain);
+        source.start();
+        return;
+      }
+
+      await playBuiltInChime(kind, 0.5);
+    },
+    [ensureChimeAudioContext, fetchChimeBuffer, playBuiltInChime],
+  );
+
+  const checkLocalChimeState = useCallback(
+    async (kind: 'enter' | 'exit') => {
+      if (!connected || !localChimeIdentity) return;
+      try {
+        const response = await fetch(
+          `${resolveControlUrl(controlUrl)}/api/chime/${encodeURIComponent(localChimeIdentity)}/${kind}`,
+          {
+            method: 'HEAD',
+            headers: adminToken
+              ? {
+                  Authorization: `Bearer ${adminToken}`,
+                }
+              : undefined,
+          },
+        );
+        setChimeExists((prev) => ({ ...prev, [kind]: response.ok }));
+        if (response.ok) {
+          setChimeStatus((prev) => ({ ...prev, [kind]: 'Custom sound set' }));
+        }
+      } catch {
+        // ignore check failures
+      }
+    },
+    [connected, localChimeIdentity, controlUrl, adminToken],
+  );
+
+  const uploadChime = useCallback(
+    async (kind: 'enter' | 'exit') => {
+      if (!adminToken || !localChimeIdentity) return;
+      const file = chimeFileRef.current[kind];
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        setChimeStatus((prev) => ({ ...prev, [kind]: 'Too large (max 2MB)' }));
+        return;
+      }
+
+      setChimeStatus((prev) => ({ ...prev, [kind]: 'Uploading...' }));
+      try {
+        const response = await fetch(
+          `${resolveControlUrl(controlUrl)}/api/chime/upload?identity=${encodeURIComponent(localChimeIdentity)}&kind=${kind}`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${adminToken}`,
+              'Content-Type': file.type || 'audio/mpeg',
+            },
+            body: await file.arrayBuffer(),
+          },
+        );
+        const payload = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        if (!response.ok || !payload.ok) {
+          setChimeStatus((prev) => ({ ...prev, [kind]: payload.error || 'Upload failed' }));
+          return;
+        }
+
+        chimeBufferCacheRef.current.delete(`${localChimeIdentity}-${kind}`);
+        setChimeExists((prev) => ({ ...prev, [kind]: true }));
+        setChimeStatus((prev) => ({ ...prev, [kind]: file.name || 'Custom sound set' }));
+        chimeFileRef.current[kind] = null;
+      } catch {
+        setChimeStatus((prev) => ({ ...prev, [kind]: 'Upload error' }));
+      }
+    },
+    [adminToken, localChimeIdentity, controlUrl],
+  );
+
+  const previewChime = useCallback(
+    async (kind: 'enter' | 'exit') => {
+      if (!localChimeIdentity) return;
+      chimeBufferCacheRef.current.delete(`${localChimeIdentity}-${kind}`);
+      const buffer = await fetchChimeBuffer(localChimeIdentity, kind);
+      if (!buffer) return;
+      const context = await ensureChimeAudioContext();
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      const gain = context.createGain();
+      gain.gain.value = 0.6;
+      source.connect(gain);
+      gain.connect(context.destination);
+      source.start();
+    },
+    [localChimeIdentity, fetchChimeBuffer, ensureChimeAudioContext],
+  );
+
+  const removeChime = useCallback(
+    async (kind: 'enter' | 'exit') => {
+      if (!adminToken || !localChimeIdentity) return;
+      try {
+        await fetch(`${resolveControlUrl(controlUrl)}/api/chime/delete`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ identity: localChimeIdentity, kind }),
+        });
+      } catch {
+        // ignore delete failure
+      }
+
+      chimeBufferCacheRef.current.delete(`${localChimeIdentity}-${kind}`);
+      setChimeExists((prev) => ({ ...prev, [kind]: false }));
+      setChimeStatus((prev) => ({ ...prev, [kind]: '' }));
+    },
+    [adminToken, localChimeIdentity, controlUrl],
   );
 
   const logStatsEvent = useCallback(
@@ -955,10 +1165,12 @@ export function App() {
       })
       .on(RoomEvent.ParticipantConnected, (participant) => {
         appendDebug(`Participant joined: ${participant.name || participant.identity}`);
+        void playParticipantChime(participant.identity, 'enter');
         bump();
       })
       .on(RoomEvent.ParticipantDisconnected, (participant) => {
         appendDebug(`Participant left: ${participant.name || participant.identity}`);
+        void playParticipantChime(participant.identity, 'exit');
         bump();
       })
       .on(RoomEvent.TrackSubscribed, () => bump())
@@ -1111,6 +1323,7 @@ export function App() {
     refreshDevices,
     loadChatHistory,
     logStatsEvent,
+    playParticipantChime,
   ]);
 
   const onConnect = useCallback(() => {
@@ -1655,6 +1868,13 @@ export function App() {
       void loadSoundboard();
     }
   }, [soundboardCompactOpen, soundboardEditOpen, soundboardReloadTick, loadSoundboard]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    if (!connected || !localChimeIdentity) return;
+    void checkLocalChimeState('enter');
+    void checkLocalChimeState('exit');
+  }, [settingsOpen, connected, localChimeIdentity, checkLocalChimeState]);
 
   const jamApplyVolume = useCallback(() => {
     const gain = jamGainRef.current;
@@ -2800,6 +3020,57 @@ export function App() {
             <button type="button" onClick={() => void refreshDevices()}>
               Refresh Devices
             </button>
+          </div>
+
+          <div id="chime-settings-section" className="chime-settings-section">
+            <div className="chime-settings-title">Custom Sounds</div>
+            {(['enter', 'exit'] as const).map((kind) => (
+              <div key={kind} className="chime-upload-row">
+                <label className="chime-label">{kind === 'enter' ? 'Enter Sound' : 'Exit Sound'}</label>
+                <div className="chime-controls">
+                  <input
+                    type="file"
+                    accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm"
+                    className="hidden"
+                    id={`chime-${kind}-file`}
+                    onChange={(event) => {
+                      chimeFileRef.current[kind] = event.target.files?.[0] ?? null;
+                      if (chimeFileRef.current[kind]) {
+                        setChimeStatus((prev) => ({ ...prev, [kind]: chimeFileRef.current[kind]?.name || '' }));
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="chime-btn"
+                    onClick={() => {
+                      const input = document.getElementById(`chime-${kind}-file`) as HTMLInputElement | null;
+                      input?.click();
+                    }}
+                  >
+                    Pick
+                  </button>
+                  <button type="button" className="chime-btn" onClick={() => void uploadChime(kind)}>
+                    Upload
+                  </button>
+                  <button
+                    type="button"
+                    className={`chime-btn chime-preview${chimeExists[kind] ? '' : ' hidden'}`}
+                    onClick={() => void previewChime(kind)}
+                  >
+                    Play
+                  </button>
+                  <button
+                    type="button"
+                    className={`chime-btn chime-remove${chimeExists[kind] ? '' : ' hidden'}`}
+                    onClick={() => void removeChime(kind)}
+                  >
+                    Remove
+                  </button>
+                  <span className="chime-status">{chimeStatus[kind]}</span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
