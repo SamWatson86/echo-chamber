@@ -8040,6 +8040,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     currentRoomName = roomId;
   }
   setPublishButtonsEnabled(true);
+  // Show dashboard button for all connected users
+  var dashBtn = document.getElementById("open-admin-dash");
+  if (dashBtn) dashBtn.classList.remove("hidden");
   reconcileLocalPublishIndicators("post-connect");
   if (reuseAdmin && micEnabled) {
     // Room switch: mic was already on, re-enable immediately without permission dance
@@ -8421,6 +8424,10 @@ async function disconnect() {
   connectPanel.classList.remove("hidden");
   startOnlineUsersPolling();
   setPublishButtonsEnabled(false);
+  // Hide dashboard button and close panel on disconnect
+  var dashBtn = document.getElementById("open-admin-dash");
+  if (dashBtn) dashBtn.classList.add("hidden");
+  if (_adminDashOpen) toggleAdminDash();
   micEnabled = false;
   camEnabled = false;
   screenEnabled = false;

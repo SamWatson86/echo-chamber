@@ -77,7 +77,7 @@
           </div>
           <div id="jam-banner" class="jam-banner hidden"></div>
           <div class="room-actions">
-            <button id="open-admin-dash" type="button" class="admin-only hidden" onclick="toggleAdminDash()">Admin</button>
+            <button id="open-admin-dash" type="button" class="hidden" onclick="toggleAdminDash()">Dashboard</button>
             <button id="open-settings" type="button" disabled>Settings</button>
             <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Report Bug</button>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
@@ -328,10 +328,10 @@
           <div id="jam-status" class="jam-status"></div>
         </div>
       </div>
-      <!-- Admin Dashboard Panel (admin-only) -->
-      <div id="admin-dash-panel" class="admin-only hidden admin-dash-panel">
+      <!-- Dashboard Panel (visible to all connected users) -->
+      <div id="admin-dash-panel" class="hidden admin-dash-panel">
         <div class="admin-dash-header">
-          <h3>Admin Dashboard</h3>
+          <h3>Dashboard</h3>
           <button type="button" class="admin-dash-close" onclick="toggleAdminDash()">&times;</button>
         </div>
         <div class="admin-dash-tabs">
