@@ -1,51 +1,65 @@
-# Operations (Runbook)
+# Operations Runbook
 
-## Start / Stop (Tray)
-Echo Chamber installs a Windows tray launcher at login.
+This runbook reflects the current Core stack reality (central host/server model).
 
-Tray script:
-- `tools/echo-tray.ps1`
-- Startup entry: `%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\Echo Chamber Tray.vbs`
+## Start / stop
 
-If the tray icon is visible:
-- Right-click tray icon -> Start/Stop/Restart Server
-- "Open Admin UI" opens the local web UI
-- "Open Logs Folder" opens the log directory
+From repo root:
 
-## Startup behavior
-The tray launcher auto-starts the server on login.
-If the server process is missing or the port isn't listening, the launcher retries.
+```powershell
+# Start SFU + control plane + TURN (if binaries exist)
+powershell -ExecutionPolicy Bypass -File .\core\run-core.ps1
 
-## Verify server is running
-PowerShell:
-```
-Get-NetTCPConnection -LocalPort 8443 -State Listen
+# Stop all core services
+powershell -ExecutionPolicy Bypass -File .\core\stop-core.ps1
 ```
 
-Open UI:
-- `https://localhost:8443`
+## Default local URLs
+
+(From `core/control/.env.example` defaults)
+
+- Viewer: `https://127.0.0.1:9443/viewer`
+- Admin dashboard: `https://127.0.0.1:9443/admin`
+- Health: `https://127.0.0.1:9443/health`
+
+## Process + PID management
+
+The scripts manage PID files and will stop old processes before restart:
+
+- Control plane PID: `core/control/core-control.pid`
+- LiveKit PID: `core/sfu/livekit-server.pid`
+- TURN PID: `core/turn/echo-turn.pid`
+
+Manual check (PowerShell):
+
+```powershell
+Get-Process -Id (Get-Content .\core\control\core-control.pid)
+Get-Process -Id (Get-Content .\core\sfu\livekit-server.pid)
+Get-Process -Id (Get-Content .\core\turn\echo-turn.pid)
+```
 
 ## Logs
-Server log (desktop):
-- `%APPDATA%\\@echo\\desktop\\logs\\echo-chamber-server.log`
 
-Tray log:
-- `%APPDATA%\\@echo\\desktop\\logs\\echo-tray.log`
+Core runtime logs are written under `core/logs/`:
 
-TURN log (if enabled):
-- `%APPDATA%\\@echo\\desktop\\logs\\echo-turn.log`
+- `core/logs/run-core.log`
+- `core/logs/core-control.out.log`
+- `core/logs/core-control.err.log`
+- `core/logs/livekit.out.log`
+- `core/logs/livekit.err.log`
+- `core/logs/turn.out.log`
+- `core/logs/turn.err.log`
 
-## Common problems
-1) Tray launched but server not running
-- Check `echo-tray.log`
-- Check for a stale PID in `%APPDATA%\\@echo\\desktop\\echo-server.pid`
+## Quick incident flow
 
-2) Screen share shows blank tile
-- Browser autoplay restrictions can block video play.
-- Re-click/tap the page or re-join; the client also attempts recovery.
+1. Confirm health endpoint and viewer/admin reachability.
+2. Check `core/logs/core-control.err.log` first.
+3. Validate PID files are present and processes are alive.
+4. If needed, run `stop-core.ps1` then `run-core.ps1` for clean restart.
+5. Capture timestamps + action sequence + relevant logs in the issue.
 
-3) No mic audio
-- Check output device selection in Settings.
-- Verify "Mute All" is not active.
-- Confirm the peer is not muted in Active Users.
+## Change management
 
+- PRs only (no direct `main`/`master` pushes).
+- Keep release impact explicit (server-only vs desktop-binary).
+- For behavior changes in state/race-prone paths, include verification evidence.
