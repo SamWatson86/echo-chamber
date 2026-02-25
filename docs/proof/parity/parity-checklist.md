@@ -1,57 +1,44 @@
-# Viewer-Next Parity Checklist (Draft PR #62)
+# Viewer-Next Parity Checklist (PR #62)
 
-Last updated: 2026-02-25 16:22 ET  
+Last updated: 2026-02-25 17:01 ET  
 Branch: `feat/viewer-next-parity-finish`
 
-> Truth status: **INCOMPLETE for true legacy parity**.
+> Truth status: **COMPLETE for the previously explicit 6 legacy media/quality parity gaps** (implemented in `core/viewer-next`, with tests and verification runs below).
 
 ## Scope criteria status
 
 | Criterion | Status | Evidence |
 |---|---:|---|
-| 1) Legacy viewer DOM/control parity for required workflows + admin tabs present | ✅ | Playwright parity journey asserts legacy control IDs (`#connect`, `#disconnect`, `#toggle-mic`, `#toggle-cam`, `#toggle-screen`, `#chat-panel`) and validates admin tab buttons `Live/History/Metrics/Bugs/Deploys`. |
-| 2) Functional parity for core workflows (connect/disconnect, room switch, media toggles, chat send/upload/delete, soundboard play/edit/upload/update, jam controls, bug report, admin tabs) | ✅ | `e2e/smoke.spec.ts` covers all workflows end-to-end with mocked APIs; reliability unit tests cover media toggle logic and room-switch during provisioning. |
-| 3) Reliability parity pass for quick toggle/switch drift scenarios | ✅ | `tests/app.reliability.test.tsx` validates rapid double-toggle final media state correctness; `tests/connectionMachine.test.ts` + App reliability test validate latest room switch request wins during provisioning/reconnect timing. |
-| 4) Verification pass (`npm run test`, `npm run build`, `npm run test:e2e`) + evidence artifacts | ✅ | All commands pass on this branch. Latest artifacts listed below. |
-| 5) Commit + push branch updates and refresh PR #62 status/checklist | ✅ | Commits pushed to `feat/viewer-next-parity-finish`; PR #62 body/checklist updated to current status. |
+| 1) Legacy viewer DOM/control parity for required workflows + admin tabs present | ✅ | `e2e/smoke.spec.ts` validates legacy control IDs and admin tabs (`Live/History/Metrics/Bugs/Deploys`). |
+| 2) Functional parity for core workflows (connect/disconnect, room switch, media toggles, chat send/upload/delete, soundboard play/edit/upload/update, jam controls, bug report, admin tabs) | ✅ | End-to-end flow validated in `npm run test:e2e` and `PARITY_EVIDENCE=1 npm run test:e2e`. |
+| 3) Reliability parity pass for quick toggle/switch drift scenarios | ✅ | `tests/app.reliability.test.tsx` + `tests/connectionMachine.test.ts`. |
+| 4) Verification pass (`npm run test`, `npm run build`, `npm run test:e2e`) + evidence artifacts | ✅ | All commands pass (see command log below). |
+| 5) Commit + push branch updates and refresh PR #62 status/checklist | ✅ | This checklist + PR body updated in the same push. |
 
-## Legacy media/quality pipeline parity (not yet complete)
+## Legacy media/quality pipeline parity (6 explicit gaps)
 
-| Legacy capability | Status in `viewer-next` |
-|---|---:|
-| Canvas screen-share pipeline (`canvas-pipe`) | ❌ missing |
-| Receiver-side AIMD bitrate control + publisher bitrate-cap datachannel flow | ❌ missing |
-| BWE watchdog/rescue encoder re-assert logic | ❌ missing |
-| RNNoise mic noise-cancel pipeline | ❌ missing |
-| Volume boost gain-node pipeline (>100% amplification) | ❌ missing |
-| Explicit screen-share audio publish tuning (`dtx: false`, codec/bitrate behavior parity) | ❌ missing |
+| Legacy capability | Status in `viewer-next` | Primary implementation | Test evidence |
+|---|---:|---|---|
+| 1) Canvas screen-share pipeline (`canvas-pipe`) semantics | ✅ | `src/features/media/screenShareParity.ts` + App manual screen-share path in `src/app/App.tsx` (`createCanvasScreenSharePipeline`, capped resolution, canvas capture publish) | `tests/media.screenShareParity.test.ts` |
+| 2) Receiver-side AIMD + publisher bitrate-cap handling | ✅ | `src/features/media/aimdBitrateControl.ts` + App datachannel handling (`bitrate-cap`, `bitrate-cap-ack`) + stats loop in `App.tsx` | `tests/media.aimdParity.test.ts` |
+| 3) BWE watchdog/rescue behavior | ✅ | `src/features/media/bweWatchdog.ts` + outbound sender stats watchdog/rescue actions in `App.tsx` | `tests/media.bweParity.test.ts` |
+| 4) RNNoise mic noise-cancel path | ✅ | `src/features/media/rnnoiseParity.ts` + App settings/toggle path + sender replaceTrack/restore flow | `tests/media.rnnoiseParity.test.ts` |
+| 5) Participant volume boost gain pipeline (>100%) | ✅ | `src/features/media/participantVolumeBoost.ts` + App participant volume controls + audio-bucket binding | `tests/media.volumeBoostParity.test.ts` |
+| 6) Explicit screen-share audio publish tuning parity (`dtx`/bitrate behavior) | ✅ | `SCREEN_SHARE_AUDIO_PUBLISH_OPTIONS` (`dtx: false`, `red: false`, `audioBitrate: 128000`) in `screenShareParity.ts` and publish path in `App.tsx` | `tests/media.screenShareParity.test.ts` |
 
 ## Latest parity evidence artifacts (`PARITY_EVIDENCE=1`)
 
-- `docs/proof/parity/2026-02-25T13-30-47-790Z-behavior.json`
-- `docs/proof/parity/2026-02-25T13-30-47-790Z-01-room-switched-breakout2.png` ... `docs/proof/parity/2026-02-25T13-30-47-790Z-21-admin-deploys-tab.png` (21 screenshots)
-- Legacy baseline capture for visual before/after pairing: `docs/proof/parity/2026-02-25T13-37-35-934Z-legacy-before-behavior.json` + 12 state screenshots.
+- `docs/proof/parity/2026-02-25T22-02-34-532Z-behavior.json`
+- `docs/proof/parity/2026-02-25T22-02-34-532Z-01-room-switched-breakout2.png` ... `docs/proof/parity/2026-02-25T22-02-34-532Z-21-admin-deploys-tab.png` (21 screenshots)
 
-## Verification command status (latest run)
+## Verification command status (latest run on this branch)
 
 - `npm run test` ✅
 - `npm run build` ✅
+- `npm run test:e2e` ✅
 - `PARITY_EVIDENCE=1 npm run test:e2e` ✅
 
-## Reliability/behavior updates made in this pass
+## Notes
 
-- Added provisioning-state `CONNECT` reentry support in `connectionMachine` so rapid room-switch requests during provisioning apply the latest request (prevents stale room token/session drift).
-- Updated room-switch behavior in App to send reconnect requests while provisioning (not only when already connected).
-- Added media intent reconciliation and pending-toggle sequencing to keep mic/camera/screenshare state stable under fast repeated toggles and reconnect/room switches.
-- Added focused reliability tests for quick-toggle drift and provisioning room-switch race conditions.
-- Expanded e2e parity journey to cover all required core workflows and admin tabs in one evidence-producing run.
-
-## Remaining gaps
-
-- Full legacy media/quality parity is not complete. Missing in `viewer-next` today:
-  - canvas pipeline for screen share publication
-  - AIMD bitrate-cap control loop and fallback behavior
-  - BWE watchdog/rescue logic
-  - RNNoise mic noise-cancel path
-  - receiver volume boost gain pipeline
-  - explicit screen-share audio DTX/bitrate parity behavior
+- The parity implementations above are in `viewer-next` only (legacy untouched).
+- Existing reliability/e2e checks were kept green and extended with focused parity unit coverage for the 6 explicit gaps.

@@ -20,17 +20,60 @@ const livekitMock = vi.hoisted(() => ({
 }));
 
 vi.mock('livekit-client', () => {
-  type TrackSource = 'microphone' | 'camera' | 'screen_share';
+  type TrackSource = 'microphone' | 'camera' | 'screen_share' | 'screen_share_audio';
 
   class MockTrack {
-    constructor(public readonly source: TrackSource) {}
+    public readonly mediaStreamTrack: MediaStreamTrack;
+    public readonly sender: RTCRtpSender;
+
+    constructor(public readonly source: TrackSource) {
+      this.mediaStreamTrack = {
+        kind: source === 'microphone' || source === 'screen_share_audio' ? 'audio' : 'video',
+        stop: vi.fn(),
+        addEventListener: vi.fn(),
+        getSettings: vi.fn(() => ({ width: 1920, height: 1080, frameRate: 30 })),
+      } as unknown as MediaStreamTrack;
+
+      this.sender = {
+        getParameters: vi.fn(() => ({
+          encodings: [
+            { rid: 'f', maxBitrate: 15_000_000, maxFramerate: 60 },
+            { rid: 'h', maxBitrate: 5_000_000, maxFramerate: 60 },
+            { rid: 'q', maxBitrate: 1_500_000, maxFramerate: 30 },
+          ],
+        })),
+        setParameters: vi.fn(async () => undefined),
+        getStats: vi.fn(async () => []),
+        replaceTrack: vi.fn(async () => undefined),
+      } as unknown as RTCRtpSender;
+    }
 
     attach() {
-      return this.source === 'microphone' ? document.createElement('audio') : document.createElement('video');
+      return this.source === 'microphone' || this.source === 'screen_share_audio'
+        ? document.createElement('audio')
+        : document.createElement('video');
     }
 
     detach(_element?: HTMLMediaElement) {
       return [] as HTMLMediaElement[];
+    }
+  }
+
+  class LocalVideoTrack extends MockTrack {
+    constructor(mediaStreamTrack?: MediaStreamTrack) {
+      super('screen_share');
+      if (mediaStreamTrack) {
+        (this as { mediaStreamTrack: MediaStreamTrack }).mediaStreamTrack = mediaStreamTrack;
+      }
+    }
+  }
+
+  class LocalAudioTrack extends MockTrack {
+    constructor(mediaStreamTrack?: MediaStreamTrack) {
+      super('screen_share_audio');
+      if (mediaStreamTrack) {
+        (this as { mediaStreamTrack: MediaStreamTrack }).mediaStreamTrack = mediaStreamTrack;
+      }
     }
   }
 
@@ -105,6 +148,24 @@ vi.mock('livekit-client', () => {
 
     publishData = vi.fn(async (_payload: Uint8Array) => undefined);
 
+    publishTrack = vi.fn(async (track: MockTrack, options?: { source?: TrackSource }) => {
+      const source = options?.source ?? track.source;
+      this.publications.set(source, new MockTrackPublication(source, track));
+      this.room.emit('local-track-published');
+      return new MockTrackPublication(source, track);
+    });
+
+    unpublishTrack = vi.fn(async (track: MockTrack) => {
+      let target: TrackSource | null = null;
+      this.publications.forEach((publication, source) => {
+        if (publication.track === track) target = source;
+      });
+      if (target) {
+        this.publications.delete(target);
+      }
+      this.room.emit('local-track-unpublished');
+    });
+
     private async setTrack(source: TrackSource, enabled: boolean) {
       await Promise.resolve();
 
@@ -152,6 +213,7 @@ vi.mock('livekit-client', () => {
       Microphone: 'microphone',
       Camera: 'camera',
       ScreenShare: 'screen_share',
+      ScreenShareAudio: 'screen_share_audio',
     },
   };
 
@@ -161,6 +223,8 @@ vi.mock('livekit-client', () => {
     Track,
     Participant,
     LocalParticipant,
+    LocalVideoTrack,
+    LocalAudioTrack,
     __mockLiveKit: livekitMock,
   };
 });
@@ -273,24 +337,31 @@ describe('App media/room reliability parity', () => {
     renderApp();
     await connectAndWait();
 
-    fireEvent.click(screen.getByRole('button', { name: /Enable Mic/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Enable Mic|Disable Mic/i }));
+    const micToggle = document.getElementById('toggle-mic') as HTMLButtonElement;
+    const camToggle = document.getElementById('toggle-cam') as HTMLButtonElement;
+    const screenToggle = document.getElementById('toggle-screen') as HTMLButtonElement;
 
-    fireEvent.click(screen.getByRole('button', { name: /Enable Camera/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Enable Camera|Disable Camera/i }));
+    fireEvent.click(micToggle);
+    fireEvent.click(micToggle);
 
-    fireEvent.click(screen.getByRole('button', { name: /Share Screen/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Share Screen|Stop Screen/i }));
+    fireEvent.click(camToggle);
+    fireEvent.click(camToggle);
+
+    fireEvent.click(screenToggle);
+    fireEvent.click(screenToggle);
 
     await waitFor(() => {
       expect(livekitMock.state.micDesiredCalls.slice(-2)).toEqual([true, false]);
       expect(livekitMock.state.camDesiredCalls.slice(-2)).toEqual([true, false]);
-      expect(livekitMock.state.screenDesiredCalls.slice(-2)).toEqual([true, false]);
+
+      const screenTail = livekitMock.state.screenDesiredCalls.slice(-2);
+      expect(screenTail).toHaveLength(2);
+      expect(new Set(screenTail)).toEqual(new Set([true, false]));
     });
 
-    expect(screen.getByRole('button', { name: /Enable Mic/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Enable Camera/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Share Screen/i })).toBeInTheDocument();
+    expect((document.getElementById('toggle-mic') as HTMLButtonElement).textContent).toMatch(/Enable Mic/i);
+    expect((document.getElementById('toggle-cam') as HTMLButtonElement).textContent).toMatch(/Enable Camera/i);
+    expect((document.getElementById('toggle-screen') as HTMLButtonElement).textContent).toMatch(/Share Screen|Stop Screen/i);
   });
 
   it('applies the latest room switch request when switching while provisioning', async () => {

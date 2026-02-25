@@ -9,7 +9,9 @@ import {
   useState,
 } from 'react';
 import {
+  LocalAudioTrack,
   LocalParticipant,
+  LocalVideoTrack,
   Participant,
   Room,
   RoomEvent,
@@ -24,6 +26,22 @@ import { useViewerPrefsStore } from '@/stores/viewerPrefsStore';
 import { useOnlineUsersQuery } from '@/features/connection/useOnlineUsersQuery';
 import { useRoomStatusQuery } from '@/features/connection/useRoomStatusQuery';
 import type { RoomStatusParticipant } from '@/lib/api';
+import {
+  BITRATE_DEFAULT_HIGH,
+  BITRATE_DEFAULT_LOW,
+  BITRATE_DEFAULT_MED,
+  SCREEN_SHARE_AUDIO_PUBLISH_OPTIONS,
+  buildScreenSharePublishOptions,
+  createCanvasScreenSharePipeline,
+} from '@/features/media/screenShareParity';
+import {
+  PublisherBitrateCapManager,
+  ReceiverAimdController,
+  type BitrateCapMessage,
+} from '@/features/media/aimdBitrateControl';
+import { BweWatchdog, applyBweActionToSender } from '@/features/media/bweWatchdog';
+import { RnnoiseMicProcessor, type RnnoiseSuppressionLevel } from '@/features/media/rnnoiseParity';
+import { ParticipantVolumeBoostManager } from '@/features/media/participantVolumeBoost';
 
 const FIXED_ROOMS = ['main', 'breakout-1', 'breakout-2', 'breakout-3'] as const;
 const ROOM_DISPLAY_NAMES: Record<(typeof FIXED_ROOMS)[number], string> = {
@@ -37,6 +55,9 @@ const THEME_STORAGE_KEY = 'echo-core-theme';
 const UI_OPACITY_KEY = 'echo-core-ui-opacity';
 const CHAT_MESSAGE_TYPE = 'chat-message';
 const CHAT_FILE_TYPE = 'chat-file';
+const RNNOISE_ENABLED_KEY = 'echo-noise-cancel-enabled';
+const RNNOISE_LEVEL_KEY = 'echo-noise-cancel-level';
+const PARTICIPANT_VOLUME_STORAGE_KEY = 'echo-participant-volumes';
 
 const THEMES = [
   { id: 'frost', label: 'Frost', previewClass: 'frost-preview' },
@@ -110,6 +131,7 @@ type ParticipantView = {
   micTrack: LocalTrack | RemoteTrack | null;
   cameraTrack: LocalTrack | RemoteTrack | null;
   screenTrack: LocalTrack | RemoteTrack | null;
+  screenAudioTrack: LocalTrack | RemoteTrack | null;
 };
 
 type JamTrack = {
@@ -288,6 +310,38 @@ function safeJsonParse<T>(value: string | null, fallback: T): T {
   }
 }
 
+function loadParticipantVolumes(): Record<string, { mic: number; screen: number }> {
+  return safeJsonParse<Record<string, { mic: number; screen: number }>>(
+    getStoredValue(PARTICIPANT_VOLUME_STORAGE_KEY),
+    {},
+  );
+}
+
+function getParticipantVolume(
+  volumes: Record<string, { mic: number; screen: number }>,
+  identity: string,
+  kind: 'mic' | 'screen',
+) {
+  const entry = volumes[identity];
+  const value = kind === 'mic' ? entry?.mic : entry?.screen;
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(0, Math.min(3, Number(value)));
+}
+
+function setParticipantVolume(
+  volumes: Record<string, { mic: number; screen: number }>,
+  identity: string,
+  kind: 'mic' | 'screen',
+  value: number,
+) {
+  const current = volumes[identity] ?? { mic: 1, screen: 1 };
+  const nextValue = Math.max(0, Math.min(3, Number(value)));
+  volumes[identity] = {
+    mic: kind === 'mic' ? nextValue : current.mic,
+    screen: kind === 'screen' ? nextValue : current.screen,
+  };
+}
+
 function stableRoomId(room: string): (typeof FIXED_ROOMS)[number] {
   if (FIXED_ROOMS.includes(room as (typeof FIXED_ROOMS)[number])) {
     return room as (typeof FIXED_ROOMS)[number];
@@ -390,6 +444,8 @@ function buildParticipantViews(room: Room): ParticipantView[] {
     const micPublication = participant.getTrackPublication(Track.Source.Microphone);
     const cameraPublication = participant.getTrackPublication(Track.Source.Camera);
     const screenPublication = participant.getTrackPublication(Track.Source.ScreenShare);
+    const screenAudioSource = (Track.Source as Record<string, string | undefined>).ScreenShareAudio ?? 'screen_share_audio';
+    const screenAudioPublication = participant.getTrackPublication(screenAudioSource as any);
 
     return {
       identity: participant.identity,
@@ -399,6 +455,7 @@ function buildParticipantViews(room: Room): ParticipantView[] {
       micTrack: classifyTrack(micPublication),
       cameraTrack: classifyTrack(cameraPublication),
       screenTrack: classifyTrack(screenPublication),
+      screenAudioTrack: classifyTrack(screenAudioPublication),
     };
   });
 }
@@ -455,6 +512,25 @@ function TrackRenderer({
   }, [track, className, muted, onMounted, onUnmounted]);
 
   return <div ref={mountRef} className="h-full w-full" />;
+}
+
+type TrackLikeWithSender = {
+  sender?: RTCRtpSender;
+  mediaStreamTrack?: MediaStreamTrack;
+};
+
+function getTrackSender(track: LocalTrack | RemoteTrack | null | undefined) {
+  const candidate = track as LocalTrack | RemoteTrack | null | undefined;
+  if (!candidate) return null;
+  const sender = (candidate as unknown as TrackLikeWithSender).sender;
+  return sender ?? null;
+}
+
+function getTrackMediaStreamTrack(track: LocalTrack | RemoteTrack | null | undefined) {
+  const candidate = track as LocalTrack | RemoteTrack | null | undefined;
+  if (!candidate) return null;
+  const mediaStreamTrack = (candidate as unknown as TrackLikeWithSender).mediaStreamTrack;
+  return mediaStreamTrack ?? null;
 }
 
 export function App() {
@@ -560,6 +636,13 @@ export function App() {
   const [pendingScreenDesired, setPendingScreenDesired] = useState<boolean | null>(null);
   const [updateBannerVersion, setUpdateBannerVersion] = useState<string | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [noiseCancelEnabled, setNoiseCancelEnabled] = useState(() => getStoredValue(RNNOISE_ENABLED_KEY) === '1');
+  const [noiseCancelLevel, setNoiseCancelLevel] = useState<RnnoiseSuppressionLevel>(() => {
+    const raw = Number(getStoredValue(RNNOISE_LEVEL_KEY) ?? '2');
+    if (raw === 0 || raw === 1) return raw;
+    return 2;
+  });
+  const [volumeRevision, setVolumeRevision] = useState(0);
 
   const micToggleSeqRef = useRef(0);
   const camToggleSeqRef = useRef(0);
@@ -573,6 +656,26 @@ export function App() {
   const remoteMediaElementsRef = useRef<Set<HTMLMediaElement>>(new Set());
   const heartbeatTimerRef = useRef<number | null>(null);
   const heartbeatAbortRef = useRef<AbortController | null>(null);
+
+  const screenShareVideoTrackRef = useRef<LocalVideoTrack | null>(null);
+  const screenShareAudioTrackRef = useRef<LocalAudioTrack | null>(null);
+  const screenSharePipelineRef = useRef<ReturnType<typeof createCanvasScreenSharePipeline> | null>(null);
+  const screenShareManualActiveRef = useRef(false);
+  const startManualScreenShareRef = useRef<() => Promise<boolean>>(async () => false);
+  const stopManualScreenShareRef = useRef<() => Promise<void>>(async () => undefined);
+  const applyRnnoiseToLocalMicRef = useRef<() => Promise<void>>(async () => undefined);
+  const publisherCapManagerRef = useRef<PublisherBitrateCapManager | null>(null);
+  const receiverAimdControllersRef = useRef<Map<string, ReceiverAimdController>>(new Map());
+  const bweWatchdogRef = useRef(new BweWatchdog());
+  const outboundBweTimerRef = useRef<number | null>(null);
+  const capCleanupTimerRef = useRef<number | null>(null);
+  const outboundPrevStatsRef = useRef<{ bytesSent: number; timestamp: number } | null>(null);
+  const inboundPrevLostRef = useRef<Map<string, number>>(new Map());
+  const inboundPrevBytesRef = useRef<Map<string, { bytes: number; timestamp: number }>>(new Map());
+  const rnnoiseProcessorRef = useRef(new RnnoiseMicProcessor());
+  const volumeBoostRef = useRef(new ParticipantVolumeBoostManager());
+  const participantVolumesRef = useRef<Record<string, { mic: number; screen: number }>>(loadParticipantVolumes());
+  const mediaBindingRef = useRef<Map<HTMLMediaElement, { identity: string; kind: 'mic' | 'screen' }>>(new Map());
 
   const jamAudioWsRef = useRef<WebSocket | null>(null);
   const jamAudioCtxRef = useRef<AudioContext | null>(null);
@@ -625,6 +728,7 @@ export function App() {
           micTrack: null,
           cameraTrack: null,
           screenTrack: null,
+          screenAudioTrack: null,
         });
       });
 
@@ -639,8 +743,9 @@ export function App() {
       micTrack: null,
       cameraTrack: null,
       screenTrack: null,
+      screenAudioTrack: null,
     }));
-  }, [roomVersion, roomStatusMap, activeRoom]);
+  }, [roomVersion, roomStatusMap, activeRoom, volumeRevision]);
 
   const screenParticipants = useMemo(
     () => participantViews.filter((participant) => Boolean(participant.screenTrack)),
@@ -668,7 +773,7 @@ export function App() {
       return {
         mic: localParticipant.isMicrophoneEnabled,
         cam: localParticipant.isCameraEnabled,
-        screen: localParticipant.isScreenShareEnabled,
+        screen: screenShareManualActiveRef.current || localParticipant.isScreenShareEnabled,
       };
     }
 
@@ -1038,11 +1143,20 @@ export function App() {
   }, [adminToken, apiUrl, localIdentity, name, connectedRoomName, activeRoom]);
 
   const registerRemoteMediaElement = useCallback(
-    (element: HTMLMediaElement, isAttach: boolean) => {
+    (
+      element: HTMLMediaElement,
+      isAttach: boolean,
+      binding?: { identity: string; kind: 'mic' | 'screen' },
+    ) => {
       if (isAttach) {
         remoteMediaElementsRef.current.add(element);
+        if (binding) {
+          mediaBindingRef.current.set(element, binding);
+        }
       } else {
         remoteMediaElementsRef.current.delete(element);
+        mediaBindingRef.current.delete(element);
+        volumeBoostRef.current.cleanup(element);
       }
 
       if (typeof (element as HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId === 'function') {
@@ -1058,8 +1172,13 @@ export function App() {
         }
       }
 
-      element.muted = roomAudioMuted;
-      element.volume = roomAudioMuted ? 0 : 1;
+      const currentBinding = mediaBindingRef.current.get(element);
+      const volume = currentBinding
+        ? getParticipantVolume(participantVolumesRef.current, currentBinding.identity, currentBinding.kind)
+        : 1;
+
+      volumeBoostRef.current.applyVolume(element, volume, roomAudioMuted);
+      element.muted = false;
     },
     [roomAudioMuted, selectedSpeakerId],
   );
@@ -1092,17 +1211,51 @@ export function App() {
   }, [selectedSpeakerId]);
 
   useEffect(() => {
+    void volumeBoostRef.current.setSinkId(selectedSpeakerId);
+  }, [selectedSpeakerId]);
+
+  useEffect(() => {
+    setStoredValue(RNNOISE_ENABLED_KEY, noiseCancelEnabled ? '1' : '0');
+  }, [noiseCancelEnabled]);
+
+  useEffect(() => {
+    setStoredValue(RNNOISE_LEVEL_KEY, String(noiseCancelLevel));
+    rnnoiseProcessorRef.current.setSuppressionLevel(noiseCancelLevel);
+  }, [noiseCancelLevel]);
+
+  useEffect(() => {
     if (chatOpen) {
       setUnreadChatCount(0);
     }
   }, [chatOpen]);
 
+  // RNNoise mic effect is installed after callback declarations.
+
   useEffect(() => {
     remoteMediaElementsRef.current.forEach((element) => {
-      element.muted = roomAudioMuted;
-      element.volume = roomAudioMuted ? 0 : 1;
+      const binding = mediaBindingRef.current.get(element);
+      const volume = binding
+        ? getParticipantVolume(participantVolumesRef.current, binding.identity, binding.kind)
+        : 1;
+      volumeBoostRef.current.applyVolume(element, volume, roomAudioMuted);
+      element.muted = false;
     });
-  }, [roomAudioMuted]);
+  }, [roomAudioMuted, volumeRevision]);
+
+  useEffect(() => () => {
+    if (outboundBweTimerRef.current) {
+      window.clearInterval(outboundBweTimerRef.current);
+      outboundBweTimerRef.current = null;
+    }
+    if (capCleanupTimerRef.current) {
+      window.clearInterval(capCleanupTimerRef.current);
+      capCleanupTimerRef.current = null;
+    }
+    screenSharePipelineRef.current?.stop();
+    screenSharePipelineRef.current = null;
+    volumeBoostRef.current.cleanupAll();
+    void rnnoiseProcessorRef.current.disable();
+  }, []);
 
   useEffect(() => {
     stopHeartbeat();
@@ -1263,6 +1416,15 @@ export function App() {
   );
 
   const disconnectRoom = useCallback(async () => {
+    if (outboundBweTimerRef.current) {
+      window.clearInterval(outboundBweTimerRef.current);
+      outboundBweTimerRef.current = null;
+    }
+    if (capCleanupTimerRef.current) {
+      window.clearInterval(capCleanupTimerRef.current);
+      capCleanupTimerRef.current = null;
+    }
+
     if (roomRef.current) {
       try {
         await roomRef.current.disconnect();
@@ -1272,7 +1434,34 @@ export function App() {
       roomRef.current.removeAllListeners();
       roomRef.current = null;
     }
+
+    screenSharePipelineRef.current?.stop();
+    screenSharePipelineRef.current = null;
+    try {
+      screenShareVideoTrackRef.current?.mediaStreamTrack?.stop();
+      screenShareAudioTrackRef.current?.mediaStreamTrack?.stop();
+    } catch {
+      // ignore stop errors
+    }
+    screenShareVideoTrackRef.current = null;
+    screenShareAudioTrackRef.current = null;
+    screenShareManualActiveRef.current = false;
+
+    if (publisherCapManagerRef.current) {
+      await publisherCapManagerRef.current.clear();
+    }
+    publisherCapManagerRef.current = null;
+    receiverAimdControllersRef.current.clear();
+    inboundPrevLostRef.current.clear();
+    inboundPrevBytesRef.current.clear();
+    outboundPrevStatsRef.current = null;
+    bweWatchdogRef.current.reset();
+
     remoteMediaElementsRef.current.clear();
+    mediaBindingRef.current.clear();
+    volumeBoostRef.current.cleanupAll();
+    void rnnoiseProcessorRef.current.disable();
+
     setRoomVersion((v) => v + 1);
   }, []);
 
@@ -1303,9 +1492,19 @@ export function App() {
       }
     }
 
-    if (localParticipant.isScreenShareEnabled !== intent.screen) {
+    const currentScreenEnabled = screenShareManualActiveRef.current || localParticipant.isScreenShareEnabled;
+    if (currentScreenEnabled !== intent.screen) {
       try {
-        await localParticipant.setScreenShareEnabled(intent.screen, intent.screen ? { audio: true } : undefined);
+        if (intent.screen) {
+          const parityStarted = await startManualScreenShareRef.current();
+          if (!parityStarted) {
+            await localParticipant.setScreenShareEnabled(true, { audio: true });
+          }
+        } else if (screenShareManualActiveRef.current) {
+          await stopManualScreenShareRef.current();
+        } else {
+          await localParticipant.setScreenShareEnabled(false);
+        }
       } catch (error) {
         appendDebug(`Screen-share reconcile failed: ${(error as Error).message}`);
       }
@@ -1319,7 +1518,7 @@ export function App() {
       pendingCamDesiredRef.current = null;
       setPendingCamDesired(null);
     }
-    if (localParticipant.isScreenShareEnabled === intent.screen) {
+    if ((screenShareManualActiveRef.current || localParticipant.isScreenShareEnabled) === intent.screen) {
       pendingScreenDesiredRef.current = null;
       setPendingScreenDesired(null);
     }
@@ -1399,7 +1598,7 @@ export function App() {
       .on(RoomEvent.DataReceived, (payload, participant) => {
         try {
           const text = new TextDecoder().decode(payload);
-          const message = JSON.parse(text) as ChatMessage & {
+          const message = JSON.parse(text) as {
             type?: string;
             room?: string;
             id?: string;
@@ -1408,7 +1607,48 @@ export function App() {
             host?: string;
             identityBase?: string;
             avatarUrl?: string;
+            text?: string;
+            timestamp?: number;
+            fileUrl?: string;
+            fileName?: string;
+            fileType?: string;
+            [key: string]: unknown;
           };
+
+          if (message.type === 'bitrate-cap') {
+            if (!publisherCapManagerRef.current) {
+              publisherCapManagerRef.current = new PublisherBitrateCapManager({
+                localIdentity,
+                senderProvider: () => {
+                  if (screenShareVideoTrackRef.current?.sender) return screenShareVideoTrackRef.current.sender;
+                  const publication = roomRef.current?.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+                  return getTrackSender(publication?.track as LocalTrack | RemoteTrack | null | undefined);
+                },
+                sendData: async (encodedPayload, destinationIdentity) => {
+                  const localRoom = roomRef.current;
+                  if (!localRoom) return;
+                  const options = {
+                    reliable: true,
+                    destinationIdentities: [destinationIdentity],
+                  } as unknown as Parameters<LocalParticipant['publishData']>[1];
+                  await localRoom.localParticipant.publishData(encodedPayload, options);
+                },
+              });
+            }
+
+            void publisherCapManagerRef.current.handleCapRequest(
+              message as unknown as Partial<BitrateCapMessage>,
+              participant?.identity,
+            );
+            return;
+          }
+
+          if (message.type === 'bitrate-cap-ack') {
+            if (participant?.identity) {
+              receiverAimdControllersRef.current.get(participant.identity)?.markAckReceived();
+            }
+            return;
+          }
 
           if (message.type === CHAT_MESSAGE_TYPE || message.type === CHAT_FILE_TYPE) {
             if (message.room && message.room !== activeRoom) return;
@@ -1601,6 +1841,11 @@ export function App() {
       await room.localParticipant.setMicrophoneEnabled(desired, {
         deviceId: desired ? (selectedMicId || undefined) : undefined,
       });
+      if (desired) {
+        await applyRnnoiseToLocalMicRef.current();
+      } else {
+        await rnnoiseProcessorRef.current.disable();
+      }
       appendDebug(desired ? 'Microphone enabled' : 'Microphone disabled');
       void logStatsEvent(desired ? 'mic-enabled' : 'mic-disabled');
     } catch (error) {
@@ -1649,7 +1894,10 @@ export function App() {
 
   const toggleScreenShare = useCallback(async () => {
     const room = roomRef.current;
-    const current = pendingScreenDesiredRef.current ?? room?.localParticipant.isScreenShareEnabled ?? localMediaState.screen;
+    const actualScreenState =
+      screenShareManualActiveRef.current
+      || Boolean(room?.localParticipant.isScreenShareEnabled);
+    const current = pendingScreenDesiredRef.current ?? actualScreenState;
     const desired = !current;
 
     mediaIntentRef.current.screen = desired;
@@ -1662,7 +1910,18 @@ export function App() {
     if (!room) return;
 
     try {
-      await room.localParticipant.setScreenShareEnabled(desired, desired ? { audio: true } : undefined);
+      if (desired) {
+        const parityStarted = await startManualScreenShareRef.current();
+        if (!parityStarted) {
+          await room.localParticipant.setScreenShareEnabled(true, { audio: true });
+          screenShareManualActiveRef.current = false;
+        }
+      } else if (screenShareManualActiveRef.current) {
+        await stopManualScreenShareRef.current();
+      } else {
+        await room.localParticipant.setScreenShareEnabled(false);
+      }
+
       appendDebug(desired ? 'Screen share started' : 'Screen share stopped');
       void logStatsEvent(desired ? 'screen-share-start' : 'screen-share-stop');
     } catch (error) {
@@ -1675,7 +1934,7 @@ export function App() {
         setRoomVersion((v) => v + 1);
       }
     }
-  }, [appendDebug, localMediaState.screen, logStatsEvent]);
+  }, [appendDebug, logStatsEvent]);
 
   const switchMicDevice = useCallback(
     async (deviceId: string) => {
@@ -1686,6 +1945,7 @@ export function App() {
         await roomRef.current.localParticipant.setMicrophoneEnabled(true, {
           deviceId,
         });
+        await applyRnnoiseToLocalMicRef.current();
         appendDebug(`Switched microphone: ${deviceId}`);
       } catch (error) {
         setDeviceStatus(`Mic switch failed: ${(error as Error).message}`);
@@ -1709,6 +1969,26 @@ export function App() {
       }
     },
     [appendDebug, camEnabled],
+  );
+
+  const updateParticipantVolume = useCallback(
+    (targetIdentity: string, kind: 'mic' | 'screen', volume: number) => {
+      setParticipantVolume(participantVolumesRef.current, targetIdentity, kind, volume);
+      setStoredValue(PARTICIPANT_VOLUME_STORAGE_KEY, JSON.stringify(participantVolumesRef.current));
+
+      remoteMediaElementsRef.current.forEach((element) => {
+        const binding = mediaBindingRef.current.get(element);
+        if (!binding) return;
+        if (binding.identity !== targetIdentity) return;
+        if (binding.kind !== kind) return;
+
+        const nextVolume = getParticipantVolume(participantVolumesRef.current, targetIdentity, kind);
+        volumeBoostRef.current.applyVolume(element, nextVolume, roomAudioMuted);
+      });
+
+      setVolumeRevision((value) => value + 1);
+    },
+    [roomAudioMuted],
   );
 
   const saveChatMessage = useCallback(
@@ -1740,6 +2020,405 @@ export function App() {
       appendDebug(`Data publish failed: ${(error as Error).message}`);
     }
   }, [appendDebug]);
+
+  const publishDataToIdentity = useCallback(async (payload: object, destinationIdentity: string) => {
+    const room = roomRef.current;
+    if (!room || !destinationIdentity) return;
+
+    try {
+      const encoded = new TextEncoder().encode(JSON.stringify(payload));
+      const options = {
+        reliable: true,
+        destinationIdentities: [destinationIdentity],
+      } as unknown as Parameters<LocalParticipant['publishData']>[1];
+
+      await room.localParticipant.publishData(encoded, options);
+    } catch {
+      await publishData(payload);
+    }
+  }, [publishData]);
+
+  const getLocalScreenSender = useCallback((): RTCRtpSender | null => {
+    if (screenShareVideoTrackRef.current?.sender) return screenShareVideoTrackRef.current.sender;
+
+    const room = roomRef.current;
+    if (!room) return null;
+
+    const publication = room.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+    return getTrackSender(publication?.track as LocalTrack | RemoteTrack | null | undefined);
+  }, []);
+
+  const stopManualScreenShare = useCallback(async () => {
+    const room = roomRef.current;
+
+    screenSharePipelineRef.current?.stop();
+    screenSharePipelineRef.current = null;
+
+    if (room && screenShareVideoTrackRef.current) {
+      try {
+        await room.localParticipant.unpublishTrack(screenShareVideoTrackRef.current, true);
+      } catch {
+        // ignore unpublish errors
+      }
+    }
+
+    if (room && screenShareAudioTrackRef.current) {
+      try {
+        await room.localParticipant.unpublishTrack(screenShareAudioTrackRef.current, true);
+      } catch {
+        // ignore unpublish errors
+      }
+    }
+
+    try {
+      screenShareVideoTrackRef.current?.mediaStreamTrack?.stop();
+      screenShareAudioTrackRef.current?.mediaStreamTrack?.stop();
+    } catch {
+      // ignore stop errors
+    }
+
+    screenShareVideoTrackRef.current = null;
+    screenShareAudioTrackRef.current = null;
+    screenShareManualActiveRef.current = false;
+    receiverAimdControllersRef.current.clear();
+
+    if (publisherCapManagerRef.current) {
+      await publisherCapManagerRef.current.clear();
+    }
+
+    bweWatchdogRef.current.reset();
+  }, []);
+
+  const startManualScreenShare = useCallback(async (): Promise<boolean> => {
+    const room = roomRef.current;
+    const participant = room?.localParticipant;
+    if (!room || !participant) return false;
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getDisplayMedia) {
+      return false;
+    }
+
+    if (typeof LocalVideoTrack !== 'function') {
+      return false;
+    }
+
+    let capture: MediaStream | null = null;
+    let videoSourceTrack: MediaStreamTrack | null = null;
+
+    try {
+      capture = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          frameRate: { ideal: 60 },
+          resizeMode: 'none' as ConstrainDOMString,
+        },
+        audio: {
+          autoGainControl: false,
+          echoCancellation: false,
+          noiseSuppression: false,
+        },
+        systemAudio: 'include' as any,
+      } as DisplayMediaStreamOptions & { systemAudio?: string });
+
+      videoSourceTrack = capture.getVideoTracks()[0] ?? null;
+      if (!videoSourceTrack) {
+        throw new Error('Display capture returned no video track');
+      }
+
+      const pipeline = createCanvasScreenSharePipeline(videoSourceTrack, {
+        logger: (line) => appendDebug(line),
+      });
+      screenSharePipelineRef.current = pipeline;
+
+      const localVideoTrack = new LocalVideoTrack(pipeline.publishTrack, undefined, false);
+      await participant.publishTrack(localVideoTrack as unknown as LocalTrack, {
+        source: Track.Source.ScreenShare,
+        ...buildScreenSharePublishOptions(pipeline.width, pipeline.height),
+      } as any);
+
+      const sender = localVideoTrack.sender;
+      if (sender) {
+        try {
+          const params = sender.getParameters();
+          params.encodings?.forEach((encoding) => {
+            if (encoding.rid === 'f' || (!encoding.rid && (params.encodings?.length ?? 0) === 1)) {
+              encoding.maxBitrate = BITRATE_DEFAULT_HIGH;
+              encoding.maxFramerate = 60;
+              encoding.scaleResolutionDownBy = 1;
+            } else if (encoding.rid === 'h') {
+              encoding.maxBitrate = BITRATE_DEFAULT_MED;
+              encoding.maxFramerate = 60;
+              encoding.scaleResolutionDownBy = 2;
+            } else if (encoding.rid === 'q') {
+              encoding.maxBitrate = BITRATE_DEFAULT_LOW;
+              encoding.maxFramerate = 30;
+              encoding.scaleResolutionDownBy = 3;
+            }
+          });
+          await sender.setParameters(params);
+        } catch {
+          // best effort sender tune
+        }
+      }
+
+      screenShareVideoTrackRef.current = localVideoTrack;
+
+      const sourceAudio = capture.getAudioTracks()[0] ?? null;
+      if (sourceAudio && typeof LocalAudioTrack === 'function') {
+        const localAudioTrack = new LocalAudioTrack(sourceAudio, undefined, false);
+        const screenAudioSource =
+          (Track.Source as Record<string, string | undefined>).ScreenShareAudio
+          ?? 'screen_share_audio';
+
+        await participant.publishTrack(localAudioTrack as unknown as LocalTrack, {
+          source: screenAudioSource,
+          ...SCREEN_SHARE_AUDIO_PUBLISH_OPTIONS,
+        } as any);
+
+        screenShareAudioTrackRef.current = localAudioTrack;
+      }
+
+      videoSourceTrack.addEventListener(
+        'ended',
+        () => {
+          mediaIntentRef.current.screen = false;
+          pendingScreenDesiredRef.current = null;
+          setPendingScreenDesired(null);
+          void stopManualScreenShare();
+          setRoomVersion((value) => value + 1);
+        },
+        { once: true },
+      );
+
+      screenShareManualActiveRef.current = true;
+      appendDebug('Screen share started (canvas-pipeline parity path)');
+
+      if (!publisherCapManagerRef.current) {
+        publisherCapManagerRef.current = new PublisherBitrateCapManager({
+          localIdentity,
+          senderProvider: getLocalScreenSender,
+          sendData: async (payload, destinationIdentity) => {
+            const localRoom = roomRef.current;
+            if (!localRoom) return;
+            const options = {
+              reliable: true,
+              destinationIdentities: [destinationIdentity],
+            } as unknown as Parameters<LocalParticipant['publishData']>[1];
+            await localRoom.localParticipant.publishData(payload, options);
+          },
+        });
+      }
+
+      return true;
+    } catch (error) {
+      appendDebug(`Screen share parity path failed: ${(error as Error).message}`);
+      screenSharePipelineRef.current?.stop();
+      screenSharePipelineRef.current = null;
+      capture?.getTracks().forEach((track) => track.stop());
+      videoSourceTrack?.stop();
+      await stopManualScreenShare();
+      return false;
+    }
+  }, [appendDebug, getLocalScreenSender, localIdentity, stopManualScreenShare]);
+
+  useEffect(() => {
+    startManualScreenShareRef.current = startManualScreenShare;
+  }, [startManualScreenShare]);
+
+  useEffect(() => {
+    stopManualScreenShareRef.current = stopManualScreenShare;
+  }, [stopManualScreenShare]);
+
+  const applyRnnoiseToLocalMic = useCallback(async () => {
+    if (!noiseCancelEnabled) {
+      await rnnoiseProcessorRef.current.disable();
+      return;
+    }
+
+    const room = roomRef.current;
+    const publication = room?.localParticipant.getTrackPublication(Track.Source.Microphone);
+    const track = publication?.track as LocalTrack | RemoteTrack | null | undefined;
+    const sender = getTrackSender(track);
+    const mediaStreamTrack = getTrackMediaStreamTrack(track);
+
+    if (!sender || !mediaStreamTrack || mediaStreamTrack.kind !== 'audio') {
+      return;
+    }
+
+    try {
+      await rnnoiseProcessorRef.current.enableForSender(sender, mediaStreamTrack, {
+        suppressionLevel: noiseCancelLevel,
+        logger: appendDebug,
+      });
+      appendDebug('[rnnoise] enabled for local microphone');
+    } catch (error) {
+      appendDebug(`[rnnoise] enable failed: ${(error as Error).message}`);
+    }
+  }, [appendDebug, noiseCancelEnabled, noiseCancelLevel]);
+
+  useEffect(() => {
+    applyRnnoiseToLocalMicRef.current = applyRnnoiseToLocalMic;
+  }, [applyRnnoiseToLocalMic]);
+
+  useEffect(() => {
+    if (!connected || !micEnabled) {
+      void rnnoiseProcessorRef.current.disable();
+      return;
+    }
+
+    void applyRnnoiseToLocalMic();
+  }, [connected, micEnabled, applyRnnoiseToLocalMic]);
+
+  useEffect(() => {
+    if (outboundBweTimerRef.current) {
+      window.clearInterval(outboundBweTimerRef.current);
+      outboundBweTimerRef.current = null;
+    }
+
+    if (capCleanupTimerRef.current) {
+      window.clearInterval(capCleanupTimerRef.current);
+      capCleanupTimerRef.current = null;
+    }
+
+    if (!connected) return;
+
+    outboundBweTimerRef.current = window.setInterval(() => {
+      void (async () => {
+        const room = roomRef.current;
+        const sender = getLocalScreenSender();
+        if (!room || !sender) return;
+
+        try {
+          const reports = await sender.getStats();
+          let bytesSent = 0;
+          let bweKbps: number | null = null;
+          const layers: Array<{ rid: string; fps: number; limit: string }> = [];
+
+          reports.forEach((report) => {
+            if (report.type === 'outbound-rtp' && !('isRemote' in report && report.isRemote)) {
+              bytesSent += Number((report as RTCOutboundRtpStreamStats).bytesSent ?? 0);
+              layers.push({
+                rid: String((report as RTCOutboundRtpStreamStats).rid ?? 'single'),
+                fps: Number((report as RTCOutboundRtpStreamStats).framesPerSecond ?? 0),
+                limit: String((report as RTCOutboundRtpStreamStats).qualityLimitationReason ?? 'none'),
+              });
+            }
+
+            if (report.type === 'candidate-pair') {
+              const pair = report as RTCIceCandidatePairStats & { selected?: boolean };
+              const selected = pair.selected ?? pair.nominated;
+              if (selected && Number.isFinite(pair.availableOutgoingBitrate ?? NaN)) {
+                bweKbps = Math.round(Number(pair.availableOutgoingBitrate ?? 0) / 1000);
+              }
+            }
+          });
+
+          const now = Date.now();
+          const previous = outboundPrevStatsRef.current;
+          let totalSendKbps = 0;
+
+          if (previous && now > previous.timestamp) {
+            const deltaBytes = Math.max(0, bytesSent - previous.bytesSent);
+            const deltaMs = now - previous.timestamp;
+            totalSendKbps = Math.round((deltaBytes * 8) / deltaMs);
+          }
+
+          outboundPrevStatsRef.current = { bytesSent, timestamp: now };
+
+          const actions = bweWatchdogRef.current.evaluate(
+            {
+              bweKbps,
+              totalSendKbps,
+              layers,
+            },
+            publisherCapManagerRef.current?.getAppliedCap() ?? null,
+          );
+
+          for (const action of actions) {
+            await applyBweActionToSender(sender, action);
+          }
+        } catch {
+          // ignore outbound stats failures
+        }
+
+        for (const participant of room.remoteParticipants.values()) {
+          const screenPublication = participant.getTrackPublication(Track.Source.ScreenShare);
+          const remoteTrack = screenPublication?.track as
+            | (RemoteTrack & { receiver?: RTCRtpReceiver })
+            | null
+            | undefined;
+
+          const receiver = remoteTrack?.receiver;
+          if (!receiver?.getStats) continue;
+
+          try {
+            const stats = await receiver.getStats();
+            let packetsLost = 0;
+            let bytesReceived = 0;
+
+            stats.forEach((entry) => {
+              if (entry.type !== 'inbound-rtp') return;
+              const inbound = entry as RTCInboundRtpStreamStats;
+              if (inbound.kind !== 'video') return;
+              packetsLost += Number(inbound.packetsLost ?? 0);
+              bytesReceived += Number(inbound.bytesReceived ?? 0);
+            });
+
+            const now = Date.now();
+            const prevLost = inboundPrevLostRef.current.get(participant.identity) ?? packetsLost;
+            const deltaLost = Math.max(0, packetsLost - prevLost);
+            inboundPrevLostRef.current.set(participant.identity, packetsLost);
+
+            const prevBytes = inboundPrevBytesRef.current.get(participant.identity);
+            let kbps = 0;
+            if (prevBytes && now > prevBytes.timestamp) {
+              kbps = Math.round(((bytesReceived - prevBytes.bytes) * 8) / (now - prevBytes.timestamp));
+            }
+            inboundPrevBytesRef.current.set(participant.identity, { bytes: bytesReceived, timestamp: now });
+
+            const controller =
+              receiverAimdControllersRef.current.get(participant.identity)
+              ?? new ReceiverAimdController();
+            receiverAimdControllersRef.current.set(participant.identity, controller);
+
+            const result = controller.update({
+              deltaLost,
+              receivedKbps: Math.max(0, kbps),
+              localIdentity,
+              nowMs: now,
+            });
+
+            if (result.outboundMessage) {
+              await publishDataToIdentity(result.outboundMessage, participant.identity);
+            }
+          } catch {
+            // ignore receiver stats failures
+          }
+        }
+
+        await publisherCapManagerRef.current?.tickCleanup();
+      })();
+    }, 3_000);
+
+    capCleanupTimerRef.current = window.setInterval(() => {
+      void publisherCapManagerRef.current?.tickCleanup();
+    }, 5_000);
+
+    return () => {
+      if (outboundBweTimerRef.current) {
+        window.clearInterval(outboundBweTimerRef.current);
+        outboundBweTimerRef.current = null;
+      }
+      if (capCleanupTimerRef.current) {
+        window.clearInterval(capCleanupTimerRef.current);
+        capCleanupTimerRef.current = null;
+      }
+      outboundPrevStatsRef.current = null;
+      inboundPrevLostRef.current.clear();
+      inboundPrevBytesRef.current.clear();
+      receiverAimdControllersRef.current.clear();
+      bweWatchdogRef.current.reset();
+    };
+  }, [connected, getLocalScreenSender, localIdentity, publishDataToIdentity]);
 
   const sendChatMessage = useCallback(
     async (event?: FormEvent<HTMLFormElement>) => {
@@ -3319,7 +3998,47 @@ export function App() {
                     </div>
                   </div>
                   <div className="user-controls">
-                    {!participant.isLocal ? <button className="mute-button" type="button" onClick={() => setRoomAudioMuted((prev) => !prev)}>{roomAudioMuted ? 'Unmute' : 'Mute'}</button> : null}
+                    {!participant.isLocal ? (
+                      <>
+                        <button className="mute-button" type="button" onClick={() => setRoomAudioMuted((prev) => !prev)}>
+                          {roomAudioMuted ? 'Unmute' : 'Mute'}
+                        </button>
+                        <label className="device-field user-volume-field">
+                          Mic Volume ({Math.round(getParticipantVolume(participantVolumesRef.current, participant.identity, 'mic') * 100)}%)
+                          <input
+                            type="range"
+                            min={0}
+                            max={300}
+                            step={10}
+                            value={Math.round(getParticipantVolume(participantVolumesRef.current, participant.identity, 'mic') * 100)}
+                            onChange={(event) =>
+                              updateParticipantVolume(
+                                participant.identity,
+                                'mic',
+                                Number(event.target.value) / 100,
+                              )
+                            }
+                          />
+                        </label>
+                        <label className="device-field user-volume-field">
+                          Screen Audio ({Math.round(getParticipantVolume(participantVolumesRef.current, participant.identity, 'screen') * 100)}%)
+                          <input
+                            type="range"
+                            min={0}
+                            max={300}
+                            step={10}
+                            value={Math.round(getParticipantVolume(participantVolumesRef.current, participant.identity, 'screen') * 100)}
+                            onChange={(event) =>
+                              updateParticipantVolume(
+                                participant.identity,
+                                'screen',
+                                Number(event.target.value) / 100,
+                              )
+                            }
+                          />
+                        </label>
+                      </>
+                    ) : null}
                   </div>
                 </article>
               ))}
@@ -3419,7 +4138,32 @@ export function App() {
           </div>
         </div>
 
-        <div id="audio-bucket" className="audio-bucket" />
+        <div id="audio-bucket" className="audio-bucket" aria-hidden>
+          {participantViews
+            .filter((participant) => !participant.isLocal)
+            .map((participant) => (
+              <div key={`audio-${participant.identity}`}>
+                {participant.micTrack ? (
+                  <TrackRenderer
+                    track={participant.micTrack}
+                    className="hidden"
+                    muted={false}
+                    onMounted={(element) => registerRemoteMediaElement(element, true, { identity: participant.identity, kind: 'mic' })}
+                    onUnmounted={(element) => registerRemoteMediaElement(element, false, { identity: participant.identity, kind: 'mic' })}
+                  />
+                ) : null}
+                {participant.screenAudioTrack ? (
+                  <TrackRenderer
+                    track={participant.screenAudioTrack}
+                    className="hidden"
+                    muted={false}
+                    onMounted={(element) => registerRemoteMediaElement(element, true, { identity: participant.identity, kind: 'screen' })}
+                    onUnmounted={(element) => registerRemoteMediaElement(element, false, { identity: participant.identity, kind: 'screen' })}
+                  />
+                ) : null}
+              </div>
+            ))}
+        </div>
       </section>
 
       <div id="settings-panel" className={`settings-panel${settingsOpen ? '' : ' hidden'}`} role="dialog" aria-label="Settings">
@@ -3467,6 +4211,31 @@ export function App() {
             <button type="button" onClick={() => void refreshDevices()}>
               Refresh Devices
             </button>
+          </div>
+
+          <div className="device-actions">
+            <label className="device-field">
+              <span>RNNoise Mic Cancel</span>
+              <input
+                type="checkbox"
+                checked={noiseCancelEnabled}
+                onChange={(event) => setNoiseCancelEnabled(event.target.checked)}
+              />
+            </label>
+            <label className="device-field">
+              Suppression Level
+              <select
+                value={noiseCancelLevel}
+                onChange={(event) => {
+                  const level = Number(event.target.value);
+                  setNoiseCancelLevel(level === 0 || level === 1 ? level : 2);
+                }}
+              >
+                <option value={0}>Off</option>
+                <option value={1}>Medium</option>
+                <option value={2}>Strong</option>
+              </select>
+            </label>
           </div>
 
           <div id="chime-settings-section" className="chime-settings-section">

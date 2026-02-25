@@ -1,0 +1,55 @@
+{
+  "timestamp": "2026-02-25T22-02-34-532Z",
+  "scenarios": [
+    "connect/disconnect/reconnect flow with room switch token refresh",
+    "legacy control IDs/classes present for connect/media/chat/soundboard shells",
+    "chat send/upload/delete handling",
+    "theme + settings shell parity checks",
+    "soundboard play/edit/upload/update workflows",
+    "jam controls (search/queue/start/skip/stop)",
+    "bug report submit with screenshot upload",
+    "admin dashboard tabs present and populated (live/history/metrics/bugs/deploys)",
+    "multi-state screenshot gallery captured across major UI panels"
+  ],
+  "assertions": {
+    "tokenRoomRequests": [
+      "main",
+      "breakout-2",
+      "breakout-2"
+    ],
+    "soundUpdateCalled": true,
+    "soundUploadCalled": true,
+    "soundPlayFetches": 1,
+    "chatUploadCalled": true,
+    "chatDeleteCalled": true,
+    "bugUploadCalled": true,
+    "bugReportCalled": true,
+    "jamStartCalled": true,
+    "jamSkipCalled": true,
+    "jamStopCalled": true,
+    "jamQueueCalled": true
+  },
+  "screenshots": [
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-01-room-switched-breakout2.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-02-reconnected-breakout2.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-03-connected-shell.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-04-chat-open-message-sent.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-05-chat-with-upload.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-06-chat-after-delete.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-07-theme-panel-cyberpunk.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-08-settings-chime.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-09-soundboard-compact.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-10-soundboard-edit-open.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-11-soundboard-after-upload.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-12-jam-panel-open.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-13-jam-started-now-playing.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-14-jam-search-queue.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-15-jam-stopped.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-16-bug-report-submitted.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-17-admin-live-tab.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-18-admin-history-tab.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-19-admin-metrics-tab.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-20-admin-bugs-tab.png",
+    "/home/smstromb/.openclaw/workspace/echo-chamber-react/docs/proof/parity/2026-02-25T22-02-34-532Z-21-admin-deploys-tab.png"
+  ]
+}
