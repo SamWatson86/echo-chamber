@@ -77,23 +77,46 @@ function Set-LastDeployedSha([string]$sha) {
 
 function Write-DeployEvent([string]$sha, [string]$status, [int]$durationSec, [string]$errorMsg) {
     $historyFile = Join-Path $deployDir "deploy-history.json"
-    $history = @()
+    $shortSha = $sha.Substring(0, [Math]::Min(7, $sha.Length))
+    $ts = (Get-Date).ToString("s")
+
+    # Build new entry as JSON string to avoid PowerShell object nesting issues
+    $entryJson = '{"sha":"' + $shortSha + '","status":"' + $status + '","timestamp":"' + $ts + '","duration_seconds":' + $durationSec + ',"error":"' + ($errorMsg -replace '"','\"') + '"}'
+
+    # Read existing file as raw text, parse as array of raw JSON entries
+    $entries = [System.Collections.ArrayList]@()
     if (Test-Path $historyFile) {
-        try { $history = @(Get-Content $historyFile -Raw | ConvertFrom-Json) } catch { $history = @() }
+        try {
+            $existing = Get-Content $historyFile -Raw | ConvertFrom-Json
+            foreach ($e in $existing) {
+                $j = $e | ConvertTo-Json -Compress -Depth 2
+                [void]$entries.Add($j)
+            }
+        } catch {}
     }
-    $entry = @{
-        sha = $sha.Substring(0, [Math]::Min(7, $sha.Length))
-        status = $status
-        timestamp = (Get-Date).ToString("s")
-        duration_seconds = $durationSec
-        error = $errorMsg
-    }
-    $history = @($entry) + @($history)
-    if ($history.Count -gt 50) { $history = $history[0..49] }
-    $json = $history | ConvertTo-Json -Depth 3
-    if ($history.Count -eq 1) { $json = "[$json]" }
+
+    # Prepend new entry, cap at 50
+    $entries.Insert(0, $entryJson)
+    while ($entries.Count -gt 50) { $entries.RemoveAt($entries.Count - 1) }
+
+    # Write clean JSON array
+    $json = "[`n  " + ($entries -join ",`n  ") + "`n]"
     [System.IO.File]::WriteAllText($historyFile, $json)
-    Write-Log "Deploy event recorded: $status ($sha)"
+    Write-Log "Deploy event recorded: $status ($shortSha)"
+}
+
+function Start-OldProcess {
+    $exe = Join-Path $coreDir "target\debug\echo-core-control.exe"
+    $pidFile = Join-Path $coreDir "control\core-control.pid"
+    $outLog = Join-Path $logDir "core-control.out.log"
+    $errLog = Join-Path $logDir "core-control.err.log"
+    Load-Env $envFile
+    Write-Log "Restarting control plane..."
+    $proc = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    if ($proc) {
+        [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
+        Write-Log "Control plane restarted (PID $($proc.Id))"
+    }
 }
 
 function Test-Health {
@@ -155,28 +178,12 @@ function Build-Control {
 }
 
 function Deploy-BlueGreen {
+    # Process already killed and backup already made before Build-Control
     $exe = Join-Path $coreDir "target\debug\echo-core-control.exe"
     $bak = "$exe.bak"
     $pidFile = Join-Path $coreDir "control\core-control.pid"
     $outLog = Join-Path $logDir "core-control.out.log"
     $errLog = Join-Path $logDir "core-control.err.log"
-
-    # Backup current binary
-    if (Test-Path $exe) {
-        Copy-Item $exe $bak -Force
-        Write-Log "Backed up current binary to .bak"
-    }
-
-    # Kill old process (elevated)
-    Write-Log "Killing old control plane..."
-    try {
-        Start-Process powershell -ArgumentList '-Command "taskkill /F /IM echo-core-control.exe 2>$null"' -Verb RunAs -Wait -WindowStyle Hidden
-    } catch {
-        Write-Log "Kill command failed (process may not be running): $_" "WARN"
-    }
-    Start-Sleep -Seconds 2
-
-    # The build already placed new binary at $exe (cargo build overwrites it)
 
     # Load env vars for the new process
     Load-Env $envFile
@@ -270,15 +277,36 @@ do {
                 Write-DeployEvent $remoteSha "failed" $dur "Tests failed"
                 $consecutiveFailures++
             } else {
+                # Kill process BEFORE build so cargo can overwrite the .exe
+                Write-Log "Stopping control plane for rebuild..."
+                $exe = Join-Path $coreDir "target\debug\echo-core-control.exe"
+                $bak = "$exe.bak"
+                if (Test-Path $exe) {
+                    Copy-Item $exe $bak -Force
+                    Write-Log "Backed up current binary to .bak"
+                }
+                try {
+                    Start-Process powershell -ArgumentList '-Command "taskkill /F /IM echo-core-control.exe 2>$null"' -Verb RunAs -Wait -WindowStyle Hidden
+                } catch {
+                    Write-Log "Kill command failed: $_" "WARN"
+                }
+                Start-Sleep -Seconds 2
+
                 # Build
                 $buildPassed = Build-Control
                 if (-not $buildPassed) {
-                    Write-Log "Skipping deploy - build failed" "ERROR"
+                    Write-Log "Build failed - restoring backup and restarting" "ERROR"
                     $dur = [int]((Get-Date) - $deployStart).TotalSeconds
                     Write-DeployEvent $remoteSha "failed" $dur "Build failed"
+                    # Restore backup and restart
+                    if (Test-Path $bak) {
+                        Copy-Item $bak $exe -Force
+                        Write-Log "Restored backup binary"
+                    }
+                    Start-OldProcess
                     $consecutiveFailures++
                 } else {
-                    # Deploy
+                    # Deploy (process already killed, binary already built)
                     $deployed = Deploy-BlueGreen
                     $dur = [int]((Get-Date) - $deployStart).TotalSeconds
                     if ($deployed) {
