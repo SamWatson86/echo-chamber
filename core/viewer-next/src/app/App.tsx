@@ -603,6 +603,32 @@ export function App() {
     [adminToken, controlUrl, snapshot.context.session?.identity, localIdentity, identity],
   );
 
+  const logStatsEvent = useCallback(
+    async (eventName: string, eventDetail?: string) => {
+      const room = roomRef.current;
+      const participantIdentity = room?.localParticipant?.identity || localIdentity;
+      if (!participantIdentity) return;
+
+      try {
+        await fetch(apiUrl('/api/stats-log'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            identity: participantIdentity,
+            room: connectedRoomName || activeRoom,
+            event: eventName,
+            event_detail: eventDetail || null,
+          }),
+        });
+      } catch {
+        // best-effort logging only
+      }
+    },
+    [apiUrl, localIdentity, connectedRoomName, activeRoom],
+  );
+
   const registerRemoteMediaElement = useCallback(
     (element: HTMLMediaElement, isAttach: boolean) => {
       if (isAttach) {
@@ -824,12 +850,14 @@ export function App() {
     nextRoom
       .on(RoomEvent.Connected, () => {
         appendDebug('LiveKit room connected');
+        void logStatsEvent('room-connected', activeRoom);
         setRoomConnectError(null);
         setConnectedRoomName(activeRoom);
         bump();
       })
       .on(RoomEvent.Disconnected, () => {
         appendDebug('LiveKit room disconnected');
+        void logStatsEvent('room-disconnected', activeRoom);
         bump();
       })
       .on(RoomEvent.ParticipantConnected, (participant) => {
@@ -882,6 +910,11 @@ export function App() {
             if (!chatOpen) {
               setUnreadChatCount((count) => count + 1);
             }
+            return;
+          }
+
+          if (message.type === 'chat-delete' && message.id) {
+            setChatMessages((prev) => prev.filter((entry) => entry.id !== message.id));
             return;
           }
 
@@ -978,6 +1011,7 @@ export function App() {
     disconnectRoom,
     refreshDevices,
     loadChatHistory,
+    logStatsEvent,
   ]);
 
   const onConnect = useCallback(() => {
@@ -987,11 +1021,12 @@ export function App() {
   const onDisconnect = useCallback(() => {
     sendLeaveNotification();
     stopHeartbeat();
+    void logStatsEvent('disconnect-click');
     actorRef.send({ type: 'DISCONNECT' });
     void disconnectRoom();
     setRoomAudioMuted(false);
     appendDebug('Disconnected by user');
-  }, [actorRef, disconnectRoom, appendDebug, sendLeaveNotification, stopHeartbeat]);
+  }, [actorRef, disconnectRoom, appendDebug, sendLeaveNotification, stopHeartbeat, logStatsEvent]);
 
   const onSwitchRoom = useCallback(
     (roomId: (typeof FIXED_ROOMS)[number]) => {
@@ -1014,12 +1049,13 @@ export function App() {
         deviceId: selectedMicId || undefined,
       });
       appendDebug(desired ? 'Microphone enabled' : 'Microphone disabled');
+      void logStatsEvent(desired ? 'mic-enabled' : 'mic-disabled');
       setRoomVersion((v) => v + 1);
     } catch (error) {
       appendDebug(`Mic toggle failed: ${(error as Error).message}`);
       setDeviceStatus(`Mic toggle failed: ${(error as Error).message}`);
     }
-  }, [appendDebug, micEnabled, selectedMicId]);
+  }, [appendDebug, micEnabled, selectedMicId, logStatsEvent]);
 
   const toggleCamera = useCallback(async () => {
     const room = roomRef.current;
@@ -1031,12 +1067,13 @@ export function App() {
         deviceId: selectedCamId || undefined,
       });
       appendDebug(desired ? 'Camera enabled' : 'Camera disabled');
+      void logStatsEvent(desired ? 'camera-enabled' : 'camera-disabled');
       setRoomVersion((v) => v + 1);
     } catch (error) {
       appendDebug(`Camera toggle failed: ${(error as Error).message}`);
       setDeviceStatus(`Camera toggle failed: ${(error as Error).message}`);
     }
-  }, [appendDebug, camEnabled, selectedCamId]);
+  }, [appendDebug, camEnabled, selectedCamId, logStatsEvent]);
 
   const toggleScreenShare = useCallback(async () => {
     const room = roomRef.current;
@@ -1048,12 +1085,13 @@ export function App() {
         audio: true,
       });
       appendDebug(desired ? 'Screen share started' : 'Screen share stopped');
+      void logStatsEvent(desired ? 'screen-share-start' : 'screen-share-stop');
       setRoomVersion((v) => v + 1);
     } catch (error) {
       appendDebug(`Screen share toggle failed: ${(error as Error).message}`);
       setDeviceStatus(`Screen share toggle failed: ${(error as Error).message}`);
     }
-  }, [appendDebug, screenEnabled]);
+  }, [appendDebug, screenEnabled, logStatsEvent]);
 
   const switchMicDevice = useCallback(
     async (deviceId: string) => {
@@ -1215,6 +1253,41 @@ export function App() {
       event.target.value = '';
     },
     [activeRoom, chatInput, connected, localIdentity, name, publishData, saveChatMessage, uploadChatFile],
+  );
+
+  const deleteChatMessage = useCallback(
+    async (message: ChatMessage) => {
+      if (!adminToken || !connected || !message.id) return;
+      const localIdentityValue = roomRef.current?.localParticipant?.identity || localIdentity;
+      if (!localIdentityValue || message.identity !== localIdentityValue) return;
+
+      try {
+        await fetch(apiUrl('/api/chat/delete'), {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            id: message.id,
+            identity: localIdentityValue,
+            room: activeRoom,
+          }),
+        });
+      } catch (error) {
+        appendDebug(`Failed to delete chat message: ${(error as Error).message}`);
+        return;
+      }
+
+      setChatMessages((prev) => prev.filter((entry) => entry.id !== message.id));
+      await publishData({
+        type: 'chat-delete',
+        id: message.id,
+        identity: localIdentityValue,
+        room: activeRoom,
+      });
+    },
+    [adminToken, connected, localIdentity, apiUrl, activeRoom, appendDebug, publishData],
   );
 
   const onChatKeyDown = useCallback(
@@ -2353,6 +2426,16 @@ export function App() {
                     <span className={`chat-message-author${message.identity === localIdentity ? ' self' : ''}`}>{message.name || message.identity}</span>
                     <span className="chat-message-time">{formatChatTime(message.timestamp)}</span>
                   </div>
+                  {message.identity === localIdentity && message.id ? (
+                    <button
+                      type="button"
+                      className="chat-message-delete"
+                      title="Delete message"
+                      onClick={() => void deleteChatMessage(message)}
+                    >
+                      ×
+                    </button>
+                  ) : null}
                   {message.fileUrl ? (
                     <>
                       {message.fileType?.startsWith('image/') ? (
