@@ -79,7 +79,7 @@
           <div class="room-actions">
             <button id="open-admin-dash" type="button" class="hidden" onclick="toggleAdminDash()">Dashboard</button>
             <button id="open-settings" type="button" disabled>Settings</button>
-            <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Report Bug</button>
+            <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Feedback</button>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
           </div>
         </div>
@@ -261,14 +261,25 @@
           </div>
         </div>
       </div>
-  <div id="bug-report-modal" class="bug-report-modal hidden" role="dialog" aria-label="Bug Report">
+  <div id="bug-report-modal" class="bug-report-modal hidden" role="dialog" aria-label="Send Feedback">
     <div class="bug-report-content">
       <div class="bug-report-header">
-        <h3>Report a Bug</h3>
+        <h3>Send Feedback</h3>
         <button id="close-bug-report" type="button">Close</button>
       </div>
       <div class="bug-report-body">
-        <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Describe what happened..." rows="4" maxlength="1000"></textarea>
+        <div class="feedback-type-row">
+          <label class="feedback-type-option">
+            <input type="radio" name="feedback-type" value="bug" checked /> Bug
+          </label>
+          <label class="feedback-type-option">
+            <input type="radio" name="feedback-type" value="enhancement" /> Enhancement
+          </label>
+          <label class="feedback-type-option">
+            <input type="radio" name="feedback-type" value="idea" /> Idea
+          </label>
+        </div>
+        <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Tell us what's on your mind..." rows="4" maxlength="1000"></textarea>
         <div class="bug-report-screenshot-row">
           <button id="bug-report-screenshot-btn" type="button" class="bug-report-screenshot-btn">Attach Screenshot</button>
           <input type="file" id="bug-report-file" class="hidden" accept="image/*" />

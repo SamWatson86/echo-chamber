@@ -135,6 +135,8 @@ struct BugReport {
     name: String,
     room: String,
     description: String,
+    #[serde(default)]
+    feedback_type: Option<String>,
     timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     screen_fps: Option<f64>,
@@ -157,6 +159,8 @@ struct BugReport {
 #[derive(Deserialize)]
 struct BugReportRequest {
     description: String,
+    #[serde(default)]
+    feedback_type: Option<String>,
     #[serde(default)]
     identity: Option<String>,
     #[serde(default)]
@@ -2036,6 +2040,7 @@ async fn submit_bug_report(
             .unwrap_or_else(|| "Unknown".to_string()),
         room: payload.room.unwrap_or_default(),
         description: payload.description,
+        feedback_type: payload.feedback_type,
         timestamp: now,
         screen_fps: payload.screen_fps,
         screen_bitrate_kbps: payload.screen_bitrate_kbps,
@@ -4362,10 +4367,16 @@ fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
 /// Fire-and-forget: create a GitHub Issue from a bug report.
 /// Silently does nothing if GITHUB_PAT or GITHUB_REPO are not configured.
 async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport) {
+    let feedback_type = report.feedback_type.as_deref().unwrap_or("bug");
+    let prefix = match feedback_type {
+        "enhancement" => "Enhancement",
+        "idea" => "Idea",
+        _ => "Bug",
+    };
     let title = if report.description.len() > 80 {
-        format!("Bug: {}...", &report.description[..77])
+        format!("{}: {}...", prefix, &report.description[..77])
     } else {
-        format!("Bug: {}", report.description)
+        format!("{}: {}", prefix, report.description)
     };
 
     let mut body = format!(
@@ -4410,13 +4421,17 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
         body.push_str(&format!("\n### Screenshot\n{}\n", url));
     }
 
-    body.push_str("\n---\n*Auto-created from in-app bug report*");
+    body.push_str(&format!("\n---\n*Auto-created from in-app feedback ({})*", feedback_type));
 
     let url = format!("https://api.github.com/repos/{}/issues", repo);
     let payload = serde_json::json!({
         "title": title,
         "body": body,
-        "labels": ["bug-report"],
+        "labels": [match feedback_type {
+            "enhancement" => "enhancement",
+            "idea" => "idea",
+            _ => "bug-report",
+        }],
     });
 
     match client
