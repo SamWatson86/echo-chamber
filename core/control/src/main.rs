@@ -2106,15 +2106,20 @@ async fn admin_deploys(
     }
 
     // Run git log for recent commits on origin/main
+    // Use ||| as field delimiter and %x00 as record separator (body can contain newlines)
     let git_output = std::process::Command::new("git")
-        .args(["log", "--format=%H|%an|%s|%aI", "-30", "origin/main"])
+        .args(["log", "--format=%H|||%an|||%s|||%aI|||%b%x00", "-30", "origin/main"])
         .output();
 
     let mut commits = vec![];
     if let Ok(output) = git_output {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.splitn(4, '|').collect();
+        for record in stdout.split('\0') {
+            let record = record.trim();
+            if record.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = record.splitn(5, "|||").collect();
             if parts.len() < 4 {
                 continue;
             }
@@ -2123,6 +2128,17 @@ async fn admin_deploys(
             let author = parts[1];
             let message = parts[2];
             let timestamp = parts[3];
+            let body = if parts.len() >= 5 { parts[4].trim() } else { "" };
+
+            // Extract PR number from merge commit subjects like "Merge pull request #61 from ..."
+            let pr_number: Option<u64> = if message.starts_with("Merge pull request #") {
+                message
+                    .strip_prefix("Merge pull request #")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|num| num.parse().ok())
+            } else {
+                None
+            };
 
             let (deploy_status, deploy_ts, deploy_error, deploy_duration) =
                 if let Some(event) = deploy_map.get(short_sha) {
@@ -2152,6 +2168,8 @@ async fn admin_deploys(
                 "author": author,
                 "message": message,
                 "timestamp": timestamp,
+                "pr_number": pr_number,
+                "body": if body.is_empty() { None } else { Some(body) },
                 "deploy_status": deploy_status,
                 "deploy_timestamp": deploy_ts,
                 "deploy_error": deploy_error,
