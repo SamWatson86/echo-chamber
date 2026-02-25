@@ -10613,6 +10613,7 @@ function switchAdminTab(btn, tabId) {
   var tab = document.getElementById(tabId);
   if (tab) tab.classList.remove("hidden");
   btn.classList.add("active");
+  if (tabId === "admin-dash-deploys") fetchAdminDeploys();
 }
 
 function escAdm(s) {
@@ -11094,4 +11095,74 @@ async function fetchAdminBugs() {
     });
     el.innerHTML = html;
   } catch (e) {}
+}
+
+/* ── Deploy History Tab ────────────────────────────────────────── */
+
+async function fetchAdminDeploys() {
+  var deploysDiv = document.getElementById("admin-dash-deploys");
+  if (!deploysDiv) return;
+  try {
+    var resp = await fetch(apiUrl("/admin/api/deploys"), {
+      headers: { "Authorization": "Bearer " + adminToken }
+    });
+    if (!resp.ok) {
+      deploysDiv.innerHTML = '<div class="adm-empty">Failed to load (' + resp.status + ')</div>';
+      return;
+    }
+    var data = await resp.json();
+    renderAdminDeploys(data.commits || [], deploysDiv);
+  } catch (e) {
+    deploysDiv.innerHTML = '<div class="adm-empty">Error: ' + e.message + '</div>';
+  }
+}
+
+function renderAdminDeploys(commits, container) {
+  if (commits.length === 0) {
+    container.innerHTML = '<div class="adm-empty">No deploy history yet</div>';
+    return;
+  }
+  var html = '<div class="adm-deploy-list">';
+  commits.forEach(function(c) {
+    var statusClass = "adm-deploy-pending";
+    var statusLabel = "pending";
+    if (c.deploy_status === "success") { statusClass = "adm-deploy-success"; statusLabel = "deployed"; }
+    else if (c.deploy_status === "failed") { statusClass = "adm-deploy-failed"; statusLabel = "failed"; }
+    else if (c.deploy_status === "rollback") { statusClass = "adm-deploy-rollback"; statusLabel = "rolled back"; }
+
+    html += '<div class="adm-deploy-row">';
+    html += '<div class="adm-deploy-status"><span class="adm-deploy-badge ' + statusClass + '">' + escAdm(statusLabel) + '</span></div>';
+    html += '<div class="adm-deploy-info">';
+    html += '<div class="adm-deploy-msg">' + escAdm(c.message || "(no message)") + '</div>';
+    html += '<div class="adm-deploy-meta">';
+    html += '<span class="adm-deploy-sha">' + escAdm(c.short_sha || c.sha || "") + '</span>';
+    html += '<span class="adm-deploy-author">' + escAdm(c.author || "unknown") + '</span>';
+    html += '<span class="adm-deploy-time">' + formatDeployTime(c.timestamp || c.deploy_timestamp || "") + '</span>';
+    if (c.deploy_duration) {
+      html += '<span class="adm-deploy-dur">' + c.deploy_duration + 's</span>';
+    }
+    if (c.deploy_error) {
+      html += '<div class="adm-deploy-err">' + escAdm(c.deploy_error) + '</div>';
+    }
+    html += '</div></div></div>';
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function formatDeployTime(isoStr) {
+  if (!isoStr) return "";
+  try {
+    var d = new Date(isoStr);
+    var now = new Date();
+    var diffMs = now - d;
+    var diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return diffMin + "m ago";
+    var diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return diffHr + "h ago";
+    var diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return diffDay + "d ago";
+    return d.toLocaleDateString();
+  } catch (e) { return isoStr; }
 }

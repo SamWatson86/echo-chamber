@@ -749,6 +749,7 @@ async fn main() {
         .route("/admin/api/metrics", get(admin_metrics))
         .route("/admin/api/bugs", get(admin_bug_reports))
         .route("/admin/api/metrics/dashboard", get(admin_dashboard_metrics))
+        .route("/admin/api/deploys", get(admin_deploys))
         .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
@@ -2076,6 +2077,90 @@ async fn admin_bug_reports(
     all.truncate(200);
 
     Ok(Json(BugReportsResponse { reports: all }))
+}
+
+async fn admin_deploys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    // Read deploy history JSON written by deploy-watcher.ps1
+    let history_file = std::path::Path::new("core/deploy/deploy-history.json");
+    let deploy_events: Vec<serde_json::Value> = if history_file.exists() {
+        match fs::read_to_string(history_file) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    // Build SHA -> deploy event map (short SHA keys)
+    let mut deploy_map: std::collections::HashMap<String, &serde_json::Value> =
+        std::collections::HashMap::new();
+    for event in &deploy_events {
+        if let Some(sha) = event.get("sha").and_then(|v| v.as_str()) {
+            deploy_map.entry(sha.to_string()).or_insert(event);
+        }
+    }
+
+    // Run git log for recent commits on origin/main
+    let git_output = std::process::Command::new("git")
+        .args(["log", "--format=%H|%an|%s|%aI", "-30", "origin/main"])
+        .output();
+
+    let mut commits = vec![];
+    if let Ok(output) = git_output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.splitn(4, '|').collect();
+            if parts.len() < 4 {
+                continue;
+            }
+            let sha = parts[0];
+            let short_sha = &sha[..7.min(sha.len())];
+            let author = parts[1];
+            let message = parts[2];
+            let timestamp = parts[3];
+
+            let (deploy_status, deploy_ts, deploy_error, deploy_duration) =
+                if let Some(event) = deploy_map.get(short_sha) {
+                    let status = event
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let ts = event
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let err = event
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let dur = event
+                        .get("duration_seconds")
+                        .and_then(|v| v.as_i64());
+                    (Some(status.to_string()), ts, err, dur)
+                } else {
+                    (None, None, None, None)
+                };
+
+            commits.push(serde_json::json!({
+                "sha": sha,
+                "short_sha": short_sha,
+                "author": author,
+                "message": message,
+                "timestamp": timestamp,
+                "deploy_status": deploy_status,
+                "deploy_timestamp": deploy_ts,
+                "deploy_error": deploy_error,
+                "deploy_duration": deploy_duration,
+            }));
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "commits": commits })))
 }
 
 async fn soundboard_list(

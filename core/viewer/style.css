@@ -4505,3 +4505,21 @@ body.admin-mode .room-top {
 .adm-ice-host { color: #49b86d; }
 .adm-ice-srflx { color: #3b9dda; }
 .adm-ice-relay { color: #e8922f; }
+
+/* Deploy history tab */
+.adm-deploy-list { display: flex; flex-direction: column; gap: 6px; }
+.adm-deploy-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; border-left: 3px solid rgba(255,255,255,0.1); }
+.adm-deploy-row:hover { background: rgba(255,255,255,0.06); }
+.adm-deploy-status { flex-shrink: 0; padding-top: 2px; }
+.adm-deploy-badge { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+.adm-deploy-success { background: rgba(73,184,109,0.2); color: #49b86d; }
+.adm-deploy-failed { background: rgba(214,87,87,0.2); color: #d65757; }
+.adm-deploy-rollback { background: rgba(201,184,62,0.2); color: #c9b83e; }
+.adm-deploy-pending { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.5); }
+.adm-deploy-info { flex: 1; min-width: 0; }
+.adm-deploy-msg { font-size: 12px; color: rgba(255,255,255,0.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+.adm-deploy-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: rgba(255,255,255,0.4); align-items: center; }
+.adm-deploy-sha { font-family: monospace; background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px; font-size: 10px; }
+.adm-deploy-author { color: rgba(255,255,255,0.55); }
+.adm-deploy-dur { color: rgba(255,255,255,0.35); }
+.adm-deploy-err { margin-top: 4px; font-size: 11px; color: #d65757; background: rgba(214,87,87,0.08); padding: 4px 8px; border-radius: 4px; }
