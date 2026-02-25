@@ -43,3 +43,4 @@ core/turn/echo-turn.exe
 
 # Power manager runtime config (machine-specific)
 power-manager/config.json
+core/deploy/.last-deployed-sha
