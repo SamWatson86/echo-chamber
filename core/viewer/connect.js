@@ -171,19 +171,21 @@ function renderPublishButtons() {
 
 function reconcileLocalPublishIndicators(reason) {
   if (!publishStateReconcile || !room || !room.localParticipant) return;
+  // Skip reconciliation while a toggle is in progress — the toggle sets
+  // camEnabled from the SDK's authoritative state when it finishes.
+  if (_camToggling || _micToggling) return;
+  // Use the SDK's authoritative isCameraEnabled / isScreenShareEnabled
+  // instead of checking !!pub.track. Publication objects retain muted/ended
+  // tracks after setCameraEnabled(false), giving false positives.
+  const cameraPublished = !!room.localParticipant.isCameraEnabled;
   const LK = getLiveKitClient();
   const pubs = getParticipantPublications(room.localParticipant);
-  const cameraPublished = pubs.some((pub) =>
-    pub &&
-    pub.source === LK?.Track?.Source?.Camera &&
-    pub.kind === LK?.Track?.Kind?.Video &&
-    !!pub.track
-  );
   const screenPublished = pubs.some((pub) =>
     pub &&
     pub.source === LK?.Track?.Source?.ScreenShare &&
     pub.kind === LK?.Track?.Kind?.Video &&
-    !!pub.track
+    !!pub.track &&
+    pub.track.mediaStreamTrack?.readyState !== "ended"
   );
 
   const out = publishStateReconcile(
