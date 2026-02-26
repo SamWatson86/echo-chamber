@@ -1,6 +1,6 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-02-24
+**Last Updated**: 2026-02-26
 **Current Version**: v0.3.1 (control plane + client)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
@@ -25,7 +25,70 @@
 
 ---
 
-## What Changed Today (2026-02-24)
+## What Changed Today (2026-02-26)
+
+### Viewer Modularization COMPLETE (PR #73 — merged)
+- Split `app.js` from **11,254 lines** into **19 focused modules** (234 lines remaining as init + event wiring)
+- Zero behavioral changes — same global-scope `<script>` tag architecture, no bundler
+- Modules: `state.js`, `debug.js`, `urls.js`, `settings.js`, `identity.js`, `rnnoise.js`, `chimes.js`, `room-status.js`, `auth.js`, `theme.js`, `chat.js`, `soundboard.js`, `screen-share.js`, `participants.js`, `audio-routing.js`, `media-controls.js`, `admin.js`, `connect.js`
+- Fixed 2 load-order bugs found during audit:
+  - `_viewerVersion` was null (IIFE searched for `app.js` tag before it was parsed)
+  - `settings.js` microtask race (Promise `.then()` fired between script tags before `theme.js` loaded)
+- All 18 new JS files added to Rust cache-busting stamp list
+- 47 deterministic tests pass, full load-order audit clean
+- Friends just refresh to get the update — no client rebuild needed
+
+---
+
+## What Changed (2026-02-25)
+
+### Mobile Browser Compatibility (PR #72 — merged)
+- Fixed Samsung download interceptor triggering on binary fetches (WASM, audio/mpeg)
+- Added `_isMobileDevice` detection, skip RNNoise on mobile, synthesized chime tones
+- "Tap to play" / "Tap to load" placeholders for chat media on mobile
+- Accept headers on all binary fetches, skip identity migration on mobile
+
+### Dashboard Visible to All Users (PR #70)
+- Dashboard button + panel now visible to **all connected users**, not just the admin-client build
+- Removed `admin-only` CSS class gate from dashboard button and panel
+- Dashboard button shows after connecting, hides on disconnect
+- Renamed "Admin Dashboard" → "Dashboard"
+- Kick/mute controls remain admin-only (gated behind `isAdminMode()`)
+- No Rust changes — all users already have valid admin tokens from login
+- Files: `core/viewer/index.html`, `core/viewer/app.js`
+
+### Admin Dashboard 30-Day Expansion + Quality Stats Persistence (PR #69)
+- **History tab**: expanded from 2 days to 30 days (event limit raised 200 → 1000)
+- **Heatmap**: expanded from 7 days to 30 days (Rust endpoint + JS slice/title)
+- **Quality stats persistence**: `StatsSnapshot` now written to daily `stats-YYYY-MM-DD.json` files alongside session logs. `admin_metrics` endpoint reads 30 days of files + in-memory data with dedup. Quality data now survives server restarts.
+- Files: `core/control/src/main.rs`, `core/viewer/app.js`
+
+### Session Log + Bug Report Merge
+- Merged scattered session logs from 3 directories (1,170 events across 14 days) into canonical `core/logs/sessions/`
+- Merged scattered bug reports (43 reports across 7 days) into `core/logs/bugs/`
+- Created merge scripts: `tools/merge-session-logs.js`, `tools/merge-bug-logs.js`
+
+### Deploy Watcher Fixes (PRs #63, #64, #65)
+- Fixed cargo "Access is denied" — kill process BEFORE building, not after
+- Fixed PowerShell array nesting corrupting deploy-history.json
+- Fixed working directory: all process starts now use `$coreDir` (core/) instead of repo root
+- Fixed test runner: switched from bash to `node --test` directly (Git bash CWD issue)
+- Deploy watcher now works end-to-end: auto-detected and deployed its own PR within 3 minutes
+
+### Clickable PR Links in Deploys Tab (PR #66)
+- Each deploy commit now links to its GitHub PR with expandable description
+- PR number extracted from merge commit subjects
+
+### Admin Bug Tab Date Display
+- Bug reports now show date + time instead of time only
+
+### Historical Deploy Status
+- Pre-existing commits (before deploy watcher) now labeled "HISTORICAL" instead of "PENDING"
+- Styled with italic, faded appearance
+
+---
+
+## What Changed (2026-02-24)
 
 ### Power Manager v2
 - Rewrote `watcher.ps1` — uses `GetLastInputInfo` Win32 API instead of GPU polling
@@ -54,7 +117,7 @@
   - `8ca86a8` TURN credentials behind authenticated endpoint (closes #29)
   - `9c8e85f` Auto-create GitHub Issues from bug reports (closes #23)
   - (pending commit) Fix native audio capture teardown on disconnect (#28) + compiler warning fix
-- **2 still open**: #30 (Spencer's PR #48 covers this), #44 (also Spencer's PR #48)
+- **ALL 35 RESOLVED**: #30 and #44 closed by Spencer's PR #48 merge
 
 ### TURN Credentials Security Fix (#29)
 - Added `/v1/ice-servers` endpoint to Rust control plane (JWT auth required)
@@ -84,6 +147,34 @@
 ### Worktree Cleanup
 - Removed orphaned worktrees: `vigilant-wilson`, `vigorous-clarke`, `awesome-newton`, `lucid-joliot`
 - Deleted corresponding branches
+
+### Spencer's PRs Merged
+- **PR #49 (Docs)** — Documentation foundation, AGENTS.md files, terminology, release boundaries
+- **PR #48 (Tests + Verification)** — State machine modules, 47 deterministic tests, `tools/verify/quick.sh`, CI workflow
+
+### Branch Protection Locked Down
+- `enforce_admins: true` — no more direct pushes to main
+- Required status check: `verify` (Spencer's CI workflow must pass)
+- 0 required reviewers — PRs merge as soon as CI is green
+- New workflow: branch -> PR -> CI tests -> merge -> auto-deploy
+
+### Auto-Deploy Pipeline (PR #60)
+- `core/deploy/deploy-watcher.ps1` — Polls GitHub every 3 min for new commits on main
+- On new commit: pulls, runs test suite, builds Rust control plane, blue-green binary swap
+- Automatic rollback if health check fails (backup `.bak` binary restored)
+- Circuit breaker stops after 3 consecutive failures
+- `core/deploy/install-deploy-watcher.ps1` — Registers as Windows Scheduled Task
+- Tested end-to-end: simulated change -> pull -> test -> build -> deploy -> health check pass
+- Scheduled task "EchoChamberDeployWatcher" installed and running
+
+### Admin Deploy History Tab (PR #61)
+- New **Deploys** tab in admin dashboard showing commit timeline + deploy outcomes
+- Deploy watcher upgraded with `Write-DeployEvent` — writes structured JSON to `deploy-history.json`
+- Rust endpoint `GET /admin/api/deploys` merges `git log` with deploy event data
+- Each commit shows: status badge (deployed/failed/rolled back/pending), commit message, author, SHA, timestamp, deploy duration
+- Error messages shown for failed deploys
+- Design doc: `docs/plans/2026-02-25-admin-deploy-history-design.md`
+- Files: `deploy-watcher.ps1`, `main.rs`, `app.js`, `index.html`, `style.css`
 
 ### Per-Person Chime Volume (New Feature)
 - Each participant card has a "Chime" slider (0-100%, default 50%)
@@ -188,23 +279,37 @@ All changes deployed and running. Design doc: `docs/plans/2026-02-23-admin-dashb
 
 ---
 
+## Chaos Stress Test (2026-02-26)
+
+Designed and executed a 7-phase chaos stress test using Chrome DevTools MCP to automate 3 browser tabs (Observer, ChaosBot-1, ChaosBot-2). Found and fixed 3 bugs:
+
+### Bug 1: Camera desync under rapid toggling (FIXED)
+- **Symptom**: `camEnabled=false` but camera track still published
+- **Root cause**: `setCameraEnabled(false)` mutes the track and ends the MediaStreamTrack, but keeps the publication object with `track !== null`. Checking `!!pub.track` gave false positives — both `toggleCam()` and the reconciler thought the camera was still published.
+- **Fix**: Use `room.localParticipant.isCameraEnabled` (SDK's authoritative state) instead of checking raw publication `track` refs. Also suppress reconciler during active toggles.
+- **Commits**: `f2e1e0f`, `141f1ce`
+
+### Bug 2: LK TDZ in room switch (FIXED)
+- **Symptom**: "Cannot access 'LK' before initialization" ~40% of room switches
+- **Root cause**: Inner `const LK = getLiveKitClient()` in TrackSubscribed callback shadowed outer `LK` from closure scope
+- **Fix**: Removed inner declaration
+- **Commit**: `f2e1e0f`
+
+### Bug 3: Stale cameraTrackSid (MINOR, unfixed)
+- Observer's `participantState` retains `cameraTrackSid` after remote cam unpublish. Low priority — cosmetic only.
+
+### Chaos test v2 results: 16/16 checks passed
+
+---
+
 ## Known Bugs / Open Items
 
-### Needs Monitoring
-1. **Brad's streaming stability** — AIMD bitrate control keeps 1080p@60fps, adjusts compression only. Brad getting AT&T fiber on Tuesday 2026-02-18 — should eliminate bursty packet loss at source.
-2. **David's reconnection resilience** — Fixed false exit chimes, audio loss after reconnection, and slow FPS recovery. David needs to test during his next session.
-3. **Admin Dashboard v2 verification** — Just deployed. Sam needs to verify all new features work: colors, resize, leaderboard click→heatmap filter, heatmap cell click→popup, bug charts, quality dashboard.
-
-### Needs Investigation
-4. **35fps cap in Phase 1** — David's stream stuck at ~35fps for first 2-3 minutes even on HIGH layer, then jumps to 60fps. Correlates with ICE pair switch in SFU log.
-
-### Minor / Cosmetic
-5. **Schema file noise** — `core/client/gen/schemas/desktop-schema.json` and `windows-schema.json` show as modified but are auto-generated. Not committed.
+- Minor: stale `cameraTrackSid` in observer's participantState after remote camera unpublish (cosmetic only)
 
 ---
 
 ## Active Worktree
-- None — all worktrees cleaned up. Working directly on main.
+- None — on main, all branches cleaned up.
 
 ## Files Modified (Admin Dashboard v2)
 - `core/viewer/app.js` — 30-color palette, resize IIFE, interactive leaderboard/heatmap, bug charts, quality dashboard, admin-only reveal fix
