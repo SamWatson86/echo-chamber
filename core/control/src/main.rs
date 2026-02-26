@@ -929,7 +929,15 @@ fn stamp_viewer_index(viewer_dir: &PathBuf) {
     match fs::read_to_string(&index_path) {
         Ok(html) => {
             let v = env!("CARGO_PKG_VERSION");
-            let assets = ["style.css", "jam.css", "app.js", "jam.js", "changelog.js", "livekit-client.umd.js"];
+            let assets = [
+                "style.css", "jam.css",
+                "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
+                "state.js", "debug.js", "urls.js", "settings.js", "identity.js",
+                "rnnoise.js", "chimes.js", "room-status.js", "auth.js", "theme.js",
+                "chat.js", "soundboard.js", "screen-share.js", "participants.js",
+                "audio-routing.js", "media-controls.js", "admin.js", "connect.js",
+                "app.js", "jam.js", "changelog.js",
+            ];
             let mut stamped = html;
             for asset in &assets {
                 // Remove any existing ?v=... before the closing quote
