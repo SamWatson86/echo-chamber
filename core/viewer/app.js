@@ -284,12 +284,6 @@ function getTrackSource(publication, track) {
 }
 
 // ─── Who's Online polling (pre-connect) ───
-function getControlUrl() {
-  const val = controlUrlInput?.value?.trim();
-  if (val) return val;
-  return `https://${window.location.host}`;
-}
-
 async function fetchOnlineUsers(controlUrl) {
   try {
     const resp = await fetch(`${controlUrl}/api/online`, { signal: AbortSignal.timeout(5000) });
@@ -334,155 +328,6 @@ function stopOnlineUsersPolling() {
   }
   if (onlineUsersEl) onlineUsersEl.innerHTML = "";
 }
-
-function safeStorageGet(key) {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeStorageSet(key, value) {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // ignore storage errors (private mode / blocked storage)
-  }
-}
-
-// ─── Persistent Settings (origin-independent) ───
-// In native client, settings are stored in a JSON file via Tauri IPC.
-// In browser, falls back to localStorage. echoGet/echoSet are synchronous
-// after the initial async loadAllSettings() call at startup.
-var _settingsCache = {};
-var _settingsLoaded = false;
-var _settingsSaveTimer = null;
-
-var _SETTINGS_KEYS = [
-  "echo-core-theme", "echo-core-ui-opacity",
-  "echo-core-soundboard-volume", "echo-core-soundboard-clip-volume",
-  "echo-soundboard-favorites", "echo-soundboard-order",
-  "echo-noise-cancel", "echo-nc-level",
-  "echo-device-mic", "echo-device-cam", "echo-device-speaker",
-  "echo-core-remember-name", "echo-core-remember-pass",
-  "echo-core-identity-suffix", "echo-core-device-id",
-  "echo-avatar-device", "echo-volume-prefs"
-];
-
-async function loadAllSettings() {
-  if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
-    try {
-      var json = await tauriInvoke("load_settings");
-      _settingsCache = JSON.parse(json || "{}");
-      debugLog("[settings] loaded " + Object.keys(_settingsCache).length + " settings from file");
-    } catch (e) {
-      debugLog("[settings] load_settings failed: " + e + " — using defaults");
-      _settingsCache = {};
-    }
-  }
-  // If cache is empty (first run or browser mode), try localStorage migration
-  if (Object.keys(_settingsCache).length === 0) {
-    var migrated = 0;
-    for (var i = 0; i < _SETTINGS_KEYS.length; i++) {
-      try {
-        var v = localStorage.getItem(_SETTINGS_KEYS[i]);
-        if (v !== null) { _settingsCache[_SETTINGS_KEYS[i]] = v; migrated++; }
-      } catch (e) {}
-    }
-    // Also migrate dynamic avatar keys
-    try {
-      for (var j = 0; j < localStorage.length; j++) {
-        var k = localStorage.key(j);
-        if (k && k.startsWith("echo-avatar-")) {
-          _settingsCache[k] = localStorage.getItem(k);
-          migrated++;
-        }
-      }
-    } catch (e) {}
-    if (migrated > 0) {
-      debugLog("[settings] migrated " + migrated + " settings from localStorage");
-      _persistSettings();
-    }
-  }
-  _settingsLoaded = true;
-}
-
-function echoGet(key) {
-  // Before _settingsCache is assigned (var hoisting), fall back to localStorage
-  if (_settingsCache) {
-    var v = _settingsCache[key];
-    if (v !== undefined) return v;
-  }
-  try { return localStorage.getItem(key); } catch (e) { return null; }
-}
-
-function echoSet(key, value) {
-  _settingsCache[key] = String(value);
-  // Also write to localStorage as fallback
-  try { localStorage.setItem(key, String(value)); } catch (e) {}
-  // Debounced persist to file (batch rapid writes like volume slider)
-  _debouncedPersist();
-}
-
-function _debouncedPersist() {
-  if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) return;
-  // Don't persist until settings have been loaded from file — prevents
-  // synchronous init code from overwriting the saved file with defaults
-  if (!_settingsLoaded) return;
-  if (_settingsSaveTimer) clearTimeout(_settingsSaveTimer);
-  _settingsSaveTimer = setTimeout(_persistSettings, 300);
-}
-
-function _persistSettings() {
-  if (!window.__ECHO_NATIVE__ || !hasTauriIPC()) return;
-  tauriInvoke("save_settings", { settings: JSON.stringify(_settingsCache) }).catch(function(e) {
-    debugLog("[settings] save failed: " + e);
-  });
-}
-
-// ─── Per-participant volume persistence ───
-function _getVolumePrefs() {
-  try { return JSON.parse(echoGet("echo-volume-prefs") || "{}"); } catch(e) { return {}; }
-}
-function _saveVolumePrefs(prefs) {
-  echoSet("echo-volume-prefs", JSON.stringify(prefs));
-}
-function saveParticipantVolume(identity, mic, screen, chime) {
-  var prefs = _getVolumePrefs();
-  prefs[identity] = { mic: mic, screen: screen, chime: chime };
-  _saveVolumePrefs(prefs);
-}
-function getParticipantVolume(identity) {
-  var prefs = _getVolumePrefs();
-  return prefs[identity] || null;
-}
-
-function _reapplySettingsAfterLoad() {
-  // Theme
-  var savedTheme = echoGet(THEME_STORAGE_KEY);
-  if (savedTheme && savedTheme !== document.body.dataset.theme) {
-    debugLog("[settings] reapplying theme: " + savedTheme);
-    applyTheme(savedTheme, true);
-  }
-  // UI opacity
-  var savedOpacity = echoGet(UI_OPACITY_KEY);
-  if (savedOpacity) applyUiOpacity(parseInt(savedOpacity, 10));
-  // Name + password in lobby
-  var savedName = echoGet(REMEMBER_NAME_KEY);
-  if (savedName && nameInput) nameInput.value = savedName;
-  var savedPass = echoGet(REMEMBER_PASS_KEY);
-  if (savedPass && passwordInput) passwordInput.value = savedPass;
-}
-
-// Fire settings load at startup — async, re-applies settings when loaded
-var _settingsReadyPromise = loadAllSettings().then(function() {
-  debugLog("[settings] ready (" + Object.keys(_settingsCache).length + " keys)");
-  // Re-apply settings that were initialized with defaults before the file loaded
-  _reapplySettingsAfterLoad();
-}).catch(function(e) {
-  debugLog("[settings] loadAllSettings error: " + e);
-});
 
 if (nameInput) {
   const savedName = echoGet(REMEMBER_NAME_KEY);
@@ -1323,36 +1168,6 @@ var _nativeAudioDest = null;        // MediaStreamDestination
 var _nativeAudioTrack = null;       // Published LiveKit track
 var _nativeAudioUnlisten = null;    // Tauri event unlisten function
 var _nativeAudioActive = false;
-var _echoServerUrl = ""; // Server URL for API calls (set by Tauri get_control_url on native client)
-
-// Tauri IPC — viewer loaded locally so window.__TAURI__ is available natively
-function tauriInvoke(cmd, args) {
-  if (window.__TAURI__ && window.__TAURI__.core) {
-    return window.__TAURI__.core.invoke(cmd, args);
-  }
-  return Promise.reject(new Error("Tauri IPC not available"));
-}
-function tauriListen(eventName, callback) {
-  if (window.__TAURI__ && window.__TAURI__.event) {
-    return window.__TAURI__.event.listen(eventName, callback);
-  }
-  return Promise.reject(new Error("Tauri event system not available"));
-}
-function hasTauriIPC() {
-  return !!(window.__TAURI__ && window.__TAURI__.core);
-}
-function isAdminMode() {
-  return !!window.__ECHO_ADMIN__;
-}
-
-// Build absolute URL for API calls. Native client uses the configured server URL
-// since the page is loaded locally (tauri://). Browser uses relative paths.
-function apiUrl(path) {
-  if (window.__ECHO_NATIVE__ && _echoServerUrl) {
-    return _echoServerUrl + path;
-  }
-  return path;
-}
 
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
@@ -2445,49 +2260,6 @@ function setRoomAudioMutedState(next) {
   // Mute/unmute Jam audio
   if (typeof _jamGainNode !== "undefined" && _jamGainNode) {
     _jamGainNode.gain.value = roomAudioMuted ? 0 : (_jamVolume / 100);
-  }
-}
-
-function setDefaultUrls() {
-  if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
-    // Native client: get server URL from Tauri config
-    tauriInvoke("get_control_url").then(function(url) {
-      _echoServerUrl = url;
-      if (!controlUrlInput.value) controlUrlInput.value = url;
-      if (!sfuUrlInput.value) {
-        // SFU is proxied through the control plane — same host:port, just wss://
-        sfuUrlInput.value = url.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
-      }
-      debugLog("[native] server URL from Tauri config: " + url);
-    }).catch(function(e) {
-      debugLog("[native] get_control_url failed: " + e);
-      // Fallback to defaults
-      if (!controlUrlInput.value) controlUrlInput.value = "https://echo.fellowshipoftheboatrace.party:9443";
-      if (!sfuUrlInput.value) sfuUrlInput.value = "wss://echo.fellowshipoftheboatrace.party:9443";
-    });
-  } else {
-    if (!controlUrlInput.value) {
-      controlUrlInput.value = window.location.protocol + "//" + window.location.host;
-    }
-    if (!sfuUrlInput.value) {
-      if (window.location.protocol === "https:") {
-        sfuUrlInput.value = "wss://" + window.location.host;
-      } else {
-        sfuUrlInput.value = "ws://" + window.location.hostname + ":7880";
-      }
-    }
-  }
-}
-
-function normalizeUrls() {
-  // For native client, URLs are set by setDefaultUrls via Tauri IPC
-  if (window.__ECHO_NATIVE__) return;
-  if (window.location.protocol !== "https:") return;
-  if (!controlUrlInput.value) {
-    controlUrlInput.value = "https://" + window.location.host;
-  }
-  if (!sfuUrlInput.value) {
-    sfuUrlInput.value = "wss://" + window.location.host;
   }
 }
 
