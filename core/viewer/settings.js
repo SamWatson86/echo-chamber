@@ -142,11 +142,15 @@ function _reapplySettingsAfterLoad() {
   if (savedPass && passwordInput) passwordInput.value = savedPass;
 }
 
-// Fire settings load at startup — async, re-applies settings when loaded
+// Fire settings load at startup — async, re-applies settings when loaded.
+// setTimeout(fn, 0) defers to a macrotask so ALL scripts are loaded before
+// _reapplySettingsAfterLoad runs (otherwise the microtask fires between script
+// tags in browser mode, before theme.js defines applyTheme/applyUiOpacity).
 var _settingsReadyPromise = loadAllSettings().then(function() {
-  debugLog("[settings] ready (" + Object.keys(_settingsCache).length + " keys)");
-  // Re-apply settings that were initialized with defaults before the file loaded
-  _reapplySettingsAfterLoad();
+  setTimeout(function() {
+    debugLog("[settings] ready (" + Object.keys(_settingsCache).length + " keys)");
+    _reapplySettingsAfterLoad();
+  }, 0);
 }).catch(function(e) {
   debugLog("[settings] loadAllSettings error: " + e);
 });
