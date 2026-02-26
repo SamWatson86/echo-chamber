@@ -295,8 +295,19 @@ function updateCameraLobbySpeakingIndicators() {
 
 // --- Media Toggles ---
 
+let _micToggling = false;
+let _camToggling = false;
+
+// Check if camera is actually enabled using the SDK's own state.
+// Publication objects can retain muted/ended tracks — checking !!pub.track
+// gives false positives. The SDK's isCameraEnabled is authoritative.
+function _isCameraActuallyEnabled() {
+  return !!room?.localParticipant?.isCameraEnabled;
+}
+
 async function toggleMic() {
-  if (!room) return;
+  if (!room || _micToggling) return;
+  _micToggling = true;
   const desired = !micEnabled;
   micBtn.disabled = true;
   try {
@@ -336,19 +347,29 @@ async function toggleMic() {
     }
   } finally {
     micBtn.disabled = false;
+    _micToggling = false;
   }
 }
 
 
 async function toggleCam() {
-  if (!room) return;
+  if (!room || _camToggling) return;
+  _camToggling = true;
   const desired = !camEnabled;
   camBtn.disabled = true;
   try {
     await room.localParticipant.setCameraEnabled(desired, {
       deviceId: selectedCamId || undefined,
     });
-    camEnabled = desired;
+
+    // Use the SDK's authoritative state rather than checking publications.
+    // Publication objects retain muted/ended tracks, so !!pub.track gives
+    // false positives. isCameraEnabled is the ground truth.
+    const actualState = _isCameraActuallyEnabled();
+    if (actualState !== desired) {
+      debugLog("[cam] post-toggle drift: desired=" + desired + " actual=" + actualState);
+    }
+    camEnabled = actualState;
     renderPublishButtons();
     if (room?.localParticipant) {
       const cardRef = ensureParticipantCard(room.localParticipant, true);
@@ -380,6 +401,7 @@ async function toggleCam() {
     }
   } finally {
     camBtn.disabled = false;
+    _camToggling = false;
   }
 }
 
