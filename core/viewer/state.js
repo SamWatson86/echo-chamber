@@ -226,6 +226,18 @@ let soundboardCurrentSource = null;
 const soundboardBufferCache = new Map();
 let soundboardDragId = null;
 
+// ── Viewer version (extracted from our own ?v= cache-busting param) ──
+var _viewerVersion = (function() {
+  try {
+    var scripts = document.querySelectorAll('script[src*="state.js"]');
+    for (var i = 0; i < scripts.length; i++) {
+      var m = scripts[i].src.match(/[?&]v=([^&]+)/);
+      if (m) return m[1];
+    }
+  } catch(e) {}
+  return null;
+})();
+
 // ── Debug panel refs ──
 const debugPanel = document.getElementById("debug-panel");
 const debugToggleBtn = document.getElementById("debug-toggle");

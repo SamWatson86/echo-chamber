@@ -77,17 +77,7 @@ function openImageLightbox(src) {
   document.body.appendChild(overlay);
 }
 
-// Extract viewer version from the cache-busting ?v= param stamped on app.js by the server
-var _viewerVersion = (function() {
-  try {
-    var scripts = document.querySelectorAll('script[src*="app.js"]');
-    for (var i = 0; i < scripts.length; i++) {
-      var m = scripts[i].src.match(/[?&]v=([^&]+)/);
-      if (m) return m[1];
-    }
-  } catch(e) {}
-  return null;
-})();
+// _viewerVersion is now in state.js (loaded first, can find its own script tag)
 
 function getParticipantAudioCtx() {
   if (!_participantAudioCtx || _participantAudioCtx.state === "closed") {
