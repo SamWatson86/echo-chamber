@@ -295,8 +295,36 @@ function updateCameraLobbySpeakingIndicators() {
 
 // --- Media Toggles ---
 
+let _micToggling = false;
+let _camToggling = false;
+
+// Check if a camera track is actually published on the local participant
+function _isCameraActuallyPublished() {
+  if (!room?.localParticipant) return false;
+  const LK = getLiveKitClient();
+  const pubs = getParticipantPublications(room.localParticipant);
+  return pubs.some((pub) =>
+    pub &&
+    pub.source === LK?.Track?.Source?.Camera &&
+    pub.kind === LK?.Track?.Kind?.Video &&
+    !!pub.track
+  );
+}
+
+// Wait up to maxWaitMs for camera publication state to match expected value.
+// Returns actual state after waiting.
+async function _waitForCameraState(expected, maxWaitMs) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (_isCameraActuallyPublished() === expected) return expected;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return _isCameraActuallyPublished();
+}
+
 async function toggleMic() {
-  if (!room) return;
+  if (!room || _micToggling) return;
+  _micToggling = true;
   const desired = !micEnabled;
   micBtn.disabled = true;
   try {
@@ -336,19 +364,39 @@ async function toggleMic() {
     }
   } finally {
     micBtn.disabled = false;
+    _micToggling = false;
   }
 }
 
 
 async function toggleCam() {
-  if (!room) return;
+  if (!room || _camToggling) return;
+  _camToggling = true;
   const desired = !camEnabled;
   camBtn.disabled = true;
   try {
     await room.localParticipant.setCameraEnabled(desired, {
       deviceId: selectedCamId || undefined,
     });
-    camEnabled = desired;
+
+    // Verify the SDK actually reached the desired state. Camera operations
+    // can take 200-800ms and setCameraEnabled may resolve before the track
+    // is fully published/unpublished. Wait up to 500ms for convergence.
+    const actualState = await _waitForCameraState(desired, 500);
+    if (actualState !== desired) {
+      debugLog("[cam] post-toggle drift: desired=" + desired + " actual=" + actualState + " — retrying once");
+      await room.localParticipant.setCameraEnabled(desired, {
+        deviceId: selectedCamId || undefined,
+      });
+      // Wait again after retry
+      const retriedState = await _waitForCameraState(desired, 500);
+      if (retriedState !== desired) {
+        debugLog("[cam] post-retry still drifted: desired=" + desired + " actual=" + retriedState + " — accepting actual");
+      }
+    }
+
+    // Set camEnabled from actual publication state, not the desired value
+    camEnabled = _isCameraActuallyPublished();
     renderPublishButtons();
     if (room?.localParticipant) {
       const cardRef = ensureParticipantCard(room.localParticipant, true);
@@ -380,6 +428,7 @@ async function toggleCam() {
     }
   } finally {
     camBtn.disabled = false;
+    _camToggling = false;
   }
 }
 

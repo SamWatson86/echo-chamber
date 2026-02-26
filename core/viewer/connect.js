@@ -601,8 +601,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     if (participant) hookPublication(publication, participant);
     debugLog(`track subscribed ${participant?.identity || "unknown"} src=${publication?.source || track.source} kind=${track.kind}`);
 
-    // Refresh Camera Lobby if open and it's a camera track
-    const LK = getLiveKitClient();
+    // Refresh Camera Lobby if open and it's a camera track (uses outer LK from line 447)
     if (track.kind === 'video' && publication?.source === LK?.Track?.Source?.Camera) {
       if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
         setTimeout(() => populateCameraLobby(), 100);
