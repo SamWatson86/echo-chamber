@@ -60,7 +60,16 @@ jobs:
           SIG=$(ls "$NSIS_DIR"/*.sig 2>/dev/null | head -1)
           echo "exe=$EXE" >> "$GITHUB_OUTPUT"
           echo "sig=$SIG" >> "$GITHUB_OUTPUT"
-          echo "sig_content=$(cat "$SIG")" >> "$GITHUB_OUTPUT"
+          if [ -n "$SIG" ]; then
+            {
+              echo "sig_content<<SIGEOF"
+              cat "$SIG"
+              echo "SIGEOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "sig_content=" >> "$GITHUB_OUTPUT"
+            echo "WARNING: No Windows updater signature found"
+          fi
 
       - name: Read version
         id: version
@@ -139,7 +148,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CI: 'true'
-        run: cargo tauri build --bundles dmg
+        run: cargo tauri build --bundles app,dmg
 
       - name: List build output
         shell: bash
@@ -155,7 +164,11 @@ jobs:
         run: |
           SIG_FILE=$(ls core/target/release/bundle/macos/*.tar.gz.sig 2>/dev/null | head -1)
           if [ -n "$SIG_FILE" ]; then
-            echo "content=$(cat "$SIG_FILE")" >> "$GITHUB_OUTPUT"
+            {
+              echo "content<<SIGEOF"
+              cat "$SIG_FILE"
+              echo "SIGEOF"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "content=" >> "$GITHUB_OUTPUT"
           fi
