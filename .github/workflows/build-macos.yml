@@ -56,17 +56,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CI: 'true'
-        run: cargo tauri build --bundles dmg
+        run: cargo tauri build --bundles app,dmg
 
       - name: List build output
-        run: ls -la core/target/release/bundle/dmg/ || echo "No DMG found"
+        run: |
+          ls -la core/target/release/bundle/dmg/ || echo "No DMG found"
+          ls -la core/target/release/bundle/macos/ || echo "No updater artifacts found"
 
-      - name: Upload DMG artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: echo-chamber-macos-dmg
-          path: core/target/release/bundle/dmg/*.dmg
-          if-no-files-found: error
+          path: |
+            core/target/release/bundle/dmg/*.dmg
+            core/target/release/bundle/macos/*.tar.gz
+            core/target/release/bundle/macos/*.tar.gz.sig
+          if-no-files-found: warn
 
       - name: Get latest release tag
         id: latest
@@ -78,9 +83,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload DMG to latest release
+      - name: Upload artifacts to latest release
         if: steps.latest.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.latest.outputs.tag }}
-          files: core/target/release/bundle/dmg/*.dmg
+          files: |
+            core/target/release/bundle/dmg/*.dmg
+            core/target/release/bundle/macos/*.tar.gz
+            core/target/release/bundle/macos/*.tar.gz.sig

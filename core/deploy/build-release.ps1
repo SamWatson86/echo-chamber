@@ -79,6 +79,9 @@ if ($setupExe -and $setupSig) {
     # GitHub converts spaces to dots in asset filenames
     $ghFileName = $setupExe.Name -replace ' ', '.'
 
+    # macOS updater artifact name (built by CI, not locally)
+    $macTarGz = "Echo.Chamber.app.tar.gz"
+
     $manifest = @{
         version = $version
         notes = "Echo Chamber v$version"
@@ -87,6 +90,10 @@ if ($setupExe -and $setupSig) {
             "windows-x86_64" = @{
                 signature = $sig.Trim()
                 url = "https://github.com/SamWatson86/echo-chamber/releases/download/v$version/$ghFileName"
+            }
+            "darwin-aarch64" = @{
+                signature = ""
+                url = "https://github.com/SamWatson86/echo-chamber/releases/download/v$version/$macTarGz"
             }
         }
     } | ConvertTo-Json -Depth 4
@@ -115,3 +122,7 @@ Write-Status "     - latest.json (update manifest)"
 Write-Status ""
 Write-Status "Or use gh CLI:"
 Write-Status "  gh release create v$version --title 'Echo Chamber v$version' $bundleDir\*"
+Write-Status ""
+Write-Status "After CI completes the macOS build:" Yellow
+Write-Status "  Download latest.json from the GitHub Release and copy to core\deploy\" Yellow
+Write-Status "  Or run: gh release download v$version -p latest.json -D core\deploy\ --clobber" Yellow
