@@ -2089,6 +2089,12 @@ video {
   max-width: 200px;
 }
 
+.bug-report-paste-hint {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
 .bug-report-screenshot-preview {
   margin-bottom: 8px;
 }

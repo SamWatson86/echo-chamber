@@ -59,6 +59,7 @@ struct AppState {
     spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
     spotify_token_file: PathBuf,
     http_client: reqwest::Client,
+    viewer_stamp: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -621,6 +622,16 @@ async fn main() {
         initial_jam.spotify_token = Some(token);
     }
 
+    // Viewer cache-busting stamp — unique per server start
+    let viewer_stamp = format!(
+        "{}.{}",
+        env!("CARGO_PKG_VERSION"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -644,6 +655,7 @@ async fn main() {
         jam_bot: Arc::new(tokio::sync::Mutex::new(None)),
         spotify_token_file,
         http_client: reqwest::Client::new(),
+        viewer_stamp: viewer_stamp.clone(),
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -734,8 +746,8 @@ async fn main() {
     let admin_dir = resolve_admin_dir();
     info!("admin dir: {:?}", admin_dir);
 
-    // Stamp cache-busting version strings into index.html at startup
-    stamp_viewer_index(&viewer_dir);
+    // Stamp viewer files with startup-unique cache-busting string
+    stamp_viewer_index(&viewer_dir, &viewer_stamp);
 
     let app = Router::new()
         .route("/", get(root_route))
@@ -924,11 +936,10 @@ fn resolve_viewer_dir() -> PathBuf {
 /// Stamp cache-busting version query strings into viewer/index.html on disk.
 /// Called once at server startup so ServeDir serves the already-stamped file.
 /// Idempotent — strips old ?v= params before re-stamping.
-fn stamp_viewer_index(viewer_dir: &PathBuf) {
+fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
     let index_path = viewer_dir.join("index.html");
     match fs::read_to_string(&index_path) {
         Ok(html) => {
-            let v = env!("CARGO_PKG_VERSION");
             let assets = [
                 "style.css", "jam.css",
                 "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
@@ -941,20 +952,21 @@ fn stamp_viewer_index(viewer_dir: &PathBuf) {
             let mut stamped = html;
             for asset in &assets {
                 // Remove any existing ?v=... before the closing quote
-                let with_param = format!("{}?v=", asset);
+                // Use leading quote to avoid substring matches (e.g. "state.js" inside "room-switch-state.js")
+                let with_param = format!("\"{}?v=", asset);
                 if let Some(pos) = stamped.find(&with_param) {
                     // Find the closing quote after the ?v= param
                     let after = pos + with_param.len();
                     if let Some(q) = stamped[after..].find('"') {
-                        stamped = format!("{}{}\"{}",
+                        stamped = format!("{}\"{}\"{}",
                             &stamped[..pos],
                             asset,
                             &stamped[after + q + 1..]);
                     }
                 }
-                // Now stamp the fresh version
-                let plain = format!("{}\"", asset);
-                let versioned = format!("{}?v={}\"", asset, v);
+                // Now stamp the fresh version (also use leading quote for precision)
+                let plain = format!("\"{}\"", asset);
+                let versioned = format!("\"{}?v={}\"", asset, v);
                 stamped = stamped.replace(&plain, &versioned);
             }
             if let Err(e) = fs::write(&index_path, &stamped) {
@@ -1636,7 +1648,7 @@ async fn admin_dashboard(
         ts: now,
         rooms,
         total_online: total,
-        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        server_version: state.viewer_stamp.clone(),
     }))
 }
 

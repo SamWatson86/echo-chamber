@@ -115,41 +115,57 @@ if (bugReportDesc) {
   });
 }
 // Screenshot attachment for bug reports
+async function attachBugReportScreenshot(file) {
+  if (!file) return;
+  if (bugReportFileName) bugReportFileName.textContent = file.name;
+  if (bugReportPreview) {
+    var imgPreview = document.createElement("img");
+    imgPreview.src = URL.createObjectURL(file);
+    bugReportPreview.innerHTML = "";
+    bugReportPreview.appendChild(imgPreview);
+    bugReportPreview.classList.remove("hidden");
+  }
+  try {
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Uploading screenshot...";
+    var formData = new FormData();
+    formData.append("file", file);
+    var uploadResp = await fetch(apiUrl("/api/chat/upload"), {
+      method: "POST",
+      headers: { Authorization: "Bearer " + adminToken },
+      body: formData,
+    });
+    var uploadData = await uploadResp.json().catch(function() { return {}; });
+    if (uploadData.ok && uploadData.url) {
+      _bugReportScreenshotUrl = uploadData.url;
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot attached.";
+    } else {
+      if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot upload failed.";
+    }
+  } catch (e) {
+    if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot upload error: " + e.message;
+  }
+}
 if (bugReportScreenshotBtn && bugReportFileInput) {
   bugReportScreenshotBtn.addEventListener("click", function() {
     bugReportFileInput.click();
   });
-  bugReportFileInput.addEventListener("change", async function() {
+  bugReportFileInput.addEventListener("change", function() {
     var file = bugReportFileInput.files && bugReportFileInput.files[0];
-    if (!file) return;
-    if (bugReportFileName) bugReportFileName.textContent = file.name;
-    // Show preview
-    if (bugReportPreview) {
-      var imgPreview = document.createElement("img");
-      imgPreview.src = URL.createObjectURL(file);
-      bugReportPreview.innerHTML = "";
-      bugReportPreview.appendChild(imgPreview);
-      bugReportPreview.classList.remove("hidden");
-    }
-    // Upload to server using chat upload endpoint
-    try {
-      if (bugReportStatusEl) bugReportStatusEl.textContent = "Uploading screenshot...";
-      var formData = new FormData();
-      formData.append("file", file);
-      var uploadResp = await fetch(apiUrl("/api/chat/upload"), {
-        method: "POST",
-        headers: { Authorization: "Bearer " + adminToken },
-        body: formData,
-      });
-      var uploadData = await uploadResp.json().catch(function() { return {}; });
-      if (uploadData.ok && uploadData.url) {
-        _bugReportScreenshotUrl = uploadData.url;
-        if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot attached.";
-      } else {
-        if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot upload failed.";
+    if (file) attachBugReportScreenshot(file);
+  });
+}
+// Clipboard paste support — paste image into feedback dialog
+if (bugReportModal) {
+  bugReportModal.addEventListener("paste", function(e) {
+    var items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image/") === 0) {
+        e.preventDefault();
+        var blob = items[i].getAsFile();
+        if (blob) attachBugReportScreenshot(new File([blob], "clipboard-screenshot.png", { type: blob.type }));
+        return;
       }
-    } catch (e) {
-      if (bugReportStatusEl) bugReportStatusEl.textContent = "Screenshot upload error: " + e.message;
     }
   });
 }
