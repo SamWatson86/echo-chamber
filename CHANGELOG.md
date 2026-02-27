@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- macOS Apple Silicon (aarch64) DMG now included in releases
+- macOS auto-updater support via unified latest.json manifest
+- Viewer refactored into modular JS files (auth, chat, media, participants, etc.)
+- Fix camera desync under rapid toggling
+- Fix camera state tracking to use SDK isCameraEnabled
+
 ## 0.3.1
 
 - Security: Fixed links in chat opening on the server's desktop instead of the user's machine
