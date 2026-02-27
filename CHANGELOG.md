@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Fix: "Update available" banner no longer shows after updating (version sync between Cargo.toml and tauri.conf.json)
+- Fix: Camera card no longer glitches after stopping camera on macOS (guard against dead track re-attach)
+- Fix: Jam queue no longer empties when searching for new songs (server was draining queue when Spotify played non-queued tracks)
+- Chat: Clicking images now opens a fullscreen lightbox overlay (ESC or click to close)
+
 ## 0.4.0
 
 - macOS Apple Silicon (aarch64) DMG now included in releases

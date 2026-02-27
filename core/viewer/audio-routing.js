@@ -481,6 +481,11 @@ function handleTrackSubscribed(track, publication, participant) {
     }
     if (track?.mediaStreamTrack) {
       track.mediaStreamTrack.onunmute = () => {
+        // Guard: don't re-attach if the track has ended or been unsubscribed
+        if (track.mediaStreamTrack?.readyState === "ended" || !publication?.isSubscribed) {
+          debugLog(`camera onunmute ignored ${participant.identity} (track ended or unsubscribed)`);
+          return;
+        }
         requestVideoKeyFrame(publication, track);
         ensureCameraVideo(cardRef, track, publication);
       };
