@@ -61,11 +61,7 @@ jobs:
           echo "exe=$EXE" >> "$GITHUB_OUTPUT"
           echo "sig=$SIG" >> "$GITHUB_OUTPUT"
           if [ -n "$SIG" ]; then
-            {
-              echo "sig_content<<SIGEOF"
-              cat "$SIG"
-              echo "SIGEOF"
-            } >> "$GITHUB_OUTPUT"
+            echo "sig_content=$(cat "$SIG" | tr -d '\n')" >> "$GITHUB_OUTPUT"
           else
             echo "sig_content=" >> "$GITHUB_OUTPUT"
             echo "WARNING: No Windows updater signature found"
@@ -164,11 +160,7 @@ jobs:
         run: |
           SIG_FILE=$(ls core/target/release/bundle/macos/*.tar.gz.sig 2>/dev/null | head -1)
           if [ -n "$SIG_FILE" ]; then
-            {
-              echo "content<<SIGEOF"
-              cat "$SIG_FILE"
-              echo "SIGEOF"
-            } >> "$GITHUB_OUTPUT"
+            echo "content=$(cat "$SIG_FILE" | tr -d '\n')" >> "$GITHUB_OUTPUT"
           else
             echo "content=" >> "$GITHUB_OUTPUT"
           fi
