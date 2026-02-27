@@ -2906,14 +2906,22 @@ async fn jam_state(
                     // track doesn't match the front of the queue, that song has
                     // finished and should be removed.
                     if !current_uri.is_empty() && !jam.queue.is_empty() {
-                        while !jam.queue.is_empty()
-                            && jam.queue[0].spotify_uri != current_uri
-                        {
-                            let removed = jam.queue.remove(0);
-                            info!(
-                                "Jam: auto-removed finished track '{}' from queue",
-                                removed.name
-                            );
+                        // Only auto-remove queue[0] if the currently playing
+                        // track exists later in the queue — that means queue[0]
+                        // has finished and Spotify advanced. Without this guard
+                        // the while-loop would drain the ENTIRE queue whenever
+                        // Spotify plays something not in the queue at all.
+                        let current_in_queue = jam.queue.iter().any(|t| t.spotify_uri == current_uri);
+                        if current_in_queue {
+                            while !jam.queue.is_empty()
+                                && jam.queue[0].spotify_uri != current_uri
+                            {
+                                let removed = jam.queue.remove(0);
+                                info!(
+                                    "Jam: auto-removed finished track '{}' from queue",
+                                    removed.name
+                                );
+                            }
                         }
                     }
                     jam.now_playing = Some(np);

@@ -1902,6 +1902,11 @@ function scheduleCameraRecovery(identity, cardRef, publication) {
   const attempt = cameraRecoveryAttempts.get(key) || 0;
   if (attempt >= 2) return;
   setTimeout(() => {
+    // Guard: don't recover if the track has ended or been unsubscribed
+    if (!publication?.isSubscribed || publication?.track?.mediaStreamTrack?.readyState === "ended") {
+      debugLog(`camera recovery skipped ${identity} (track ended or unsubscribed)`);
+      return;
+    }
     const video = cardRef.avatar.querySelector("video");
     if (!video || !video.isConnected) return;
     const lastFrame = video._lastFrameTs || 0;
