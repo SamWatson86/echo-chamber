@@ -15,11 +15,13 @@ var bugReportFileInput = document.getElementById("bug-report-file");
 var bugReportScreenshotBtn = document.getElementById("bug-report-screenshot-btn");
 var bugReportFileName = document.getElementById("bug-report-file-name");
 var bugReportPreview = document.getElementById("bug-report-screenshot-preview");
+var bugReportTitle = document.getElementById("bug-report-title");
 var _bugReportScreenshotUrl = null;
 
 function openBugReport() {
   if (!bugReportModal) return;
   bugReportModal.classList.remove("hidden");
+  if (bugReportTitle) bugReportTitle.value = "";
   if (bugReportDesc) bugReportDesc.value = "";
   if (bugReportStatusEl) bugReportStatusEl.textContent = "";
   // Reset screenshot state
@@ -62,13 +64,19 @@ async function sendBugReport() {
   var feedbackType = "bug";
   var checkedRadio = document.querySelector('input[name="feedback-type"]:checked');
   if (checkedRadio) feedbackType = checkedRadio.value;
+  var titleText = bugReportTitle ? bugReportTitle.value.trim() : "";
   var payload = {
     description: desc,
     feedback_type: feedbackType,
     identity: room?.localParticipant?.identity || "",
     name: room?.localParticipant?.name || "",
     room: currentRoomName || "",
+    version: (typeof _viewerVersion !== "undefined" && _viewerVersion) ? _viewerVersion : "",
+    user_agent: navigator.userAgent || "",
+    participant_count: room?.remoteParticipants?.size != null ? room.remoteParticipants.size + 1 : 0,
+    connection_state: room?.state || "",
   };
+  if (titleText) payload.title = titleText;
   if (_bugReportScreenshotUrl) {
     payload.screenshot_url = _bugReportScreenshotUrl;
   }
@@ -85,6 +93,7 @@ async function sendBugReport() {
     });
     if (res.ok) {
       if (bugReportStatusEl) bugReportStatusEl.textContent = "Feedback sent! Thank you.";
+      if (bugReportTitle) bugReportTitle.value = "";
       bugReportDesc.value = "";
       setTimeout(closeBugReportModal, 1500);
     } else {
@@ -127,12 +136,12 @@ async function attachBugReportScreenshot(file) {
   }
   try {
     if (bugReportStatusEl) bugReportStatusEl.textContent = "Uploading screenshot...";
-    var formData = new FormData();
-    formData.append("file", file);
-    var uploadResp = await fetch(apiUrl("/api/chat/upload"), {
+    var fileBytes = await file.arrayBuffer();
+    var uploadRoom = currentRoomName || "main";
+    var uploadResp = await fetch(apiUrl("/api/chat/upload?room=" + encodeURIComponent(uploadRoom)), {
       method: "POST",
       headers: { Authorization: "Bearer " + adminToken },
-      body: formData,
+      body: fileBytes,
     });
     var uploadData = await uploadResp.json().catch(function() { return {}; });
     if (uploadData.ok && uploadData.url) {

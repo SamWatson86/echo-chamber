@@ -483,6 +483,21 @@ body {
   word-break: break-word;
 }
 
+.bug-gh {
+  white-space: nowrap;
+  text-align: center;
+}
+
+.gh-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.gh-link:hover {
+  text-decoration: underline;
+}
+
 .bug-stats {
   white-space: nowrap;
 }

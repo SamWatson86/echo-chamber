@@ -24,7 +24,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -59,7 +59,7 @@ struct AppState {
     spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
     spotify_token_file: PathBuf,
     http_client: reqwest::Client,
-    viewer_stamp: String,
+    viewer_stamp: Arc<RwLock<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -136,6 +136,8 @@ struct BugReport {
     name: String,
     room: String,
     description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
     #[serde(default)]
     feedback_type: Option<String>,
     timestamp: u64,
@@ -155,11 +157,25 @@ struct BugReport {
     ice_remote_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     screenshot_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    participant_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_issue_url: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct BugReportRequest {
     description: String,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     feedback_type: Option<String>,
     #[serde(default)]
@@ -184,6 +200,14 @@ struct BugReportRequest {
     ice_remote_type: Option<String>,
     #[serde(default)]
     screenshot_url: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    user_agent: Option<String>,
+    #[serde(default)]
+    participant_count: Option<u32>,
+    #[serde(default)]
+    connection_state: Option<String>,
 }
 
 #[derive(Clone)]
@@ -655,7 +679,7 @@ async fn main() {
         jam_bot: Arc::new(tokio::sync::Mutex::new(None)),
         spotify_token_file,
         http_client: reqwest::Client::new(),
-        viewer_stamp: viewer_stamp.clone(),
+        viewer_stamp: Arc::new(RwLock::new(viewer_stamp.clone())),
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -748,6 +772,48 @@ async fn main() {
 
     // Stamp viewer files with startup-unique cache-busting string
     stamp_viewer_index(&viewer_dir, &viewer_stamp);
+
+    // Background task: watch viewer files for changes and re-stamp automatically.
+    // This lets the stale banner fire without a full server restart when viewer
+    // JS/CSS/HTML files are edited on disk.
+    {
+        let stamp = state.viewer_stamp.clone();
+        let vdir = viewer_dir.clone();
+        let mut startup = SystemTime::now();
+        tokio::spawn(async move {
+            let watched_files = ["app.js", "style.css", "index.html", "connect.js",
+                                 "room-status.js", "participants.js", "audio-routing.js",
+                                 "media-controls.js", "chat.js", "soundboard.js",
+                                 "state.js", "jam.js"];
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let changed = watched_files.iter().any(|f| {
+                    vdir.join(f)
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| t > startup)
+                        .unwrap_or(false)
+                });
+                if changed {
+                    let new_stamp = format!(
+                        "{}.{}",
+                        env!("CARGO_PKG_VERSION"),
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    );
+                    stamp_viewer_index(&vdir, &new_stamp);
+                    if let Ok(mut s) = stamp.write() {
+                        *s = new_stamp.clone();
+                    }
+                    info!("viewer files changed on disk — re-stamped to {}", new_stamp);
+                    // Reset baseline so future edits are detected too
+                    startup = SystemTime::now();
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(root_route))
@@ -1428,7 +1494,7 @@ async fn participant_heartbeat(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let now = now_ts();
     let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
@@ -1478,7 +1544,13 @@ async fn participant_heartbeat(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    // Tell viewer if its version is stale
+    let current_stamp = state.viewer_stamp.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let stale = match &payload.viewer_version {
+        Some(v) => *v != current_stamp,
+        None => true,
+    };
+    Ok(Json(serde_json::json!({ "stale": stale })))
 }
 
 async fn participant_leave(
@@ -1648,7 +1720,7 @@ async fn admin_dashboard(
         ts: now,
         rooms,
         total_online: total,
-        server_version: state.viewer_stamp.clone(),
+        server_version: state.viewer_stamp.read().unwrap_or_else(|e| e.into_inner()).clone(),
     }))
 }
 
@@ -2048,7 +2120,7 @@ async fn submit_bug_report(
     let now = now_ts();
     info!("Bug report received (len={})", payload.description.len());
 
-    let report = BugReport {
+    let mut report = BugReport {
         id: now,
         identity: payload
             .identity
@@ -2060,6 +2132,7 @@ async fn submit_bug_report(
             .unwrap_or_else(|| "Unknown".to_string()),
         room: payload.room.unwrap_or_default(),
         description: payload.description,
+        title: payload.title,
         feedback_type: payload.feedback_type,
         timestamp: now,
         screen_fps: payload.screen_fps,
@@ -2070,21 +2143,31 @@ async fn submit_bug_report(
         ice_local_type: payload.ice_local_type,
         ice_remote_type: payload.ice_remote_type,
         screenshot_url: payload.screenshot_url,
+        version: payload.version,
+        user_agent: payload.user_agent,
+        participant_count: payload.participant_count,
+        connection_state: payload.connection_state,
+        github_issue_number: None,
+        github_issue_url: None,
     };
 
-    append_bug_report(&state.bug_log_dir, &report);
-
-    // Fire-and-forget: create GitHub Issue if configured
+    // Create GitHub Issue if configured (10s timeout so we don't block the user)
     if let (Some(pat), Some(repo)) = (
         state.config.github_pat.clone(),
         state.config.github_repo.clone(),
     ) {
         let client = state.http_client.clone();
         let gh_report = report.clone();
-        tokio::spawn(async move {
-            create_github_issue(client, pat, repo, gh_report).await;
-        });
+        if let Ok(Some((number, url))) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            create_github_issue(client, pat, repo, gh_report),
+        ).await {
+            report.github_issue_number = Some(number);
+            report.github_issue_url = Some(url);
+        }
     }
+
+    append_bug_report(&state.bug_log_dir, &report);
 
     {
         let mut reports = state.bug_reports.lock().unwrap_or_else(|e| e.into_inner());
@@ -4392,24 +4475,34 @@ fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
     }
 }
 
-/// Fire-and-forget: create a GitHub Issue from a bug report.
-/// Silently does nothing if GITHUB_PAT or GITHUB_REPO are not configured.
-async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport) {
+/// Create a GitHub Issue from a bug report.
+/// Returns (issue_number, html_url) on success.
+/// Silently returns None if creation fails.
+async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport) -> Option<(u64, String)> {
     let feedback_type = report.feedback_type.as_deref().unwrap_or("bug");
     let prefix = match feedback_type {
         "enhancement" => "Enhancement",
         "idea" => "Idea",
         _ => "Bug",
     };
-    let title = if report.description.len() > 80 {
+    let title = if let Some(ref t) = report.title {
+        if !t.is_empty() {
+            format!("{}: {}", prefix, t)
+        } else if report.description.len() > 80 {
+            format!("{}: {}...", prefix, &report.description[..77])
+        } else {
+            format!("{}: {}", prefix, report.description)
+        }
+    } else if report.description.len() > 80 {
         format!("{}: {}...", prefix, &report.description[..77])
     } else {
         format!("{}: {}", prefix, report.description)
     };
 
+    let version_str = report.version.as_deref().unwrap_or("unknown");
     let mut body = format!(
-        "**Reporter:** {}\n**Room:** {}\n\n{}\n",
-        report.name, report.room, report.description
+        "**Reporter:** {}\n**Room:** {}\n**Version:** {}\n\n{}\n",
+        report.name, report.room, version_str, report.description
     );
 
     // Add WebRTC stats table if any stats are present
@@ -4449,6 +4542,23 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
         body.push_str(&format!("\n### Screenshot\n{}\n", url));
     }
 
+    // Client diagnostics
+    let has_diag = report.participant_count.is_some()
+        || report.connection_state.is_some()
+        || report.user_agent.is_some();
+    if has_diag {
+        body.push_str("\n### Client Info\n");
+        if let Some(count) = report.participant_count {
+            body.push_str(&format!("- **Participants in room:** {}\n", count));
+        }
+        if let Some(ref cs) = report.connection_state {
+            body.push_str(&format!("- **Connection state:** {}\n", cs));
+        }
+        if let Some(ref ua) = report.user_agent {
+            body.push_str(&format!("- **User agent:** {}\n", ua));
+        }
+    }
+
     body.push_str(&format!("\n---\n*Auto-created from in-app feedback ({})*", feedback_type));
 
     let url = format!("https://api.github.com/repos/{}/issues", repo);
@@ -4474,7 +4584,14 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
     {
         Ok(resp) => {
             if resp.status().is_success() {
-                info!("GitHub Issue created for bug report from {}", report.name);
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let number = body["number"].as_u64();
+                let html_url = body["html_url"].as_str().map(|s| s.to_string());
+                if let (Some(n), Some(u)) = (number, html_url) {
+                    info!("GitHub Issue #{} created for bug report from {}", n, report.name);
+                    return Some((n, u));
+                }
+                info!("GitHub Issue created for bug report from {} (could not parse response)", report.name);
             } else {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -4485,6 +4602,7 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
             warn!("GitHub Issue creation request failed: {}", e);
         }
     }
+    None
 }
 
 fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {

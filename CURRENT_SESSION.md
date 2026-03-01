@@ -1,6 +1,6 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-02-27
+**Last Updated**: 2026-02-28
 **Current Version**: v0.4.1 (released — CI complete, server running locally)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
@@ -15,42 +15,39 @@
 
 ---
 
-## What Changed Today (2026-02-27)
+## What Changed Today (2026-02-28)
 
-### v0.4.1 Bugfix Release (PR #80 — merged, tag pushed, CI complete)
+### PG-13 Mode (#98) — NEW
+- **Toggle button** in Active Users sidebar (row 1: Chat, Mute All, PG-13)
+- **Animated gradient banner** appears at top of room when active (yellow/orange shimmer)
+- **Glowing amber border** around room layout via `.pg13-active` box-shadow
+- **Speech synthesis** announces "PG-13 Mode Enabled/Disabled"
+- **Data channel broadcast** — all participants see/hear the toggle + toast with who toggled it
+- **Ephemeral** — resets on disconnect (per-session state)
+- **Debug button relocated** from Active Users sidebar to top `.room-actions` bar (next to Settings/Feedback)
+- Files: `index.html`, `style.css`, `state.js`, `media-controls.js`, `connect.js`
 
-**Fixes 3 GitHub issues + 1 live bug:**
+### Mobile Browser Support (3 fixes)
+1. **Camera flip button** — "Flip" button on mobile toggles front/back camera via `facingMode`. Hidden on desktop. Camera dropdown hidden on mobile (cryptic labels).
+2. **Screen tile cleanup on disconnect** — ParticipantDisconnected handler now cleans up screen tiles from `screenTileByIdentity`, `screenTileBySid`, `screenTrackMeta`, `screenRecoveryAttempts`, `screenResubscribeIntent`. Fixes stale tiles after abrupt mobile disconnects.
+3. **16:9 aspect ratio on screen tiles** — Added `aspect-ratio: 16 / 9` to `.screens-grid .tile`. Portrait video gets side letterboxing. Added `.portrait` CSS class detection in `tagAspect()`.
 
-1. **#79 — "Update available" banner stuck after updating**
-   - Root cause: `core/client/Cargo.toml` was still at `0.3.1` while `tauri.conf.json` was `0.4.0`
-   - Fix: Bumped both `core/client/Cargo.toml` and `core/control/Cargo.toml` to `0.4.1`
+### Chat Visual Improvement
+- Per-user color coding: 15-color deterministic palette, left border stripe `border-left: 3px solid var(--chat-user-color)`, self-messages get green tint. Author name shows in user's color.
 
-2. **#77 — Jam queue empties when searching for new songs**
-   - Root cause: Server's auto-remove logic in `jam_state()` drained the ENTIRE queue whenever Spotify was playing a track not in the queue
-   - Fix: Added guard — only remove queue entries if the currently playing track exists in the queue
+### GitHub Issues Batch (7 issues closed)
+- **#84** — Login page cleanup: password hidden by default (auto-fills), URLs/devices behind "Advanced" toggle, password shows on auth failure
+- **#85** — Screenshot upload fix: FormData → ArrayBuffer to match server expectation
+- **#86** — Dialog overflow fix: `max-height` + `overflow-y: auto` on bug report content
+- **#87** — Max characters increased: 1000 → 5000 on feedback textarea
+- **#88** — Title + Description split: separate title input (120 chars), flows to GitHub issue title, Rust structs updated
+- **#90** — Screen share volume slider on tile: shows on hover, syncs with participant card slider, only appears with audio track
+- **#93** — Soundboard compact UX: pill buttons with emoji + name, search filter input, panel widened to 320px
 
-3. **#75 — Chat image fullscreen (Spencer's enhancement request)**
-   - JS infrastructure was already done; only CSS was missing
-   - Fix: Added lightbox CSS to style.css
-
-4. **Jeff's macOS camera glitch (live bug, no issue number)**
-   - Fix: Added `readyState === "ended"` and `!publication?.isSubscribed` guards
-
-### Post-Release Server-Side Fixes (committed to main, local only)
-
-5. **#81 — Clipboard paste in feedback dialog**
-   - Extracted upload logic into reusable `attachBugReportScreenshot(file)` function in admin.js
-   - Added `paste` event listener on bug report modal for clipboard image paste
-   - Added "or Ctrl+V to paste" hint in HTML + CSS
-
-6. **Cache-busting stamper bug — `state.js` was never re-stamped**
-   - Root cause: `stamped.find("state.js?v=")` was matching inside `room-switch-state.js?v=...` (substring match)
-   - Fix: Include leading `"` in search pattern so only exact asset names match
-   - Also changed stamps from static `CARGO_PKG_VERSION` to per-startup timestamp (`0.4.1.{unix_ts}`) so the admin dashboard correctly detects stale viewers after server restarts with file changes
-
-7. **Update loop bug — app kept re-installing on every launch**
-   - Root cause: Sam's taskbar/desktop shortcuts pointed to the old local release build (`core/target/release/`) instead of the NSIS-installed binary (`AppData\Local\Echo Chamber\`)
-   - Fix: Updated both shortcuts via WScript.Shell COM object
+### Issues Also Closed (confirmed fixed earlier)
+- **#89** — Stale screen tiles (fixed by disconnect cleanup above)
+- **#91** — Duplicate of #89
+- **#92** — Zane's audio lag (GPU overload from Resident Evil, not a code bug)
 
 ---
 
@@ -59,20 +56,24 @@
 ### Core Features
 - WebRTC video/screen sharing via LiveKit SFU (1080p@60fps target)
 - Multi-room support with room switching
-- Chat with file/image upload, emoji picker, link rendering, **image fullscreen lightbox**
-- Soundboard with custom uploads, icons, per-clip volume
+- Chat with file/image upload, emoji picker, link rendering, image fullscreen lightbox, **per-user color coding**
+- Soundboard with custom uploads, icons, per-clip volume, **compact search + pill buttons**
 - Camera lobby for previewing webcams
 - 7 themes (Frost, Cyberpunk, Aurora, Ember, Matrix, Ultra Instinct) with opacity slider
-- Bug report system with screenshot attachment, auto-captured WebRTC stats, **clipboard paste**
+- Bug report system with screenshot attachment, auto-captured WebRTC stats, clipboard paste, **title + description fields**
 - Admin dashboard with live stats, session history, metrics, bug reports
 - Auto-update check + native Tauri auto-updater
-- **macOS Apple Silicon support** (DMG + auto-updater)
-- **Per-startup cache-busting stamps** — dashboard detects stale viewers
+- macOS Apple Silicon support (DMG + auto-updater)
+- Per-startup cache-busting stamps — dashboard detects stale viewers
+- **PG-13 Mode** — room-wide content warning toggle with banner, glow, speech, data channel sync
+- **Mobile browser support** — camera flip, clean disconnect, proper aspect ratio
+- **Screen share volume slider on tile** — hover to adjust
+- **Streamlined login page** — clean layout, Advanced toggle for power users
 
 ### Jam Session (Spotify Integration)
 - Spotify OAuth PKCE flow with token persistence
 - Song search, queue management, skip
-- **Queue no longer drains when searching** (fixed in v0.4.1)
+- Queue no longer drains when searching (fixed in v0.4.1)
 - WASAPI per-process audio capture (Spotify.exe)
 - WebSocket audio streaming to opted-in listeners
 
@@ -81,11 +82,34 @@
 ## Known Bugs / Open Items
 
 - Minor: stale `cameraTrackSid` in observer's participantState after remote camera unpublish (cosmetic only)
+- **#83** — Signal notifications (deferred — requires external infrastructure setup)
 
 ---
 
 ## Active Worktree
-- None — on main, all branches cleaned up.
+- None — on main, all changes committed directly.
+
+---
+
+## Files Modified This Session
+
+### Viewer JS
+- `core/viewer/state.js` — Added `flipCamBtn`, `_camFacingMode`, `pg13ModeActive`, `togglePg13Button`
+- `core/viewer/media-controls.js` — Added `flipCam()`, mobile facingMode in `switchCam()`/`toggleCam()`, PG-13 toggle/apply/announce functions
+- `core/viewer/connect.js` — Screen tile cleanup in disconnect handler, password field show on auth failure, local screen tile identity, PG-13 data handler + button enable/disable
+- `core/viewer/participants.js` — `.portrait` class in `tagAspect()`, volume slider in `addScreenTile()`
+- `core/viewer/audio-routing.js` — `tile.dataset.identity`, volume slider reveal on screen audio attach
+- `core/viewer/app.js` — Flip button handler, mobile cam dropdown hide, password auto-fill, Advanced toggle
+- `core/viewer/chat.js` — Per-user color system, `--chat-user-color` CSS var, `.self` class
+- `core/viewer/soundboard.js` — Pill buttons with names, search filter
+- `core/viewer/admin.js` — Screenshot upload fix (ArrayBuffer), bug report title field
+
+### Viewer HTML/CSS
+- `core/viewer/index.html` — Flip button, login page restructure, title input, soundboard search, maxlength 5000, PG-13 banner + button, Debug moved to top bar
+- `core/viewer/style.css` — All new styles (flip button, login page, chat colors, dialog overflow, title input, volume slider, soundboard pills, screen tile aspect ratio, PG-13 banner/glow/button)
+
+### Rust
+- `core/control/src/main.rs` — `title` field in BugReport/BugReportRequest structs, `create_github_issue()` title logic
 
 ---
 

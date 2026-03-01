@@ -169,6 +169,44 @@ function addScreenTile(label, element, trackSid) {
   });
   tile.appendChild(fsBtn);
 
+  // Volume slider — shown on hover when tile has audio
+  var volWrap = document.createElement("div");
+  volWrap.className = "tile-volume-wrap hidden";
+  var volSlider = document.createElement("input");
+  volSlider.type = "range";
+  volSlider.className = "tile-volume-slider";
+  volSlider.min = "0";
+  volSlider.max = "3";
+  volSlider.step = "0.01";
+  volSlider.value = "1";
+  volSlider.title = "Screen volume";
+  volSlider.addEventListener("click", function(e) { e.stopPropagation(); });
+  volSlider.addEventListener("pointerdown", function(e) { e.stopPropagation(); });
+  volSlider.addEventListener("input", function(e) {
+    e.stopPropagation();
+    var identity = tile.dataset.identity;
+    if (!identity) return;
+    var state = participantState.get(identity);
+    if (!state) return;
+    state.screenVolume = Number(volSlider.value);
+    applyParticipantAudioVolumes(state);
+    saveParticipantVolume(identity, state.micVolume, state.screenVolume, state.chimeVolume);
+    // Sync the participant card slider
+    var cardRef = participantCards.get(identity);
+    if (cardRef?.screenSlider) {
+      cardRef.screenSlider.value = state.screenVolume;
+      if (cardRef.screenPct) cardRef.screenPct.textContent = Math.round(state.screenVolume * 100) + "%";
+    }
+    if (cardRef?.popScreenSlider) {
+      cardRef.popScreenSlider.value = state.screenVolume;
+      if (cardRef.popScreenPct) cardRef.popScreenPct.textContent = Math.round(state.screenVolume * 100) + "%";
+    }
+  });
+  volWrap.appendChild(volSlider);
+  tile.appendChild(volWrap);
+  tile._volWrap = volWrap;
+  tile._volSlider = volSlider;
+
   if (trackSid) {
     tile.dataset.trackSid = trackSid;
     screenTileBySid.set(trackSid, tile);
@@ -182,6 +220,7 @@ function addScreenTile(label, element, trackSid) {
         const ratio = vw / vh;
         tile.classList.toggle("ultrawide", ratio > 2.0);
         tile.classList.toggle("superwide", ratio > 2.8);
+        tile.classList.toggle("portrait", ratio < 1.0);
         tile.dataset.aspectRatio = ratio.toFixed(2);
       }
     };
@@ -355,8 +394,10 @@ function forceReattachVideo(publication, participant) {
     ensureVideoPlays(track, element);
     ensureVideoSubscribed(publication, element);
     const tile = addScreenTile(label, element, publication.trackSid);
+    tile.dataset.identity = participant.identity;
+    screenTileByIdentity.set(participant.identity, tile);
     if (publication.trackSid) {
-      registerScreenTrack(publication.trackSid, publication, tile);
+      registerScreenTrack(publication.trackSid, publication, tile, participant.identity);
     }
     requestVideoKeyFrame(publication, track);
     forceVideoLayer(publication, element);

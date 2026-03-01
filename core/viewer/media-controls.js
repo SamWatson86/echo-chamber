@@ -168,7 +168,25 @@ async function switchCam(deviceId) {
   selectedCamId = deviceId || "";
   echoSet("echo-device-cam", selectedCamId);
   if (!room || !camEnabled) return;
-  await room.localParticipant.setCameraEnabled(true, { deviceId: selectedCamId || undefined });
+  if (_isMobileDevice) {
+    // On mobile, use facingMode instead of deviceId (labels are cryptic)
+    await room.localParticipant.setCameraEnabled(true, { facingMode: _camFacingMode });
+  } else {
+    await room.localParticipant.setCameraEnabled(true, { deviceId: selectedCamId || undefined });
+  }
+}
+
+async function flipCam() {
+  if (!room || !camEnabled) return;
+  _camFacingMode = _camFacingMode === "user" ? "environment" : "user";
+  debugLog("[cam] flipping to facingMode=" + _camFacingMode);
+  try {
+    await room.localParticipant.setCameraEnabled(true, { facingMode: _camFacingMode });
+  } catch (err) {
+    debugLog("[cam] flip error: " + (err.message || err));
+    // Revert on failure
+    _camFacingMode = _camFacingMode === "user" ? "environment" : "user";
+  }
 }
 
 async function switchSpeaker(deviceId) {
@@ -358,9 +376,10 @@ async function toggleCam() {
   const desired = !camEnabled;
   camBtn.disabled = true;
   try {
-    await room.localParticipant.setCameraEnabled(desired, {
-      deviceId: selectedCamId || undefined,
-    });
+    var camOpts = _isMobileDevice
+      ? { facingMode: _camFacingMode }
+      : { deviceId: selectedCamId || undefined };
+    await room.localParticipant.setCameraEnabled(desired, camOpts);
 
     // Use the SDK's authoritative state rather than checking publications.
     // Publication objects retain muted/ended tracks, so !!pub.track gives
@@ -469,3 +488,37 @@ async function toggleScreenOn() {
   if (screenEnabled) return;
   await toggleScreen();
 }
+
+// ── PG-13 Mode ──
+function applyPg13Ui(enabled) {
+  pg13ModeActive = enabled;
+  var banner = document.getElementById("pg13-banner");
+  var layout = document.querySelector(".room-layout");
+  var btn = document.getElementById("toggle-pg13");
+  if (banner) banner.classList.toggle("hidden", !enabled);
+  if (layout) layout.classList.toggle("pg13-active", enabled);
+  if (btn) {
+    btn.classList.toggle("is-active", enabled);
+    btn.textContent = enabled ? "PG-13 ON" : "PG-13";
+  }
+}
+
+function announcePg13(enabled) {
+  if (!window.speechSynthesis) return;
+  var u = new SpeechSynthesisUtterance(enabled ? "PG 13 Mode Enabled" : "PG 13 Mode Disabled");
+  u.rate = 1.0;
+  u.volume = 0.8;
+  speechSynthesis.speak(u);
+}
+
+function togglePg13Mode() {
+  if (!room) return;
+  pg13ModeActive = !pg13ModeActive;
+  applyPg13Ui(pg13ModeActive);
+  var encoder = new TextEncoder();
+  var msg = JSON.stringify({ type: "pg13-mode", enabled: pg13ModeActive, senderName: room.localParticipant.name || room.localParticipant.identity });
+  room.localParticipant.publishData(encoder.encode(msg), { reliable: true });
+  announcePg13(pg13ModeActive);
+}
+
+if (togglePg13Button) togglePg13Button.addEventListener("click", togglePg13Mode);

@@ -6,6 +6,7 @@ function setRoomAudioMutedState(next) {
   roomAudioMuted = Boolean(next);
   if (toggleRoomAudioButton) {
     toggleRoomAudioButton.textContent = roomAudioMuted ? "Unmute All" : "Mute All";
+    toggleRoomAudioButton.classList.toggle("is-muted", roomAudioMuted);
   }
   participantState.forEach((state) => {
     applyParticipantAudioVolumes(state);
@@ -15,6 +16,8 @@ function setRoomAudioMutedState(next) {
   if (typeof _jamGainNode !== "undefined" && _jamGainNode) {
     _jamGainNode.gain.value = roomAudioMuted ? 0 : (_jamVolume / 100);
   }
+  // Refresh mic icons so they immediately reflect the mute-all state
+  updateActiveSpeakerUi();
 }
 
 function runFullReconcile(reason) {
@@ -193,7 +196,7 @@ function updateActiveSpeakerUi() {
   participantCards.forEach((cardRef, identity) => {
     const micEl = cardRef.micStatusEl;
     const state = participantState.get(identity);
-    const muted = state?.micMuted || state?.micUserMuted || (cardRef.isLocal && !micEnabled);
+    const muted = roomAudioMuted || state?.micMuted || state?.micUserMuted || (cardRef.isLocal && !micEnabled);
     if (micEl) {
       micEl.classList.toggle("is-muted", !!muted);
       if (muted) {
@@ -446,6 +449,7 @@ function handleTrackSubscribed(track, publication, participant) {
     setTimeout(() => requestVideoKeyFrame(publication, track), 200);
     setTimeout(() => requestVideoKeyFrame(publication, track), 600);
     const tile = addScreenTile(label, element, screenTrackSid);
+    tile.dataset.identity = participant.identity;
     debugLog("[screen-tile] CREATED for " + participant.identity + " trackSid=" + screenTrackSid + " label=" + label);
     ensureVideoSubscribed(publication, element);
     if (screenTrackSid) {
@@ -591,6 +595,12 @@ function handleTrackSubscribed(track, publication, participant) {
     if (source === LK.Track.Source.ScreenShareAudio) {
       state.screenAudioSid = getTrackSid(publication, track, `${participant.identity}-screen-audio`);
       state.screenAudioEls.add(element);
+      // Show volume slider on the screen tile now that audio is attached
+      var screenTile = screenTileByIdentity.get(participant.identity);
+      if (screenTile && screenTile._volWrap) {
+        screenTile._volWrap.classList.remove("hidden");
+        if (screenTile._volSlider) screenTile._volSlider.value = state.screenVolume;
+      }
       // Mute screen audio if user has unwatched this screen share
       if (hiddenScreens.has(participant.identity)) {
         element.muted = true;

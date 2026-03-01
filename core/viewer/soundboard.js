@@ -421,16 +421,16 @@ function attachSoundboardDragDrop(el, sound, gridEl, selectorClass, rerenderFn) 
 
 // ── Rendering ──
 
-function renderSoundboardCompact() {
+function renderSoundboardCompact(filter) {
   if (!soundboardCompactGrid) return;
-  const sounds = getSoundboardSoundsFiltered("");
+  const sounds = getSoundboardSoundsFiltered(filter || "");
   soundboardCompactGrid.innerHTML = "";
   if (sounds.length === 0) {
     const empty = document.createElement("div");
     empty.className = "hint";
     empty.style.gridColumn = "1 / -1";
     empty.style.fontSize = "11px";
-    empty.textContent = "No sounds yet.";
+    empty.textContent = filter ? "No matches." : "No sounds yet.";
     soundboardCompactGrid.appendChild(empty);
     return;
   }
@@ -441,14 +441,22 @@ function renderSoundboardCompact() {
     const btn = document.createElement("div");
     btn.setAttribute("role", "button");
     btn.setAttribute("tabindex", "0");
-    btn.className = "sound-icon-btn";
+    btn.className = "sound-pill-btn";
     btn.dataset.soundId = sound.id;
     btn.draggable = true;
     btn.setAttribute("draggable", "true");
     btn.dataset.soundName = sound.name || "Sound";
-    btn.textContent = sound.icon || "\u{1F50A}";
-    btn.addEventListener("mouseenter", function() { showSoundTooltip(btn, btn.dataset.soundName); });
-    btn.addEventListener("mouseleave", hideSoundTooltip);
+
+    var iconSpan = document.createElement("span");
+    iconSpan.className = "sound-pill-icon";
+    iconSpan.textContent = sound.icon || "\u{1F50A}";
+    btn.appendChild(iconSpan);
+
+    var nameSpan = document.createElement("span");
+    nameSpan.className = "sound-pill-name";
+    nameSpan.textContent = sound.name || "Sound";
+    btn.appendChild(nameSpan);
+
     if (favSet.has(sound.id)) {
       btn.classList.add("is-favorite");
     }
@@ -458,7 +466,7 @@ function renderSoundboardCompact() {
       playSoundboardSound(sound.id).catch(() => {});
       sendSoundboardMessage({ type: "sound-play", soundId: sound.id, senderName: room?.localParticipant?.name || "", soundName: sound.name || "" });
     });
-    attachSoundboardDragDrop(btn, sound, soundboardCompactGrid, "sound-icon-btn", renderAllSoundboardViews);
+    attachSoundboardDragDrop(btn, sound, soundboardCompactGrid, "sound-pill-btn", renderAllSoundboardViews);
     soundboardCompactGrid.appendChild(btn);
   });
 }
@@ -822,6 +830,14 @@ if (openSoundboardButton) {
 if (closeSoundboardButton) {
   closeSoundboardButton.addEventListener("click", () => {
     closeSoundboard();
+  });
+}
+
+// Compact soundboard search
+var compactSearchInput = document.getElementById("soundboard-compact-search");
+if (compactSearchInput) {
+  compactSearchInput.addEventListener("input", function() {
+    renderSoundboardCompact(compactSearchInput.value.trim());
   });
 }
 

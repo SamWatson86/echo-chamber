@@ -2,6 +2,25 @@
    CHAT — Messages, file uploads, emoji picker, and persistence
    ========================================================= */
 
+// Assign each user a consistent HSL color based on their identity string
+const _chatUserColors = new Map();
+const _chatColorPalette = [
+  "#60a5fa", "#f472b6", "#a78bfa", "#fb923c", "#34d399",
+  "#fbbf24", "#f87171", "#38bdf8", "#c084fc", "#4ade80",
+  "#e879f9", "#22d3ee", "#facc15", "#fb7185", "#818cf8",
+];
+function getChatUserColor(identity) {
+  if (!identity) return _chatColorPalette[0];
+  if (_chatUserColors.has(identity)) return _chatUserColors.get(identity);
+  var hash = 0;
+  for (var i = 0; i < identity.length; i++) {
+    hash = ((hash << 5) - hash + identity.charCodeAt(i)) | 0;
+  }
+  var color = _chatColorPalette[Math.abs(hash) % _chatColorPalette.length];
+  _chatUserColors.set(identity, color);
+  return color;
+}
+
 const EMOJI_LIST = [
   "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃", "😉", "😊", "😇",
   "🥰", "😍", "🤩", "😘", "😗", "😚", "😙", "🥲", "😋", "😛", "😜", "🤪", "😝",
@@ -84,13 +103,17 @@ function renderChatMessage(message) {
   if (message.id) {
     messageEl.dataset.msgId = message.id;
   }
+  var isSelf = message.identity === room?.localParticipant?.identity;
+  var userColor = isSelf ? "#34d399" : getChatUserColor(message.identity);
+  messageEl.style.setProperty("--chat-user-color", userColor);
+  if (isSelf) messageEl.classList.add("self");
 
   const headerEl = document.createElement("div");
   headerEl.className = "chat-message-header";
 
   const authorEl = document.createElement("div");
   authorEl.className = "chat-message-author";
-  if (message.identity === room?.localParticipant?.identity) {
+  if (isSelf) {
     authorEl.classList.add("self");
   }
   authorEl.textContent = message.name || message.identity;
