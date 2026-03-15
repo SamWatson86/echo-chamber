@@ -230,17 +230,10 @@ async function switchSpeaker(deviceId) {
   selectedSpeakerId = deviceId || "";
   echoSet("echo-device-speaker", selectedSpeakerId);
   debugLog("[speaker] switching to: " + (selectedSpeakerId || "default"));
-  // On native Tauri (Windows): use WASAPI to switch system default audio output.
-  // WebView2's setSinkId resolves OK but silently fails to change output.
-  if (hasTauriIPC()) {
-    try {
-      await tauriInvoke("set_audio_output_device", { deviceId: selectedSpeakerId });
-      debugLog("[speaker] native WASAPI switch OK");
-    } catch (err) {
-      debugLog("[speaker] native switch failed: " + (err.message || err));
-    }
-  }
-  // Also apply setSinkId for browser viewers and as best-effort in WebView2
+  // Note: WebView2's setSinkId is broken (resolves OK but doesn't change output).
+  // Native WASAPI system-default switching was too dangerous (force-kill loses restore state).
+  // For now, output device must be changed in Windows Sound settings.
+  // Native device enumeration still populates the dropdown with correct device names.
   await applySpeakerToMedia();
 }
 
@@ -378,9 +371,20 @@ async function toggleMic() {
   const desired = !micEnabled;
   micBtn.disabled = true;
   try {
-    await room.localParticipant.setMicrophoneEnabled(desired, {
-      deviceId: selectedMicId || undefined,
-    });
+    try {
+      await room.localParticipant.setMicrophoneEnabled(desired, {
+        deviceId: selectedMicId || undefined,
+      });
+    } catch (devErr) {
+      if (devErr.name === "NotFoundError" && selectedMicId) {
+        debugLog("[mic] saved device not found, falling back to default");
+        selectedMicId = "";
+        echoSet("echo-device-mic", "");
+        await room.localParticipant.setMicrophoneEnabled(desired);
+      } else {
+        throw devErr;
+      }
+    }
     micEnabled = desired;
 
     // Apply or remove noise cancellation
@@ -428,7 +432,18 @@ async function toggleCam() {
     var camOpts = _isMobileDevice
       ? { facingMode: _camFacingMode }
       : { deviceId: selectedCamId || undefined };
-    await room.localParticipant.setCameraEnabled(desired, camOpts);
+    try {
+      await room.localParticipant.setCameraEnabled(desired, camOpts);
+    } catch (devErr) {
+      if (devErr.name === "NotFoundError" && selectedCamId) {
+        debugLog("[cam] saved device not found, falling back to default");
+        selectedCamId = "";
+        echoSet("echo-device-cam", "");
+        await room.localParticipant.setCameraEnabled(desired);
+      } else {
+        throw devErr;
+      }
+    }
 
     // Use the SDK's authoritative state rather than checking publications.
     // Publication objects retain muted/ended tracks, so !!pub.track gives

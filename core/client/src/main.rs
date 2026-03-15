@@ -180,10 +180,9 @@ fn list_audio_output_devices() -> Vec<audio_output::OutputDevice> {
     audio_output::list_output_devices()
 }
 
-#[tauri::command]
-fn set_audio_output_device(device_id: String) -> Result<(), String> {
-    audio_output::set_output_device(&device_id)
-}
+// set_audio_output_device removed — changing system-wide default is too dangerous.
+// Force-kill/crash loses the saved previous default, leaving user's audio broken.
+// Output device switching is a known WebView2 limitation (setSinkId is a silent no-op).
 
 fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -274,7 +273,6 @@ fn main() {
             start_audio_capture,
             stop_audio_capture,
             list_audio_output_devices,
-            set_audio_output_device,
             check_for_updates,
         ])
         .setup(move |app| {
@@ -340,9 +338,5 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("Error while building Echo Chamber")
-        .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                audio_output::restore_default_output();
-            }
-        });
+        .run(|_app, _event| {});
 }
