@@ -1,7 +1,7 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-02-26
-**Current Version**: v0.3.1 (control plane + client)
+**Last Updated**: 2026-03-15
+**Current Version**: v0.4.1 (released — CI complete, server running locally)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
 ## IMPORTANT CONTEXT
@@ -15,384 +15,193 @@
 
 ---
 
-## ROLLBACK POINT
+## What Changed Today (2026-03-15)
 
-**Tag `pre-issue-fixes` = commit `a8a6e8d`** — Last known-good state before GitHub issue fixes.
-- All code committed, clean working tree
-- Server running, Power Manager v2 running (Active mode)
-- Viewer, admin dashboard, jam session all functional
-- To restore: `git reset --hard pre-issue-fixes`
+### PG-13 Sync Query Mechanism (#104) — FIX
+- Previous fix (ParticipantConnected re-broadcast) had timing issues — new joiner's data channel often not ready yet
+- Added "pg13-query" mechanism: new joiner sends query 2s after connecting, existing participants with PG-13 active respond directly
+- ParticipantConnected broadcast now targeted to specific new joiner via `destinationIdentities` (no longer spams everyone)
+- New `pg13-query` handler in DataReceived responds with targeted `pg13-mode` sync message
+- Files: `connect.js`, `changelog.js`
 
----
-
-## What Changed Today (2026-02-26)
-
-### Viewer Modularization COMPLETE (PR #73 — merged)
-- Split `app.js` from **11,254 lines** into **19 focused modules** (234 lines remaining as init + event wiring)
-- Zero behavioral changes — same global-scope `<script>` tag architecture, no bundler
-- Modules: `state.js`, `debug.js`, `urls.js`, `settings.js`, `identity.js`, `rnnoise.js`, `chimes.js`, `room-status.js`, `auth.js`, `theme.js`, `chat.js`, `soundboard.js`, `screen-share.js`, `participants.js`, `audio-routing.js`, `media-controls.js`, `admin.js`, `connect.js`
-- Fixed 2 load-order bugs found during audit:
-  - `_viewerVersion` was null (IIFE searched for `app.js` tag before it was parsed)
-  - `settings.js` microtask race (Promise `.then()` fired between script tags before `theme.js` loaded)
-- All 18 new JS files added to Rust cache-busting stamp list
-- 47 deterministic tests pass, full load-order audit clean
-- Friends just refresh to get the update — no client rebuild needed
+### Bug #110: Feedback screenshots not appearing in GitHub Issues — FIX
+- Screenshots uploaded via feedback form were stored locally as `/api/chat/uploads/upload-{ts}` — a relative URL unreachable by GitHub
+- `create_github_issue()` now reads the screenshot file from disk, base64-encodes it, and embeds it as an HTML `<img>` inside a `<details>` block in the issue body
+- Images over 48KB (too large for GitHub issue body) get a local file reference instead
+- Added `base64` crate dependency to `core/control/Cargo.toml`
+- Files: `core/control/src/main.rs`, `core/control/Cargo.toml`
+- **Requires rebuild + restart of control plane**
 
 ---
 
-## What Changed (2026-02-25)
+## What Changed (2026-03-06)
 
-### Mobile Browser Compatibility (PR #72 — merged)
-- Fixed Samsung download interceptor triggering on binary fetches (WASM, audio/mpeg)
-- Added `_isMobileDevice` detection, skip RNNoise on mobile, synthesized chime tones
-- "Tap to play" / "Tap to load" placeholders for chat media on mobile
-- Accept headers on all binary fetches, skip identity migration on mobile
+### Security Hardening Batch — DEPLOYED
+Three security fixes implemented and verified:
 
-### Dashboard Visible to All Users (PR #70)
-- Dashboard button + panel now visible to **all connected users**, not just the admin-client build
-- Removed `admin-only` CSS class gate from dashboard button and panel
-- Dashboard button shows after connecting, hides on disconnect
-- Renamed "Admin Dashboard" → "Dashboard"
-- Kick/mute controls remain admin-only (gated behind `isAdminMode()`)
-- No Rust changes — all users already have valid admin tokens from login
-- Files: `core/viewer/index.html`, `core/viewer/app.js`
+1. **Login rate limiting** (`main.rs`) — IP-based, 5 failed attempts per 15 min window → HTTP 429. Uses `ConnectInfo<SocketAddr>` extraction + `HashMap<IpAddr, (u32, Instant)>` in AppState. Successful login clears counter.
+2. **Path traversal prevention** (`main.rs`) — `is_safe_path_component()` validates room names and file names in `create_room`, `chat_history_path`, `soundboard_room_dir`, `soundboard_file_path`. Rejects `/`, `\`, `..`, empty strings.
+3. **Chat fileUrl token leak** (`chat.js`) — Rejects `fileUrl` not starting with `/` at top of `renderChatMessage()`. Prevents `fetchImageAsBlob()` from sending Bearer token to attacker-controlled external URLs.
 
-### Admin Dashboard 30-Day Expansion + Quality Stats Persistence (PR #69)
-- **History tab**: expanded from 2 days to 30 days (event limit raised 200 → 1000)
-- **Heatmap**: expanded from 7 days to 30 days (Rust endpoint + JS slice/title)
-- **Quality stats persistence**: `StatsSnapshot` now written to daily `stats-YYYY-MM-DD.json` files alongside session logs. `admin_metrics` endpoint reads 30 days of files + in-memory data with dedup. Quality data now survives server restarts.
-- Files: `core/control/src/main.rs`, `core/viewer/app.js`
+### CSS Screen Share Overflow Fix
+- `.screens-grid` changed to `grid-auto-rows: 1fr` + `overflow: hidden`
+- `.screens-grid .tile` gets `max-height: 100%` to prevent tiles exceeding viewport when maximized
 
-### Session Log + Bug Report Merge
-- Merged scattered session logs from 3 directories (1,170 events across 14 days) into canonical `core/logs/sessions/`
-- Merged scattered bug reports (43 reports across 7 days) into `core/logs/bugs/`
-- Created merge scripts: `tools/merge-session-logs.js`, `tools/merge-bug-logs.js`
-
-### Deploy Watcher Fixes (PRs #63, #64, #65)
-- Fixed cargo "Access is denied" — kill process BEFORE building, not after
-- Fixed PowerShell array nesting corrupting deploy-history.json
-- Fixed working directory: all process starts now use `$coreDir` (core/) instead of repo root
-- Fixed test runner: switched from bash to `node --test` directly (Git bash CWD issue)
-- Deploy watcher now works end-to-end: auto-detected and deployed its own PR within 3 minutes
-
-### Clickable PR Links in Deploys Tab (PR #66)
-- Each deploy commit now links to its GitHub PR with expandable description
-- PR number extracted from merge commit subjects
-
-### Admin Bug Tab Date Display
-- Bug reports now show date + time instead of time only
-
-### Historical Deploy Status
-- Pre-existing commits (before deploy watcher) now labeled "HISTORICAL" instead of "PENDING"
-- Styled with italic, faded appearance
+### Screen Share Stop Banner Fix (`screen-share.js`)
+- `stopScreenShareManual()` now stops original getDisplayMedia tracks (not just canvas tracks)
+- Fixes browser "sharing your screen" indicator persisting after clicking the stop share button
 
 ---
 
-## What Changed (2026-02-24)
+## What Changed (2026-03-03)
 
-### Power Manager v2
-- Rewrote `watcher.ps1` — uses `GetLastInputInfo` Win32 API instead of GPU polling
-- Detects mouse/keyboard activity every 10 seconds, not GPU utilization
-- 60-minute idle timeout before switching to Server mode (was 3 minutes)
-- Wakes to full power in <10 seconds when you touch mouse/keyboard
-- Fixed Session 0 bug: scheduled task runs as user (Interactive) not SYSTEM
-- Game process detection kept as safety override
-- Files: `power-manager/watcher.ps1`, `power-manager/setup.ps1`, `power-manager/switch-mode.ps1`, `power-manager/config.json`
+### PG-13 Sync for Late Joiners (#104) — FIX
+- Late joiners now receive PG-13 state from existing participants
+- Re-broadcast via `ParticipantConnected` handler (same pattern as avatar/device sync)
+- `sync: true` flag distinguishes from manual toggle — subtle toast, no speech, deduped
+- Files: `connect.js`
 
-### Bug Report Fix
-- Server endpoint now scans ALL `bugs-*.json` files (was only loading today + yesterday)
-- Spencer's reports from Feb 14 now visible in admin dashboard
-- File: `core/control/src/main.rs`
-
-### GitHub Issues — Resolved 33 of 35
-- Triaged all 35 of Spencer's issues against current code
-- **15 already fixed** — closed with comments
-- **5 non-issues** — closed with explanation
-- **13 fixed in code** (8 commits):
-  - `666e51c` P1 Security: escapeHtml XSS prevention, hardcoded TURN creds removed
-  - `abf69c5` P2 User-facing: heartbeat room fix, chat race guard, jam reconnect, volume/mute fix
-  - `4749f0d` P3 Cleanup: autoplay listener leak, update-check timer leak, TURN health check, port validation
-  - `71af1b2` Per-person chime volume slider (closes #53)
-  - `c7354aa` Ghost presence fix via AbortController (closes #50)
-  - `8ca86a8` TURN credentials behind authenticated endpoint (closes #29)
-  - `9c8e85f` Auto-create GitHub Issues from bug reports (closes #23)
-  - (pending commit) Fix native audio capture teardown on disconnect (#28) + compiler warning fix
-- **ALL 35 RESOLVED**: #30 and #44 closed by Spencer's PR #48 merge
-
-### TURN Credentials Security Fix (#29)
-- Added `/v1/ice-servers` endpoint to Rust control plane (JWT auth required)
-- Returns STUN servers + TURN credentials from env vars
-- Viewer now fetches ICE config at connect time instead of hardcoding
-- Falls back to STUN-only if fetch fails (graceful degradation)
-- TURN env vars (`TURN_USER`, `TURN_PASS`, `TURN_PUBLIC_IP`, `TURN_PORT`) added to `core/control/.env`
-- Both TURN binary and control plane read from same env vars (loaded by `run-core.ps1`)
-
-### Bug Reports → GitHub Issues (#23)
-- Bug reports submitted via `/api/bug-report` now auto-create GitHub Issues
-- Fire-and-forget async (`tokio::spawn`) — never blocks the bug report response
-- Issue body includes: reporter name, room, description, WebRTC stats table, screenshot link
-- Labeled `bug-report` for easy filtering on GitHub
-- Config: `GITHUB_PAT` + `GITHUB_REPO` env vars — silently disabled if not set
-- Tested end-to-end: issue #55 created on GitHub with full formatting
-- Design doc: `docs/plans/2026-02-24-bug-reports-to-github-design.md`
-
-### Native Audio Capture Teardown (#28)
-- Added `await stopNativeAudioCapture()` to `disconnect()` in viewer JS
-- Prevents WASAPI per-process audio capture from continuing after disconnect
-- One-line fix — viewer-side only, goes live on client refresh
-
-### Compiler Warning Fix
-- Fixed unused `headers` parameter warning in `open_url` handler (`headers` → `_headers`)
-
-### Worktree Cleanup
-- Removed orphaned worktrees: `vigilant-wilson`, `vigorous-clarke`, `awesome-newton`, `lucid-joliot`
-- Deleted corresponding branches
-
-### Spencer's PRs Merged
-- **PR #49 (Docs)** — Documentation foundation, AGENTS.md files, terminology, release boundaries
-- **PR #48 (Tests + Verification)** — State machine modules, 47 deterministic tests, `tools/verify/quick.sh`, CI workflow
-
-### Branch Protection Locked Down
-- `enforce_admins: true` — no more direct pushes to main
-- Required status check: `verify` (Spencer's CI workflow must pass)
-- 0 required reviewers — PRs merge as soon as CI is green
-- New workflow: branch -> PR -> CI tests -> merge -> auto-deploy
-
-### Auto-Deploy Pipeline (PR #60)
-- `core/deploy/deploy-watcher.ps1` — Polls GitHub every 3 min for new commits on main
-- On new commit: pulls, runs test suite, builds Rust control plane, blue-green binary swap
-- Automatic rollback if health check fails (backup `.bak` binary restored)
-- Circuit breaker stops after 3 consecutive failures
-- `core/deploy/install-deploy-watcher.ps1` — Registers as Windows Scheduled Task
-- Tested end-to-end: simulated change -> pull -> test -> build -> deploy -> health check pass
-- Scheduled task "EchoChamberDeployWatcher" installed and running
-
-### Admin Deploy History Tab (PR #61)
-- New **Deploys** tab in admin dashboard showing commit timeline + deploy outcomes
-- Deploy watcher upgraded with `Write-DeployEvent` — writes structured JSON to `deploy-history.json`
-- Rust endpoint `GET /admin/api/deploys` merges `git log` with deploy event data
-- Each commit shows: status badge (deployed/failed/rolled back/pending), commit message, author, SHA, timestamp, deploy duration
-- Error messages shown for failed deploys
-- Design doc: `docs/plans/2026-02-25-admin-deploy-history-design.md`
-- Files: `deploy-watcher.ps1`, `main.rs`, `app.js`, `index.html`, `style.css`
-
-### Per-Person Chime Volume (New Feature)
-- Each participant card has a "Chime" slider (0-100%, default 50%)
-- Controls how loud each person's enter/exit/switch/screenshare chimes sound to you
-- Persisted per-person in localStorage alongside mic/screen volumes
-- All chime functions updated: playJoinChime, playLeaveChime, playSwitchChime, playScreenShareChime, playCustomChime
-- Mute All silences all chimes
-- Design doc: `docs/plans/2026-02-24-per-person-chime-volume-design.md`
-
-### Spencer's PRs Reviewed
-- **PR #49 (Docs)**: Requested changes — CLAUDE.md must be preserved (his redirect strips all operating instructions), wrong dir names, missing docs, generic OPERATIONS.md
-- **PR #48 (State Machines + Tests)**: Requested changes — excellent code quality, but must rebase onto current main (would overwrite our security fixes), CI workflow runs on Linux for Windows-only project, state mutations in render function
-- Ball is in Spencer's court — waiting for him to address the feedback and resubmit
+### Mic/Cam Switching Fix (#105) — FIX
+- `switchMic()` and `switchCam()` now use `restartTrack()` for seamless device switching
+- LiveKit SDK's `setMicrophoneEnabled(true)` was short-circuiting when mic already on
+- Fallback to disable/re-enable if `restartTrack` unavailable
+- Added try/catch + debug logging for both paths
+- Files: `media-controls.js`
 
 ---
 
-## What Changed (2026-02-23)
+## What Changed (2026-02-28)
 
-### Admin Dashboard v2 — Major Enhancement
-All changes deployed and running. Design doc: `docs/plans/2026-02-23-admin-dashboard-v2-design.md`
+### PG-13 Mode (#98) — NEW
+- **Toggle button** in Active Users sidebar (row 1: Chat, Mute All, PG-13)
+- **Animated gradient banner** appears at top of room when active (yellow/orange shimmer)
+- **Glowing amber border** around room layout via `.pg13-active` box-shadow
+- **Speech synthesis** announces "PG-13 Mode Enabled/Disabled"
+- **Data channel broadcast** — all participants see/hear the toggle + toast with who toggled it
+- **Ephemeral** — resets on disconnect (per-session state)
+- **Debug button relocated** from Active Users sidebar to top `.room-actions` bar (next to Settings/Feedback)
+- Files: `index.html`, `style.css`, `state.js`, `media-controls.js`, `connect.js`
 
-1. **30-Color Palette** — Expanded from 8 to 30 curated colors. djb2 hash on display name ensures consistent unique colors across sessions. Applied to leaderboard bars, heatmap highlights, bug charts, quality bars.
+### Mobile Browser Support (3 fixes)
+1. **Camera flip button** — "Flip" button on mobile toggles front/back camera via `facingMode`. Hidden on desktop. Camera dropdown hidden on mobile (cryptic labels).
+2. **Screen tile cleanup on disconnect** — ParticipantDisconnected handler now cleans up screen tiles from `screenTileByIdentity`, `screenTileBySid`, `screenTrackMeta`, `screenRecoveryAttempts`, `screenResubscribeIntent`. Fixes stale tiles after abrupt mobile disconnects.
+3. **16:9 aspect ratio on screen tiles** — Added `aspect-ratio: 16 / 9` to `.screens-grid .tile`. Portrait video gets side letterboxing. Added `.portrait` CSS class detection in `tagAspect()`.
 
-2. **Resizable Panel** — Drag handle on left edge, min 400px, max 80vw. Width persisted in `localStorage("admin-panel-width")`. CSS custom property `--admin-panel-width` drives the width.
+### Chat Visual Improvement
+- Per-user color coding: 15-color deterministic palette, left border stripe `border-left: 3px solid var(--chat-user-color)`, self-messages get green tint. Author name shows in user's color.
 
-3. **Interactive Leaderboard → Heatmap** — Click a user bar on leaderboard to filter the heatmap to only that user's activity. Filtered cells show the user's color. "Show All" button to clear. Module-level state: `_admSelectedUser`.
+### GitHub Issues Batch (7 issues closed)
+- **#84** — Login page cleanup: password hidden by default (auto-fills), URLs/devices behind "Advanced" toggle, password shows on auth failure
+- **#85** — Screenshot upload fix: FormData → ArrayBuffer to match server expectation
+- **#86** — Dialog overflow fix: `max-height` + `overflow-y: auto` on bug report content
+- **#87** — Max characters increased: 1000 → 5000 on feedback textarea
+- **#88** — Title + Description split: separate title input (120 chars), flows to GitHub issue title, Rust structs updated
+- **#90** — Screen share volume slider on tile: shows on hover, syncs with participant card slider, only appears with audio track
+- **#93** — Soundboard compact UX: pill buttons with emoji + name, search filter input, panel widened to 320px
 
-4. **Clickable Heatmap Cells** — Click a cell to see a popup listing which users were active in that hour with color dots + join counts.
-
-5. **Rust Changes** — `HeatmapJoin` struct (timestamp + name) replaces plain `Vec<u64>`. `StatsSnapshot` expanded with `encoder`, `ice_local_type`, `ice_remote_type`. `UserMetrics` expanded with same fields + aggregation in `admin_metrics` handler.
-
-6. **Bug Reports Fixed** — `r.reporter` changed to `r.name` (field name mismatch with Rust struct).
-
-7. **Bug Summary Charts** (Metrics tab) — "Bugs by User" horizontal bar chart + "Bugs by Day" vertical bar chart.
-
-8. **Quality Dashboard** (Metrics tab) — Summary cards (avg FPS, bitrate, BW-limited%, CPU-limited%), Quality Score Ranking (composite 0-100 with colored badges), Per-User FPS/Bitrate bars, Quality Limitation Breakdown (stacked bars: green=clean, yellow=CPU, red=BW), Encoder & ICE Connection table.
-
-9. **Admin Panel Auto-Show Bug Fixed** — The `admin-only` reveal code was removing `hidden` from the panel on login, showing it without calling `toggleAdminDash()` (so no fetches fired → permanent "Loading..."). Fixed by skipping `admin-dash-panel` in the reveal loop.
-
-### Timezone Fix (from previous session)
-- Heatmap and timeline now show local timezone instead of UTC
-- Dead code cleanup: removed unused `UserTimeline`/`TimeSpan` structs from Rust
+### Issues Also Closed (confirmed fixed earlier)
+- **#89** — Stale screen tiles (fixed by disconnect cleanup above)
+- **#91** — Duplicate of #89
+- **#92** — Zane's audio lag (GPU overload from Resident Evil, not a code bug)
 
 ---
 
-## What's Working (v0.3.1 MVP)
+## What's Working (v0.4.1)
 
 ### Core Features
 - WebRTC video/screen sharing via LiveKit SFU (1080p@60fps target)
 - Multi-room support with room switching
-- Chat with file/image upload, emoji picker, link rendering
-- Chat message deletion (users can delete their own messages)
-- Soundboard with custom uploads, icons, per-clip volume
+- Chat with file/image upload, emoji picker, link rendering, image fullscreen lightbox, **per-user color coding**
+- Soundboard with custom uploads, icons, per-clip volume, **compact search + pill buttons**
 - Camera lobby for previewing webcams
 - 7 themes (Frost, Cyberpunk, Aurora, Ember, Matrix, Ultra Instinct) with opacity slider
-- Bug report system with screenshot attachment and auto-captured WebRTC stats
-- Admin dashboard (in-app panel) with live stats, session history, metrics, bug reports
-- Auto-update check (queries server, not GitHub)
-- Name impersonation prevention (server rejects duplicate names)
-- Cache-busting: server stamps `?v={version}` on all JS/CSS URLs at startup
+- Bug report system with screenshot attachment, auto-captured WebRTC stats, clipboard paste, **title + description fields**
+- Admin dashboard with live stats, session history, metrics, bug reports
+- Auto-update check + native Tauri auto-updater
+- macOS Apple Silicon support (DMG + auto-updater)
+- Per-startup cache-busting stamps — dashboard detects stale viewers
+- **PG-13 Mode** — room-wide content warning toggle with banner, glow, speech, data channel sync
+- **Mobile browser support** — camera flip, clean disconnect, proper aspect ratio
+- **Screen share volume slider on tile** — hover to adjust
+- **Streamlined login page** — clean layout, Advanced toggle for power users
 
 ### Jam Session (Spotify Integration)
 - Spotify OAuth PKCE flow with token persistence
 - Song search, queue management, skip
+- Queue no longer drains when searching (fixed in v0.4.1)
 - WASAPI per-process audio capture (Spotify.exe)
 - WebSocket audio streaming to opted-in listeners
-- Now Playing banner, join/leave toggles
-- WASAPI conflict guard (screen share falls back to getDisplayMedia audio during jam)
-- **Dedicated Spotify account**: thefellowshipoftheboatrace@gmail.com (Sam's family plan), Client ID `ef0d20da592a429b9bdf1c4893bddb92`
-
-### AIMD Adaptive Publisher Bitrate Control (Added 2026-02-16)
-- Receiver detects packet loss on incoming screen share → sends `bitrate-cap` via data channel to publisher
-- Publisher caps `maxBitrate` on its screen share encoding (Multiplicative Decrease: ×0.7 on loss)
-- Probe-up phase: +500kbps every 6s until cap reaches 6Mbps (Additive Increase)
-- Resolution stays 1080p@60fps — only compression quality changes (no 360p jumps)
-- 10s fallback: if publisher doesn't ack (old client), falls back to v3 layer switching
-
-### Mic/Screen Volume Boost (Added 2026-02-16)
-- Per-participant volume sliders now go 0–300% (was 0–100%)
-- Audio routed through WebAudio GainNode for amplification beyond 1.0
-- Single shared AudioContext for all participant audio (avoids browser limits)
-- Speaker device selection works correctly — AudioContext.setSinkId() synced with device picker
-- Percentage label next to each slider, turns accent-colored when boosted above 100%
-- Gain nodes cleaned up on track removal
-- Both mic and screen share audio support boosting
-
-### Admin Dashboard v2 (Added 2026-02-23)
-- 30-color palette with djb2 hash for unique, consistent user colors
-- Resizable panel with drag handle (400px–80vw), localStorage persistence
-- Interactive leaderboard: click user → filter heatmap to that user
-- Clickable heatmap cells: popup showing active users per hour
-- Bug summary charts: bugs by user + bugs by day on Metrics tab
-- Quality dashboard: summary cards, quality score ranking (0-100), per-user FPS/bitrate bars, quality limitation breakdown, encoder & ICE connection table
-- Fixed bug reports display (field name mismatch)
-- Fixed auto-show bug (panel no longer appears on admin login without fetching data)
-
-### Infrastructure
-- Let's Encrypt TLS with custom domain
-- TURN server for NAT traversal
-- Port forwards: 9443 TCP, 3478 UDP, 40000-40099 UDP, 7881 TCP
-- Public IP: 99.111.153.69
-
----
-
-## Chaos Stress Test (2026-02-26)
-
-Designed and executed a 7-phase chaos stress test using Chrome DevTools MCP to automate 3 browser tabs (Observer, ChaosBot-1, ChaosBot-2). Found and fixed 3 bugs:
-
-### Bug 1: Camera desync under rapid toggling (FIXED)
-- **Symptom**: `camEnabled=false` but camera track still published
-- **Root cause**: `setCameraEnabled(false)` mutes the track and ends the MediaStreamTrack, but keeps the publication object with `track !== null`. Checking `!!pub.track` gave false positives — both `toggleCam()` and the reconciler thought the camera was still published.
-- **Fix**: Use `room.localParticipant.isCameraEnabled` (SDK's authoritative state) instead of checking raw publication `track` refs. Also suppress reconciler during active toggles.
-- **Commits**: `f2e1e0f`, `141f1ce`
-
-### Bug 2: LK TDZ in room switch (FIXED)
-- **Symptom**: "Cannot access 'LK' before initialization" ~40% of room switches
-- **Root cause**: Inner `const LK = getLiveKitClient()` in TrackSubscribed callback shadowed outer `LK` from closure scope
-- **Fix**: Removed inner declaration
-- **Commit**: `f2e1e0f`
-
-### Bug 3: Stale cameraTrackSid (MINOR, unfixed)
-- Observer's `participantState` retains `cameraTrackSid` after remote cam unpublish. Low priority — cosmetic only.
-
-### Chaos test v2 results: 16/16 checks passed
 
 ---
 
 ## Known Bugs / Open Items
 
 - Minor: stale `cameraTrackSid` in observer's participantState after remote camera unpublish (cosmetic only)
+- **#83** — Signal notifications (deferred — requires external infrastructure setup)
+
+### Security Hardening (audited 2026-03-03)
+
+Full security sweep completed. No credentials in git, no eval/injection, TLS enforced.
+
+**FIXED (2026-03-06):**
+- ~~Admin dashboard XSS~~ — Already fixed, all fields use `esc()` / `escAdm()`
+- ~~Chat fileUrl token leak~~ — Rejects external URLs in `renderChatMessage()` (`chat.js`)
+- ~~Login brute-force~~ — IP-based rate limit 5/15min with 429 response (`main.rs`)
+- ~~Path traversal~~ — `is_safe_path_component()` on room names + file names (`main.rs`)
+
+**Remaining (lower priority):**
+- `/api/online` unauthenticated — leaks room membership
+- CORS fully open (`Any`) — should scope to `tauri://localhost` + server origin
+- No security headers (CSP, HSTS, X-Frame-Options, nosniff)
+- Avatar URL spoofing via data channel (no sender identity validation)
+- Admin password uses plaintext path in .env (Argon2 path exists but unused)
 
 ---
 
 ## Active Worktree
-- None — on main, all branches cleaned up.
+- None — on main, all changes committed directly.
 
-## Files Modified (Admin Dashboard v2)
-- `core/viewer/app.js` — 30-color palette, resize IIFE, interactive leaderboard/heatmap, bug charts, quality dashboard, admin-only reveal fix
-- `core/viewer/style.css` — Resize handle, popup, bug chart, quality dashboard styles
-- `core/control/src/main.rs` — HeatmapJoin struct, StatsSnapshot expansion, UserMetrics expansion, encoder/ICE aggregation, timezone fix
-- `docs/plans/2026-02-23-admin-dashboard-v2-design.md` — Design document
-- `docs/plans/2026-02-23-admin-dashboard-v2-plan.md` — Implementation plan
+---
+
+## Files Modified This Session
+
+### Viewer JS
+- `core/viewer/state.js` — Added `flipCamBtn`, `_camFacingMode`, `pg13ModeActive`, `togglePg13Button`
+- `core/viewer/media-controls.js` — Added `flipCam()`, mobile facingMode in `switchCam()`/`toggleCam()`, PG-13 toggle/apply/announce functions, **restartTrack for mic/cam switching**
+- `core/viewer/connect.js` — Screen tile cleanup in disconnect handler, password field show on auth failure, local screen tile identity, PG-13 data handler + button enable/disable, **PG-13 sync re-broadcast + dedup**
+- `core/viewer/participants.js` — `.portrait` class in `tagAspect()`, volume slider in `addScreenTile()`
+- `core/viewer/audio-routing.js` — `tile.dataset.identity`, volume slider reveal on screen audio attach
+- `core/viewer/app.js` — Flip button handler, mobile cam dropdown hide, password auto-fill, Advanced toggle
+- `core/viewer/chat.js` — Per-user color system, `--chat-user-color` CSS var, `.self` class
+- `core/viewer/soundboard.js` — Pill buttons with names, search filter
+- `core/viewer/admin.js` — Screenshot upload fix (ArrayBuffer), bug report title field
+
+### Viewer HTML/CSS
+- `core/viewer/index.html` — Flip button, login page restructure, title input, soundboard search, maxlength 5000, PG-13 banner + button, Debug moved to top bar
+- `core/viewer/style.css` — All new styles (flip button, login page, chat colors, dialog overflow, title input, volume slider, soundboard pills, screen tile aspect ratio, PG-13 banner/glow/button)
+
+### Rust
+- `core/control/src/main.rs` — `title` field in BugReport/BugReportRequest structs, `create_github_issue()` title logic
 
 ---
 
 ## Version History (Recent)
 
-### v0.3.1 (2026-02-14/16/23/24) — Current
-- Admin Dashboard v2: 30 colors, resizable, interactive leaderboard/heatmap, bug charts, quality dashboard
-- Timezone fix: heatmap/timeline show local time
-- AIMD adaptive publisher bitrate control (replaces v3 layer switching)
-- Mic/screen volume boost up to 300% via WebAudio GainNode
-- Admin kick/mute fixed (3-layer bug: wrong JS var, missing JWT grants, empty room field)
-- Spencer's audit: resolved 33 of 35 issues (security, UX, cleanup, new features)
-- `9c8e85f` Auto-create GitHub Issues from in-app bug reports (#23)
-- `8ca86a8` TURN credentials behind authenticated endpoint (#29)
-- `c7354aa` Ghost presence fix via AbortController (#50)
-- `71af1b2` Per-person chime volume slider (#53)
-- `cdf87e7` Fix streaming stability, add chat message deletion, add cache-busting
-- `8c5ae4a` Move version check to server, remove GitHub dependency
-- `54cf186` Bump version to v0.3.1
+### v0.4.1 (2026-02-27) — Released
+- Fix "Update available" banner (#79) — Cargo.toml versions synced
+- Fix jam queue drain on search (#77) — server auto-remove guard
+- Chat image fullscreen lightbox (#75) — CSS for existing JS
+- Fix macOS camera card glitch — dead track re-attach guard
+- Post-release: clipboard paste in feedback (#81), cache-bust stamper fix
 
-### v0.3.0 (2026-02-12/13)
-- `a22f07d` Fix 12 bugs from user reports + critical link security hole
-- `c805002` Improve app responsiveness: batch debug DOM updates, reduce polling
-- `9b50cfa` Fix theme persistence, identity stability, jam UX, update check
-- `c9f0da5` Fix viewer URL trailing slash
-- `ee033be` Switch Tauri clients to load viewer from server instead of embedded files
-- `77c5a95` Fix 4 bugs: jam display, screen share UX, banner
-- Jam Session v2 with WebSocket audio streaming
-- Admin client, Let's Encrypt TLS, custom domain
+### v0.4.0 (2026-02-27)
+- macOS Apple Silicon DMG in releases
+- macOS auto-updater support via unified latest.json
+- Viewer modularized into 19 JS files
+- Camera desync fix, LK TDZ fix
 
----
-
-## Architecture Reference
-
-### Core Components
-| Component | Path | Language | Purpose |
-|-----------|------|----------|---------|
-| SFU | `core/sfu/` | Go (binary) | LiveKit media routing |
-| Control | `core/control/` | Rust (axum) | API server, auth, rooms, file serving |
-| Viewer | `core/viewer/` | HTML/JS/CSS | Browser UI (served by control plane) |
-| Client | `core/client/` | Rust (Tauri) | Native Windows app |
-| Admin | `core/admin/` | HTML/JS/CSS | Admin dashboard (browser-only) |
-| TURN | `core/turn/` | Go (binary) | NAT traversal |
-| Deploy | `core/deploy/` | PowerShell | Build/sign/push pipeline |
-
-### How Core Starts
-- Run: `powershell -ExecutionPolicy Bypass -File .\run-core.ps1`
-- Stop: `powershell -ExecutionPolicy Bypass -File .\stop-core.ps1`
-- Health: `https://127.0.0.1:9443/health`
-- Viewer: `https://127.0.0.1:9443/viewer/`
-- Admin: `https://127.0.0.1:9443/admin`
-
-### Network
-- ATT BGW320-500 in IP passthrough → Eero router (DHCP, NAT, port forwarding)
-- Public IP: 99.111.153.69
-- Ports: 9443 TCP, 3478 UDP, 40000-40099 UDP, 7881 TCP
-
----
-
-## Deployment Workflow
-
-### Server-side changes (viewer JS/CSS, Rust backend)
-1. Edit files in worktree
-2. If Rust changed: `cargo build -p echo-core-control` in `core/` dir
-3. Kill old process (elevated): `Start-Process powershell -ArgumentList '-Command "taskkill /F /IM echo-core-control.exe"' -Verb RunAs`
-4. Copy binary from worktree to main repo `core/target/debug/`
-5. Copy viewer files from worktree to main repo `core/viewer/`
-6. Start services: `powershell -ExecutionPolicy Bypass -File run-core.ps1`
-7. Friends just refresh their Tauri client (F5) to get new viewer code
-
-### Client-side changes (Tauri app itself)
-1. Bump version in `core/client/tauri.conf.json` and `core/control/Cargo.toml`
-2. Build: `cargo tauri build --bundles nsis` in `core/client/`
-3. Tag: `git tag v0.X.Y`
-4. Push tag: `git push --tags` (triggers GitHub Release CI)
-5. Friends get auto-update notification
+### v0.3.1 (2026-02-14/16/23/24)
+- Admin Dashboard v2, AIMD bitrate control, volume boost, security fixes, 33 issues resolved
 
 ---
 

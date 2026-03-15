@@ -157,6 +157,11 @@ function setPublishButtonsEnabled(enabled) {
   micBtn.disabled = !enabled;
   camBtn.disabled = !enabled;
   screenBtn.disabled = !enabled;
+  if (flipCamBtn) {
+    flipCamBtn.disabled = !enabled;
+    // Show flip button only on mobile devices
+    flipCamBtn.classList.toggle("hidden", !_isMobileDevice);
+  }
   // Device selects stay enabled so users can choose devices before connecting
 }
 
@@ -214,6 +219,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     }
     adminToken = await fetchAdminToken(controlUrl, password);
   }
+
+  // Admin mode: only on the server machine (localhost)
+  try {
+    var cUrl = new URL(controlUrl);
+    if (cUrl.hostname === "127.0.0.1" || cUrl.hostname === "localhost") {
+      window.__ECHO_ADMIN__ = true;
+    }
+  } catch {}
 
   setStatus("Requesting token...");
   const seq = ++connectSequence;
@@ -469,11 +482,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       publishDefaults: {
         simulcast: true,
         videoCodec: "h264",
-        videoEncoding: { maxBitrate: 5_000_000, maxFramerate: 60 },
+        videoEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 },
         videoSimulcastLayers: [
-          { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
+          { width: 960, height: 540, encoding: { maxBitrate: 1_000_000, maxFramerate: 30 } },
         ],
-        screenShareEncoding: { maxBitrate: 15_000_000, maxFramerate: 60 },
+        screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
         dtx: true,
         degradationPreference: "maintain-resolution",
       },
@@ -688,6 +701,74 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   newRoom.on(LK.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
     handleTrackUnsubscribed(track, publication, participant);
   });
+  // Remote TrackUnpublished — fires AFTER the publication is removed from the
+  // participant's list.  handleTrackUnsubscribed may have suppressed cleanup
+  // because the publication was still listed during TrackUnsubscribed.
+  // This handler catches screen share tiles and camera cards that got stuck.
+  if (LK.RoomEvent?.TrackUnpublished) {
+    newRoom.on(LK.RoomEvent.TrackUnpublished, (publication, participant) => {
+      if (!publication || !participant) return;
+      const source = publication.source;
+      const identity = participant.identity;
+      if (!identity) return;
+
+      // Helper: get remaining publications for this participant
+      var remoteP = null;
+      if (room && room.remoteParticipants) {
+        remoteP = room.remoteParticipants.get?.(identity);
+        if (!remoteP) room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteP = p; });
+      }
+      var pubs = remoteP ? getParticipantPublications(remoteP) : [];
+
+      // ── Screen share cleanup ──
+      if (source === LK.Track.Source.ScreenShare) {
+        var isVideo = !publication.kind || publication.kind === LK?.Track?.Kind?.Video || publication.kind === "video";
+        if (!isVideo) return;
+        var trackSid = publication.trackSid || publication.track?.sid;
+        debugLog("[unpublished] remote screen share unpublished: " + identity + " sid=" + trackSid);
+        var stillSharing = pubs.some(function(pub) { return pub && pub.source === LK.Track.Source.ScreenShare; });
+        if (!stillSharing) {
+          var tile = trackSid ? screenTileBySid.get(trackSid) : null;
+          if (!tile) tile = screenTileByIdentity.get(identity);
+          if (tile) {
+            var tileSid = tile.dataset?.trackSid || trackSid;
+            debugLog("[unpublished] cleaning up orphaned tile for " + identity + " sid=" + tileSid);
+            removeScreenTile(tileSid);
+            unregisterScreenTrack(tileSid);
+            if (tileSid) screenResubscribeIntent.delete(tileSid);
+          }
+          screenTileByIdentity.delete(identity);
+          hiddenScreens.delete(identity);
+          watchedScreens.delete(identity);
+          _pubBitrateControl.delete(identity);
+          var cardRef = participantCards.get(identity);
+          if (cardRef?.watchToggleBtn) {
+            cardRef.watchToggleBtn.style.display = "none";
+            cardRef.watchToggleBtn.textContent = "Stop Watching";
+            if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = "none"; cardRef.ovWatchClone.textContent = "Stop Watching"; }
+          }
+        }
+      }
+
+      // ── Camera cleanup ──
+      if (source === LK.Track.Source.Camera) {
+        debugLog("[unpublished] remote camera unpublished: " + identity);
+        var stillHasCam = pubs.some(function(pub) { return pub && pub.source === LK.Track.Source.Camera && pub.track; });
+        if (!stillHasCam) {
+          var cardRef = participantCards.get(identity);
+          if (cardRef) {
+            updateAvatarVideo(cardRef, null);
+            debugLog("[unpublished] camera cleared for " + identity + " (card reverted to avatar)");
+          }
+          var state = participantState.get(identity);
+          if (state) state.cameraTrackSid = null;
+          // Cancel any pending camera clear timer
+          var existingTimer = cameraClearTimers.get(identity);
+          if (existingTimer) { clearTimeout(existingTimer); cameraClearTimers.delete(identity); }
+        }
+      }
+    });
+  }
   newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
     ensureParticipantCard(participant);
     debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
@@ -697,6 +778,17 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       clearTimeout(_pendingDisconnects.get(participant.identity));
       _pendingDisconnects.delete(participant.identity);
       debugLog(`[reconnect] participant ${participant.identity} reconnected — cancelled pending disconnect`);
+    }
+    // Cancel any stale camera-clear timer from a previous unsubscribe
+    var camTimer = cameraClearTimers.get(participant.identity);
+    if (camTimer) {
+      clearTimeout(camTimer);
+      cameraClearTimers.delete(participant.identity);
+    }
+    // Clear stale camera frame on reused card — participant may reconnect without camera
+    if (wasPendingDisconnect) {
+      var cardRef = participantCards.get(participant.identity);
+      if (cardRef) updateAvatarVideo(cardRef, null);
     }
     // Real-time enter chime — fires instantly via WebSocket, no polling delay
     // Suppress during reconnection (they never actually left) or brief disconnect/rejoin
@@ -738,6 +830,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         broadcastAvatar(identityBase, relativePath);
       }
       broadcastDeviceId();
+      // Re-broadcast PG-13 state so late joiners pick it up (target only the new joiner)
+      if (pg13ModeActive) {
+        var enc = new TextEncoder();
+        room.localParticipant.publishData(
+          enc.encode(JSON.stringify({ type: "pg13-mode", enabled: true, sync: true })),
+          { reliable: true, destinationIdentities: [participant.identity] }
+        );
+      }
     }, _avatarDelay);
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
@@ -768,11 +868,44 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     }
     const timer = setTimeout(() => {
       _pendingDisconnects.delete(key);
+      // Cancel any pending camera-clear timer — card is being fully removed
+      var camT = cameraClearTimers.get(key);
+      if (camT) { clearTimeout(camT); cameraClearTimers.delete(key); }
       debugLog(`[reconnect] grace period expired for ${key} — cleaning up`);
       const cardRef = participantCards.get(key);
       if (cardRef) cardRef.card.remove();
       participantCards.delete(key);
       participantState.delete(key);
+      // Clean up any screen tiles for this participant (abrupt disconnects
+      // may not fire TrackUnsubscribed, leaving stale tiles in the grid)
+      var disconnectedTile = screenTileByIdentity.get(key);
+      if (disconnectedTile) {
+        // Find the track SID for this tile and clean up all related state
+        var tileSid = disconnectedTile.dataset?.trackSid;
+        if (tileSid) {
+          removeScreenTile(tileSid);
+          unregisterScreenTrack(tileSid);
+          screenRecoveryAttempts.delete(tileSid);
+          screenResubscribeIntent.delete(tileSid);
+        } else {
+          // No SID on tile — just remove from DOM
+          if (disconnectedTile.classList.contains("is-focused")) {
+            screenGridEl.classList.remove("is-focused");
+          }
+          disconnectedTile.remove();
+        }
+        screenTileByIdentity.delete(key);
+        debugLog(`[disconnect] removed screen tile for ${key}`);
+      }
+      // Also sweep screenTrackMeta for any other tracks from this identity
+      screenTrackMeta.forEach((meta, sid) => {
+        if (meta.identity === key) {
+          removeScreenTile(sid);
+          unregisterScreenTrack(sid);
+          screenRecoveryAttempts.delete(sid);
+          screenResubscribeIntent.delete(sid);
+        }
+      });
       // Check if they moved to another room or fully left
       if (!_isRoomSwitch) {
         (async function() {
@@ -918,6 +1051,28 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           // Mark ack received on the controller for this publisher
           var ackCtrl = _pubBitrateControl.get(msg.identity);
           if (ackCtrl) ackCtrl.ackReceived = true;
+        } else if (msg.type === "pg13-mode") {
+          var wasActive = pg13ModeActive;
+          applyPg13Ui(!!msg.enabled);
+          if (msg.sync) {
+            // Sync message from existing participant — subtle toast, no speech, dedup
+            if (!wasActive && msg.enabled) {
+              showToast("PG-13 Mode is active in this room", 4000);
+            }
+          } else {
+            // Manual toggle — full announcement
+            announcePg13(!!msg.enabled);
+            showToast((msg.senderName || "Someone") + (msg.enabled ? " enabled" : " disabled") + " PG-13 Mode", 4000);
+          }
+        } else if (msg.type === "pg13-query") {
+          // New joiner is asking for PG-13 state — respond if active
+          if (pg13ModeActive && participant) {
+            var enc = new TextEncoder();
+            room.localParticipant.publishData(
+              enc.encode(JSON.stringify({ type: "pg13-mode", enabled: true, sync: true })),
+              { reliable: true, destinationIdentities: [participant.identity] }
+            );
+          }
         }
       } catch {
         // ignore
@@ -935,6 +1090,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         const label = `${name} (Screen)`;
         const tile = addScreenTile(label, element, publication.trackSid);
         const localIdentity = local.identity;
+        tile.dataset.identity = localIdentity;
         screenTileByIdentity.set(localIdentity, tile);
         if (publication.trackSid) {
           registerScreenTrack(publication.trackSid, publication, tile, localIdentity);
@@ -1092,14 +1248,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       return pub && pub.source === LK.Track.Source.ScreenShare;
     });
     if (hasScreen) {
-      if (!hiddenScreens.has(participant.identity)) {
-        hiddenScreens.add(participant.identity);
-      }
+      // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
+      // The "Stop Watching" button is available if they want to unsubscribe later.
       var cardRef = participantCards.get(participant.identity);
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
-        cardRef.watchToggleBtn.textContent = "Start Watching";
-        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
+        cardRef.watchToggleBtn.textContent = "Stop Watching";
+        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Stop Watching"; }
       }
     }
   });
@@ -1135,6 +1290,16 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
   startAudioMonitor();
 
+  // Query existing participants for PG-13 state (data channel needs time to be ready)
+  setTimeout(() => {
+    if (!room || !room.localParticipant) return;
+    var enc = new TextEncoder();
+    room.localParticipant.publishData(
+      enc.encode(JSON.stringify({ type: "pg13-query" })),
+      { reliable: true }
+    );
+  }, 2000);
+
   // ── First-connect-only UI setup (skip on room switch) ──
   if (!reuseAdmin) {
     if (openSoundboardButton) openSoundboardButton.disabled = false;
@@ -1142,6 +1307,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     if (openChatButton) openChatButton.disabled = false;
     if (bugReportBtn) bugReportBtn.disabled = false;
     if (openJamButton) openJamButton.disabled = false;
+    if (togglePg13Button) togglePg13Button.disabled = false;
     if (toggleRoomAudioButton) {
       toggleRoomAudioButton.disabled = false;
       setRoomAudioMutedState(false);
@@ -1161,6 +1327,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     disconnectTopBtn.disabled = false;
     roomListEl.classList.remove("hidden");
     connectPanel.classList.add("hidden");
+    document.querySelector("header")?.classList.remove("portal-hidden");
     startUpdateCheckPolling();
   }
 
@@ -1386,6 +1553,9 @@ async function connect() {
     await connectToRoom({ controlUrl, sfuUrl, roomId: roomName, identity, name, reuseAdmin: false });
   } catch (err) {
     setStatus(err.message || "Connect failed", true);
+    // Show password field so user can re-enter credentials
+    var pwField = document.getElementById("password-field");
+    if (pwField) pwField.classList.remove("hidden");
   }
 }
 
@@ -1424,6 +1594,8 @@ async function disconnect() {
   if (openChatButton) openChatButton.disabled = true;
   if (bugReportBtn) bugReportBtn.disabled = true;
   if (openJamButton) openJamButton.disabled = true;
+  if (togglePg13Button) togglePg13Button.disabled = true;
+  applyPg13Ui(false);
   if (typeof cleanupJam === "function") cleanupJam();
   _latestScreenStats = null;
   if (toggleRoomAudioButton) toggleRoomAudioButton.disabled = true;
@@ -1440,6 +1612,7 @@ async function disconnect() {
   disconnectTopBtn.disabled = true;
   roomListEl.classList.add("hidden");
   connectPanel.classList.remove("hidden");
+  document.querySelector("header")?.classList.add("portal-hidden");
   startOnlineUsersPolling();
   setPublishButtonsEnabled(false);
   // Hide dashboard button and close panel on disconnect

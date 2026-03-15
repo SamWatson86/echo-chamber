@@ -2,6 +2,7 @@ mod audio_capture;
 mod jam_bot;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use base64::Engine as _;
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::OriginalUri;
 use axum::http::HeaderValue;
@@ -22,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -59,6 +60,8 @@ struct AppState {
     spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
     spotify_token_file: PathBuf,
     http_client: reqwest::Client,
+    viewer_stamp: Arc<RwLock<String>>,
+    login_attempts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -135,6 +138,8 @@ struct BugReport {
     name: String,
     room: String,
     description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
     #[serde(default)]
     feedback_type: Option<String>,
     timestamp: u64,
@@ -154,11 +159,25 @@ struct BugReport {
     ice_remote_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     screenshot_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    participant_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_issue_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_issue_url: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct BugReportRequest {
     description: String,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     feedback_type: Option<String>,
     #[serde(default)]
@@ -183,6 +202,14 @@ struct BugReportRequest {
     ice_remote_type: Option<String>,
     #[serde(default)]
     screenshot_url: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    user_agent: Option<String>,
+    #[serde(default)]
+    participant_count: Option<u32>,
+    #[serde(default)]
+    connection_state: Option<String>,
 }
 
 #[derive(Clone)]
@@ -621,6 +648,16 @@ async fn main() {
         initial_jam.spotify_token = Some(token);
     }
 
+    // Viewer cache-busting stamp — unique per server start
+    let viewer_stamp = format!(
+        "{}.{}",
+        env!("CARGO_PKG_VERSION"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -644,6 +681,8 @@ async fn main() {
         jam_bot: Arc::new(tokio::sync::Mutex::new(None)),
         spotify_token_file,
         http_client: reqwest::Client::new(),
+        viewer_stamp: Arc::new(RwLock::new(viewer_stamp.clone())),
+        login_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -734,8 +773,50 @@ async fn main() {
     let admin_dir = resolve_admin_dir();
     info!("admin dir: {:?}", admin_dir);
 
-    // Stamp cache-busting version strings into index.html at startup
-    stamp_viewer_index(&viewer_dir);
+    // Stamp viewer files with startup-unique cache-busting string
+    stamp_viewer_index(&viewer_dir, &viewer_stamp);
+
+    // Background task: watch viewer files for changes and re-stamp automatically.
+    // This lets the stale banner fire without a full server restart when viewer
+    // JS/CSS/HTML files are edited on disk.
+    {
+        let stamp = state.viewer_stamp.clone();
+        let vdir = viewer_dir.clone();
+        let mut startup = SystemTime::now();
+        tokio::spawn(async move {
+            let watched_files = ["app.js", "style.css", "index.html", "connect.js",
+                                 "room-status.js", "participants.js", "audio-routing.js",
+                                 "media-controls.js", "chat.js", "soundboard.js",
+                                 "state.js", "jam.js"];
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let changed = watched_files.iter().any(|f| {
+                    vdir.join(f)
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| t > startup)
+                        .unwrap_or(false)
+                });
+                if changed {
+                    let new_stamp = format!(
+                        "{}.{}",
+                        env!("CARGO_PKG_VERSION"),
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    );
+                    stamp_viewer_index(&vdir, &new_stamp);
+                    if let Ok(mut s) = stamp.write() {
+                        *s = new_stamp.clone();
+                    }
+                    info!("viewer files changed on disk — re-stamped to {}", new_stamp);
+                    // Reset baseline so future edits are detected too
+                    startup = SystemTime::now();
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(root_route))
@@ -848,11 +929,12 @@ async fn main() {
             generate_self_signed().await
         };
         axum_server::bind_rustls(addr, tls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .unwrap();
     } else {
-        axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .unwrap();
     }
@@ -924,11 +1006,10 @@ fn resolve_viewer_dir() -> PathBuf {
 /// Stamp cache-busting version query strings into viewer/index.html on disk.
 /// Called once at server startup so ServeDir serves the already-stamped file.
 /// Idempotent — strips old ?v= params before re-stamping.
-fn stamp_viewer_index(viewer_dir: &PathBuf) {
+fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
     let index_path = viewer_dir.join("index.html");
     match fs::read_to_string(&index_path) {
         Ok(html) => {
-            let v = env!("CARGO_PKG_VERSION");
             let assets = [
                 "style.css", "jam.css",
                 "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
@@ -941,20 +1022,21 @@ fn stamp_viewer_index(viewer_dir: &PathBuf) {
             let mut stamped = html;
             for asset in &assets {
                 // Remove any existing ?v=... before the closing quote
-                let with_param = format!("{}?v=", asset);
+                // Use leading quote to avoid substring matches (e.g. "state.js" inside "room-switch-state.js")
+                let with_param = format!("\"{}?v=", asset);
                 if let Some(pos) = stamped.find(&with_param) {
                     // Find the closing quote after the ?v= param
                     let after = pos + with_param.len();
                     if let Some(q) = stamped[after..].find('"') {
-                        stamped = format!("{}{}\"{}",
+                        stamped = format!("{}\"{}\"{}",
                             &stamped[..pos],
                             asset,
                             &stamped[after + q + 1..]);
                     }
                 }
-                // Now stamp the fresh version
-                let plain = format!("{}\"", asset);
-                let versioned = format!("{}?v={}\"", asset, v);
+                // Now stamp the fresh version (also use leading quote for precision)
+                let plain = format!("\"{}\"", asset);
+                let versioned = format!("\"{}?v={}\"", asset, v);
                 stamped = stamped.replace(&plain, &versioned);
             }
             if let Err(e) = fs::write(&index_path, &stamped) {
@@ -1198,6 +1280,7 @@ async fn root_route(
 
 async fn login(
     State(state): State<AppState>,
+    connect_info: axum::extract::ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
@@ -1206,9 +1289,35 @@ async fn login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-");
     info!("login request (ua: {})", ua);
+
+    // Rate limit: 5 failed attempts per 15 minutes per IP
+    let ip = connect_info.0.ip();
+    {
+        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        // Clean up expired entries while we have the lock
+        let window = Duration::from_secs(15 * 60);
+        attempts.retain(|_, (_, first)| first.elapsed() < window);
+        if let Some((count, first)) = attempts.get(&ip) {
+            if *count >= 5 && first.elapsed() < window {
+                warn!("login rate-limited ip={}", ip);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+        }
+    }
+
     if !verify_password(&state.config, &payload.password) {
-        warn!("login failed (bad password)");
+        warn!("login failed (bad password) ip={}", ip);
+        // Record failed attempt
+        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = attempts.entry(ip).or_insert((0, Instant::now()));
+        entry.0 += 1;
         return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Successful login — clear any failed attempts for this IP
+    {
+        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        attempts.remove(&ip);
     }
 
     let now = now_ts();
@@ -1353,6 +1462,9 @@ async fn create_room(
     Json(payload): Json<CreateRoomRequest>,
 ) -> Result<Json<RoomInfo>, StatusCode> {
     ensure_admin(&state, &headers)?;
+    if !is_safe_path_component(&payload.room_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let mut rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     let entry = rooms.entry(payload.room_id.clone()).or_insert(RoomInfo {
         room_id: payload.room_id.clone(),
@@ -1416,7 +1528,7 @@ async fn participant_heartbeat(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     ensure_admin(&state, &headers)?;
     let now = now_ts();
     let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
@@ -1466,7 +1578,13 @@ async fn participant_heartbeat(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    // Tell viewer if its version is stale
+    let current_stamp = state.viewer_stamp.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let stale = match &payload.viewer_version {
+        Some(v) => *v != current_stamp,
+        None => true,
+    };
+    Ok(Json(serde_json::json!({ "stale": stale })))
 }
 
 async fn participant_leave(
@@ -1636,7 +1754,7 @@ async fn admin_dashboard(
         ts: now,
         rooms,
         total_online: total,
-        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        server_version: state.viewer_stamp.read().unwrap_or_else(|e| e.into_inner()).clone(),
     }))
 }
 
@@ -2036,7 +2154,7 @@ async fn submit_bug_report(
     let now = now_ts();
     info!("Bug report received (len={})", payload.description.len());
 
-    let report = BugReport {
+    let mut report = BugReport {
         id: now,
         identity: payload
             .identity
@@ -2048,6 +2166,7 @@ async fn submit_bug_report(
             .unwrap_or_else(|| "Unknown".to_string()),
         room: payload.room.unwrap_or_default(),
         description: payload.description,
+        title: payload.title,
         feedback_type: payload.feedback_type,
         timestamp: now,
         screen_fps: payload.screen_fps,
@@ -2058,21 +2177,35 @@ async fn submit_bug_report(
         ice_local_type: payload.ice_local_type,
         ice_remote_type: payload.ice_remote_type,
         screenshot_url: payload.screenshot_url,
+        version: payload.version,
+        user_agent: payload.user_agent,
+        participant_count: payload.participant_count,
+        connection_state: payload.connection_state,
+        github_issue_number: None,
+        github_issue_url: None,
     };
 
-    append_bug_report(&state.bug_log_dir, &report);
-
-    // Fire-and-forget: create GitHub Issue if configured
+    // Create GitHub Issue if configured (10s timeout so we don't block the user)
     if let (Some(pat), Some(repo)) = (
         state.config.github_pat.clone(),
         state.config.github_repo.clone(),
     ) {
         let client = state.http_client.clone();
         let gh_report = report.clone();
-        tokio::spawn(async move {
-            create_github_issue(client, pat, repo, gh_report).await;
-        });
+        let uploads_dir = {
+            let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
+            chat.uploads_dir.clone()
+        };
+        if let Ok(Some((number, url))) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            create_github_issue(client, pat, repo, gh_report, uploads_dir),
+        ).await {
+            report.github_issue_number = Some(number);
+            report.github_issue_url = Some(url);
+        }
     }
+
+    append_bug_report(&state.bug_log_dir, &report);
 
     {
         let mut reports = state.bug_reports.lock().unwrap_or_else(|e| e.into_inner());
@@ -3616,12 +3749,22 @@ fn soundboard_meta_path(dir: &PathBuf) -> PathBuf {
     dir.join("soundboard.json")
 }
 
+fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains("..")
+        && s != "."
+}
+
 fn soundboard_room_dir(dir: &PathBuf, room_id: &str) -> PathBuf {
-    dir.join(room_id)
+    let safe = if is_safe_path_component(room_id) { room_id } else { "_invalid" };
+    dir.join(safe)
 }
 
 fn soundboard_file_path(dir: &PathBuf, room_id: &str, file_name: &str) -> PathBuf {
-    soundboard_room_dir(dir, room_id).join(file_name)
+    let safe_name = if is_safe_path_component(file_name) { file_name } else { "_invalid" };
+    soundboard_room_dir(dir, room_id).join(safe_name)
 }
 
 fn load_soundboard(state: &mut SoundboardState) {
@@ -3680,7 +3823,8 @@ fn persist_soundboard(state: &SoundboardState) {
 // ==================== CHAT HELPERS ====================
 
 fn chat_history_path(dir: &PathBuf, room: &str) -> PathBuf {
-    dir.join(format!("{}.json", room))
+    let safe = if is_safe_path_component(room) { room } else { "_invalid" };
+    dir.join(format!("{}.json", safe))
 }
 
 fn load_chat_history(dir: &PathBuf, room: &str) -> Vec<ChatMessage> {
@@ -4380,24 +4524,34 @@ fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
     }
 }
 
-/// Fire-and-forget: create a GitHub Issue from a bug report.
-/// Silently does nothing if GITHUB_PAT or GITHUB_REPO are not configured.
-async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport) {
+/// Create a GitHub Issue from a bug report.
+/// Returns (issue_number, html_url) on success.
+/// Silently returns None if creation fails.
+async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport, uploads_dir: PathBuf) -> Option<(u64, String)> {
     let feedback_type = report.feedback_type.as_deref().unwrap_or("bug");
     let prefix = match feedback_type {
         "enhancement" => "Enhancement",
         "idea" => "Idea",
         _ => "Bug",
     };
-    let title = if report.description.len() > 80 {
+    let title = if let Some(ref t) = report.title {
+        if !t.is_empty() {
+            format!("{}: {}", prefix, t)
+        } else if report.description.len() > 80 {
+            format!("{}: {}...", prefix, &report.description[..77])
+        } else {
+            format!("{}: {}", prefix, report.description)
+        }
+    } else if report.description.len() > 80 {
         format!("{}: {}...", prefix, &report.description[..77])
     } else {
         format!("{}: {}", prefix, report.description)
     };
 
+    let version_str = report.version.as_deref().unwrap_or("unknown");
     let mut body = format!(
-        "**Reporter:** {}\n**Room:** {}\n\n{}\n",
-        report.name, report.room, report.description
+        "**Reporter:** {}\n**Room:** {}\n**Version:** {}\n\n{}\n",
+        report.name, report.room, version_str, report.description
     );
 
     // Add WebRTC stats table if any stats are present
@@ -4434,7 +4588,51 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
     }
 
     if let Some(ref url) = report.screenshot_url {
-        body.push_str(&format!("\n### Screenshot\n{}\n", url));
+        // Extract filename from upload URL (e.g. "/api/chat/uploads/upload-123" -> "upload-123")
+        let file_name = url.rsplit('/').next().unwrap_or("");
+        let file_path = uploads_dir.join(file_name);
+        if !file_name.is_empty() {
+            match fs::read(&file_path) {
+                Ok(bytes) => {
+                    // GitHub renders HTML in issue bodies; embed as base64 data URI.
+                    // Cap at ~48KB raw (~64KB base64) to stay within GitHub's body limits.
+                    if bytes.len() <= 48_000 {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        body.push_str(&format!(
+                            "\n### Screenshot\n<details><summary>View screenshot</summary>\n\n<img src=\"data:image/png;base64,{}\" />\n\n</details>\n",
+                            b64
+                        ));
+                    } else {
+                        body.push_str(&format!(
+                            "\n### Screenshot\nScreenshot attached locally ({}, {:.0} KB). File: `{}`\n",
+                            file_name,
+                            bytes.len() as f64 / 1024.0,
+                            file_path.display()
+                        ));
+                    }
+                }
+                Err(_) => {
+                    body.push_str(&format!("\n### Screenshot\nScreenshot referenced but file not found: `{}`\n", file_name));
+                }
+            }
+        }
+    }
+
+    // Client diagnostics
+    let has_diag = report.participant_count.is_some()
+        || report.connection_state.is_some()
+        || report.user_agent.is_some();
+    if has_diag {
+        body.push_str("\n### Client Info\n");
+        if let Some(count) = report.participant_count {
+            body.push_str(&format!("- **Participants in room:** {}\n", count));
+        }
+        if let Some(ref cs) = report.connection_state {
+            body.push_str(&format!("- **Connection state:** {}\n", cs));
+        }
+        if let Some(ref ua) = report.user_agent {
+            body.push_str(&format!("- **User agent:** {}\n", ua));
+        }
     }
 
     body.push_str(&format!("\n---\n*Auto-created from in-app feedback ({})*", feedback_type));
@@ -4462,7 +4660,14 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
     {
         Ok(resp) => {
             if resp.status().is_success() {
-                info!("GitHub Issue created for bug report from {}", report.name);
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let number = body["number"].as_u64();
+                let html_url = body["html_url"].as_str().map(|s| s.to_string());
+                if let (Some(n), Some(u)) = (number, html_url) {
+                    info!("GitHub Issue #{} created for bug report from {}", n, report.name);
+                    return Some((n, u));
+                }
+                info!("GitHub Issue created for bug report from {} (could not parse response)", report.name);
             } else {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -4473,6 +4678,7 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
             warn!("GitHub Issue creation request failed: {}", e);
         }
     }
+    None
 }
 
 fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {

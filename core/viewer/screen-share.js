@@ -169,16 +169,24 @@ function startInboundScreenStatsMonitor() {
               // NACK retransmission alone may not recover in time.
               var deltaLost = pktLost - (dt.lastLost || 0);
               dt.lastLost = pktLost;
-              if (deltaLost > 0) {
+              // Throttled keyframe requests — at most one per 8 seconds per track.
+              // Excessive keyframes flood the encoder and cause brief 0fps stalls.
+              var _kfKey = key + "-kf";
+              var _lastKf = _inboundScreenLastBytes.get(_kfKey) || 0;
+              var _kfElapsed = Date.now() - _lastKf;
+              if (deltaLost > 5 && _kfElapsed > 8000) {
+                _inboundScreenLastBytes.set(_kfKey, Date.now());
                 debugLog(`[packet-loss] ${key}: ${deltaLost} new packets lost (total=${pktLost}), requesting keyframe`);
                 try {
                   if (pub.track?.requestKeyFrame) pub.track.requestKeyFrame();
                   else if (pub.videoTrack?.requestKeyFrame) pub.videoTrack.requestKeyFrame();
                 } catch (e) { /* ignore */ }
               }
-              // Also detect FPS stall (0fps when we previously had frames) — decoder is stuck
-              if (fps === 0 && dt.fpsHistory.length > 0 && dt.fpsHistory[dt.fpsHistory.length - 1] > 0) {
-                debugLog(`[stall-recovery] ${key}: FPS dropped to 0 (was ${dt.fpsHistory[dt.fpsHistory.length - 1]}), requesting keyframe`);
+              // Also detect FPS stall (0fps for 2+ ticks when we previously had frames) — decoder is stuck
+              if (fps === 0 && dt.fpsHistory.length >= 2 && dt.fpsHistory[dt.fpsHistory.length - 1] === 0 &&
+                  dt.fpsHistory[dt.fpsHistory.length - 2] > 0 && _kfElapsed > 8000) {
+                _inboundScreenLastBytes.set(_kfKey, Date.now());
+                debugLog(`[stall-recovery] ${key}: FPS at 0 for 2 ticks, requesting keyframe`);
                 try {
                   if (pub.track?.requestKeyFrame) pub.track.requestKeyFrame();
                   else if (pub.videoTrack?.requestKeyFrame) pub.videoTrack.requestKeyFrame();
@@ -282,18 +290,18 @@ function startInboundScreenStatsMonitor() {
                   // Pattern: large loss in one tick, then immediately clean.
                   // If the FIRST tick after capping is clean, path capacity is unchanged
                   // — snap back immediately instead of slow 12s probe ramp.
-                  if (ctrl.capped && ctrl.cleanTicksSinceLoss === 1 && ctrl.probePhase === "backing-off") {
-                    // First tick after loss is clean → burst, not sustained congestion
-                    debugLog("[bitrate-ctrl] " + pubIdent + ": burst detected (clean after 1 tick) — INSTANT SNAP BACK");
-                    targetHighBps = BITRATE_DEFAULT_HIGH;
+                  if (ctrl.capped && ctrl.cleanTicksSinceLoss === 2 && ctrl.probePhase === "backing-off") {
+                    // 2 clean ticks after loss → likely burst, not sustained congestion.
+                    // Don't snap back instantly — ramp via probing to avoid setParameters churn
+                    debugLog("[bitrate-ctrl] " + pubIdent + ": burst detected (clean 2 ticks) — starting probe ramp");
+                    ctrl.probePhase = "probing";
+                    ctrl.probeCleanTicks = 0;
+                    ctrl.probeBitrate = Math.min(ctrl.currentCapHigh + 3_000_000, BITRATE_DEFAULT_HIGH);
+                    targetHighBps = ctrl.probeBitrate;
                     ctrl.currentCapHigh = targetHighBps;
-                    ctrl.capped = false;
-                    ctrl.probePhase = "idle";
-                    ctrl.lossHistory = [];
-                    ctrl.kbpsHistory = [];
                   }
                   // Sustained congestion recovery: slow probe ramp
-                  else if (ctrl.capped && ctrl.cleanTicksSinceLoss >= 3) {
+                  else if (ctrl.capped && ctrl.cleanTicksSinceLoss >= 4) {
                     // 3 consecutive clean ticks (~9s) = sustained congestion has cleared
                     debugLog("[bitrate-ctrl] " + pubIdent + ": 9s low-loss — SNAP BACK to full bitrate");
                     targetHighBps = BITRATE_DEFAULT_HIGH;
@@ -398,19 +406,26 @@ function startInboundScreenStatsMonitor() {
 
               // ── CAMERAS (or screen share fallback): v3 layer switching ──
               // Only used for camera tracks, or screen shares where bitrate control failed.
+              // Skip adaptive layer switching for cameras — let WebRTC handle it natively.
               var _bitrateCtrlActive = !isCamera && _pubBitrateControl.has(participant?.identity);
-              if (!_bitrateCtrlActive) {
+              if (isCamera) {
+                // no-op: cameras bypass adaptive layer switching entirely
+              } else if (!_bitrateCtrlActive) {
                 dt.lossHistory.push(deltaLost);
                 if (dt.lossHistory.length > 8) dt.lossHistory.shift();
                 var nowMsLoss = Date.now();
                 var timeSinceLastLossChange = nowMsLoss - (dt.lastLayerChangeTime || 0);
                 var prevFps = dt.fpsHistory.length > 0 ? dt.fpsHistory[dt.fpsHistory.length - 1] : 0;
-                var isStalled = fps === 0 && prevFps > 0;
+                // Require 2+ consecutive 0fps ticks to treat as genuine stall —
+                // single-tick 0fps is normal during layer switches and keyframe generation.
+                var prev2Fps = dt.fpsHistory.length > 1 ? dt.fpsHistory[dt.fpsHistory.length - 2] : -1;
+                var isStalled = fps === 0 && prevFps === 0 && prev2Fps >= 0;
                 var isTanking = fps > 0 && fps < 30 && prevFps >= 30 && deltaLost > 15;
                 var isBurstNuke = deltaLost >= 50;
-                var shouldDropLow = (isStalled && deltaLost > 0) || isTanking || isBurstNuke;
+                // Require meaningful loss (>5 packets), not just TURN relay noise
+                var shouldDropLow = (isStalled && deltaLost > 5) || isTanking || isBurstNuke;
 
-                if (shouldDropLow && dt.currentQuality !== "LOW" && timeSinceLastLossChange >= 3000 && LK?.VideoQuality) {
+                if (shouldDropLow && dt.currentQuality !== "LOW" && timeSinceLastLossChange >= 15000 && LK?.VideoQuality) {
                   var oldQ = dt.currentQuality;
                   dt.currentQuality = "LOW";
                   dt.lossDowngraded = true;
@@ -455,7 +470,8 @@ function startInboundScreenStatsMonitor() {
               }
 
               // Push FPS into rolling window (keep last 5 ticks = 15 seconds)
-              if (fps > 0) dt.fpsHistory.push(fps);
+              // Include 0fps readings so stall detection can see consecutive zero ticks
+              dt.fpsHistory.push(fps);
               if (dt.fpsHistory.length > 5) dt.fpsHistory.shift();
 
               // Calculate rolling average FPS (used by both layer switching and debug log)
@@ -478,7 +494,7 @@ function startInboundScreenStatsMonitor() {
               var reason = dropRatio > 0.4 ? "decode (drop=" + Math.round(dropRatio * 100) + "%)"
                 : "low avg fps (" + Math.round(avgFps) + "fps avg over " + dt.fpsHistory.length + " ticks)";
 
-              // Cooldown: don't switch layers more than once per 30 seconds to prevent thrashing
+              // Cooldown: don't switch layers more often than this to prevent thrashing.
               var nowMs = Date.now();
               var timeSinceLastChange = nowMs - dt.lastLayerChangeTime;
               var layerCooldown = 30000;
@@ -534,7 +550,6 @@ function startInboundScreenStatsMonitor() {
               } else if (dt.currentQuality !== "HIGH") {
                 dt.stableTicks = Math.max(0, dt.stableTicks - 1);
               }
-              // Cameras: 4 good ticks (12s), Screen shares: 8 ticks (24s) + cooldown
               var upgradeTicksNeeded = isCamera ? 4 : 8;
               if (dt.stableTicks >= upgradeTicksNeeded && timeSinceLastChange >= layerCooldown && dt.currentQuality !== "HIGH" && LK?.VideoQuality) {
                 if (dt.currentQuality === "LOW" && !isCamera) {
@@ -1284,7 +1299,12 @@ async function stopScreenShareManual() {
     window._canvasFrameWorker = null;
   }
   if (window._canvasRafId) { cancelAnimationFrame(window._canvasRafId); window._canvasRafId = null; }
-  if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
+  if (window._canvasOffVideo) {
+    // Stop the original getDisplayMedia tracks to dismiss the browser sharing indicator
+    var origStream = window._canvasOffVideo.srcObject;
+    if (origStream) { origStream.getTracks().forEach(function(t) { t.stop(); }); }
+    window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null;
+  }
   if (window._canvasPipeEl) { window._canvasPipeEl.remove(); window._canvasPipeEl = null; }
   // Ghost subscriber removed (was causing DTLS timeouts)
   if (window._ghostSubscriber) {

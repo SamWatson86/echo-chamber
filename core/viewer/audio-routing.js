@@ -6,6 +6,7 @@ function setRoomAudioMutedState(next) {
   roomAudioMuted = Boolean(next);
   if (toggleRoomAudioButton) {
     toggleRoomAudioButton.textContent = roomAudioMuted ? "Unmute All" : "Mute All";
+    toggleRoomAudioButton.classList.toggle("is-muted", roomAudioMuted);
   }
   participantState.forEach((state) => {
     applyParticipantAudioVolumes(state);
@@ -15,6 +16,8 @@ function setRoomAudioMutedState(next) {
   if (typeof _jamGainNode !== "undefined" && _jamGainNode) {
     _jamGainNode.gain.value = roomAudioMuted ? 0 : (_jamVolume / 100);
   }
+  // Refresh mic icons so they immediately reflect the mute-all state
+  updateActiveSpeakerUi();
 }
 
 function runFullReconcile(reason) {
@@ -113,7 +116,10 @@ function ensureGainNode(state, audioEl, isScreen) {
   try {
     var actx = getParticipantAudioCtx();
     if (actx.state === "suspended") actx.resume().catch(function() {});
-    if (!audioEl.srcObject) return null;
+    if (!audioEl.srcObject) {
+      debugLog("[vol-boost] srcObject is null — cannot create GainNode");
+      return null;
+    }
     var srcNode = actx.createMediaStreamSource(audioEl.srcObject);
     var gainNode = actx.createGain();
     gainNode.gain.value = 1.0;
@@ -123,6 +129,8 @@ function ensureGainNode(state, audioEl, isScreen) {
     audioEl.muted = false;
     var ref = { source: srcNode, gain: gainNode };
     map.set(audioEl, ref);
+    debugLog("[vol-boost] GainNode created for " + (isScreen ? "screen" : "mic") +
+      " audio (actx.state=" + actx.state + " sinkId=" + (actx.sinkId || "default") + ")");
     return ref;
   } catch (e) {
     debugLog("[vol-boost] lazy GainNode failed: " + e.message);
@@ -193,7 +201,7 @@ function updateActiveSpeakerUi() {
   participantCards.forEach((cardRef, identity) => {
     const micEl = cardRef.micStatusEl;
     const state = participantState.get(identity);
-    const muted = state?.micMuted || state?.micUserMuted || (cardRef.isLocal && !micEnabled);
+    const muted = roomAudioMuted || state?.micMuted || state?.micUserMuted || (cardRef.isLocal && !micEnabled);
     if (micEl) {
       micEl.classList.toggle("is-muted", !!muted);
       if (muted) {
@@ -419,7 +427,8 @@ function handleTrackSubscribed(track, publication, participant) {
     const label = `${participant.name || "Guest"} (Screen)`;
     const element = createLockedVideoElement(track);
     configureVideoElement(element, true);
-    // Minimize video playout delay for screen share to reduce A/V desync
+    // Add playout delay buffer for remote screen shares to absorb WiFi jitter.
+    // Trades ~150ms latency for smooth playback instead of stuttering.
     var _isRemoteScreen = room && room.localParticipant && participant.identity !== room.localParticipant.identity;
     if (_isRemoteScreen && track?.mediaStreamTrack) {
       try {
@@ -428,8 +437,8 @@ function handleTrackSubscribed(track, publication, participant) {
           const receivers = pc.getReceivers();
           const videoReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
           if (videoReceiver && "playoutDelayHint" in videoReceiver) {
-            videoReceiver.playoutDelayHint = 0; // Minimum playout delay
-            debugLog("[sync] set video playoutDelayHint=0 for " + participant.identity);
+            videoReceiver.playoutDelayHint = 0.15; // 150ms jitter buffer
+            debugLog("[sync] set video playoutDelayHint=0.15 for " + participant.identity);
           }
         }
       } catch {}
@@ -446,6 +455,7 @@ function handleTrackSubscribed(track, publication, participant) {
     setTimeout(() => requestVideoKeyFrame(publication, track), 200);
     setTimeout(() => requestVideoKeyFrame(publication, track), 600);
     const tile = addScreenTile(label, element, screenTrackSid);
+    tile.dataset.identity = participant.identity;
     debugLog("[screen-tile] CREATED for " + participant.identity + " trackSid=" + screenTrackSid + " label=" + label);
     ensureVideoSubscribed(publication, element);
     if (screenTrackSid) {
@@ -554,7 +564,8 @@ function handleTrackSubscribed(track, publication, participant) {
     // Volume boost: GainNode is created lazily in applyParticipantAudioVolumes()
     // only when the user boosts above 100%. At normal volume, the plain HTML
     // audio element handles playback directly.
-    // Minimize audio playout delay for screen share audio to reduce A/V desync
+    // Add playout delay buffer for screen share audio to absorb WiFi jitter
+    // Matches the 150ms video buffer so audio and video stay in sync
     if (source === LK.Track.Source.ScreenShareAudio) {
       try {
         const pc = room?.engine?.pcManager?.subscriber?.pc;
@@ -562,8 +573,8 @@ function handleTrackSubscribed(track, publication, participant) {
           const receivers = pc.getReceivers();
           const audioReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
           if (audioReceiver && "playoutDelayHint" in audioReceiver) {
-            audioReceiver.playoutDelayHint = 0; // Minimum playout delay
-            debugLog("[sync] set audio playoutDelayHint=0 for " + participant.identity);
+            audioReceiver.playoutDelayHint = 0.15; // 150ms jitter buffer
+            debugLog("[sync] set audio playoutDelayHint=0.15 for " + participant.identity);
           }
         }
       } catch {}
@@ -591,6 +602,12 @@ function handleTrackSubscribed(track, publication, participant) {
     if (source === LK.Track.Source.ScreenShareAudio) {
       state.screenAudioSid = getTrackSid(publication, track, `${participant.identity}-screen-audio`);
       state.screenAudioEls.add(element);
+      // Show volume slider on the screen tile now that audio is attached
+      var screenTile = screenTileByIdentity.get(participant.identity);
+      if (screenTile && screenTile._volWrap) {
+        screenTile._volWrap.classList.remove("hidden");
+        if (screenTile._volSlider) screenTile._volSlider.value = state.screenVolume;
+      }
       // Mute screen audio if user has unwatched this screen share
       if (hiddenScreens.has(participant.identity)) {
         element.muted = true;

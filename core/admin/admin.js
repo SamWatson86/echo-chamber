@@ -294,7 +294,7 @@ async function fetchBugs() {
 function renderBugs(data) {
   const reports = data.reports || [];
   if (reports.length === 0) {
-    bugsBody.innerHTML = '<tr class="bugs-empty"><td colspan="4">No bug reports</td></tr>';
+    bugsBody.innerHTML = '<tr class="bugs-empty"><td colspan="5">No bug reports</td></tr>';
     return;
   }
   bugsBody.innerHTML = reports.map(r => {
@@ -315,10 +315,14 @@ function renderBugs(data) {
       statsChips += `<span class="badge ${iceClass(r.ice_remote_type)}">${r.ice_remote_type}</span>`;
     }
     if (!statsChips) statsChips = '<span class="no-media">No stats</span>';
+    const ghCell = r.github_issue_url
+      ? `<a class="gh-link" href="${esc(r.github_issue_url)}" target="_blank">#${r.github_issue_number}</a>`
+      : '—';
     return `<tr>
       <td>${formatTime(r.timestamp)}</td>
       <td>${esc(r.name || r.identity)}</td>
       <td class="bug-desc">${esc(r.description)}</td>
+      <td class="bug-gh">${ghCell}</td>
       <td class="bug-stats">${statsChips}</td>
     </tr>`;
   }).join('');

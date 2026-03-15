@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.3.1"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
@@ -853,11 +853,12 @@ dependencies = [
 
 [[package]]
 name = "echo-core-control"
-version = "0.3.1"
+version = "0.4.1"
 dependencies = [
  "argon2",
  "axum",
  "axum-server",
+ "base64 0.22.1",
  "futures-util",
  "jsonwebtoken",
  "rand 0.8.5",

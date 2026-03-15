@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Echo Chamber</title>
-    <link rel="stylesheet" href="style.css?v=0.3.1" />
-    <link rel="stylesheet" href="jam.css?v=0.3.1" />
+    <link rel="stylesheet" href="style.css?v=0.4.1.1773603094" />
+    <link rel="stylesheet" href="jam.css?v=0.4.1.1773603094" />
   </head>
   <body>
     <main class="app">
@@ -19,54 +19,87 @@
         </div>
       </header>
 
-      <section id="connect-panel" class="panel">
-        <div class="grid">
-          <label>
-            Control URL
-            <input id="control-url" type="text" placeholder="https://192.168.5.70:9443" />
-          </label>
-          <label>
-            SFU URL
-            <input id="sfu-url" type="text" placeholder="ws://127.0.0.1:7880" />
-          </label>
-          <input id="room" type="hidden" value="main" />
-          <input id="identity" type="hidden" value="" />
-          <label>
-            Name
-            <input id="name" type="text" value="Viewer" />
-          </label>
-          <label>
-            Admin password
-            <input id="admin-password" type="password" placeholder="Enter admin password" />
-          </label>
+      <section id="connect-panel" class="panel portal">
+        <input id="room" type="hidden" value="main" />
+        <input id="identity" type="hidden" value="" />
+
+        <!-- Animated background orbs -->
+        <div class="portal-bg">
+          <div class="portal-orb portal-orb-1"></div>
+          <div class="portal-orb portal-orb-2"></div>
+          <div class="portal-orb portal-orb-3"></div>
         </div>
-        <div class="actions">
-          <button id="connect">Connect</button>
-          <button id="disconnect" disabled>Disconnect</button>
+
+        <!-- Hero section -->
+        <div class="portal-hero">
+          <div class="portal-logo-wrap">
+            <img src="badge.jpg" alt="Fellowship Badge" class="portal-logo" />
+          </div>
+          <div class="portal-title">Echo Chamber</div>
+          <div class="portal-tagline">The Fellowship of the Boatrace</div>
         </div>
+
+        <!-- Online users -->
+        <div id="online-users" class="online-users"></div>
+
+        <!-- Login form -->
+        <div class="portal-form">
+          <div class="connect-main">
+            <label>
+              Name
+              <input id="name" type="text" value="Viewer" />
+            </label>
+            <label id="password-field" class="hidden">
+              Password
+              <input id="admin-password" type="password" placeholder="Enter admin password" />
+            </label>
+          </div>
+          <div class="portal-connect-row">
+            <button id="connect" class="portal-connect-btn">Connect</button>
+            <button id="disconnect" disabled>Disconnect</button>
+          </div>
+        </div>
+
+        <!-- Device selection (visible on portal) -->
+        <div class="portal-devices">
+          <div class="actions device-actions">
+            <label class="device-field">
+              Mic
+              <select id="mic-select" disabled></select>
+            </label>
+            <label class="device-field">
+              Camera
+              <select id="cam-select" disabled></select>
+            </label>
+            <label class="device-field">
+              Output
+              <select id="speaker-select" disabled></select>
+            </label>
+            <button id="refresh-devices" disabled>Refresh Devices</button>
+          </div>
+        </div>
+
         <div class="actions publish-actions hidden">
           <button id="toggle-mic" disabled>Enable Mic</button>
           <button id="toggle-cam" disabled>Enable Camera</button>
+          <button id="flip-cam" class="flip-cam-btn hidden" disabled>Flip</button>
           <button id="toggle-screen" disabled>Share Screen</button>
         </div>
-        <div class="actions device-actions">
-          <label class="device-field">
-            Mic
-            <select id="mic-select" disabled></select>
-          </label>
-          <label class="device-field">
-            Camera
-            <select id="cam-select" disabled></select>
-          </label>
-          <label class="device-field">
-            Output
-            <select id="speaker-select" disabled></select>
-          </label>
-          <button id="refresh-devices" disabled>Refresh Devices</button>
-        </div>
-        <div id="device-status" class="status device-status"></div>
         <div id="status" class="status">Idle</div>
-        <div id="online-users" class="online-users"></div>
+        <button id="advanced-toggle" type="button" class="advanced-toggle">Advanced</button>
+        <div id="advanced-section" class="advanced-section hidden">
+          <div class="grid">
+            <label>
+              Control URL
+              <input id="control-url" type="text" placeholder="https://192.168.5.70:9443" />
+            </label>
+            <label>
+              SFU URL
+              <input id="sfu-url" type="text" placeholder="ws://127.0.0.1:7880" />
+            </label>
+          </div>
+          <div id="device-status" class="status device-status"></div>
+        </div>
       </section>
 
       <section class="panel room-panel">
@@ -80,9 +113,12 @@
             <button id="open-admin-dash" type="button" class="hidden" onclick="toggleAdminDash()">Dashboard</button>
             <button id="open-settings" type="button" disabled>Settings</button>
             <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Feedback</button>
+            <button id="open-updates" type="button">Updates</button>
+            <button id="debug-toggle" type="button">Debug</button>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
           </div>
         </div>
+        <div id="pg13-banner" class="pg13-banner hidden">PG-13 Mode</div>
         <div class="room-layout">
           <div class="room-main">
             <div class="grid-header">
@@ -96,9 +132,9 @@
                 <h2>Active Users</h2>
                 <div class="sidebar-actions">
                   <button id="refresh-videos" type="button" class="hidden" style="background: #10b981; color: white;">Enable Videos</button>
-                  <button id="debug-toggle" type="button">Debug</button>
                   <button id="open-chat" type="button" disabled>Chat<span id="chat-badge" class="chat-badge hidden"></span></button>
                   <button id="toggle-room-audio" type="button" disabled>Mute All</button>
+                  <button id="toggle-pg13" type="button" disabled>PG-13</button>
                 </div>
                 <div class="sidebar-actions">
                   <button id="open-soundboard" type="button" disabled>Soundboard</button>
@@ -152,6 +188,7 @@
             <span id="soundboard-volume-value" class="soundboard-volume-value">100%</span>
           </div>
         </div>
+        <input id="soundboard-compact-search" type="text" class="soundboard-compact-search" placeholder="Search sounds..." />
         <div id="soundboard-compact-grid" class="soundboard-compact-grid"></div>
       </div>
 
@@ -279,11 +316,13 @@
             <input type="radio" name="feedback-type" value="idea" /> Idea
           </label>
         </div>
-        <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Tell us what's on your mind..." rows="4" maxlength="1000"></textarea>
+        <input id="bug-report-title" type="text" class="bug-report-title-input" placeholder="Short summary (e.g. 'Audio cuts out when switching rooms')" maxlength="120" />
+        <textarea id="bug-report-desc" class="bug-report-textarea" placeholder="Details — what happened, what you expected, steps to reproduce..." rows="4" maxlength="5000"></textarea>
         <div class="bug-report-screenshot-row">
           <button id="bug-report-screenshot-btn" type="button" class="bug-report-screenshot-btn">Attach Screenshot</button>
           <input type="file" id="bug-report-file" class="hidden" accept="image/*" />
           <span id="bug-report-file-name" class="bug-report-file-name"></span>
+          <span class="bug-report-paste-hint">or Ctrl+V to paste</span>
         </div>
         <div id="bug-report-screenshot-preview" class="bug-report-screenshot-preview hidden"></div>
         <div id="bug-report-stats" class="bug-report-stats"></div>
@@ -371,30 +410,30 @@
       <pre id="debug-log"></pre>
     </div>
 
-    <script src="livekit-client.umd.js?v=0.3.1"></script>
-    <script src="room-switch-state.js?v=0.3.1"></script>
-    <script src="jam-session-state.js?v=0.3.1"></script>
-    <script src="publish-state-reconcile.js?v=0.3.1"></script>
-    <script src="state.js?v=0.3.1"></script>
-    <script src="debug.js?v=0.3.1"></script>
-    <script src="urls.js?v=0.3.1"></script>
-    <script src="settings.js?v=0.3.1"></script>
-    <script src="identity.js?v=0.3.1"></script>
-    <script src="rnnoise.js?v=0.3.1"></script>
-    <script src="chimes.js?v=0.3.1"></script>
-    <script src="room-status.js?v=0.3.1"></script>
-    <script src="auth.js?v=0.3.1"></script>
-    <script src="theme.js?v=0.3.1"></script>
-    <script src="chat.js?v=0.3.1"></script>
-    <script src="soundboard.js?v=0.3.1"></script>
-    <script src="screen-share.js?v=0.3.1"></script>
-    <script src="participants.js?v=0.3.1"></script>
-    <script src="audio-routing.js?v=0.3.1"></script>
-    <script src="media-controls.js?v=0.3.1"></script>
-    <script src="admin.js?v=0.3.1"></script>
-    <script src="connect.js?v=0.3.1"></script>
-    <script src="app.js?v=0.3.1"></script>
-    <script src="jam.js?v=0.3.1"></script>
-    <script src="changelog.js?v=0.3.1"></script>
+    <script src="livekit-client.umd.js?v=0.4.1.1773603094"></script>
+    <script src="room-switch-state.js?v=0.4.1.1773603094"></script>
+    <script src="jam-session-state.js?v=0.4.1.1773603094"></script>
+    <script src="publish-state-reconcile.js?v=0.4.1.1773603094"></script>
+    <script src="state.js?v=0.4.1.1773603094"></script>
+    <script src="debug.js?v=0.4.1.1773603094"></script>
+    <script src="urls.js?v=0.4.1.1773603094"></script>
+    <script src="settings.js?v=0.4.1.1773603094"></script>
+    <script src="identity.js?v=0.4.1.1773603094"></script>
+    <script src="rnnoise.js?v=0.4.1.1773603094"></script>
+    <script src="chimes.js?v=0.4.1.1773603094"></script>
+    <script src="room-status.js?v=0.4.1.1773603094"></script>
+    <script src="auth.js?v=0.4.1.1773603094"></script>
+    <script src="theme.js?v=0.4.1.1773603094"></script>
+    <script src="chat.js?v=0.4.1.1773603094"></script>
+    <script src="soundboard.js?v=0.4.1.1773603094"></script>
+    <script src="screen-share.js?v=0.4.1.1773603094"></script>
+    <script src="participants.js?v=0.4.1.1773603094"></script>
+    <script src="audio-routing.js?v=0.4.1.1773603094"></script>
+    <script src="media-controls.js?v=0.4.1.1773603094"></script>
+    <script src="admin.js?v=0.4.1.1773603094"></script>
+    <script src="connect.js?v=0.4.1.1773603094"></script>
+    <script src="app.js?v=0.4.1.1773603094"></script>
+    <script src="jam.js?v=0.4.1.1773603094"></script>
+    <script src="changelog.js?v=0.4.1.1773603094"></script>
   </body>
 </html>

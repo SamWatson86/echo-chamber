@@ -8,8 +8,28 @@ if (nameInput) {
 }
 if (passwordInput) {
   const savedPass = echoGet(REMEMBER_PASS_KEY);
-  if (savedPass) passwordInput.value = savedPass;
+  if (savedPass) {
+    passwordInput.value = savedPass;
+    // Password is saved — keep the field hidden
+  } else {
+    // No saved password — show the field
+    var pwField = document.getElementById("password-field");
+    if (pwField) pwField.classList.remove("hidden");
+  }
 }
+
+// Advanced toggle for URL/device fields on login page
+var advancedToggle = document.getElementById("advanced-toggle");
+var advancedSection = document.getElementById("advanced-section");
+if (advancedToggle && advancedSection) {
+  advancedToggle.addEventListener("click", function() {
+    advancedSection.classList.toggle("hidden");
+    advancedToggle.textContent = advancedSection.classList.contains("hidden") ? "Advanced" : "Hide Advanced";
+  });
+}
+
+// Hide header while portal is showing (re-shown on connect, hidden on disconnect)
+document.querySelector("header")?.classList.add("portal-hidden");
 
 // Soundboard state vars (echoGet-dependent) are in soundboard.js
 
@@ -91,6 +111,12 @@ screenBtn.addEventListener("click", () => {
   toggleScreen().catch(() => {});
 });
 
+if (flipCamBtn) {
+  flipCamBtn.addEventListener("click", () => {
+    flipCam().catch(() => {});
+  });
+}
+
 refreshDevicesBtn.addEventListener("click", async () => {
   setDeviceStatus("Refreshing devices...");
   await ensureDevicePermissions();
@@ -99,6 +125,12 @@ refreshDevicesBtn.addEventListener("click", async () => {
 });
 
 // Create Room button removed in favor of fixed rooms (Main, Breakout 1-3)
+
+// On mobile, hide camera device dropdown (labels are cryptic) and show flip button
+if (_isMobileDevice) {
+  var camLabel = camSelect?.closest("label.device-field");
+  if (camLabel) camLabel.style.display = "none";
+}
 
 micSelect.addEventListener("change", () => {
   switchMic(micSelect.value).catch(() => {});

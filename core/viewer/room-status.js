@@ -28,10 +28,11 @@ function renderOnlineUsers(users) {
     const name = escapeHtml(u.name || "Unknown");
     const room = escapeHtml(u.room || "");
     const title = room ? `In room: ${room}` : "";
-    return `<span class="online-user-pill" title="${title}">${name}</span>`;
+    const initials = escapeHtml(getInitials(u.name || "Unknown"));
+    return `<span class="online-user-pill" title="${title}" data-initials="${initials}">${name}</span>`;
   }).join("");
   onlineUsersEl.innerHTML =
-    `<div class="online-users-header">Currently Online (${users.length})</div>` +
+    `<div class="online-users-header">Online Now \u2014 ${users.length}</div>` +
     `<div class="online-users-list">${pills}</div>`;
 }
 
@@ -201,25 +202,63 @@ function showUpdateBanner(version) {
   document.body.appendChild(banner);
 }
 
+// ─── Stale Version Banner ───
+var _staleDismissed = false;
+
+function showStaleBanner() {
+  if (_staleDismissed) return;
+  if (document.getElementById("stale-banner")) return;
+  var banner = document.createElement("div");
+  banner.id = "stale-banner";
+  banner.className = "stale-banner";
+  banner.innerHTML =
+    '<span>A newer version is available — refresh to update</span>' +
+    '<button type="button" class="stale-refresh-btn">Refresh Now</button>' +
+    '<button type="button" class="stale-dismiss-btn" title="Dismiss">&times;</button>';
+  banner.querySelector(".stale-refresh-btn").addEventListener("click", function() {
+    window.location.reload();
+  });
+  banner.querySelector(".stale-dismiss-btn").addEventListener("click", function() {
+    banner.remove();
+    _staleDismissed = true;
+  });
+  document.body.appendChild(banner);
+}
+
+function hideStaleBanner() {
+  var banner = document.getElementById("stale-banner");
+  if (banner) banner.remove();
+}
+
 // ─── Heartbeat ───
 function startHeartbeat() {
   stopHeartbeat();
   const controlUrl = controlUrlInput.value.trim();
   if (!controlUrl || !adminToken) return;
   _heartbeatAbort = new AbortController();
-  const sendBeat = () => {
+  const sendBeat = async () => {
     if (!_heartbeatAbort || _heartbeatAbort.signal.aborted) return;
     const identity = identityInput ? identityInput.value : "";
     const name = nameInput.value.trim() || "Viewer";
     const beatRoom = roomSwitchState && roomSwitchState.heartbeatRoomName
       ? roomSwitchState.heartbeatRoomName()
       : currentRoomName;
-    fetch(`${controlUrl}/v1/participants/heartbeat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ room: beatRoom, identity, name, viewer_version: _viewerVersion }),
-      signal: _heartbeatAbort.signal,
-    }).catch(() => {});
+    try {
+      const resp = await fetch(`${controlUrl}/v1/participants/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ room: beatRoom, identity, name, viewer_version: _viewerVersion }),
+        signal: _heartbeatAbort.signal,
+      });
+      if (resp.ok) {
+        const data = await resp.json().catch(() => null);
+        if (data && data.stale) {
+          showStaleBanner();
+        } else {
+          hideStaleBanner();
+        }
+      }
+    } catch {}
   };
   sendBeat();
   heartbeatTimer = setInterval(sendBeat, 10000);

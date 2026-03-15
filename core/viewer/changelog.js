@@ -1,62 +1,149 @@
 /* =========================================================
    CHANGELOG — What's New after each update
    Loaded AFTER app.js. Shares global scope.
+
+   Uses a content stamp (not client binary version) so updates
+   show even for viewer-only changes with no new release.
    ========================================================= */
 
-var ECHO_CHANGELOG = {
-  "0.3.1": [
-    "Security: Links now open on YOUR computer, not the server",
-    "Chat: Videos and audio play inline with download button",
-    "Soundboard: See who played each sound",
-    "Jam: Join/Leave is now instant, queue auto-clears finished songs",
-    "Bug reports: Attach screenshots",
-    "Auto-notification when a new update is available",
-    "12 bug fixes from your reports — keep them coming!"
-  ],
-  "0.3.0": [
-    "Jam Session: Listen to Spotify together in real-time with everyone in the room",
-    "Now Playing banner shows the current track at the top of the screen",
-    "Search for songs, queue them up, and skip tracks",
-    "Audio streams automatically to all connected listeners",
-    "Bug report system: report issues directly from the app",
-    "Performance metrics displayed in settings"
-  ],
-  "0.2.9": [
-    "macOS support for Apple Silicon",
-    "Screen share improvements and adaptive quality",
-    "Various bug fixes and stability improvements"
-  ]
-};
+var ECHO_CHANGELOG = [
+  {
+    version: "2026-03-15",
+    title: "Bug Fixes + Audio Output Switching",
+    notes: [
+      "Audio output device switching now works on Windows — uses native WASAPI routing (requires client update)",
+      "Previous output device automatically restored when Echo Chamber closes",
+      "Fixed PG-13 Mode not syncing to late joiners — new users now query for room state on connect",
+      "Fixed mic/camera switching while connected — no longer requires disconnect/reconnect",
+      "Fixed screenshots in bug reports — now embedded directly in GitHub issues"
+    ]
+  },
+  {
+    version: "2026-03-14",
+    title: "Stream Stability Fix",
+    notes: [
+      "Fixed stream freezing caused by layer switching oscillation — quality changes no longer trigger instant re-downgrades",
+      "AIMD bitrate control ramps gradually instead of instant snap-back (was causing encoder stalls)",
+      "Keyframe requests throttled to 1 per 8 seconds per track (was flooding encoder on packet loss)",
+      "Stall detection now requires 2+ consecutive 0fps ticks instead of 1 (layer switches naturally cause brief 0fps)",
+      "Watchdog recovery tamed — no more subscription cycling storms"
+    ]
+  },
+  {
+    version: "2026-03-06",
+    title: "Security & Screen Share Fixes",
+    notes: [
+      "Login rate limiting: Blocks brute-force password guessing (5 attempts per 15 min)",
+      "Screen share overflow fixed: No more scrollbars when window is maximized",
+      "Screen share stop fix: Browser 'sharing your screen' banner now disappears properly",
+      "Path traversal protection on room names and file uploads",
+      "Chat security: Blocks malicious external file URLs"
+    ]
+  },
+  {
+    version: "2026-03-02",
+    title: "PG-13 Mode & Quality of Life",
+    notes: [
+      "PG-13 Mode: Toggle a room-wide content warning with glowing border + speech announcement",
+      "Admin kick/mute buttons restored for server host",
+      "Debug button moved to top bar for a cleaner sidebar"
+    ]
+  },
+  {
+    version: "2026-02-28",
+    title: "Feedback, Chat & Mobile Improvements",
+    notes: [
+      "Feedback: Title field added, character limit raised to 5000, screenshot upload fixed",
+      "Feedback dialog scrolls properly on small screens",
+      "Chat: Per-user color coding with unique border stripes",
+      "Soundboard: Emoji + name pills with search filter",
+      "Screen share: Volume slider on hover over screen tiles",
+      "Login page: Clean layout with Advanced toggle for URLs and devices",
+      "Mobile: Camera flip button, better disconnect cleanup, 16:9 aspect ratio"
+    ]
+  },
+  {
+    version: "v0.4.1",
+    title: "Stability & macOS",
+    notes: [
+      "macOS Apple Silicon support (DMG + auto-updater)",
+      "Fix 'Update available' banner version mismatch",
+      "Fix jam queue draining when searching for songs",
+      "Chat image fullscreen lightbox",
+      "Clipboard paste in feedback dialog",
+      "12 bug fixes from your reports"
+    ]
+  },
+  {
+    version: "v0.4.0",
+    title: "Modular Viewer & macOS",
+    notes: [
+      "Viewer split into focused JS modules for faster updates",
+      "macOS Apple Silicon DMG in releases",
+      "Camera desync fix, LiveKit stability improvements"
+    ]
+  },
+  {
+    version: "v0.3.1",
+    title: "Admin Dashboard & Performance",
+    notes: [
+      "Admin Dashboard with live stats and session history",
+      "AIMD bitrate control for adaptive quality",
+      "Volume boost and per-participant audio controls",
+      "Security: Links open on YOUR computer, not the server",
+      "Chat: Videos and audio play inline",
+      "Soundboard: See who played each sound",
+      "Auto-notification when updates are available",
+      "33 issues resolved"
+    ]
+  },
+  {
+    version: "v0.3.0",
+    title: "Jam Session & Bug Reports",
+    notes: [
+      "Jam Session: Listen to Spotify together in real-time",
+      "Now Playing banner shows current track",
+      "Search, queue, and skip songs",
+      "Bug report system with screenshots and stats"
+    ]
+  }
+];
 
-// Current app version (set by Tauri IPC or fallback)
-var _whatsNewVersion = null;
+// The latest changelog stamp — bump this whenever you add a new entry
+var CHANGELOG_LATEST = ECHO_CHANGELOG[0].version;
 
-(function initWhatsNew() {
-  // Only run in native client
-  if (!window.__ECHO_NATIVE__) return;
+var _changelogSeenKey = "echo-changelog-seen";
 
-  // Wait for Tauri IPC to be ready
+(function initChangelog() {
   setTimeout(function() {
-    if (typeof tauriInvoke !== "function") return;
-    tauriInvoke("get_app_info").then(function(info) {
-      if (!info || !info.version) return;
-      _whatsNewVersion = info.version;
+    var lastSeen = null;
+    // Use echoGet if available (Tauri persistent storage), else localStorage
+    if (typeof echoGet === "function") {
+      lastSeen = echoGet(_changelogSeenKey);
+    } else {
+      lastSeen = localStorage.getItem(_changelogSeenKey);
+    }
 
-      var storageKey = "echo-whats-new-seen";
-      var lastSeen = localStorage.getItem(storageKey);
-      if (lastSeen === info.version) return; // Already seen this version
+    if (lastSeen === CHANGELOG_LATEST) {
+      return; // Already seen
+    }
 
-      var notes = ECHO_CHANGELOG[info.version];
-      if (!notes || !notes.length) return; // No notes for this version
-
-      showWhatsNew(info.version, notes);
-      localStorage.setItem(storageKey, info.version);
-    }).catch(function() {});
-  }, 2000);
+    // Show the latest entry as a popup
+    var latest = ECHO_CHANGELOG[0];
+    showWhatsNew(latest.version, latest.title, latest.notes);
+    _markChangelogSeen();
+  }, 2500);
 })();
 
-function showWhatsNew(version, notes) {
-  // Build the overlay
+function _markChangelogSeen() {
+  if (typeof echoSet === "function") {
+    echoSet(_changelogSeenKey, CHANGELOG_LATEST);
+  } else {
+    localStorage.setItem(_changelogSeenKey, CHANGELOG_LATEST);
+  }
+}
+
+function showWhatsNew(version, title, notes) {
   var overlay = document.createElement("div");
   overlay.className = "whats-new-overlay";
 
@@ -66,7 +153,7 @@ function showWhatsNew(version, notes) {
   var header = document.createElement("div");
   header.className = "whats-new-header";
   header.innerHTML = '<span class="whats-new-badge">NEW</span>' +
-    '<h2>What\'s New in v' + version + '</h2>';
+    '<h2>' + _escHtml(title || ("What's New — " + version)) + '</h2>';
 
   var list = document.createElement("ul");
   list.className = "whats-new-list";
@@ -92,7 +179,6 @@ function showWhatsNew(version, notes) {
   panel.appendChild(footer);
   overlay.appendChild(panel);
 
-  // Close on overlay click
   overlay.addEventListener("click", function(e) {
     if (e.target === overlay) {
       overlay.classList.add("whats-new-closing");
@@ -101,4 +187,107 @@ function showWhatsNew(version, notes) {
   });
 
   document.body.appendChild(overlay);
+}
+
+// ── Browsable Updates Panel ──
+
+function showUpdatesPanel() {
+  // Remove existing if open
+  var existing = document.querySelector(".updates-overlay");
+  if (existing) { existing.remove(); return; }
+
+  var overlay = document.createElement("div");
+  overlay.className = "whats-new-overlay updates-overlay";
+
+  var panel = document.createElement("div");
+  panel.className = "whats-new-panel updates-panel";
+
+  var header = document.createElement("div");
+  header.className = "whats-new-header";
+  header.innerHTML = '<h2>Update History</h2>';
+
+  var closeBtn = document.createElement("button");
+  closeBtn.className = "updates-close-x";
+  closeBtn.textContent = "\u00d7";
+  closeBtn.addEventListener("click", function() {
+    overlay.classList.add("whats-new-closing");
+    setTimeout(function() { overlay.remove(); }, 300);
+  });
+  header.appendChild(closeBtn);
+
+  panel.appendChild(header);
+
+  ECHO_CHANGELOG.forEach(function(entry, i) {
+    var section = document.createElement("div");
+    section.className = "updates-entry";
+    if (i === 0) section.classList.add("updates-latest");
+
+    var entryHeader = document.createElement("div");
+    entryHeader.className = "updates-entry-header";
+    var titleEl = document.createElement("h3");
+    titleEl.textContent = entry.title || entry.version;
+    var versionEl = document.createElement("span");
+    versionEl.className = "updates-entry-version";
+    versionEl.textContent = entry.version;
+    entryHeader.appendChild(titleEl);
+    entryHeader.appendChild(versionEl);
+    section.appendChild(entryHeader);
+
+    var list = document.createElement("ul");
+    list.className = "whats-new-list";
+    entry.notes.forEach(function(note) {
+      var li = document.createElement("li");
+      li.textContent = note;
+      list.appendChild(li);
+    });
+    section.appendChild(list);
+    panel.appendChild(section);
+  });
+
+  overlay.appendChild(panel);
+
+  overlay.addEventListener("click", function(e) {
+    if (e.target === overlay) {
+      overlay.classList.add("whats-new-closing");
+      setTimeout(function() { overlay.remove(); }, 300);
+    }
+  });
+
+  // Mark as seen
+  _markChangelogSeen();
+  // Clear badge
+  var badge = document.getElementById("updates-badge");
+  if (badge) badge.classList.add("hidden");
+
+  document.body.appendChild(overlay);
+}
+
+function _escHtml(s) {
+  var d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Button wiring ──
+var openUpdatesBtn = document.getElementById("open-updates");
+if (openUpdatesBtn) {
+  openUpdatesBtn.addEventListener("click", showUpdatesPanel);
+
+  // Show badge dot if there are unseen updates
+  setTimeout(function() {
+    var lastSeen = null;
+    if (typeof echoGet === "function") {
+      lastSeen = echoGet(_changelogSeenKey);
+    } else {
+      lastSeen = localStorage.getItem(_changelogSeenKey);
+    }
+    if (lastSeen !== CHANGELOG_LATEST) {
+      // Add a small notification dot
+      var badge = document.createElement("span");
+      badge.id = "updates-badge";
+      badge.className = "updates-badge";
+      openUpdatesBtn.style.position = "relative";
+      openUpdatesBtn.appendChild(badge);
+    }
+  }, 500);
 }
