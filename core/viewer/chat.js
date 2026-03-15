@@ -139,6 +139,12 @@ function renderChatMessage(message) {
     messageEl.appendChild(deleteBtn);
   }
 
+  // Security: reject external fileUrls to prevent Bearer token leaking to attacker servers
+  if (message.fileUrl && !message.fileUrl.startsWith("/")) {
+    debugLog("[chat] rejected external fileUrl: " + message.fileUrl);
+    message.fileUrl = null;
+  }
+
   if (message.type === CHAT_FILE_TYPE && message.fileUrl) {
     if (message.fileType?.startsWith("image/")) {
       const imgEl = document.createElement("img");

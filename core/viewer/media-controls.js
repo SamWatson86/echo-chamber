@@ -70,12 +70,29 @@ async function refreshDevices() {
   }
   const mics = devices.filter((d) => d.kind === "audioinput");
   const cams = devices.filter((d) => d.kind === "videoinput");
-  const speakers = devices.filter((d) => d.kind === "audiooutput");
+  var speakers = devices.filter((d) => d.kind === "audiooutput");
 
   // Detect macOS permission-denied scenario: devices exist but all have empty labels
   const allLabelsEmpty = devices.length > 0 && devices.every((d) => !d.label);
   if (allLabelsEmpty) {
     debugLog("[devices] enumerateDevices returned " + devices.length + " devices but all labels are empty (permissions not granted)");
+  }
+
+  // On native Tauri (Windows), use WASAPI enumeration for output devices.
+  // WebView2's enumerateDevices returns output devices but setSinkId is broken,
+  // so we need native device IDs that match what WASAPI uses for switching.
+  if (hasTauriIPC()) {
+    try {
+      var nativeOutputs = await tauriInvoke("list_audio_output_devices");
+      if (Array.isArray(nativeOutputs) && nativeOutputs.length > 0) {
+        speakers = nativeOutputs.map(function(dev) {
+          return { deviceId: dev.id, kind: "audiooutput", label: dev.name, groupId: "" };
+        });
+        debugLog("[devices] using " + speakers.length + " native output devices");
+      }
+    } catch (err) {
+      debugLog("[devices] native output enumeration failed: " + (err.message || err));
+    }
   }
 
   setSelectOptions(micSelect, mics, "Default mic");
@@ -122,18 +139,27 @@ async function refreshDevices() {
 }
 
 async function applySpeakerToMedia() {
-  const audioEls = audioBucketEl.querySelectorAll("audio");
-  if (selectedSpeakerId) {
-    audioEls.forEach((el) => {
-      if (typeof el.setSinkId === "function") {
-        el.setSinkId(selectedSpeakerId).catch(() => {});
+  var sinkId = selectedSpeakerId && selectedSpeakerId.length > 0 ? selectedSpeakerId : "default";
+  var audioEls = audioBucketEl.querySelectorAll("audio");
+  debugLog("[speaker] applySpeakerToMedia: sinkId=" + sinkId + " audioEls=" + audioEls.length);
+  for (var i = 0; i < audioEls.length; i++) {
+    var el = audioEls[i];
+    if (typeof el.setSinkId === "function") {
+      try {
+        await el.setSinkId(sinkId);
+        debugLog("[speaker] setSinkId OK on element " + i + " → " + sinkId);
+      } catch (e) {
+        debugLog("[speaker] setSinkId FAILED on element " + i + ": " + e.message);
       }
-    });
+    } else {
+      debugLog("[speaker] setSinkId NOT supported on element " + i);
+    }
   }
   // Route participant volume-boost AudioContext to selected speaker
   if (_participantAudioCtx && typeof _participantAudioCtx.setSinkId === "function") {
-    var sinkId = selectedSpeakerId && selectedSpeakerId.length > 0 ? selectedSpeakerId : "default";
-    try { await _participantAudioCtx.setSinkId(sinkId); } catch {}
+    try { await _participantAudioCtx.setSinkId(sinkId); } catch (e) {
+      debugLog("[speaker] AudioContext setSinkId failed: " + e.message);
+    }
   }
   if (soundboardContext) {
     await applySoundboardOutputDevice();
@@ -152,27 +178,38 @@ function resumeAnalyser(analyserObj) {
 async function switchMic(deviceId) {
   selectedMicId = deviceId || "";
   echoSet("echo-device-mic", selectedMicId);
-  if (!room || !micEnabled) return;
-  // Tear down existing noise cancellation before switching
-  disableNoiseCancellation();
-  await room.localParticipant.setMicrophoneEnabled(true, { deviceId: selectedMicId || undefined });
-  // Re-apply noise cancellation to new mic track
-  if (noiseCancelEnabled) {
-    try { await enableNoiseCancellation(); } catch (e) {
-      debugLog("[noise-cancel] Could not re-apply after mic switch: " + (e.message || e));
+  if (!room) return;
+  try {
+    disableNoiseCancellation();
+    debugLog("[mic] switching device via room.switchActiveDevice: " + selectedMicId);
+    await room.switchActiveDevice("audioinput", selectedMicId || "default");
+    if (noiseCancelEnabled) {
+      try { await enableNoiseCancellation(); } catch (e) {
+        debugLog("[noise-cancel] Could not re-apply after mic switch: " + (e.message || e));
+      }
     }
+    debugLog("[mic] switch complete to device: " + selectedMicId);
+  } catch (err) {
+    debugLog("[mic] switch error: " + (err.message || err));
+    setStatus("Mic switch failed — try again");
   }
 }
 
 async function switchCam(deviceId) {
   selectedCamId = deviceId || "";
   echoSet("echo-device-cam", selectedCamId);
-  if (!room || !camEnabled) return;
-  if (_isMobileDevice) {
-    // On mobile, use facingMode instead of deviceId (labels are cryptic)
-    await room.localParticipant.setCameraEnabled(true, { facingMode: _camFacingMode });
-  } else {
-    await room.localParticipant.setCameraEnabled(true, { deviceId: selectedCamId || undefined });
+  if (!room) return;
+  try {
+    if (_isMobileDevice) {
+      await room.localParticipant.setCameraEnabled(true, { facingMode: _camFacingMode });
+    } else {
+      debugLog("[cam] switching device via room.switchActiveDevice: " + selectedCamId);
+      await room.switchActiveDevice("videoinput", selectedCamId || "default");
+    }
+    debugLog("[cam] switch complete to device: " + selectedCamId);
+  } catch (err) {
+    debugLog("[cam] switch error: " + (err.message || err));
+    setStatus("Camera switch failed — try again");
   }
 }
 
@@ -192,6 +229,18 @@ async function flipCam() {
 async function switchSpeaker(deviceId) {
   selectedSpeakerId = deviceId || "";
   echoSet("echo-device-speaker", selectedSpeakerId);
+  debugLog("[speaker] switching to: " + (selectedSpeakerId || "default"));
+  // On native Tauri (Windows): use WASAPI to switch system default audio output.
+  // WebView2's setSinkId resolves OK but silently fails to change output.
+  if (hasTauriIPC()) {
+    try {
+      await tauriInvoke("set_audio_output_device", { deviceId: selectedSpeakerId });
+      debugLog("[speaker] native WASAPI switch OK");
+    } catch (err) {
+      debugLog("[speaker] native switch failed: " + (err.message || err));
+    }
+  }
+  // Also apply setSinkId for browser viewers and as best-effort in WebView2
   await applySpeakerToMedia();
 }
 

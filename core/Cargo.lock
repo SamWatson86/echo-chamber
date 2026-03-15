@@ -858,6 +858,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-server",
+ "base64 0.22.1",
  "futures-util",
  "jsonwebtoken",
  "rand 0.8.5",

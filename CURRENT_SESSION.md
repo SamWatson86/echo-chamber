@@ -1,6 +1,6 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-02-28
+**Last Updated**: 2026-03-15
 **Current Version**: v0.4.1 (released — CI complete, server running locally)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
@@ -15,7 +15,62 @@
 
 ---
 
-## What Changed Today (2026-02-28)
+## What Changed Today (2026-03-15)
+
+### PG-13 Sync Query Mechanism (#104) — FIX
+- Previous fix (ParticipantConnected re-broadcast) had timing issues — new joiner's data channel often not ready yet
+- Added "pg13-query" mechanism: new joiner sends query 2s after connecting, existing participants with PG-13 active respond directly
+- ParticipantConnected broadcast now targeted to specific new joiner via `destinationIdentities` (no longer spams everyone)
+- New `pg13-query` handler in DataReceived responds with targeted `pg13-mode` sync message
+- Files: `connect.js`, `changelog.js`
+
+### Bug #110: Feedback screenshots not appearing in GitHub Issues — FIX
+- Screenshots uploaded via feedback form were stored locally as `/api/chat/uploads/upload-{ts}` — a relative URL unreachable by GitHub
+- `create_github_issue()` now reads the screenshot file from disk, base64-encodes it, and embeds it as an HTML `<img>` inside a `<details>` block in the issue body
+- Images over 48KB (too large for GitHub issue body) get a local file reference instead
+- Added `base64` crate dependency to `core/control/Cargo.toml`
+- Files: `core/control/src/main.rs`, `core/control/Cargo.toml`
+- **Requires rebuild + restart of control plane**
+
+---
+
+## What Changed (2026-03-06)
+
+### Security Hardening Batch — DEPLOYED
+Three security fixes implemented and verified:
+
+1. **Login rate limiting** (`main.rs`) — IP-based, 5 failed attempts per 15 min window → HTTP 429. Uses `ConnectInfo<SocketAddr>` extraction + `HashMap<IpAddr, (u32, Instant)>` in AppState. Successful login clears counter.
+2. **Path traversal prevention** (`main.rs`) — `is_safe_path_component()` validates room names and file names in `create_room`, `chat_history_path`, `soundboard_room_dir`, `soundboard_file_path`. Rejects `/`, `\`, `..`, empty strings.
+3. **Chat fileUrl token leak** (`chat.js`) — Rejects `fileUrl` not starting with `/` at top of `renderChatMessage()`. Prevents `fetchImageAsBlob()` from sending Bearer token to attacker-controlled external URLs.
+
+### CSS Screen Share Overflow Fix
+- `.screens-grid` changed to `grid-auto-rows: 1fr` + `overflow: hidden`
+- `.screens-grid .tile` gets `max-height: 100%` to prevent tiles exceeding viewport when maximized
+
+### Screen Share Stop Banner Fix (`screen-share.js`)
+- `stopScreenShareManual()` now stops original getDisplayMedia tracks (not just canvas tracks)
+- Fixes browser "sharing your screen" indicator persisting after clicking the stop share button
+
+---
+
+## What Changed (2026-03-03)
+
+### PG-13 Sync for Late Joiners (#104) — FIX
+- Late joiners now receive PG-13 state from existing participants
+- Re-broadcast via `ParticipantConnected` handler (same pattern as avatar/device sync)
+- `sync: true` flag distinguishes from manual toggle — subtle toast, no speech, deduped
+- Files: `connect.js`
+
+### Mic/Cam Switching Fix (#105) — FIX
+- `switchMic()` and `switchCam()` now use `restartTrack()` for seamless device switching
+- LiveKit SDK's `setMicrophoneEnabled(true)` was short-circuiting when mic already on
+- Fallback to disable/re-enable if `restartTrack` unavailable
+- Added try/catch + debug logging for both paths
+- Files: `media-controls.js`
+
+---
+
+## What Changed (2026-02-28)
 
 ### PG-13 Mode (#98) — NEW
 - **Toggle button** in Active Users sidebar (row 1: Chat, Mute All, PG-13)
@@ -84,6 +139,23 @@
 - Minor: stale `cameraTrackSid` in observer's participantState after remote camera unpublish (cosmetic only)
 - **#83** — Signal notifications (deferred — requires external infrastructure setup)
 
+### Security Hardening (audited 2026-03-03)
+
+Full security sweep completed. No credentials in git, no eval/injection, TLS enforced.
+
+**FIXED (2026-03-06):**
+- ~~Admin dashboard XSS~~ — Already fixed, all fields use `esc()` / `escAdm()`
+- ~~Chat fileUrl token leak~~ — Rejects external URLs in `renderChatMessage()` (`chat.js`)
+- ~~Login brute-force~~ — IP-based rate limit 5/15min with 429 response (`main.rs`)
+- ~~Path traversal~~ — `is_safe_path_component()` on room names + file names (`main.rs`)
+
+**Remaining (lower priority):**
+- `/api/online` unauthenticated — leaks room membership
+- CORS fully open (`Any`) — should scope to `tauri://localhost` + server origin
+- No security headers (CSP, HSTS, X-Frame-Options, nosniff)
+- Avatar URL spoofing via data channel (no sender identity validation)
+- Admin password uses plaintext path in .env (Argon2 path exists but unused)
+
 ---
 
 ## Active Worktree
@@ -95,8 +167,8 @@
 
 ### Viewer JS
 - `core/viewer/state.js` — Added `flipCamBtn`, `_camFacingMode`, `pg13ModeActive`, `togglePg13Button`
-- `core/viewer/media-controls.js` — Added `flipCam()`, mobile facingMode in `switchCam()`/`toggleCam()`, PG-13 toggle/apply/announce functions
-- `core/viewer/connect.js` — Screen tile cleanup in disconnect handler, password field show on auth failure, local screen tile identity, PG-13 data handler + button enable/disable
+- `core/viewer/media-controls.js` — Added `flipCam()`, mobile facingMode in `switchCam()`/`toggleCam()`, PG-13 toggle/apply/announce functions, **restartTrack for mic/cam switching**
+- `core/viewer/connect.js` — Screen tile cleanup in disconnect handler, password field show on auth failure, local screen tile identity, PG-13 data handler + button enable/disable, **PG-13 sync re-broadcast + dedup**
 - `core/viewer/participants.js` — `.portrait` class in `tagAspect()`, volume slider in `addScreenTile()`
 - `core/viewer/audio-routing.js` — `tile.dataset.identity`, volume slider reveal on screen audio attach
 - `core/viewer/app.js` — Flip button handler, mobile cam dropdown hide, password auto-fill, Advanced toggle

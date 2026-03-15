@@ -116,7 +116,10 @@ function ensureGainNode(state, audioEl, isScreen) {
   try {
     var actx = getParticipantAudioCtx();
     if (actx.state === "suspended") actx.resume().catch(function() {});
-    if (!audioEl.srcObject) return null;
+    if (!audioEl.srcObject) {
+      debugLog("[vol-boost] srcObject is null — cannot create GainNode");
+      return null;
+    }
     var srcNode = actx.createMediaStreamSource(audioEl.srcObject);
     var gainNode = actx.createGain();
     gainNode.gain.value = 1.0;
@@ -126,6 +129,8 @@ function ensureGainNode(state, audioEl, isScreen) {
     audioEl.muted = false;
     var ref = { source: srcNode, gain: gainNode };
     map.set(audioEl, ref);
+    debugLog("[vol-boost] GainNode created for " + (isScreen ? "screen" : "mic") +
+      " audio (actx.state=" + actx.state + " sinkId=" + (actx.sinkId || "default") + ")");
     return ref;
   } catch (e) {
     debugLog("[vol-boost] lazy GainNode failed: " + e.message);
@@ -422,7 +427,8 @@ function handleTrackSubscribed(track, publication, participant) {
     const label = `${participant.name || "Guest"} (Screen)`;
     const element = createLockedVideoElement(track);
     configureVideoElement(element, true);
-    // Minimize video playout delay for screen share to reduce A/V desync
+    // Add playout delay buffer for remote screen shares to absorb WiFi jitter.
+    // Trades ~150ms latency for smooth playback instead of stuttering.
     var _isRemoteScreen = room && room.localParticipant && participant.identity !== room.localParticipant.identity;
     if (_isRemoteScreen && track?.mediaStreamTrack) {
       try {
@@ -431,8 +437,8 @@ function handleTrackSubscribed(track, publication, participant) {
           const receivers = pc.getReceivers();
           const videoReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
           if (videoReceiver && "playoutDelayHint" in videoReceiver) {
-            videoReceiver.playoutDelayHint = 0; // Minimum playout delay
-            debugLog("[sync] set video playoutDelayHint=0 for " + participant.identity);
+            videoReceiver.playoutDelayHint = 0.15; // 150ms jitter buffer
+            debugLog("[sync] set video playoutDelayHint=0.15 for " + participant.identity);
           }
         }
       } catch {}
@@ -558,7 +564,8 @@ function handleTrackSubscribed(track, publication, participant) {
     // Volume boost: GainNode is created lazily in applyParticipantAudioVolumes()
     // only when the user boosts above 100%. At normal volume, the plain HTML
     // audio element handles playback directly.
-    // Minimize audio playout delay for screen share audio to reduce A/V desync
+    // Add playout delay buffer for screen share audio to absorb WiFi jitter
+    // Matches the 150ms video buffer so audio and video stay in sync
     if (source === LK.Track.Source.ScreenShareAudio) {
       try {
         const pc = room?.engine?.pcManager?.subscriber?.pc;
@@ -566,8 +573,8 @@ function handleTrackSubscribed(track, publication, participant) {
           const receivers = pc.getReceivers();
           const audioReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
           if (audioReceiver && "playoutDelayHint" in audioReceiver) {
-            audioReceiver.playoutDelayHint = 0; // Minimum playout delay
-            debugLog("[sync] set audio playoutDelayHint=0 for " + participant.identity);
+            audioReceiver.playoutDelayHint = 0.15; // 150ms jitter buffer
+            debugLog("[sync] set audio playoutDelayHint=0.15 for " + participant.identity);
           }
         }
       } catch {}

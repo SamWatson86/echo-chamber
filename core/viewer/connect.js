@@ -482,11 +482,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       publishDefaults: {
         simulcast: true,
         videoCodec: "h264",
-        videoEncoding: { maxBitrate: 5_000_000, maxFramerate: 60 },
+        videoEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 },
         videoSimulcastLayers: [
-          { width: 960, height: 540, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
+          { width: 960, height: 540, encoding: { maxBitrate: 1_000_000, maxFramerate: 30 } },
         ],
-        screenShareEncoding: { maxBitrate: 15_000_000, maxFramerate: 60 },
+        screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
         dtx: true,
         degradationPreference: "maintain-resolution",
       },
@@ -830,6 +830,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         broadcastAvatar(identityBase, relativePath);
       }
       broadcastDeviceId();
+      // Re-broadcast PG-13 state so late joiners pick it up (target only the new joiner)
+      if (pg13ModeActive) {
+        var enc = new TextEncoder();
+        room.localParticipant.publishData(
+          enc.encode(JSON.stringify({ type: "pg13-mode", enabled: true, sync: true })),
+          { reliable: true, destinationIdentities: [participant.identity] }
+        );
+      }
     }, _avatarDelay);
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
@@ -1044,9 +1052,27 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           var ackCtrl = _pubBitrateControl.get(msg.identity);
           if (ackCtrl) ackCtrl.ackReceived = true;
         } else if (msg.type === "pg13-mode") {
+          var wasActive = pg13ModeActive;
           applyPg13Ui(!!msg.enabled);
-          announcePg13(!!msg.enabled);
-          showToast((msg.senderName || "Someone") + (msg.enabled ? " enabled" : " disabled") + " PG-13 Mode", 4000);
+          if (msg.sync) {
+            // Sync message from existing participant — subtle toast, no speech, dedup
+            if (!wasActive && msg.enabled) {
+              showToast("PG-13 Mode is active in this room", 4000);
+            }
+          } else {
+            // Manual toggle — full announcement
+            announcePg13(!!msg.enabled);
+            showToast((msg.senderName || "Someone") + (msg.enabled ? " enabled" : " disabled") + " PG-13 Mode", 4000);
+          }
+        } else if (msg.type === "pg13-query") {
+          // New joiner is asking for PG-13 state — respond if active
+          if (pg13ModeActive && participant) {
+            var enc = new TextEncoder();
+            room.localParticipant.publishData(
+              enc.encode(JSON.stringify({ type: "pg13-mode", enabled: true, sync: true })),
+              { reliable: true, destinationIdentities: [participant.identity] }
+            );
+          }
         }
       } catch {
         // ignore
@@ -1222,14 +1248,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       return pub && pub.source === LK.Track.Source.ScreenShare;
     });
     if (hasScreen) {
-      if (!hiddenScreens.has(participant.identity)) {
-        hiddenScreens.add(participant.identity);
-      }
+      // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
+      // The "Stop Watching" button is available if they want to unsubscribe later.
       var cardRef = participantCards.get(participant.identity);
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
-        cardRef.watchToggleBtn.textContent = "Start Watching";
-        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
+        cardRef.watchToggleBtn.textContent = "Stop Watching";
+        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Stop Watching"; }
       }
     }
   });
@@ -1264,6 +1289,16 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     scheduleReconcileWaves("post-connect");
   }
   startAudioMonitor();
+
+  // Query existing participants for PG-13 state (data channel needs time to be ready)
+  setTimeout(() => {
+    if (!room || !room.localParticipant) return;
+    var enc = new TextEncoder();
+    room.localParticipant.publishData(
+      enc.encode(JSON.stringify({ type: "pg13-query" })),
+      { reliable: true }
+    );
+  }, 2000);
 
   // ── First-connect-only UI setup (skip on room switch) ──
   if (!reuseAdmin) {

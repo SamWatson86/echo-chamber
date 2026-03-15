@@ -312,12 +312,12 @@ function startScreenWatchdog() {
       // New tiles need time to receive first frames before recovery kicks in.
       var tileAge = now - (meta.createdAt || 0);
       if (tileAge < 8000) return;
-      if (isBlack && blackFor > 1200 && track) {
-        if (!meta.lastSwap || now - meta.lastSwap > 2500) {
+      if (isBlack && blackFor > 3000 && track) {
+        if (!meta.lastSwap || now - meta.lastSwap > 10000) {
           meta.lastSwap = now;
           replaceScreenVideoElement(tile, track, publication);
         }
-        if (blackFor > 3500 && (!meta.lastResub || now - meta.lastResub > 6000)) {
+        if (blackFor > 6000 && (!meta.lastResub || now - meta.lastResub > 12000)) {
           meta.lastResub = now;
           meta.blackAttempts = (meta.blackAttempts || 0) + 1;
           if (publication?.setSubscribed) {
@@ -327,19 +327,22 @@ function startScreenWatchdog() {
           }
         }
       }
-      if (now - (meta.lastKeyframe || 0) > 2500) {
+      if (now - (meta.lastKeyframe || 0) > 10000) {
         meta.lastKeyframe = now;
         requestVideoKeyFrame(publication, track);
       }
       // Give new tracks time to settle before trying aggressive recovery.
       if (!isBlack && sinceFirstFrame > 0 && sinceFirstFrame < 5000 && age < 5000) return;
-      const stalled = age > 1200;
+      const stalled = age > 3000;
       if (!stalled) return;
-      const minFixInterval = meta.lastFix ? (isBlack ? 2200 : 8000) : (isBlack ? 1200 : 2000);
+      const minFixInterval = meta.lastFix ? (isBlack ? 8000 : 15000) : (isBlack ? 4000 : 6000);
       if (now - (meta.lastFix || 0) < minFixInterval) return;
 
       meta.lastFix = now;
       meta.retryCount = (meta.retryCount || 0) + 1;
+
+      // Back off after 5 failed recovery attempts — stop hammering the stream
+      if (meta.retryCount > 5) return;
 
       if (track) {
         if (publication?.setSubscribed) {
@@ -356,23 +359,18 @@ function startScreenWatchdog() {
         } catch {}
         ensureVideoPlays(track, video);
         ensureVideoSubscribed(publication, video);
-        forceVideoLayer(publication, video);
-        requestVideoKeyFrame(publication, track);
         video._isBlack = false;
       }
 
-      // Only flip subscription as a last resort, and not too frequently.
-      if (meta.retryCount >= 2 && publication?.setSubscribed && (age > 12000 || (isBlack && stalled))) {
+      // Reset retry counter periodically but do NOT cycle subscription.
+      // Subscription toggling from the watchdog causes cascading resubscription
+      // storms that starve the encoder to 0fps.
+      if (meta.retryCount >= 5) {
         meta.retryCount = 0;
-        markResubscribeIntent(trackSid);
-        publication.setSubscribed(false);
-        setTimeout(() => {
-          publication.setSubscribed(true);
-        }, 400);
       }
       // Avoid forcing remote users to re-share (re-prompts).
     });
-  }, 1500);
+  }, 3000);
 }
 
 function forceReattachVideo(publication, participant) {
@@ -592,7 +590,7 @@ function startBasicVideoMonitor(element) {
         count += 1;
       }
       const avg = count ? sum / (count * 3) : 0;
-      element._isBlack = avg < 3;
+      element._isBlack = avg < 8;
     } catch {
       // ignore sampling errors
     }
@@ -710,8 +708,6 @@ function replaceScreenVideoElement(tile, track, publication) {
   }
   ensureVideoPlays(track, newEl);
   ensureVideoSubscribed(publication, newEl);
-  forceVideoLayer(publication, newEl);
-  requestVideoKeyFrame(publication, track);
 }
 
 function kickStartScreenVideo(publication, track, element) {
@@ -847,20 +843,10 @@ function ensureVideoSubscribed(publication, element) {
       if (!evsLocal) return;
     }
   }
-  let attempts = 0;
-  const check = () => {
-    attempts += 1;
-    if (!element.isConnected) return;
-    if (element.videoWidth > 0 || element.videoHeight > 0) return;
-    publication.setSubscribed(false);
-    setTimeout(() => {
-      publication.setSubscribed(true);
-    }, 200);
-    if (attempts < 3) {
-      setTimeout(check, 2000);
-    }
-  };
-  setTimeout(check, 2000);
+  // Just ensure subscription is active — NEVER toggle off/on here.
+  // Subscription cycling from multiple code paths creates cascading
+  // resubscription storms that starve the encoder to 0fps.
+  publication.setSubscribed(true);
 }
 
 function getTrackSid(publication, track, fallback) {
@@ -1951,22 +1937,21 @@ function scheduleCameraRecovery(identity, cardRef, publication) {
     const video = cardRef.avatar.querySelector("video");
     if (!video || !video.isConnected) return;
     const lastFrame = video._lastFrameTs || 0;
-    const stalled = performance.now() - lastFrame > 1400;
+    const stalled = performance.now() - lastFrame > 3000;
     const isBlack = video._isBlack === true;
     const noSize = video.videoWidth === 0 || video.videoHeight === 0;
     if (!stalled && !isBlack && !noSize) return;
     cameraRecoveryAttempts.set(key, attempt + 1);
+    // Do NOT cycle subscription — just ensure it stays on and reattach.
+    // Subscription toggling causes SDP renegotiation that starves the encoder.
     if (publication?.setSubscribed) {
-      publication.setSubscribed(false);
-      setTimeout(() => publication.setSubscribed(true), 300);
+      publication.setSubscribed(true);
     }
     if (publication?.track) {
       updateAvatarVideo(cardRef, publication.track);
       const next = cardRef.avatar.querySelector("video");
       if (next) {
         ensureVideoPlays(publication.track, next);
-        ensureVideoSubscribed(publication, next);
-        requestVideoKeyFrame(publication, publication.track);
       }
     }
   }, 900);

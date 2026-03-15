@@ -934,13 +934,14 @@ video {
 
 .screens-grid {
   align-content: start;
-  grid-auto-rows: auto;
+  grid-auto-rows: 1fr;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .screens-grid .tile {
   min-height: 0;
+  max-height: 100%;
   overflow: hidden;
   aspect-ratio: 16 / 9;
 }
@@ -4589,6 +4590,64 @@ body[data-theme="ultra-instinct"] .theme-card.is-active {
   from { opacity: 1; transform: scale(1) translateY(0); }
   to { opacity: 0; transform: scale(0.95) translateY(10px); }
 }
+
+/* ─── Updates Panel (browsable history) ─── */
+.updates-panel {
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 80px);
+}
+.updates-close-x {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.updates-close-x:hover { color: var(--text); }
+.updates-entry {
+  padding: 16px 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+}
+.updates-entry:first-of-type { border-top: none; }
+.updates-latest { }
+.updates-entry-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.updates-entry-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.updates-entry-version {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.updates-entry .whats-new-list {
+  margin-bottom: 0;
+}
+
+/* Updates badge dot */
+.updates-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  background: #f59e0b;
+  border-radius: 50%;
+  border: 2px solid rgba(15, 23, 42, 0.8);
+}
+.updates-badge.hidden { display: none; }
 
 /* ═══════════════════════════════════════════
    ADMIN MODE

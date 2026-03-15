@@ -8,6 +8,13 @@ mod audio_capture_stub;
 #[cfg(not(target_os = "windows"))]
 use audio_capture_stub as audio_capture;
 
+#[cfg(target_os = "windows")]
+mod audio_output;
+#[cfg(not(target_os = "windows"))]
+mod audio_output_stub;
+#[cfg(not(target_os = "windows"))]
+use audio_output_stub as audio_output;
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -168,6 +175,16 @@ fn stop_audio_capture() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn list_audio_output_devices() -> Vec<audio_output::OutputDevice> {
+    audio_output::list_output_devices()
+}
+
+#[tauri::command]
+fn set_audio_output_device(device_id: String) -> Result<(), String> {
+    audio_output::set_output_device(&device_id)
+}
+
 fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let _ = std::fs::create_dir_all(&dir);
@@ -256,6 +273,8 @@ fn main() {
             list_capturable_windows,
             start_audio_capture,
             stop_audio_capture,
+            list_audio_output_devices,
+            set_audio_output_device,
             check_for_updates,
         ])
         .setup(move |app| {
@@ -319,6 +338,11 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Error while running Echo Chamber");
+        .build(tauri::generate_context!())
+        .expect("Error while building Echo Chamber")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                audio_output::restore_default_output();
+            }
+        });
 }

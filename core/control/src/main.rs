@@ -2,6 +2,7 @@ mod audio_capture;
 mod jam_bot;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use base64::Engine as _;
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::OriginalUri;
 use axum::http::HeaderValue;
@@ -22,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -60,6 +61,7 @@ struct AppState {
     spotify_token_file: PathBuf,
     http_client: reqwest::Client,
     viewer_stamp: Arc<RwLock<String>>,
+    login_attempts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -680,6 +682,7 @@ async fn main() {
         spotify_token_file,
         http_client: reqwest::Client::new(),
         viewer_stamp: Arc::new(RwLock::new(viewer_stamp.clone())),
+        login_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Background task: clean up stale participants (no heartbeat for 20s)
@@ -926,11 +929,12 @@ async fn main() {
             generate_self_signed().await
         };
         axum_server::bind_rustls(addr, tls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .unwrap();
     } else {
-        axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .unwrap();
     }
@@ -1276,6 +1280,7 @@ async fn root_route(
 
 async fn login(
     State(state): State<AppState>,
+    connect_info: axum::extract::ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
@@ -1284,9 +1289,35 @@ async fn login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-");
     info!("login request (ua: {})", ua);
+
+    // Rate limit: 5 failed attempts per 15 minutes per IP
+    let ip = connect_info.0.ip();
+    {
+        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        // Clean up expired entries while we have the lock
+        let window = Duration::from_secs(15 * 60);
+        attempts.retain(|_, (_, first)| first.elapsed() < window);
+        if let Some((count, first)) = attempts.get(&ip) {
+            if *count >= 5 && first.elapsed() < window {
+                warn!("login rate-limited ip={}", ip);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+        }
+    }
+
     if !verify_password(&state.config, &payload.password) {
-        warn!("login failed (bad password)");
+        warn!("login failed (bad password) ip={}", ip);
+        // Record failed attempt
+        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = attempts.entry(ip).or_insert((0, Instant::now()));
+        entry.0 += 1;
         return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Successful login — clear any failed attempts for this IP
+    {
+        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        attempts.remove(&ip);
     }
 
     let now = now_ts();
@@ -1431,6 +1462,9 @@ async fn create_room(
     Json(payload): Json<CreateRoomRequest>,
 ) -> Result<Json<RoomInfo>, StatusCode> {
     ensure_admin(&state, &headers)?;
+    if !is_safe_path_component(&payload.room_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let mut rooms = state.rooms.lock().unwrap_or_else(|e| e.into_inner());
     let entry = rooms.entry(payload.room_id.clone()).or_insert(RoomInfo {
         room_id: payload.room_id.clone(),
@@ -2158,9 +2192,13 @@ async fn submit_bug_report(
     ) {
         let client = state.http_client.clone();
         let gh_report = report.clone();
+        let uploads_dir = {
+            let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
+            chat.uploads_dir.clone()
+        };
         if let Ok(Some((number, url))) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            create_github_issue(client, pat, repo, gh_report),
+            create_github_issue(client, pat, repo, gh_report, uploads_dir),
         ).await {
             report.github_issue_number = Some(number);
             report.github_issue_url = Some(url);
@@ -3711,12 +3749,22 @@ fn soundboard_meta_path(dir: &PathBuf) -> PathBuf {
     dir.join("soundboard.json")
 }
 
+fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains("..")
+        && s != "."
+}
+
 fn soundboard_room_dir(dir: &PathBuf, room_id: &str) -> PathBuf {
-    dir.join(room_id)
+    let safe = if is_safe_path_component(room_id) { room_id } else { "_invalid" };
+    dir.join(safe)
 }
 
 fn soundboard_file_path(dir: &PathBuf, room_id: &str, file_name: &str) -> PathBuf {
-    soundboard_room_dir(dir, room_id).join(file_name)
+    let safe_name = if is_safe_path_component(file_name) { file_name } else { "_invalid" };
+    soundboard_room_dir(dir, room_id).join(safe_name)
 }
 
 fn load_soundboard(state: &mut SoundboardState) {
@@ -3775,7 +3823,8 @@ fn persist_soundboard(state: &SoundboardState) {
 // ==================== CHAT HELPERS ====================
 
 fn chat_history_path(dir: &PathBuf, room: &str) -> PathBuf {
-    dir.join(format!("{}.json", room))
+    let safe = if is_safe_path_component(room) { room } else { "_invalid" };
+    dir.join(format!("{}.json", safe))
 }
 
 fn load_chat_history(dir: &PathBuf, room: &str) -> Vec<ChatMessage> {
@@ -4478,7 +4527,7 @@ fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
 /// Create a GitHub Issue from a bug report.
 /// Returns (issue_number, html_url) on success.
 /// Silently returns None if creation fails.
-async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport) -> Option<(u64, String)> {
+async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport, uploads_dir: PathBuf) -> Option<(u64, String)> {
     let feedback_type = report.feedback_type.as_deref().unwrap_or("bug");
     let prefix = match feedback_type {
         "enhancement" => "Enhancement",
@@ -4539,7 +4588,34 @@ async fn create_github_issue(client: reqwest::Client, pat: String, repo: String,
     }
 
     if let Some(ref url) = report.screenshot_url {
-        body.push_str(&format!("\n### Screenshot\n{}\n", url));
+        // Extract filename from upload URL (e.g. "/api/chat/uploads/upload-123" -> "upload-123")
+        let file_name = url.rsplit('/').next().unwrap_or("");
+        let file_path = uploads_dir.join(file_name);
+        if !file_name.is_empty() {
+            match fs::read(&file_path) {
+                Ok(bytes) => {
+                    // GitHub renders HTML in issue bodies; embed as base64 data URI.
+                    // Cap at ~48KB raw (~64KB base64) to stay within GitHub's body limits.
+                    if bytes.len() <= 48_000 {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        body.push_str(&format!(
+                            "\n### Screenshot\n<details><summary>View screenshot</summary>\n\n<img src=\"data:image/png;base64,{}\" />\n\n</details>\n",
+                            b64
+                        ));
+                    } else {
+                        body.push_str(&format!(
+                            "\n### Screenshot\nScreenshot attached locally ({}, {:.0} KB). File: `{}`\n",
+                            file_name,
+                            bytes.len() as f64 / 1024.0,
+                            file_path.display()
+                        ));
+                    }
+                }
+                Err(_) => {
+                    body.push_str(&format!("\n### Screenshot\nScreenshot referenced but file not found: `{}`\n", file_name));
+                }
+            }
+        }
     }
 
     // Client diagnostics
