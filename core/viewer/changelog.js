@@ -9,12 +9,12 @@
 var ECHO_CHANGELOG = [
   {
     version: "2026-03-15",
-    title: "Bug Fixes + Audio Output Switching",
+    title: "Bug Fixes + Device Switching",
     notes: [
-      "Audio output device switching now works on Windows — uses native WASAPI routing (requires client update)",
-      "Previous output device automatically restored when Echo Chamber closes",
-      "Fixed PG-13 Mode not syncing to late joiners — new users now query for room state on connect",
       "Fixed mic/camera switching while connected — no longer requires disconnect/reconnect",
+      "Fixed stale device fallback — if saved mic/camera is unplugged, falls back to default instead of failing",
+      "Output device dropdown now shows native Windows device names (switching is still a known WebView2 limitation)",
+      "Fixed PG-13 Mode not syncing to late joiners — new users now query for room state on connect",
       "Fixed screenshots in bug reports — now embedded directly in GitHub issues"
     ]
   },
