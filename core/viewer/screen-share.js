@@ -58,8 +58,15 @@ var _nativeScreenShareActive = false;
 async function startNativeScreenShare() {
   try {
     var sources = await tauriInvoke("list_screen_sources");
+    if (!sources || sources.length === 0) {
+      debugLog("[native-capture] no sources found — falling back to browser");
+      return false;
+    }
     var selected = await showNativeCapturePicker(sources);
-    if (!selected) return;
+    if (!selected) {
+      debugLog("[native-capture] picker cancelled — falling back to browser");
+      return false;
+    }
     var identity = room?.localParticipant?.identity;
     if (!identity) throw new Error("not connected");
     var screenIdentity = identity + "$screen";
@@ -73,18 +80,23 @@ async function startNativeScreenShare() {
     var tokenData = await tokenResp.json();
     var sfuUrl = sfuUrlInput?.value?.trim();
     if (!sfuUrl) throw new Error("no SFU URL");
+    setStatus("Starting native capture...");
     await tauriInvoke("start_screen_share", { sourceId: selected.id, sfuUrl: sfuUrl, token: tokenData.token });
+    // If we get here, SFU connected + track published + first WGC frame received
     _nativeScreenShareActive = true;
+    setStatus("Native screen capture active!");
     debugLog("[native-capture] started: " + screenIdentity);
     tauriListen("screen-capture-stats", function(ev) {
       debugLog("[native-capture] " + ev.payload.fps + "fps " + ev.payload.width + "x" + ev.payload.height);
     });
     tauriListen("screen-capture-stopped", function() { _nativeScreenShareActive = false; });
     tauriListen("screen-capture-error", function(ev) { _nativeScreenShareActive = false; setStatus("Capture error: " + ev.payload, true); });
+    return true;
   } catch (e) {
     debugLog("[native-capture] failed: " + e.message);
     setStatus("Native capture failed — using browser fallback", true);
     _nativeScreenShareActive = false;
+    return false;
   }
 }
 
@@ -673,18 +685,17 @@ var _nativeAudioActive = false;
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
   var isNativeClient = !!window.__ECHO_NATIVE__;
-  // Native screen capture path - bypass getDisplayMedia
+  // Native screen capture — Rust WGC + LiveKit SDK, bypasses Chromium entirely
   if (isNativeClient && hasTauriIPC()) {
     try {
       var hasNativeCapture = await tauriInvoke("list_screen_sources").then(function() { return true; }).catch(function() { return false; });
       if (hasNativeCapture) {
-        debugLog("[native-capture] using Rust pipeline");
-        await startNativeScreenShare();
-        return;
+        debugLog("[native-capture] native available — launching picker");
+        var nativeOk = await startNativeScreenShare();
+        if (nativeOk) return;
+        debugLog("[native-capture] native failed or cancelled — falling back to browser");
       }
-    } catch (e) {
-      debugLog("[native-capture] check failed: " + e);
-    }
+    } catch (e) { debugLog("[native-capture] check failed: " + e); }
   }
 
   // Call getDisplayMedia ourselves — no fixed width/height so ultrawides
