@@ -8,6 +8,19 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-02",
+    title: "v0.5.0 — Native Screen Capture (Game Mode!)",
+    notes: [
+      "HUGE: Screen sharing now runs natively through Windows capture — completely bypasses browser limitations",
+      "Full FPS while gaming — no more 5fps drops when your game has focus",
+      "Hardware H264 encoding via NVENC — near-zero CPU cost on NVIDIA GPUs",
+      "Custom window picker — select exactly which window to share",
+      "Faster freeze recovery — keyframe requests now fire every 200ms instead of 500ms",
+      "Fixed: Admin kick/mute buttons were missing (config detection fix)",
+      "Fixed: SFU was throttling localhost subscribers to 93kbps (TWCC feedback stripped)"
+    ]
+  },
+  {
     version: "2026-03-15",
     title: "Bug Fixes + Device Switching",
     notes: [

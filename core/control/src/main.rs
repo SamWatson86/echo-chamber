@@ -1356,6 +1356,11 @@ async fn issue_token(
 
     let now = now_ts();
     let exp = now + state.config.livekit_token_ttl_secs;
+
+    // $screen identities are companion connections for native screen capture.
+    // They publish video only (no subscribe needed) and skip name conflict checks.
+    let is_screen_identity = payload.identity.ends_with("$screen");
+
     let claims = LiveKitClaims {
         iss: state.config.livekit_api_key.clone(),
         sub: payload.identity.clone(),
@@ -1366,7 +1371,7 @@ async fn issue_token(
             room: payload.room.clone(),
             roomJoin: true,
             canPublish: true,
-            canSubscribe: true,
+            canSubscribe: !is_screen_identity, // screen identity only publishes
             canPublishData: true,
         },
     };
@@ -1377,6 +1382,15 @@ async fn issue_token(
         &EncodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // $screen identities skip participant tracking — they're not real users
+    if is_screen_identity {
+        info!("issued $screen token for room={} identity={}", payload.room, payload.identity);
+        return Ok(Json(TokenResponse {
+            token,
+            expires_in_seconds: state.config.livekit_token_ttl_secs,
+        }));
+    }
 
     // Track participant in room (dedup old sessions, reject active name conflicts)
     {

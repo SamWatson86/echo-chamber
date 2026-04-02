@@ -1,7 +1,7 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-03-15
-**Current Version**: v0.4.1 (released — CI complete, server running locally)
+**Last Updated**: 2026-04-02
+**Current Version**: v0.4.3 (client Cargo.toml) / v0.4.1 (last released)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
 ## IMPORTANT CONTEXT
@@ -15,198 +15,111 @@
 
 ---
 
-## What Changed Today (2026-03-15)
+## What Changed Today (2026-04-02) — MAJOR DIAGNOSTIC + ARCHITECTURE SESSION
 
-### PG-13 Sync Query Mechanism (#104) — FIX
-- Previous fix (ParticipantConnected re-broadcast) had timing issues — new joiner's data channel often not ready yet
-- Added "pg13-query" mechanism: new joiner sends query 2s after connecting, existing participants with PG-13 active respond directly
-- ParticipantConnected broadcast now targeted to specific new joiner via `destinationIdentities` (no longer spams everyone)
-- New `pg13-query` handler in DataReceived responds with targeted `pg13-mode` sync message
-- Files: `connect.js`, `changelog.js`
+### Screen Share FPS Investigation — ROOT CAUSE FOUND
 
-### Bug #110: Feedback screenshots not appearing in GitHub Issues — FIX
-- Screenshots uploaded via feedback form were stored locally as `/api/chat/uploads/upload-{ts}` — a relative URL unreachable by GitHub
-- `create_github_issue()` now reads the screenshot file from disk, base64-encodes it, and embeds it as an HTML `<img>` inside a `<details>` block in the issue body
-- Images over 48KB (too large for GitHub issue body) get a local file reference instead
-- Added `base64` crate dependency to `core/control/Cargo.toml`
-- Files: `core/control/src/main.rs`, `core/control/Cargo.toml`
-- **Requires rebuild + restart of control plane**
+**Problem**: Spencer's screen share choppy for Sam. Sam's OWN screen share shows 4-5fps when gaming.
 
----
+**Diagnosis path** (in order of discovery):
+1. **SFU subscriber throttling** — SFU's TWCC-based BWE gave garbage estimates on localhost, throttling Sam's subscriber to 93kbps. **Fixed**: stripped TWCC from SDP for localhost connections.
+2. **Packet loss on SFU→Sam path** — With TWCC stripped, full bitrate flows but ~1% packet loss causes freezes. RTX retransmission broken (`rtxSsrc=0`). **Fixed**: tightened PLI throttle from 500ms → 200ms.
+3. **Canvas pipeline bottleneck** — `drawImage()` only takes 1.5ms (NOT the bottleneck). Source capture IS the bottleneck.
+4. **getDisplayMedia source rate** — Only produces 5fps when game has focus. **ROOT CAUSE**: Chromium/Edge throttles ALL canvas capture APIs (`captureStream`, `requestFrame`, `captureStream(30)`) when WebView is backgrounded by a game window.
+5. **Tried MediaStreamTrackGenerator** — Bypasses captureStream, writes VideoFrames directly. Got 17fps with frame pump but lag from blocking writes.
+6. **Fundamental conclusion**: No JavaScript workaround can bypass Chromium's background throttling. Need native capture.
 
-## What Changed (2026-03-06)
+### Native Screen Capture — IN PROGRESS (compiles!)
 
-### Security Hardening Batch — DEPLOYED
-Three security fixes implemented and verified:
+**Architecture**:
+```
+LiveKit Rust SDK (WGC capture) → libwebrtc H264 encoder (MFT→NVENC) → RTP → SFU
+```
 
-1. **Login rate limiting** (`main.rs`) — IP-based, 5 failed attempts per 15 min window → HTTP 429. Uses `ConnectInfo<SocketAddr>` extraction + `HashMap<IpAddr, (u32, Instant)>` in AppState. Successful login clears counter.
-2. **Path traversal prevention** (`main.rs`) — `is_safe_path_component()` validates room names and file names in `create_room`, `chat_history_path`, `soundboard_room_dir`, `soundboard_file_path`. Rejects `/`, `\`, `..`, empty strings.
-3. **Chat fileUrl token leak** (`chat.js`) — Rejects `fileUrl` not starting with `/` at top of `renderChatMessage()`. Prevents `fetchImageAsBlob()` from sending Bearer token to attacker-controlled external URLs.
+**What's built and compiling**:
+- `core/client/Cargo.toml` — Added `livekit` v0.7 + `windows-capture` v1.5
+- `core/client/src/screen_capture.rs` — **NEW** module: WGC capture → BGRA→I420 → LiveKit publish
+- `core/client/src/main.rs` — IPC commands: `list_screen_sources`, `start_screen_share`, `stop_screen_share`
+- **Build succeeds** on Rust 1.93 stable (warnings only, no errors)
 
-### CSS Screen Share Overflow Fix
-- `.screens-grid` changed to `grid-auto-rows: 1fr` + `overflow: hidden`
-- `.screens-grid .tile` gets `max-height: 100%` to prevent tiles exceeding viewport when maximized
+**Dual-identity approach**: WebView connects as `sam-7475` (camera/chat), Rust connects as `sam-7475$screen` (screen share only). Frontend merges `$screen` identities visually.
 
-### Screen Share Stop Banner Fix (`screen-share.js`)
-- `stopScreenShareManual()` now stops original getDisplayMedia tracks (not just canvas tracks)
-- Fixes browser "sharing your screen" indicator persisting after clicking the stop share button
+**Still needed (next session)**:
+1. `$screen` token endpoint in control plane (`core/control/src/main.rs`)
+2. Frontend integration — native capture picker in `screen-share.js`, `$screen` identity merging in `participants.js`
+3. windows-capture handler is skeleton — needs real WGC start/callback wiring (the Settings::new and start_free_threaded calls compile but the callback flow needs testing)
+4. Test with actual game running in fullscreen/borderless
+5. Cleanup diagnostic overlays from this session
 
----
+### Other Fixes Applied
 
-## What Changed (2026-03-03)
-
-### PG-13 Sync for Late Joiners (#104) — FIX
-- Late joiners now receive PG-13 state from existing participants
-- Re-broadcast via `ParticipantConnected` handler (same pattern as avatar/device sync)
-- `sync: true` flag distinguishes from manual toggle — subtle toast, no speech, deduped
-- Files: `connect.js`
-
-### Mic/Cam Switching Fix (#105) — FIX
-- `switchMic()` and `switchCam()` now use `restartTrack()` for seamless device switching
-- LiveKit SDK's `setMicrophoneEnabled(true)` was short-circuiting when mic already on
-- Fallback to disable/re-enable if `restartTrack` unavailable
-- Added try/catch + debug logging for both paths
-- Files: `media-controls.js`
+- **Admin kick/mute buttons missing** — `config.json` was `{"admin": true}` (ignored), fixed to `{"server": "https://127.0.0.1:9443"}`. Admin mode now detects localhost correctly.
+- **SFU PLI throttle** — Changed from 500ms to 200ms for all quality levels in `core/sfu/livekit.yaml`
+- **SFU restarted** with new config (PID changed)
+- **TWCC stripping** — Added `_stripTWCC()` function in `connect.js` that removes both the TWCC RTP header extension AND the `transport-cc` RTCP feedback line from SDPs. Only applied when SFU is localhost.
+- **Screen share encoding** — `connect.js` publishDefaults changed from 8Mbps → 5Mbps (but `screen-share.js` overrides with its own config anyway)
+- **playoutDelayHint** — Changed from 0 to 0.15 (150ms) for remote screen shares in `audio-routing.js`
 
 ---
 
-## What Changed (2026-02-28)
+## DIRTY FILES (experimental, need cleanup)
 
-### PG-13 Mode (#98) — NEW
-- **Toggle button** in Active Users sidebar (row 1: Chat, Mute All, PG-13)
-- **Animated gradient banner** appears at top of room when active (yellow/orange shimmer)
-- **Glowing amber border** around room layout via `.pg13-active` box-shadow
-- **Speech synthesis** announces "PG-13 Mode Enabled/Disabled"
-- **Data channel broadcast** — all participants see/hear the toggle + toast with who toggled it
-- **Ephemeral** — resets on disconnect (per-session state)
-- **Debug button relocated** from Active Users sidebar to top `.room-actions` bar (next to Settings/Feedback)
-- Files: `index.html`, `style.css`, `state.js`, `media-controls.js`, `connect.js`
+These files have diagnostic/experimental code from the debugging session:
 
-### Mobile Browser Support (3 fixes)
-1. **Camera flip button** — "Flip" button on mobile toggles front/back camera via `facingMode`. Hidden on desktop. Camera dropdown hidden on mobile (cryptic labels).
-2. **Screen tile cleanup on disconnect** — ParticipantDisconnected handler now cleans up screen tiles from `screenTileByIdentity`, `screenTileBySid`, `screenTrackMeta`, `screenRecoveryAttempts`, `screenResubscribeIntent`. Fixes stale tiles after abrupt mobile disconnects.
-3. **16:9 aspect ratio on screen tiles** — Added `aspect-ratio: 16 / 9` to `.screens-grid .tile`. Portrait video gets side letterboxing. Added `.portrait` CSS class detection in `tagAspect()`.
+### `core/viewer/screen-share.js` — HEAVILY MODIFIED
+- Canvas cap reduced: MAX_CANVAS_WIDTH 1920→1280, MAX_CANVAS_PIXELS 2.1M→960K
+- `getScreenSharePublishOptions()` — reverted to original 3-layer simulcast
+- Canvas pipeline has experimental MediaStreamTrackGenerator code (lines ~800-910)
+- Encoder diagnostic overlay (`_enc-diag` div) — shows fps/bitrate/limit per layer + draw timing
+- Frame timing diagnostics in processor loop (`window._drawTimings`)
+- **RECOMMEND**: Revert to git HEAD and only keep the native capture path going forward
 
-### Chat Visual Improvement
-- Per-user color coding: 15-color deterministic palette, left border stripe `border-left: 3px solid var(--chat-user-color)`, self-messages get green tint. Author name shows in user's color.
+### `core/viewer/participants.js` — DIAGNOSTIC OVERLAY
+- `attachVideoDiagnostics()` has expanded WebRTC receiver stats (kbps, lost, dec, drop, nack, pli, fir, jbuf, freeze)
+- **RECOMMEND**: Keep the expanded stats (useful), remove when native capture is working
 
-### GitHub Issues Batch (7 issues closed)
-- **#84** — Login page cleanup: password hidden by default (auto-fills), URLs/devices behind "Advanced" toggle, password shows on auth failure
-- **#85** — Screenshot upload fix: FormData → ArrayBuffer to match server expectation
-- **#86** — Dialog overflow fix: `max-height` + `overflow-y: auto` on bug report content
-- **#87** — Max characters increased: 1000 → 5000 on feedback textarea
-- **#88** — Title + Description split: separate title input (120 chars), flows to GitHub issue title, Rust structs updated
-- **#90** — Screen share volume slider on tile: shows on hover, syncs with participant card slider, only appears with audio track
-- **#93** — Soundboard compact UX: pill buttons with emoji + name, search filter input, panel widened to 320px
+### `core/viewer/connect.js` — TWCC STRIPPING
+- Added `_stripTWCC()` function + localhost detection
+- SDP hooks apply TWCC stripping to both setLocalDescription and setRemoteDescription
+- Also strips `a=rtcp-fb:N transport-cc` lines
+- **KEEP**: This fix is correct for localhost subscriber throttling
 
-### Issues Also Closed (confirmed fixed earlier)
-- **#89** — Stale screen tiles (fixed by disconnect cleanup above)
-- **#91** — Duplicate of #89
-- **#92** — Zane's audio lag (GPU overload from Resident Evil, not a code bug)
-
----
-
-## What's Working (v0.4.1)
-
-### Core Features
-- WebRTC video/screen sharing via LiveKit SFU (1080p@60fps target)
-- Multi-room support with room switching
-- Chat with file/image upload, emoji picker, link rendering, image fullscreen lightbox, **per-user color coding**
-- Soundboard with custom uploads, icons, per-clip volume, **compact search + pill buttons**
-- Camera lobby for previewing webcams
-- 7 themes (Frost, Cyberpunk, Aurora, Ember, Matrix, Ultra Instinct) with opacity slider
-- Bug report system with screenshot attachment, auto-captured WebRTC stats, clipboard paste, **title + description fields**
-- Admin dashboard with live stats, session history, metrics, bug reports
-- Auto-update check + native Tauri auto-updater
-- macOS Apple Silicon support (DMG + auto-updater)
-- Per-startup cache-busting stamps — dashboard detects stale viewers
-- **PG-13 Mode** — room-wide content warning toggle with banner, glow, speech, data channel sync
-- **Mobile browser support** — camera flip, clean disconnect, proper aspect ratio
-- **Screen share volume slider on tile** — hover to adjust
-- **Streamlined login page** — clean layout, Advanced toggle for power users
-
-### Jam Session (Spotify Integration)
-- Spotify OAuth PKCE flow with token persistence
-- Song search, queue management, skip
-- Queue no longer drains when searching (fixed in v0.4.1)
-- WASAPI per-process audio capture (Spotify.exe)
-- WebSocket audio streaming to opted-in listeners
-
----
-
-## Known Bugs / Open Items
-
-- Minor: stale `cameraTrackSid` in observer's participantState after remote camera unpublish (cosmetic only)
-- **#83** — Signal notifications (deferred — requires external infrastructure setup)
-
-### Security Hardening (audited 2026-03-03)
-
-Full security sweep completed. No credentials in git, no eval/injection, TLS enforced.
-
-**FIXED (2026-03-06):**
-- ~~Admin dashboard XSS~~ — Already fixed, all fields use `esc()` / `escAdm()`
-- ~~Chat fileUrl token leak~~ — Rejects external URLs in `renderChatMessage()` (`chat.js`)
-- ~~Login brute-force~~ — IP-based rate limit 5/15min with 429 response (`main.rs`)
-- ~~Path traversal~~ — `is_safe_path_component()` on room names + file names (`main.rs`)
-
-**Remaining (lower priority):**
-- `/api/online` unauthenticated — leaks room membership
-- CORS fully open (`Any`) — should scope to `tauri://localhost` + server origin
-- No security headers (CSP, HSTS, X-Frame-Options, nosniff)
-- Avatar URL spoofing via data channel (no sender identity validation)
-- Admin password uses plaintext path in .env (Argon2 path exists but unused)
+### `core/sfu/livekit.yaml` — PLI THROTTLE
+- All PLI throttles set to 200ms (was 300/500/500)
+- **KEEP**: Faster keyframe recovery with broken RTX
 
 ---
 
 ## Active Worktree
-- None — on main, all changes committed directly.
+- `.claude/worktrees/quirky-cray` — native screen capture development
 
 ---
 
-## Files Modified This Session
+## Key Files Modified This Session
 
-### Viewer JS
-- `core/viewer/state.js` — Added `flipCamBtn`, `_camFacingMode`, `pg13ModeActive`, `togglePg13Button`
-- `core/viewer/media-controls.js` — Added `flipCam()`, mobile facingMode in `switchCam()`/`toggleCam()`, PG-13 toggle/apply/announce functions, **restartTrack for mic/cam switching**
-- `core/viewer/connect.js` — Screen tile cleanup in disconnect handler, password field show on auth failure, local screen tile identity, PG-13 data handler + button enable/disable, **PG-13 sync re-broadcast + dedup**
-- `core/viewer/participants.js` — `.portrait` class in `tagAspect()`, volume slider in `addScreenTile()`
-- `core/viewer/audio-routing.js` — `tile.dataset.identity`, volume slider reveal on screen audio attach
-- `core/viewer/app.js` — Flip button handler, mobile cam dropdown hide, password auto-fill, Advanced toggle
-- `core/viewer/chat.js` — Per-user color system, `--chat-user-color` CSS var, `.self` class
-- `core/viewer/soundboard.js` — Pill buttons with names, search filter
-- `core/viewer/admin.js` — Screenshot upload fix (ArrayBuffer), bug report title field
+### New Files
+- `core/client/src/screen_capture.rs` — Native WGC + LiveKit Rust SDK screen capture module
 
-### Viewer HTML/CSS
-- `core/viewer/index.html` — Flip button, login page restructure, title input, soundboard search, maxlength 5000, PG-13 banner + button, Debug moved to top bar
-- `core/viewer/style.css` — All new styles (flip button, login page, chat colors, dialog overflow, title input, volume slider, soundboard pills, screen tile aspect ratio, PG-13 banner/glow/button)
-
-### Rust
-- `core/control/src/main.rs` — `title` field in BugReport/BugReportRequest structs, `create_github_issue()` title logic
+### Modified
+- `core/client/Cargo.toml` — Added `livekit` + `windows-capture` dependencies
+- `core/client/src/main.rs` — Added `mod screen_capture`, 3 IPC commands
+- `core/viewer/connect.js` — TWCC stripping, SDP hooks
+- `core/viewer/screen-share.js` — Diagnostic overlays, experimental pipeline changes
+- `core/viewer/participants.js` — Expanded diagnostic overlay
+- `core/viewer/audio-routing.js` — playoutDelayHint 0→0.15
+- `core/sfu/livekit.yaml` — PLI throttle 500→200ms
+- `core/target/debug/config.json` — Fixed to `{"server": "https://127.0.0.1:9443"}`
 
 ---
 
-## Version History (Recent)
-
-### v0.4.1 (2026-02-27) — Released
-- Fix "Update available" banner (#79) — Cargo.toml versions synced
-- Fix jam queue drain on search (#77) — server auto-remove guard
-- Chat image fullscreen lightbox (#75) — CSS for existing JS
-- Fix macOS camera card glitch — dead track re-attach guard
-- Post-release: clipboard paste in feedback (#81), cache-bust stamper fix
-
-### v0.4.0 (2026-02-27)
-- macOS Apple Silicon DMG in releases
-- macOS auto-updater support via unified latest.json
-- Viewer modularized into 19 JS files
-- Camera desync fix, LK TDZ fix
-
-### v0.3.1 (2026-02-14/16/23/24)
-- Admin Dashboard v2, AIMD bitrate control, volume boost, security fixes, 33 issues resolved
+## Plan File
+- `C:\Users\Sam\.claude\plans\transient-discovering-rocket.md` — Full native capture implementation plan (approved)
 
 ---
 
 **When resuming:**
 1. Read this file first
-2. Read CLAUDE.md for architecture and rules
-3. Check git log for any commits after this document's date
-4. Check "Known Bugs / Open Items" for what needs work
+2. Read the plan file for the native capture implementation
+3. The `screen_capture.rs` compiles but the WGC capture callback needs real testing
+4. Next steps: $screen token endpoint → frontend integration → test with game
+5. The viewer JS files have diagnostic code that should be cleaned up after native capture works

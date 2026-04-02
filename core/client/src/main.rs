@@ -1,5 +1,5 @@
-// Prevents additional console window on Windows in release
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Prevents additional console window on Windows
+#![windows_subsystem = "windows"]
 
 #[cfg(target_os = "windows")]
 mod audio_capture;
@@ -7,6 +7,9 @@ mod audio_capture;
 mod audio_capture_stub;
 #[cfg(not(target_os = "windows"))]
 use audio_capture_stub as audio_capture;
+
+#[cfg(target_os = "windows")]
+mod screen_capture;
 
 #[cfg(target_os = "windows")]
 mod audio_output;
@@ -246,6 +249,31 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Native Screen Capture IPC Commands ──
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_screen_sources() -> Vec<screen_capture::CaptureSource> {
+    screen_capture::list_sources()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_screen_share(
+    source_id: u64,
+    sfu_url: String,
+    token: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    screen_capture::start_share(source_id, sfu_url, token, app).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_screen_share() {
+    screen_capture::stop_share();
+}
+
 fn main() {
     // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
     #[cfg(target_os = "windows")]
@@ -274,6 +302,12 @@ fn main() {
             stop_audio_capture,
             list_audio_output_devices,
             check_for_updates,
+            #[cfg(target_os = "windows")]
+            list_screen_sources,
+            #[cfg(target_os = "windows")]
+            start_screen_share,
+            #[cfg(target_os = "windows")]
+            stop_screen_share,
         ])
         .setup(move |app| {
             // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
