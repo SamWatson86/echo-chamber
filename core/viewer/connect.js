@@ -276,6 +276,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       return result.join("\r\n");
     }
 
+    function _stripTWCC(sdp) {
+      return sdp.split("\r\n").filter(function(line) {
+        if (line.indexOf("transport-wide-cc") !== -1) return false;
+        if (/^a=rtcp-fb:\d+ transport-cc/.test(line)) return false;
+        return true;
+      }).join("\r\n");
+    }
+
     // Profile + level upgrade — only for local/offer SDPs (publisher side).
     // Changing profiles in remote (SFU answer) SDPs breaks negotiation.
     function _upgradeH264Profile(sdp) {
@@ -360,11 +368,15 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       return offer;
     };
 
+    var _isLocalSfu = false;
+    try { var _sfuHost = new URL(sfuUrl).hostname; _isLocalSfu = (_sfuHost === "127.0.0.1" || _sfuHost === "localhost"); } catch {}
+    var _applyTWCC = _isLocalSfu ? _stripTWCC : function(s) { return s; };
+
     const _origSLD = RTCPeerConnection.prototype.setLocalDescription;
     RTCPeerConnection.prototype.setLocalDescription = function(desc, ...args) {
       if (desc && desc.sdp) {
         // Local descriptions (our offers/answers): upgrade profile + level
-        desc = { type: desc.type, sdp: _upgradeH264Profile(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp))) };
+        desc = { type: desc.type, sdp: _applyTWCC(_upgradeH264Profile(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp)))) };
         debugLog("[SDP] LOCAL munged (profile+level+bw)");
       } else if (!desc) {
         debugLog("[SDP] WARNING: implicit setLocalDescription (no SDP to munge)");
@@ -377,7 +389,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       if (desc && desc.sdp) {
         // Remote descriptions (SFU answers): level upgrade + bandwidth only.
         // Do NOT change profiles — SFU negotiated a specific profile, changing it breaks encoding.
-        desc = { type: desc.type, sdp: _upgradeLevelOnly(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp))) };
+        desc = { type: desc.type, sdp: _applyTWCC(_upgradeLevelOnly(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp)))) };
         debugLog("[SDP] REMOTE munged: level+bw (profile preserved)");
       }
       return _origSRD.apply(this, [desc, ...args]);
@@ -770,7 +782,12 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
-    ensureParticipantCard(participant);
+    var _pIdent = typeof participant.identity === "string" ? participant.identity : String(participant.identity);
+    if (_pIdent.endsWith("$screen")) {
+      debugLog("$screen identity connected: " + _pIdent + " — skipping card");
+    } else {
+      ensureParticipantCard(participant);
+    }
     debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
     // Cancel any pending disconnect cleanup — this participant just came back
     var wasPendingDisconnect = _pendingDisconnects.has(participant.identity);

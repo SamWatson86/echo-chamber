@@ -2,6 +2,26 @@
    AUDIO ROUTING — Gain nodes, track subscription, and media reconciliation
    ========================================================= */
 
+function resolveScreenIdentity(participant) {
+  if (!participant?.identity) return participant;
+  var ident = String(participant.identity);
+  if (ident.endsWith("$screen")) {
+    var baseIdent = ident.replace(/\$screen$/, "");
+    if (room && room.remoteParticipants) {
+      var real = null;
+      room.remoteParticipants.forEach(function(p) { if (String(p.identity) === baseIdent) real = p; });
+      if (real) return real;
+    }
+    if (room && room.localParticipant && String(room.localParticipant.identity) === baseIdent) return room.localParticipant;
+    return { identity: baseIdent, name: (participant.name || "Guest").replace(" (Screen)", ""), sid: participant.sid };
+  }
+  return participant;
+}
+
+function isScreenIdentity(participant) {
+  return participant?.identity ? String(participant.identity).endsWith("$screen") : false;
+}
+
 function setRoomAudioMutedState(next) {
   roomAudioMuted = Boolean(next);
   if (toggleRoomAudioButton) {
@@ -299,6 +319,9 @@ function startAudioMonitor() {
 }
 
 function handleTrackSubscribed(track, publication, participant) {
+  if (isScreenIdentity(participant)) {
+    participant = resolveScreenIdentity(participant);
+  }
   const LK = getLiveKitClient();
   const source = getTrackSource(publication, track);
   const cardRef = ensureParticipantCard(participant);

@@ -53,6 +53,67 @@ let _inboundDropTracker = new Map(); // "identity-source" -> { lastDropped, last
 // applies it to their RTCRtpSender, reducing upload without changing resolution.
 let _pubBitrateControl = new Map(); // publisherIdentity -> AIMD controller state
 
+var _nativeScreenShareActive = false;
+
+async function startNativeScreenShare() {
+  try {
+    var sources = await tauriInvoke("list_screen_sources");
+    var selected = await showNativeCapturePicker(sources);
+    if (!selected) return;
+    var identity = room?.localParticipant?.identity;
+    if (!identity) throw new Error("not connected");
+    var screenIdentity = identity + "$screen";
+    var roomId = currentRoomName || "main";
+    var tokenResp = await fetch(apiUrl("/v1/auth/token"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
+      body: JSON.stringify({ room: roomId, identity: screenIdentity, name: (room?.localParticipant?.name || "Guest") + " (Screen)" }),
+    });
+    if (!tokenResp.ok) throw new Error("token failed: " + tokenResp.status);
+    var tokenData = await tokenResp.json();
+    var sfuUrl = sfuUrlInput?.value?.trim();
+    if (!sfuUrl) throw new Error("no SFU URL");
+    await tauriInvoke("start_screen_share", { sourceId: selected.id, sfuUrl: sfuUrl, token: tokenData.token });
+    _nativeScreenShareActive = true;
+    debugLog("[native-capture] started: " + screenIdentity);
+    tauriListen("screen-capture-stats", function(ev) {
+      debugLog("[native-capture] " + ev.payload.fps + "fps " + ev.payload.width + "x" + ev.payload.height);
+    });
+    tauriListen("screen-capture-stopped", function() { _nativeScreenShareActive = false; });
+    tauriListen("screen-capture-error", function(ev) { _nativeScreenShareActive = false; setStatus("Capture error: " + ev.payload, true); });
+  } catch (e) {
+    debugLog("[native-capture] failed: " + e.message);
+    setStatus("Native capture failed — using browser fallback", true);
+    _nativeScreenShareActive = false;
+  }
+}
+
+function showNativeCapturePicker(sources) {
+  return new Promise(function(resolve) {
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;";
+    var dialog = document.createElement("div");
+    dialog.style.cssText = "background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:24px;max-width:500px;width:90%;max-height:70vh;overflow-y:auto;color:#e2e8f0;";
+    dialog.innerHTML = '<h3 style="margin:0 0 16px;">Select Window to Share</h3>';
+    var list = document.createElement("div");
+    list.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+    sources.forEach(function(src) {
+      var btn = document.createElement("button");
+      btn.textContent = src.title;
+      btn.style.cssText = "padding:10px 14px;background:#2a2a3e;border:1px solid #444;border-radius:8px;color:#e2e8f0;cursor:pointer;text-align:left;";
+      btn.onclick = function() { document.body.removeChild(overlay); resolve(src); };
+      list.appendChild(btn);
+    });
+    var cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.style.cssText = "margin-top:16px;padding:8px 16px;background:#444;border:none;border-radius:6px;color:#999;cursor:pointer;";
+    cancelBtn.onclick = function() { document.body.removeChild(overlay); resolve(null); };
+    dialog.appendChild(list); dialog.appendChild(cancelBtn);
+    overlay.appendChild(dialog); document.body.appendChild(overlay);
+    overlay.onclick = function(e) { if (e.target === overlay) { document.body.removeChild(overlay); resolve(null); } };
+  });
+}
+
 function startInboundScreenStatsMonitor() {
   if (_inboundScreenStatsInterval) return;
   _inboundScreenStatsInterval = setInterval(async () => {
@@ -611,10 +672,23 @@ var _nativeAudioActive = false;
 
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
+  var isNativeClient = !!window.__ECHO_NATIVE__;
+  // Native screen capture path - bypass getDisplayMedia
+  if (isNativeClient && hasTauriIPC()) {
+    try {
+      var hasNativeCapture = await tauriInvoke("list_screen_sources").then(function() { return true; }).catch(function() { return false; });
+      if (hasNativeCapture) {
+        debugLog("[native-capture] using Rust pipeline");
+        await startNativeScreenShare();
+        return;
+      }
+    } catch (e) {
+      debugLog("[native-capture] check failed: " + e);
+    }
+  }
 
   // Call getDisplayMedia ourselves — no fixed width/height so ultrawides
   // capture at native aspect ratio instead of being forced to 16:9
-  var isNativeClient = !!window.__ECHO_NATIVE__;
   var gdmConstraints = {
     video: {
       // Capture at native resolution — NVENC handles 4K with zero CPU cost.
@@ -1291,6 +1365,12 @@ async function startScreenShareManual() {
 }
 
 async function stopScreenShareManual() {
+  // Stop native screen capture if active
+  if (typeof _nativeScreenShareActive !== "undefined" && _nativeScreenShareActive) {
+    try { await tauriInvoke("stop_screen_share"); } catch(e) {}
+    _nativeScreenShareActive = false;
+    return;
+  }
   // Stop native per-process audio capture if active
   await stopNativeAudioCapture();
   // Clean up canvas pipeline (Web Worker frame timer)
