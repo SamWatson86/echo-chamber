@@ -12,18 +12,9 @@ use audio_capture_stub as audio_capture;
 mod screen_capture;
 
 #[cfg(target_os = "windows")]
-mod control_block_client;
-#[cfg(target_os = "windows")]
-mod injector;
-#[cfg(target_os = "windows")]
-mod game_capture;
-#[cfg(target_os = "windows")]
 mod gpu_converter;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
-#[cfg(target_os = "windows")]
-mod nvfbc_capture;
-
 #[cfg(target_os = "windows")]
 mod audio_output;
 #[cfg(not(target_os = "windows"))]
@@ -347,25 +338,6 @@ fn get_source_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
     screen_capture::get_thumbnail(source_id, is_monitor)
 }
 
-// ── Game Capture IPC Commands ──
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn start_game_capture(
-    hwnd: u64,
-    sfu_url: String,
-    token: String,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    game_capture::start(hwnd, sfu_url, token, app).await
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn stop_game_capture() {
-    game_capture::stop();
-}
-
 // ── Desktop Capture (DXGI Desktop Duplication) IPC Commands ──
 
 #[cfg(target_os = "windows")]
@@ -390,32 +362,6 @@ async fn start_desktop_capture(
 #[tauri::command]
 fn stop_desktop_capture() {
     desktop_capture::stop();
-}
-
-// ── NVFBC Capture (GPU scanout — highest FPS) IPC Commands ──
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn check_nvfbc_available() -> Result<(bool, String), String> {
-    Ok(nvfbc_capture::check_available())
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn start_nvfbc_capture(
-    hwnd: u64,
-    fullscreen: bool,
-    sfu_url: String,
-    token: String,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    nvfbc_capture::start(hwnd, fullscreen, sfu_url, token, app).await
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn stop_nvfbc_capture() {
-    nvfbc_capture::stop();
 }
 
 fn main() {
@@ -456,21 +402,11 @@ fn main() {
             #[cfg(target_os = "windows")]
             get_source_thumbnail,
             #[cfg(target_os = "windows")]
-            start_game_capture,
-            #[cfg(target_os = "windows")]
-            stop_game_capture,
-            #[cfg(target_os = "windows")]
             check_desktop_capture_available,
             #[cfg(target_os = "windows")]
             start_desktop_capture,
             #[cfg(target_os = "windows")]
             stop_desktop_capture,
-            #[cfg(target_os = "windows")]
-            check_nvfbc_available,
-            #[cfg(target_os = "windows")]
-            start_nvfbc_capture,
-            #[cfg(target_os = "windows")]
-            stop_nvfbc_capture,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected
