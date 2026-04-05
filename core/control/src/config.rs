@@ -242,6 +242,38 @@ pub fn now_ts_ms() -> u64 {
         .as_millis() as u64
 }
 
+pub fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
+    // Simplified date calculation from Unix epoch days
+    let mut y: i64 = 1970;
+    let mut remaining = days as i64;
+    loop {
+        let days_in_year = if is_leap_year(y) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let month_days = if is_leap_year(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 0;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining < md as i64 {
+            m = i;
+            break;
+        }
+        remaining -= md as i64;
+    }
+    (y as u64, (m + 1) as u64, (remaining + 1) as u64)
+}
+
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
 pub async fn generate_self_signed() -> RustlsConfig {
     let rcgen::CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec![
         "echo.fellowshipoftheboatrace.party".into(),
