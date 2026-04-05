@@ -24,7 +24,7 @@ async function fetchRoomToken(baseUrl, adminToken, room, identity, name) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${adminToken}`,
     },
-    body: JSON.stringify({ room, identity, name }),
+    body: JSON.stringify({ room, identity, name, deviceId: ensureDeviceId() }),
   });
   if (token.status === 409) throw new Error("Name is already in use by another connected user. Please choose a different name.");
   if (!token.ok) throw new Error(`Token failed (${token.status})`);
@@ -62,7 +62,7 @@ async function prefetchRoomTokens() {
       var res = await fetch(cUrl + "/v1/auth/token", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
-        body: JSON.stringify({ room: rid, identity: id, name: nm }),
+        body: JSON.stringify({ room: rid, identity: id, name: nm, deviceId: ensureDeviceId() }),
       });
       if (!res.ok) continue;
       var data = await res.json();

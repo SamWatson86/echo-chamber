@@ -1,212 +1,158 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-03-15
-**Current Version**: v0.4.1 (released — CI complete, server running locally)
+**Last Updated**: 2026-04-05 (evening)
+**Current Version**: v0.5.0 (client Cargo.toml) / v0.5.1 (last released)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
 
-## IMPORTANT CONTEXT
-- Sam is **not a software developer** — needs full guidance, do NOT ask him to run commands
-- **FULL AUTONOMY**: Claude has full permission for ALL local operations — file edits, builds, process management, local git commits. Do NOT prompt Sam for confirmation on local work.
-- **NEVER push to GitHub** for server-side updates. GitHub pushes are ONLY for client releases via version tags.
-- Focus ONLY on `/core` folder — `/apps` is legacy
-- **Tauri client loads viewer from server** — viewer file changes are live on client refresh (no rebuild needed)
-- **Use US English** — Sam requested American spelling ("color" not "colour")
-- **Sam trusts Claude fully** — "I trust you. You don't have to ask this moving forward. I have you set to auto accept edits"
+## SESSION SUMMARY — Major Breakthroughs (2026-04-05)
 
----
+### STATUS: WGC + GPU Pipeline Working — 53fps BF6 4K, SFU Fixed
 
-## What Changed Today (2026-03-15)
+Three major fixes this session:
+1. **SFU BWE fix** — re-enabled `congestion_control: true`, allocation now "optimal"
+2. **WGC capture pipeline** — replaces DXGI DD for game capture, MPO-aware, focus-independent
+3. **GPU shader integration** — WGC frames processed via D3D11 compute shader on WGC's own device
 
-### PG-13 Sync Query Mechanism (#104) — FIX
-- Previous fix (ParticipantConnected re-broadcast) had timing issues — new joiner's data channel often not ready yet
-- Added "pg13-query" mechanism: new joiner sends query 2s after connecting, existing participants with PG-13 active respond directly
-- ParticipantConnected broadcast now targeted to specific new joiner via `destinationIdentities` (no longer spams everyone)
-- New `pg13-query` handler in DataReceived responds with targeted `pg13-mode` sync message
-- Files: `connect.js`, `changelog.js`
+### WHAT WAS FIXED THIS SESSION
 
-### Bug #110: Feedback screenshots not appearing in GitHub Issues — FIX
-- Screenshots uploaded via feedback form were stored locally as `/api/chat/uploads/upload-{ts}` — a relative URL unreachable by GitHub
-- `create_github_issue()` now reads the screenshot file from disk, base64-encodes it, and embeds it as an HTML `<img>` inside a `<details>` block in the issue body
-- Images over 48KB (too large for GitHub issue body) get a local file reference instead
-- Added `base64` crate dependency to `core/control/Cargo.toml`
-- Files: `core/control/src/main.rs`, `core/control/Cargo.toml`
-- **Requires rebuild + restart of control plane**
+**1. ContentHint=Fluid (MAINTAIN_FRAMERATE)** — CRITICAL FIX
+- File: `core/webrtc-sys-local/src/peer_connection_factory.cpp`
+- Also: `core/webrtc-sys-local/include/livekit/video_track.h` (added `is_screencast()` to VideoTrackSource)
+- Also: `core/webrtc-sys-local/src/video_track.cpp` (implemented `is_screencast()`)
+- What: Sets ContentHint::Fluid on non-screencast video tracks at creation time
+- Effect: WebRTC uses DegradationPreference::MAINTAIN_FRAMERATE — NEVER drops FPS, only reduces resolution
+- Before: SetRates fps=10 → backpressure → capture degraded from 100fps to 12fps
+- After: SetRates fps=101 → capture sustained at 100fps indefinitely
 
----
+**2. RID Quality Label Fix (LOW → HIGH)** — CRITICAL FIX
+- File: `core/livekit-local/src/room/options.rs` (in `into_rtp_encodings`)
+- What: For non-simulcast single-layer tracks, RID was 'q' (LOW quality) instead of 'f' (HIGH)
+- Effect: SFU StreamAllocator now allocates FULL bandwidth instead of minimum
+- Before: SFU saw 1080p@20Mbps track labeled "LOW" → allocated ~700kbps
+- After: SFU sees "HIGH" → allocates full bandwidth → **100fps on desktop**
 
-## What Changed (2026-03-06)
+**3. TrackSource::Camera (from previous session, kept)**
+- File: `core/client/src/desktop_capture.rs` line 641
+- What: Changed TrackSource::Screenshare → TrackSource::Camera
+- Effect: SFU StreamAllocator treats as motion content (preserve FPS > resolution)
 
-### Security Hardening Batch — DEPLOYED
-Three security fixes implemented and verified:
+### REMAINING ISSUE — DXGI DD Drops to 5fps When Game Focused (SOLVED: Use WGC)
 
-1. **Login rate limiting** (`main.rs`) — IP-based, 5 failed attempts per 15 min window → HTTP 429. Uses `ConnectInfo<SocketAddr>` extraction + `HashMap<IpAddr, (u32, Instant)>` in AppState. Successful login clears counter.
-2. **Path traversal prevention** (`main.rs`) — `is_safe_path_component()` validates room names and file names in `create_room`, `chat_history_path`, `soundboard_room_dir`, `soundboard_file_path`. Rejects `/`, `\`, `..`, empty strings.
-3. **Chat fileUrl token leak** (`chat.js`) — Rejects `fileUrl` not starting with `/` at top of `renderChatMessage()`. Prevents `fetchImageAsBlob()` from sending Bearer token to attacker-controlled external URLs.
+**DXGI DD is compositor-bound:** When a focused game is rendering heavily, DWM reduces its composition rate → DXGI DD capture drops from 90fps to 4-5fps. This is NOT MPO/Independent Flip (tested: disabling MPO via OverlayTestMode=5 made it WORSE — 1fps + system freeze because GPU can't handle forced DWM compositing + 4K game rendering simultaneously).
 
-### CSS Screen Share Overflow Fix
-- `.screens-grid` changed to `grid-auto-rows: 1fr` + `overflow: hidden`
-- `.screens-grid .tile` gets `max-height: 100%` to prevent tiles exceeding viewport when maximized
+**Solution: Windows Graphics Capture (WGC) window capture** — tested and confirmed:
+- WGC captures at **30-34fps with game focused** (vs DXGI DD's 4-5fps)
+- WGC captures at **69fps unfocused** (fresh session) / **34fps** (during active gameplay)
+- WGC is MPO-aware, captures directly from the window's swap chain presentation
+- Requires `MinimumUpdateIntervalSettings::Custom(Duration::from_millis(1))` — default (0ms) has a Windows bug that caps at ~50fps
+- Requires Windows 11 24H2+ (build 26200) — Sam has this
+- Uses `windows-capture` crate v1.5, `frame.as_raw_texture()` for GPU texture access
 
-### Screen Share Stop Banner Fix (`screen-share.js`)
-- `stopScreenShareManual()` now stops original getDisplayMedia tracks (not just canvas tracks)
-- Fixes browser "sharing your screen" indicator persisting after clicking the stop share button
+**Implementation plan (NOT YET DONE):**
+1. Extract `GpuConverter` from `desktop_capture.rs` into shared module
+2. In WGC `on_frame_arrived`: extract device via `as_raw_texture().GetDevice()` → create GpuConverter on WGC's device (once) → CopyResource → compute shader (downscale 4K→1080p + HDR→SDR) → staging → CPU buffer → channel
+3. Main loop: receive 1080p BGRA → libyuv I420 → NativeVideoSource → NVENC → SFU
+4. Key: all GPU work inside callback (WGC serializes callbacks, thread-safe), send only 8MB CPU buffer through channel (not 33MB 4K)
+5. NVENC fails at 4K input — must downscale to 1080p first (GPU shader handles this)
+6. Need 3-second negotiation wait after publish_track (missing this = no SFU track)
 
----
+**Research confirmed:**
+- WGC's internal D3D11 device is fully functional — supports compute shaders, CopyResource, staging textures
+- `frame.as_raw_texture()` texture is only valid during callback — must CopyResource before returning
+- No cross-device sharing needed — build entire GPU pipeline on WGC's device
+- WGC callback serialized — no thread safety concerns for immediate context
 
-## What Changed (2026-03-03)
+### KNOWN ISSUE — Screen Share Monitor Fallback
 
-### PG-13 Sync for Late Joiners (#104) — FIX
-- Late joiners now receive PG-13 state from existing participants
-- Re-broadcast via `ParticipantConnected` handler (same pattern as avatar/device sync)
-- `sync: true` flag distinguishes from manual toggle — subtle toast, no speech, deduped
-- Files: `connect.js`
+When sharing a game via DXGI DD and the game closes, the stream doesn't stop — it falls back to sharing the entire monitor where the game was. Expected DXGI DD behavior but should be handled better.
 
-### Mic/Cam Switching Fix (#105) — FIX
-- `switchMic()` and `switchCam()` now use `restartTrack()` for seamless device switching
-- LiveKit SDK's `setMicrophoneEnabled(true)` was short-circuiting when mic already on
-- Fallback to disable/re-enable if `restartTrack` unavailable
-- Added try/catch + debug logging for both paths
-- Files: `media-controls.js`
+### PICKER CRASH — RESOLVED (Was CD Game Crash)
 
----
+The screen picker freeze/crash during this session was caused by Crimson Desert crashing (GPU resources invalidated → DXGI handles fail → GetMonitorInfoW/GetClientRect errors in logs). NOT caused by our code changes. Confirmed by:
+- Picker worked fine after game restart
+- Client logs showed `GetMonitorInfoW failed` and `GetClientRect failed` during freeze
+- Sam confirmed "the game crashed too"
 
-## What Changed (2026-02-28)
+### CURRENT STATE OF FILES
 
-### PG-13 Mode (#98) — NEW
-- **Toggle button** in Active Users sidebar (row 1: Chat, Mute All, PG-13)
-- **Animated gradient banner** appears at top of room when active (yellow/orange shimmer)
-- **Glowing amber border** around room layout via `.pg13-active` box-shadow
-- **Speech synthesis** announces "PG-13 Mode Enabled/Disabled"
-- **Data channel broadcast** — all participants see/hear the toggle + toast with who toggled it
-- **Ephemeral** — resets on disconnect (per-session state)
-- **Debug button relocated** from Active Users sidebar to top `.room-actions` bar (next to Settings/Feedback)
-- Files: `index.html`, `style.css`, `state.js`, `media-controls.js`, `connect.js`
+**Modified in worktree `modest-leakey` (branch `claude/modest-leakey`):**
 
-### Mobile Browser Support (3 fixes)
-1. **Camera flip button** — "Flip" button on mobile toggles front/back camera via `facingMode`. Hidden on desktop. Camera dropdown hidden on mobile (cryptic labels).
-2. **Screen tile cleanup on disconnect** — ParticipantDisconnected handler now cleans up screen tiles from `screenTileByIdentity`, `screenTileBySid`, `screenTrackMeta`, `screenRecoveryAttempts`, `screenResubscribeIntent`. Fixes stale tiles after abrupt mobile disconnects.
-3. **16:9 aspect ratio on screen tiles** — Added `aspect-ratio: 16 / 9` to `.screens-grid .tile`. Portrait video gets side letterboxing. Added `.portrait` CSS class detection in `tagAspect()`.
+Rust client:
+- `core/client/src/desktop_capture.rs` — TrackSource::Camera (line 641)
 
-### Chat Visual Improvement
-- Per-user color coding: 15-color deterministic palette, left border stripe `border-left: 3px solid var(--chat-user-color)`, self-messages get green tint. Author name shows in user's color.
+webrtc-sys-local (C++ encoder fixes — ALL from previous session PLUS new):
+- `src/peer_connection_factory.cpp` — **NEW**: ContentHint=Fluid for non-screencast + `#include "livekit/video_track.h"`
+- `include/livekit/video_track.h` — **NEW**: Added `bool is_screencast() const;` to VideoTrackSource
+- `src/video_track.cpp` — **NEW**: Implemented `VideoTrackSource::is_screencast()`
+- `src/nvidia/nvidia_encoder_factory.cpp` — Multi-profile H264 (previous session)
+- `src/nvidia/h264_encoder_impl.cpp` — Profile GUID, SetRates, trusted rate controller (previous session)
+- `src/video_encoder_factory.cpp` — Creation tracing (previous session)
+- `src/video_track.cpp` — AdaptFrame bypass (previous session) + is_screencast (new)
 
-### GitHub Issues Batch (7 issues closed)
-- **#84** — Login page cleanup: password hidden by default (auto-fills), URLs/devices behind "Advanced" toggle, password shows on auth failure
-- **#85** — Screenshot upload fix: FormData → ArrayBuffer to match server expectation
-- **#86** — Dialog overflow fix: `max-height` + `overflow-y: auto` on bug report content
-- **#87** — Max characters increased: 1000 → 5000 on feedback textarea
-- **#88** — Title + Description split: separate title input (120 chars), flows to GitHub issue title, Rust structs updated
-- **#90** — Screen share volume slider on tile: shows on hover, syncs with participant card slider, only appears with audio track
-- **#93** — Soundboard compact UX: pill buttons with emoji + name, search filter input, panel widened to 320px
+LiveKit SDK fork:
+- `core/livekit-local/src/room/options.rs` — **NEW**: RID 'q'→'f' for single-layer non-simulcast
 
-### Issues Also Closed (confirmed fixed earlier)
-- **#89** — Stale screen tiles (fixed by disconnect cleanup above)
-- **#91** — Duplicate of #89
-- **#92** — Zane's audio lag (GPU overload from Resident Evil, not a code bug)
+SFU config:
+- `core/sfu/livekit.yaml` — Currently `congestion_control.enabled: false` (NEEDS to be changed to `true`)
 
----
+**NOT modified (important — viewer JS changes were NOT needed):**
+- No viewer JS changes were made. The $screen companion source remapping (identity.js/connect.js/participants.js) was planned but NOT implemented because the viewer already handles $screen via identity detection, independent of TrackSource.
 
-## What's Working (v0.4.1)
+### KEY RESEARCH SOURCES (This Session)
 
-### Core Features
-- WebRTC video/screen sharing via LiveKit SFU (1080p@60fps target)
-- Multi-room support with room switching
-- Chat with file/image upload, emoji picker, link rendering, image fullscreen lightbox, **per-user color coding**
-- Soundboard with custom uploads, icons, per-clip volume, **compact search + pill buttons**
-- Camera lobby for previewing webcams
-- 7 themes (Frost, Cyberpunk, Aurora, Ember, Matrix, Ultra Instinct) with opacity slider
-- Bug report system with screenshot attachment, auto-captured WebRTC stats, clipboard paste, **title + description fields**
-- Admin dashboard with live stats, session history, metrics, bug reports
-- Auto-update check + native Tauri auto-updater
-- macOS Apple Silicon support (DMG + auto-updater)
-- Per-startup cache-busting stamps — dashboard detects stale viewers
-- **PG-13 Mode** — room-wide content warning toggle with banner, glow, speech, data channel sync
-- **Mobile browser support** — camera flip, clean disconnect, proper aspect ratio
-- **Screen share volume slider on tile** — hover to adjust
-- **Streamlined login page** — clean layout, Advanced toggle for power users
+**WebRTC Internals:**
+- VideoStreamEncoder encoder queue: single-frame buffer, drops if `posted_frames_waiting_for_encode > 1`
+- BUT: NVENC reports 0 skipped = encoder queue is NOT the bottleneck (frames match capture count)
+- ContentHint::Fluid → DegradationPreference::MAINTAIN_FRAMERATE (confirmed in video_stream_encoder.cc)
+- FrameCadenceAdapter: Fluid → PassthroughAdapter (not ZeroHertzAdapter)
 
-### Jam Session (Spotify Integration)
-- Spotify OAuth PKCE flow with token persistence
-- Song search, queue management, skip
-- Queue no longer drains when searching (fixed in v0.4.1)
-- WASAPI per-process audio capture (Spotify.exe)
-- WebSocket audio streaming to opted-in listeners
+**LiveKit SFU Internals:**
+- `congestion_control.enabled: false` does NOT disable BWE state machine, only `allocateAllTracks()`
+- StreamAllocator's `committedChannelCapacity` still gets reduced before the `!enabled` check
+- Initial capacity: 100Mbps. Degrades over time from TWCC/REMB feedback.
+- Subscriber pacer: PassThrough (no rate limiting) — SFU is NOT pacing
+- `AllocateOptimal()` called on initial track add — uses current `committedChannelCapacity`
+- Undocumented config: `min_channel_capacity`, `use_send_side_bwe`, `use_send_side_bwe_interceptor`
 
----
+**LiveKit RID/Layer Bug:**
+- `VIDEO_RIDS = ['q', 'h', 'f']` — index 0 is 'q' (LOW)
+- Non-simulcast: 1 encoding at index 0 → gets RID 'q' → SFU sees "LOW" quality
+- Fix: single-layer uses 'f' (HIGH) → SFU allocates full bandwidth
+- Upstream bug in livekit-rust-sdks (affects all non-simulcast tracks)
 
-## Known Bugs / Open Items
+### PERFORMANCE NUMBERS (WGC + GPU Pipeline)
 
-- Minor: stale `cameraTrackSid` in observer's participantState after remote camera unpublish (cosmetic only)
-- **#83** — Signal notifications (deferred — requires external infrastructure setup)
+| Game | Capture FPS | Viewer FPS (self) | NVENC | Bitrate |
+|------|------------|-------------------|-------|---------|
+| Desktop (no game) | 90-100fps | 90-96fps | 0 skip | 7-8Mbps |
+| BF6 4K (focused) | **53-54fps** | ~40fps | 0 skip | **20Mbps** |
+| CD 4K (focused) | ~15fps | ~6fps | 0 skip | 5.9Mbps |
+| CD 4K (unfocused) | 33fps | — | 0 skip | 5.7Mbps |
 
-### Security Hardening (audited 2026-03-03)
+**Key insight:** Viewer FPS on the publisher's machine is WORSE than what remote viewers see. Publisher's GPU is doing game + capture + encode + decode. Remote viewers only decode — they should see the full capture FPS.
 
-Full security sweep completed. No credentials in git, no eval/injection, TLS enforced.
+**GPU contention determines capture FPS:** BF6 leaves enough GPU headroom → 53fps. CD maxes out the GPU → 15fps. This is a Windows GPU scheduler limitation, not Echo Chamber.
 
-**FIXED (2026-03-06):**
-- ~~Admin dashboard XSS~~ — Already fixed, all fields use `esc()` / `escAdm()`
-- ~~Chat fileUrl token leak~~ — Rejects external URLs in `renderChatMessage()` (`chat.js`)
-- ~~Login brute-force~~ — IP-based rate limit 5/15min with 429 response (`main.rs`)
-- ~~Path traversal~~ — `is_safe_path_component()` on room names + file names (`main.rs`)
+### NEXT SESSION PRIORITIES
 
-**Remaining (lower priority):**
-- `/api/online` unauthenticated — leaks room membership
-- CORS fully open (`Any`) — should scope to `tauri://localhost` + server origin
-- No security headers (CSP, HSTS, X-Frame-Options, nosniff)
-- Avatar URL spoofing via data channel (no sender identity validation)
-- Admin password uses plaintext path in .env (Argon2 path exists but unused)
+1. **Stream quality warning UI** — Monitor WGC callback FPS in real-time. When <30fps sustained, show dismissable banner: "Your game is impacting stream quality." Must be dismissable so it doesn't annoy users. Already have the data in the callback.
+2. **Test with friends externally** — Confirm remote viewers see full capture FPS (not degraded like self-view).
+3. **Screen share doesn't stop when game closes** — WGC captures window HWND, so this should auto-stop. Verify.
+4. **Optimize WGC unfocused FPS** — Currently 33fps unfocused vs DXGI DD's 90fps. Investigate if channel backpressure or libyuv is the bottleneck.
 
----
+### ACCEPTED LIMITATIONS
 
-## Active Worktree
-- None — on main, all changes committed directly.
+- **Extremely GPU-heavy games (CD 4K + DLSS FG) cap at ~15fps capture.** This is a Windows GPU scheduler issue — no software fix exists. Present() hooks don't work with DLSS Frame Generation (proxy swap chain sends garbled data). NVFBC blocked on consumer GeForce. Disabling MPO makes it worse. Every streaming tool (OBS Display Capture, Discord, Sunshine) hits the same wall.
+- **Most games work fine.** BF6 4K = 53fps. The GPU contention only matters when the game maxes out the GPU.
 
----
+### IMPORTANT NOTES
 
-## Files Modified This Session
-
-### Viewer JS
-- `core/viewer/state.js` — Added `flipCamBtn`, `_camFacingMode`, `pg13ModeActive`, `togglePg13Button`
-- `core/viewer/media-controls.js` — Added `flipCam()`, mobile facingMode in `switchCam()`/`toggleCam()`, PG-13 toggle/apply/announce functions, **restartTrack for mic/cam switching**
-- `core/viewer/connect.js` — Screen tile cleanup in disconnect handler, password field show on auth failure, local screen tile identity, PG-13 data handler + button enable/disable, **PG-13 sync re-broadcast + dedup**
-- `core/viewer/participants.js` — `.portrait` class in `tagAspect()`, volume slider in `addScreenTile()`
-- `core/viewer/audio-routing.js` — `tile.dataset.identity`, volume slider reveal on screen audio attach
-- `core/viewer/app.js` — Flip button handler, mobile cam dropdown hide, password auto-fill, Advanced toggle
-- `core/viewer/chat.js` — Per-user color system, `--chat-user-color` CSS var, `.self` class
-- `core/viewer/soundboard.js` — Pill buttons with names, search filter
-- `core/viewer/admin.js` — Screenshot upload fix (ArrayBuffer), bug report title field
-
-### Viewer HTML/CSS
-- `core/viewer/index.html` — Flip button, login page restructure, title input, soundboard search, maxlength 5000, PG-13 banner + button, Debug moved to top bar
-- `core/viewer/style.css` — All new styles (flip button, login page, chat colors, dialog overflow, title input, volume slider, soundboard pills, screen tile aspect ratio, PG-13 banner/glow/button)
-
-### Rust
-- `core/control/src/main.rs` — `title` field in BugReport/BugReportRequest structs, `create_github_issue()` title logic
-
----
-
-## Version History (Recent)
-
-### v0.4.1 (2026-02-27) — Released
-- Fix "Update available" banner (#79) — Cargo.toml versions synced
-- Fix jam queue drain on search (#77) — server auto-remove guard
-- Chat image fullscreen lightbox (#75) — CSS for existing JS
-- Fix macOS camera card glitch — dead track re-attach guard
-- Post-release: clipboard paste in feedback (#81), cache-bust stamper fix
-
-### v0.4.0 (2026-02-27)
-- macOS Apple Silicon DMG in releases
-- macOS auto-updater support via unified latest.json
-- Viewer modularized into 19 JS files
-- Camera desync fix, LK TDZ fix
-
-### v0.3.1 (2026-02-14/16/23/24)
-- Admin Dashboard v2, AIMD bitrate control, volume boost, security fixes, 33 issues resolved
-
----
-
-**When resuming:**
-1. Read this file first
-2. Read CLAUDE.md for architecture and rules
-3. Check git log for any commits after this document's date
-4. Check "Known Bugs / Open Items" for what needs work
+1. **SFU CC fix is DONE** — `congestion_control.enabled: true` in livekit.yaml. Stable.
+2. **WGC is now the primary capture method** — JS fallback chain: NVFBC → WGC → DXGI DD → Present hook. Changed in `screen-share.js`.
+3. **GpuConverter extracted to shared module** — `gpu_converter.rs` used by both `desktop_capture.rs` and `screen_capture.rs`.
+4. **WGC requires MinUpdateInterval >= 1ms** — Windows bug caps at 50fps with default (0ms).
+5. **WGC + GPU pipeline uses WGC's own D3D11 device** — No cross-device sharing. Extracted via `frame.as_raw_texture().GetDevice()`. COM pointer cast via `std::mem::transmute` (windows 0.61 → 0.58).
+6. **NVENC fails at 4K** — Must downscale to 1080p before encoding. GPU shader handles this.
+7. **3-second negotiation wait required** — After `publish_track`, wait before starting capture. Without it, NVENC never initializes.
+8. **config.json** must exist next to the release exe: `{"server": "https://echo.fellowshipoftheboatrace.party:9443"}`
+9. **Anti-MPO overlay code exists but doesn't help** — Left in desktop_capture.rs, harmless. MPO disable via registry made things WORSE (1fps + system freeze).

@@ -301,11 +301,36 @@ function startAudioMonitor() {
 function handleTrackSubscribed(track, publication, participant) {
   const LK = getLiveKitClient();
   const source = getTrackSource(publication, track);
-  const cardRef = ensureParticipantCard(participant);
-  debugLog("[track-source] " + participant.identity + " kind=" + track.kind +
+
+  // $screen companion identities route their tracks under the real participant.
+  // Strip "$screen" suffix and find the real participant for card/tile assignment.
+  var effectiveParticipant = participant;
+  var isScreenCompanion = participant.identity.endsWith("$screen");
+  if (isScreenCompanion) {
+    var realIdentity = participant.identity.slice(0, -"$screen".length);
+    debugLog(`[native-capture] routing $screen track to real identity: ${realIdentity}`);
+    // Try to find the real participant in the room
+    if (room && room.remoteParticipants) {
+      var realRemote = room.remoteParticipants.get(realIdentity);
+      if (realRemote) {
+        effectiveParticipant = realRemote;
+      } else {
+        // Real participant might be local
+        if (room.localParticipant && room.localParticipant.identity === realIdentity) {
+          effectiveParticipant = room.localParticipant;
+        } else {
+          // Create a synthetic participant-like object with the real identity
+          effectiveParticipant = { identity: realIdentity, name: participant.name || "Screen" };
+        }
+      }
+    }
+  }
+
+  const cardRef = ensureParticipantCard(effectiveParticipant);
+  debugLog("[track-source] " + effectiveParticipant.identity + " kind=" + track.kind +
     " source=" + source + " pub.source=" + publication?.source +
-    " track.source=" + track?.source);
-  const handleKey = track.kind === "video" ? `${participant.identity}-${source || track.kind}` : getTrackSid(publication, track, `${participant.identity}-${source || track.kind}`);
+    " track.source=" + track?.source + (isScreenCompanion ? " (from $screen companion)" : ""));
+  const handleKey = track.kind === "video" ? `${effectiveParticipant.identity}-${source || track.kind}` : getTrackSid(publication, track, `${effectiveParticipant.identity}-${source || track.kind}`);
 
   // Check if recently handled, but also verify track is actually displayed
   if (handleKey && wasRecentlyHandled(handleKey)) {
@@ -314,7 +339,7 @@ function handleTrackSubscribed(track, publication, participant) {
     // For screen shares, check if the track is actually rendering
     if (track.kind === "video" && source === LK.Track.Source.ScreenShare) {
       const screenTrackSid = publication?.trackSid || track?.sid || null;
-      const existingTile = screenTileByIdentity.get(participant.identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
+      const existingTile = screenTileByIdentity.get(effectiveParticipant.identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
       if (existingTile) {
         const videoEl = existingTile.querySelector("video");
         // Consider displayed if: video exists + connected + right track + (playing OR attached very recently)
@@ -334,7 +359,7 @@ function handleTrackSubscribed(track, publication, participant) {
     }
     // For audio tracks, check if audio element actually exists
     else if (track.kind === "audio") {
-      const audioSid = getTrackSid(publication, track, `${participant.identity}-${source || "audio"}`);
+      const audioSid = getTrackSid(publication, track, `${effectiveParticipant.identity}-${source || "audio"}`);
       const audioEl = audioElBySid.get(audioSid);
       isActuallyDisplayed = !!(audioEl && audioEl.isConnected && audioEl._lkTrack === track);
       if (!isActuallyDisplayed) {
@@ -367,7 +392,7 @@ function handleTrackSubscribed(track, publication, participant) {
   }
   if (track.kind === "video" && source === LK.Track.Source.ScreenShare) {
     // Opt-in: remote screen shares default to unwatched — unsubscribe unless explicitly watching
-    var _isLocalScreen = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    var _isLocalScreen = room && room.localParticipant && effectiveParticipant.identity === room.localParticipant.identity;
     if (!_isLocalScreen && isUnwatchedScreenShare(publication, participant)) {
       if (publication?.setSubscribed) publication.setSubscribed(false);
       if (cardRef && cardRef.watchToggleBtn) {
@@ -375,10 +400,10 @@ function handleTrackSubscribed(track, publication, participant) {
         cardRef.watchToggleBtn.textContent = "Start Watching";
         if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
       }
-      debugLog("[opt-in] auto-unsubscribed unwatched screen " + participant.identity);
+      debugLog("[opt-in] auto-unsubscribed unwatched screen " + effectiveParticipant.identity);
       return;
     }
-    const identity = participant.identity;
+    const identity = effectiveParticipant.identity;
     const screenTrackSid = publication?.trackSid || track?.sid || null;
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
     if (existingTile && existingTile.isConnected) {
@@ -409,7 +434,7 @@ function handleTrackSubscribed(track, publication, participant) {
       if (screenTrackSid) {
         existingTile.dataset.trackSid = screenTrackSid;
         screenTileBySid.set(screenTrackSid, existingTile);
-        registerScreenTrack(screenTrackSid, publication, existingTile, participant.identity);
+        registerScreenTrack(screenTrackSid, publication, existingTile, effectiveParticipant.identity);
         scheduleScreenRecovery(screenTrackSid, publication, existingTile.querySelector("video"));
       }
       screenTileByIdentity.set(identity, existingTile);
@@ -423,13 +448,13 @@ function handleTrackSubscribed(track, publication, participant) {
       screenTileByIdentity.delete(identity);
       if (screenTrackSid) screenTileBySid.delete(screenTrackSid);
     }
-    clearScreenTracksForIdentity(participant.identity, screenTrackSid);
+    clearScreenTracksForIdentity(effectiveParticipant.identity, screenTrackSid);
     const label = `${participant.name || "Guest"} (Screen)`;
     const element = createLockedVideoElement(track);
     configureVideoElement(element, true);
     // Add playout delay buffer for remote screen shares to absorb WiFi jitter.
     // Trades ~150ms latency for smooth playback instead of stuttering.
-    var _isRemoteScreen = room && room.localParticipant && participant.identity !== room.localParticipant.identity;
+    var _isRemoteScreen = room && room.localParticipant && effectiveParticipant.identity !== room.localParticipant.identity;
     if (_isRemoteScreen && track?.mediaStreamTrack) {
       try {
         const pc = room?.engine?.pcManager?.subscriber?.pc;
@@ -438,7 +463,7 @@ function handleTrackSubscribed(track, publication, participant) {
           const videoReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
           if (videoReceiver && "playoutDelayHint" in videoReceiver) {
             videoReceiver.playoutDelayHint = 0.15; // 150ms jitter buffer
-            debugLog("[sync] set video playoutDelayHint=0.15 for " + participant.identity);
+            debugLog("[sync] set video playoutDelayHint=0.15 for " + effectiveParticipant.identity);
           }
         }
       } catch {}
@@ -455,26 +480,27 @@ function handleTrackSubscribed(track, publication, participant) {
     setTimeout(() => requestVideoKeyFrame(publication, track), 200);
     setTimeout(() => requestVideoKeyFrame(publication, track), 600);
     const tile = addScreenTile(label, element, screenTrackSid);
-    tile.dataset.identity = participant.identity;
-    debugLog("[screen-tile] CREATED for " + participant.identity + " trackSid=" + screenTrackSid + " label=" + label);
+    tile.dataset.identity = effectiveParticipant.identity;
+    debugLog("[screen-tile] CREATED for " + effectiveParticipant.identity + " trackSid=" + screenTrackSid + " label=" + label);
     ensureVideoSubscribed(publication, element);
     if (screenTrackSid) {
-      registerScreenTrack(screenTrackSid, publication, tile, participant.identity);
+      registerScreenTrack(screenTrackSid, publication, tile, effectiveParticipant.identity);
       scheduleScreenRecovery(screenTrackSid, publication, element);
       screenResubscribeIntent.delete(screenTrackSid);
     }
-    screenTileByIdentity.set(participant.identity, tile);
+    screenTileByIdentity.set(effectiveParticipant.identity, tile);
     // Start inbound stats monitor for remote screen shares
-    var _isLocalTile = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    var _isLocalTile = room && room.localParticipant && effectiveParticipant.identity === room.localParticipant.identity;
     if (!_isLocalTile) startInboundScreenStatsMonitor();
     // Opt-in screen shares: tile was created because user is watching (or it's local)
     // No need to hide — the intercept at the top of this function already unsubscribed unwatched screens
     if (cardRef && cardRef.watchToggleBtn) {
       cardRef.watchToggleBtn.style.display = "";
-      cardRef.watchToggleBtn.textContent = hiddenScreens.has(participant.identity) ? "Start Watching" : "Stop Watching";
+      cardRef.watchToggleBtn.textContent = hiddenScreens.has(effectiveParticipant.identity) ? "Start Watching" : "Stop Watching";
       if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = cardRef.watchToggleBtn.textContent; }
     }
-    participantState.get(participant.identity).screenTrackSid = screenTrackSid;
+    var _pState = participantState.get(effectiveParticipant.identity);
+    if (_pState) _pState.screenTrackSid = screenTrackSid;
     forceVideoLayer(publication, element);
     return;
   }
@@ -493,7 +519,7 @@ function handleTrackSubscribed(track, publication, participant) {
       track.mediaStreamTrack.onunmute = () => {
         // Guard: don't re-attach if the track has ended or been unsubscribed
         if (track.mediaStreamTrack?.readyState === "ended" || !publication?.isSubscribed) {
-          debugLog(`camera onunmute ignored ${participant.identity} (track ended or unsubscribed)`);
+          debugLog(`camera onunmute ignored ${effectiveParticipant.identity} (track ended or unsubscribed)`);
           return;
         }
         requestVideoKeyFrame(publication, track);
@@ -501,24 +527,25 @@ function handleTrackSubscribed(track, publication, participant) {
       };
     }
     ensureCameraVideo(cardRef, track, publication);
-    participantState.get(participant.identity).cameraTrackSid = camTrackSid || getTrackSid(publication, track, `${participant.identity}-camera`);
+    var _cState = participantState.get(effectiveParticipant.identity);
+    if (_cState) _cState.cameraTrackSid = camTrackSid || getTrackSid(publication, track, `${effectiveParticipant.identity}-camera`);
     const camEl = cardRef?.avatar?.querySelector("video");
     if (!camEl) {
-      debugLog(`ERROR: camera video element not found for ${participant.identity} after ensureCameraVideo`);
+      debugLog(`ERROR: camera video element not found for ${effectiveParticipant.identity} after ensureCameraVideo`);
       debugLog(`  cardRef: ${!!cardRef}, avatar: ${!!cardRef?.avatar}, trackSid: ${camTrackSid}`);
     }
     forceVideoLayer(publication, camEl);
     if (camTrackSid && camEl) {
       cameraVideoBySid.set(camTrackSid, camEl);
-      debugLog(`camera video registered in map: ${participant.identity} sid=${camTrackSid}`);
+      debugLog(`camera video registered in map: ${effectiveParticipant.identity} sid=${camTrackSid}`);
     }
     setTimeout(() => {
       if (camEl) {
-        debugLog(`camera size ${participant.identity} ${camEl.videoWidth}x${camEl.videoHeight} muted=${track.mediaStreamTrack?.muted ?? "?"}`);
+        debugLog(`camera size ${effectiveParticipant.identity} ${camEl.videoWidth}x${camEl.videoHeight} muted=${track.mediaStreamTrack?.muted ?? "?"}`);
       }
     }, 900);
     // Start inbound stats monitor for remote cameras (adaptive layer selection)
-    var _isLocalCam = room && room.localParticipant && participant.identity === room.localParticipant.identity;
+    var _isLocalCam = room && room.localParticipant && effectiveParticipant.identity === room.localParticipant.identity;
     if (!_isLocalCam) startInboundScreenStatsMonitor();
     return;
   }
@@ -530,12 +557,12 @@ function handleTrackSubscribed(track, publication, participant) {
     // Heuristics: screen shares typically have "screen"/"window"/"monitor" in label, or very wide resolution
     var looksLikeScreen = /screen|window|monitor|display/i.test(mstLabel) || mstW > 1280;
     debugLog("[source-detect] WARNING: video track with unknown source for " +
-      participant.identity + " — pub.source=" + publication?.source +
+      effectiveParticipant.identity + " — pub.source=" + publication?.source +
       " track.source=" + track?.source + " label=" + mstLabel +
       " width=" + mstW + " looksLikeScreen=" + looksLikeScreen);
     if (looksLikeScreen) {
       // Route to screen share path instead of clobbering the camera avatar
-      debugLog("[source-detect] routing unknown video as screen share for " + participant.identity);
+      debugLog("[source-detect] routing unknown video as screen share for " + effectiveParticipant.identity);
       handleTrackSubscribed(track, Object.assign({}, publication, { source: LK.Track.Source.ScreenShare }), participant);
     } else {
       ensureCameraVideo(cardRef, track, publication);
@@ -546,10 +573,10 @@ function handleTrackSubscribed(track, publication, participant) {
     // Opt-in: don't attach audio for unwatched remote screen shares
     if (isUnwatchedScreenShare(publication, participant)) {
       if (publication?.setSubscribed) publication.setSubscribed(false);
-      debugLog("[opt-in] auto-unsubscribed unwatched screen audio " + participant.identity);
+      debugLog("[opt-in] auto-unsubscribed unwatched screen audio " + effectiveParticipant.identity);
       return;
     }
-    const audioSid = getTrackSid(publication, track, `${participant.identity}-${source || "audio"}`);
+    const audioSid = getTrackSid(publication, track, `${effectiveParticipant.identity}-${source || "audio"}`);
     if (audioSid && audioElBySid.has(audioSid)) {
       return;
     }
@@ -574,7 +601,7 @@ function handleTrackSubscribed(track, publication, participant) {
           const audioReceiver = receivers.find(r => r.track === track.mediaStreamTrack);
           if (audioReceiver && "playoutDelayHint" in audioReceiver) {
             audioReceiver.playoutDelayHint = 0.15; // 150ms jitter buffer
-            debugLog("[sync] set audio playoutDelayHint=0.15 for " + participant.identity);
+            debugLog("[sync] set audio playoutDelayHint=0.15 for " + effectiveParticipant.identity);
           }
         }
       } catch {}
@@ -590,26 +617,26 @@ function handleTrackSubscribed(track, publication, participant) {
     // Re-trigger play when track's mediaStreamTrack unmutes (first data arrives)
     if (track.mediaStreamTrack) {
       track.mediaStreamTrack.addEventListener("unmute", () => {
-        debugLog(`audio track unmuted ${participant.identity} src=${source}`);
+        debugLog(`audio track unmuted ${effectiveParticipant.identity} src=${source}`);
         ensureAudioPlays(element);
       });
     }
-    debugLog(`audio element created: ${participant.identity} src=${source} sid=${audioSid} srcObj=${!!element.srcObject} mst=${!!track.mediaStreamTrack} mstEnabled=${track.mediaStreamTrack?.enabled} mstMuted=${track.mediaStreamTrack?.muted}`);
+    debugLog(`audio element created: ${effectiveParticipant.identity} src=${source} sid=${audioSid} srcObj=${!!element.srcObject} mst=${!!track.mediaStreamTrack} mstEnabled=${track.mediaStreamTrack?.enabled} mstMuted=${track.mediaStreamTrack?.muted}`);
     if (audioSid) {
       audioElBySid.set(audioSid, element);
     }
-    const state = participantState.get(participant.identity);
+    const state = participantState.get(effectiveParticipant.identity);
     if (source === LK.Track.Source.ScreenShareAudio) {
-      state.screenAudioSid = getTrackSid(publication, track, `${participant.identity}-screen-audio`);
+      state.screenAudioSid = getTrackSid(publication, track, `${effectiveParticipant.identity}-screen-audio`);
       state.screenAudioEls.add(element);
       // Show volume slider on the screen tile now that audio is attached
-      var screenTile = screenTileByIdentity.get(participant.identity);
+      var screenTile = screenTileByIdentity.get(effectiveParticipant.identity);
       if (screenTile && screenTile._volWrap) {
         screenTile._volWrap.classList.remove("hidden");
         if (screenTile._volSlider) screenTile._volSlider.value = state.screenVolume;
       }
       // Mute screen audio if user has unwatched this screen share
-      if (hiddenScreens.has(participant.identity)) {
+      if (hiddenScreens.has(effectiveParticipant.identity)) {
         element.muted = true;
       }
       if (!state.screenAnalyser && LK?.createAudioAnalyser) {
@@ -617,7 +644,7 @@ function handleTrackSubscribed(track, publication, participant) {
         resumeAnalyser(state.screenAnalyser);
       }
     } else {
-      state.micSid = getTrackSid(publication, track, `${participant.identity}-mic`);
+      state.micSid = getTrackSid(publication, track, `${effectiveParticipant.identity}-mic`);
       state.micMuted = publication?.isMuted || false;
       state.micAudioEls.add(element);
       if (!state.micAnalyser && LK?.createAudioAnalyser) {

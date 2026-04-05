@@ -34,7 +34,8 @@ var _SETTINGS_KEYS = [
   "echo-device-mic", "echo-device-cam", "echo-device-speaker",
   "echo-core-remember-name", "echo-core-remember-pass",
   "echo-core-identity-suffix", "echo-core-device-id",
-  "echo-avatar-device", "echo-volume-prefs"
+  "echo-avatar-device", "echo-volume-prefs",
+  "echo-performance-mode"
 ];
 
 async function loadAllSettings() {
@@ -140,6 +141,47 @@ function _reapplySettingsAfterLoad() {
   if (savedName && nameInput) nameInput.value = savedName;
   var savedPass = echoGet(REMEMBER_PASS_KEY);
   if (savedPass && passwordInput) passwordInput.value = savedPass;
+
+  // Performance Mode — auto-detect or restore saved preference
+  _initPerformanceMode();
+}
+
+function _initPerformanceMode() {
+  var saved = echoGet("echo-performance-mode");
+  var toggle = document.getElementById("performance-mode-toggle");
+
+  if (saved !== null) {
+    // User has explicitly set a preference
+    performanceMode = saved === "true";
+  } else {
+    // Auto-detect: poll hardware probe (runs async, usually ready within 500ms)
+    var attempts = 0;
+    var pollTimer = setInterval(function() {
+      attempts++;
+      if (window.__echoHwCaps && window.__echoHwCaps.ready) {
+        clearInterval(pollTimer);
+        performanceMode = !window.__echoHwCaps.canSimulcast;
+        debugLog("[settings] performance mode auto-detected: " + performanceMode +
+                 " (h264Hw=" + window.__echoHwCaps.h264Hw + ")");
+        if (toggle) toggle.checked = performanceMode;
+      } else if (attempts >= 30) {
+        // 3 second timeout — assume weak hardware
+        clearInterval(pollTimer);
+        performanceMode = true;
+        debugLog("[settings] performance mode: probe timeout, defaulting ON");
+        if (toggle) toggle.checked = true;
+      }
+    }, 100);
+  }
+
+  if (toggle) {
+    toggle.checked = performanceMode;
+    toggle.addEventListener("change", function() {
+      performanceMode = toggle.checked;
+      echoSet("echo-performance-mode", String(performanceMode));
+      debugLog("[settings] performance mode set to " + performanceMode + " (takes effect on next join)");
+    });
+  }
 }
 
 // Fire settings load at startup — async, re-applies settings when loaded.

@@ -666,6 +666,8 @@ button:disabled {
 .media-grid {
   display: grid;
   gap: 12px;
+  /* JS grid-layout.js sets columns/rows dynamically for screens-grid.
+     Fallback for non-screen grids (camera grid, etc.): */
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
@@ -691,6 +693,19 @@ button:disabled {
   font-weight: 500;
   color: var(--muted);
 }
+
+/* Poster: dark cover that hides uninitialized GPU garbage until first real frame */
+.tile-poster {
+  position: absolute;
+  inset: 0;
+  background: var(--card-bg, #0f172a);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.35s ease;
+}
+.tile-poster.fade-out { opacity: 0; pointer-events: none; }
 
 .tile-overlay {
   position: absolute;
@@ -904,6 +919,7 @@ video {
   gap: 20px;
   overflow: hidden;
   min-height: 0;
+  position: relative;
 }
 
 .room-main {
@@ -933,17 +949,22 @@ video {
 }
 
 .screens-grid {
-  align-content: start;
-  grid-auto-rows: 1fr;
+  align-content: center;
+  justify-content: center;
   min-height: 0;
+  height: 100%;
   overflow: hidden;
 }
 
 .screens-grid .tile {
   min-height: 0;
+  min-width: 0;
   max-height: 100%;
+  max-width: 100%;
   overflow: hidden;
   aspect-ratio: 16 / 9;
+  justify-self: center;
+  align-self: center;
 }
 
 .screens-grid .tile h3 {
@@ -1052,19 +1073,20 @@ video {
 
 /* ─── PG-13 Mode ─── */
 .pg13-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
   background: linear-gradient(90deg, #f59e0b, #ef4444, #f59e0b);
   background-size: 200% 100%;
   animation: pg13-slide 3s linear infinite;
-  color: #000;
-  font-weight: 700;
-  font-size: 14px;
-  text-align: center;
-  padding: 6px 12px;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
-  border-radius: var(--radius-sm);
-  margin-bottom: 8px;
+  color: transparent;
+  font-size: 0;
+  padding: 0;
+  border-radius: 0;
   z-index: 9999;
+  pointer-events: none;
 }
 .pg13-banner.hidden { display: none; }
 @keyframes pg13-slide {
@@ -1140,6 +1162,29 @@ video {
 
 .settings-body button {
   width: 100%;
+}
+
+/* Performance Mode Toggle */
+.settings-perf-section {
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  padding-top: 12px;
+  margin-top: 8px;
+}
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  cursor: pointer;
+  font-size: 13px;
+  color: rgba(226, 232, 240, 0.9);
+  font-weight: 500;
+}
+.settings-hint {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.6);
+  margin: 2px 0 0 0;
+  line-height: 1.4;
 }
 
 /* Custom Sounds (Settings) */
@@ -2742,10 +2787,10 @@ video {
   align-content: center;
 }
 
-/* Dynamic grid: 1 tile = full, 2 = side-by-side, 3-4 = 2x2, 5-6 = 3x2, 7-9 = 3x3 */
+/* Dynamic grid: 1 = full, 2 = side-by-side, 3 = 3 across, 4 = 2x2, 5-6 = 3x2, 7-9 = 3x3 */
 .camera-lobby-grid[data-count="1"] { grid-template-columns: 1fr; }
 .camera-lobby-grid[data-count="2"] { grid-template-columns: 1fr 1fr; }
-.camera-lobby-grid[data-count="3"],
+.camera-lobby-grid[data-count="3"] { grid-template-columns: 1fr 1fr 1fr; }
 .camera-lobby-grid[data-count="4"] { grid-template-columns: 1fr 1fr; }
 .camera-lobby-grid[data-count="5"],
 .camera-lobby-grid[data-count="6"] { grid-template-columns: 1fr 1fr 1fr; }
@@ -2756,6 +2801,7 @@ video {
 .camera-lobby-tile {
   position: relative;
   aspect-ratio: 16 / 9;
+  min-height: 0;
   background: rgba(15, 23, 42, 0.7);
   border-radius: var(--radius);
   overflow: hidden;

@@ -1,5 +1,5 @@
-// Prevents additional console window on Windows in release
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Prevents additional console window on Windows
+#![windows_subsystem = "windows"]
 
 #[cfg(target_os = "windows")]
 mod audio_capture;
@@ -7,6 +7,22 @@ mod audio_capture;
 mod audio_capture_stub;
 #[cfg(not(target_os = "windows"))]
 use audio_capture_stub as audio_capture;
+
+#[cfg(target_os = "windows")]
+mod screen_capture;
+
+#[cfg(target_os = "windows")]
+mod control_block_client;
+#[cfg(target_os = "windows")]
+mod injector;
+#[cfg(target_os = "windows")]
+mod game_capture;
+#[cfg(target_os = "windows")]
+mod gpu_converter;
+#[cfg(target_os = "windows")]
+mod desktop_capture;
+#[cfg(target_os = "windows")]
+mod nvfbc_capture;
 
 #[cfg(target_os = "windows")]
 mod audio_output;
@@ -246,6 +262,108 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Native Screen Capture IPC Commands ──
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_screen_sources() -> Vec<screen_capture::CaptureSource> {
+    screen_capture::list_sources()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_screen_share(
+    source_id: u64,
+    sfu_url: String,
+    token: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    screen_capture::start_share(source_id, sfu_url, token, app).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_screen_share() {
+    screen_capture::stop_share();
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_source_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
+    screen_capture::get_thumbnail(source_id, is_monitor)
+}
+
+// ── Game Capture IPC Commands ──
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_game_capture(
+    hwnd: u64,
+    sfu_url: String,
+    token: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    game_capture::start(hwnd, sfu_url, token, app).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_game_capture() {
+    game_capture::stop();
+}
+
+// ── Desktop Capture (DXGI Desktop Duplication) IPC Commands ──
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn check_desktop_capture_available() -> Result<(bool, String), String> {
+    Ok(desktop_capture::check_available())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_desktop_capture(
+    hwnd: u64,
+    fullscreen: bool,
+    sfu_url: String,
+    token: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_desktop_capture() {
+    desktop_capture::stop();
+}
+
+// ── NVFBC Capture (GPU scanout — highest FPS) IPC Commands ──
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn check_nvfbc_available() -> Result<(bool, String), String> {
+    Ok(nvfbc_capture::check_available())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_nvfbc_capture(
+    hwnd: u64,
+    fullscreen: bool,
+    sfu_url: String,
+    token: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    nvfbc_capture::start(hwnd, fullscreen, sfu_url, token, app).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_nvfbc_capture() {
+    nvfbc_capture::stop();
+}
+
 fn main() {
     // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
     #[cfg(target_os = "windows")]
@@ -274,8 +392,65 @@ fn main() {
             stop_audio_capture,
             list_audio_output_devices,
             check_for_updates,
+            #[cfg(target_os = "windows")]
+            list_screen_sources,
+            #[cfg(target_os = "windows")]
+            start_screen_share,
+            #[cfg(target_os = "windows")]
+            stop_screen_share,
+            #[cfg(target_os = "windows")]
+            get_source_thumbnail,
+            #[cfg(target_os = "windows")]
+            start_game_capture,
+            #[cfg(target_os = "windows")]
+            stop_game_capture,
+            #[cfg(target_os = "windows")]
+            check_desktop_capture_available,
+            #[cfg(target_os = "windows")]
+            start_desktop_capture,
+            #[cfg(target_os = "windows")]
+            stop_desktop_capture,
+            #[cfg(target_os = "windows")]
+            check_nvfbc_available,
+            #[cfg(target_os = "windows")]
+            start_nvfbc_capture,
+            #[cfg(target_os = "windows")]
+            stop_nvfbc_capture,
         ])
         .setup(move |app| {
+            // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected
+            // BEFORE any game launches. The factory persists via LK_RUNTIME_KEEP_ALIVE.
+            // Without this, the $screen Room creates the factory while gaming,
+            // CUDA check fails, and WebRTC falls back to OpenH264 (CPU, 9fps).
+            #[cfg(target_os = "windows")]
+            {
+                std::thread::spawn(|| {
+                    // Direct CUDA probe to diagnose NVENC availability
+                    unsafe {
+                        let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(
+                            windows::core::w!("nvcuda.dll"),
+                        );
+                        match lib {
+                            Ok(h) => {
+                                let cu_init = windows::Win32::System::LibraryLoader::GetProcAddress(
+                                    h, windows::core::s!("cuInit"),
+                                );
+                                if let Some(init_fn) = cu_init {
+                                    let init: extern "system" fn(u32) -> i32 = std::mem::transmute(init_fn);
+                                    let result = init(0);
+                                    eprintln!("[init] CUDA cuInit(0) = {} (0=success)", result);
+                                } else {
+                                    eprintln!("[init] CUDA cuInit not found in nvcuda.dll");
+                                }
+                            }
+                            Err(e) => eprintln!("[init] nvcuda.dll load failed: {e}"),
+                        }
+                    }
+                    livekit::ensure_runtime_initialized();
+                    eprintln!("[init] LiveKit runtime pre-initialized (NVENC detection)");
+                });
+            }
+
             // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
             clear_cache_on_upgrade(app);
 

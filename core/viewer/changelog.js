@@ -8,6 +8,64 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-05",
+    title: "WGC Capture + SFU Bandwidth Fix (v0.6.0)",
+    notes: [
+      "Windows Graphics Capture (WGC) — captures games at 50-60fps even while focused, replaces DXGI DD for game capture",
+      "GPU shader pipeline — 4K capture downscaled to 1080p on GPU in under 1ms, no CPU bottleneck",
+      "SFU bandwidth fix — stream now delivers full bitrate to all viewers (was throttled to 720kbps)",
+      "NVENC encodes every frame — zero skipped frames at up to 20Mbps",
+      "No more yellow capture border around shared games",
+      "Battlefield 6 at 4K: 53fps capture, viewers see 60fps"
+    ]
+  },
+  {
+    version: "2026-04-04",
+    title: "DXGI Desktop Duplication Capture",
+    notes: [
+      "DXGI Desktop Duplication — captures DWM compositor output, works with every game regardless of DX11/DX12/Vulkan, DLSS Frame Generation, HDR, anti-cheat",
+      "Works on ALL GPUs (not just NVIDIA) — standard Windows API used by OBS, Discord, etc.",
+      "Zero game performance impact — capture reads the compositor's front buffer, no hook DLL injected",
+      "Auto-detects availability — falls back to DX11 hook capture when not available",
+      "WASAPI per-process audio auto-starts when game capture begins"
+    ]
+  },
+  {
+    version: "2026-04-03b",
+    title: "DX12 Game Capture + Picker Upgrade",
+    notes: [
+      "DX12 game capture now works — HDR 10-bit (R10G10B10A2) and other formats auto-converted via GPU shader blit",
+      "Capture picker: much better window thumbnails (GPU-rendered apps like Chrome, Discord, VSCode now show previews)",
+      "Capture picker: larger thumbnails, clean fallback icon for apps that can't be previewed, double-click to share",
+      "Fixed green flash when game capture starts — dark poster overlay until first real frame",
+      "3-second startup delay removed — game capture streams start immediately"
+    ]
+  },
+  {
+    version: "2026-04-03",
+    title: "Game Capture Hook",
+    notes: [
+      "Full-FPS game capture via Present() hook DLL (DX11)",
+      "Custom capture source picker with thumbnails",
+      "Monitor capture support (share your entire screen)",
+      "Adaptive FPS throttle based on GPU/CPU/network conditions",
+      "Automatic fallback to standard capture when game hook is unavailable"
+    ]
+  },
+  {
+    version: "2026-04-02",
+    title: "v0.5.0 — Native Screen Capture (Game Mode!)",
+    notes: [
+      "HUGE: Screen sharing now runs natively through Windows capture — completely bypasses browser limitations",
+      "Full FPS while gaming — no more 5fps drops when your game has focus",
+      "Hardware H264 encoding via NVENC — near-zero CPU cost on NVIDIA GPUs",
+      "Custom window picker — select exactly which window to share",
+      "Faster freeze recovery — keyframe requests now fire every 200ms instead of 500ms",
+      "Fixed: Admin kick/mute buttons were missing (config detection fix)",
+      "Fixed: SFU was throttling localhost subscribers to 93kbps (TWCC feedback stripped)"
+    ]
+  },
+  {
     version: "2026-03-15",
     title: "Bug Fixes + Device Switching",
     notes: [

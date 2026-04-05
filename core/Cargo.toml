@@ -2,10 +2,15 @@
 members = [
   "control",
   "client",
-  "admin-client"
+  "admin-client",
+  "hook",
 ]
 default-members = [
   "control",
   "client"
 ]
 resolver = "2"
+
+[patch.crates-io]
+livekit = { path = "livekit-local" }
+webrtc-sys = { path = "webrtc-sys-local" }

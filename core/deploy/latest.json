@@ -1,15 +1,15 @@
 {
-  "version": "0.4.1",
-  "notes": "Update to v0.4.1",
-  "pub_date": "2026-02-27T21:43:26Z",
-  "platforms": {
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEFXV1EvcENUQnFocHIxNzdMOUtsdWdEWkV2cmdCODhzcGdTWEQ5cFM0OTdMaFk2aVd0emdIeHJmbEJEYWk3bnBhMm92NndFdjBtT2Y1MitnTGhNOWdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzcyMjI3NTYzCWZpbGU6RWNobyBDaGFtYmVyXzAuNC4xX3g2NC1zZXR1cC5leGUKc3RYb1RCanp5aEFUUHRsbi90TkUvRDNKM01NTlRzN2hqVm8vYldBVWxvVUhobjg1VmR6Rm9tV2lWclU5cXQ1Q2NNdGpOM1lST3hqK2xNdjhYVGt4Q3c9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.4.1/Echo.Chamber_0.4.1_x64-setup.exe"
-    },
-    "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMERtZTNyWEZtSGtQeUNOSzZOQ0FtT1RhYzQxZ3FWV3hLUjM2S3pMZVNaZS9BeEpUYXR1aXJwcmhsSUEvZTBkMmpMYWZEcG0rL0JOSjArY3dNUmRsMFF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzcyMjI4NTY1CWZpbGU6RWNobyBDaGFtYmVyLmFwcC50YXIuZ3oKaThROU40OFJtWGljTXVXTmp2WGlBOXJON1NEenlYMkwwZ0xpZkFQYmVyTmloYjZyazhhL1MrSWRud2RuanVBbmN5dzZINVVKbzdzN2lyRnBBVjFVREE9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.4.1/Echo.Chamber.app.tar.gz"
-    }
-  }
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMENYVHhleDVEYVFSOUUzVFVaNHBwVnpzWnVUb3NNTWpscmp4TXVCY0ZhbGtSZVF6SnNGalNiaFFTc1JVNFVWQnpveFh3RnEwT0dTU0QwcGJWbjQ1NEFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1MTY4NDQxCWZpbGU6RWNobyBDaGFtYmVyXzAuNS4xX3g2NC1zZXR1cC5leGUKWXp5V2x5RWNLQmpQREdiUG90cHNHTTdFSE9veVFwZnJHR21EZk9xejFINHRia1lqWXpoVkFFMmdXdWRMVnlWY201djNVbkpFTURpZGRzZjRNR3JjQVE9PQo=",
+                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.5.1/Echo.Chamber_0.5.1_x64-setup.exe"
+                                         },
+                      "darwin-aarch64":  {
+                                             "signature":  "",
+                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.5.1/Echo.Chamber.app.tar.gz"
+                                         }
+                  },
+    "pub_date":  "2026-04-02T22:20:41Z",
+    "version":  "0.5.1",
+    "notes":  "Echo Chamber v0.5.1"
 }
