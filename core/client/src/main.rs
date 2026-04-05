@@ -14,6 +14,8 @@ mod screen_capture;
 #[cfg(target_os = "windows")]
 mod gpu_converter;
 #[cfg(target_os = "windows")]
+mod capture_pipeline;
+#[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
 mod audio_output;
