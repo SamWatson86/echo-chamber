@@ -1,5 +1,8 @@
 mod audio_capture;
+mod config;
 mod jam_bot;
+
+use config::*;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64::Engine as _;
@@ -17,8 +20,6 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngCore;
-use rcgen::generate_simple_self_signed;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -212,30 +213,6 @@ struct BugReportRequest {
     connection_state: Option<String>,
 }
 
-#[derive(Clone)]
-struct Config {
-    host: String,
-    port: u16,
-    admin_password_hash: Option<String>,
-    admin_password: Option<String>,
-    admin_jwt_secret: String,
-    admin_token_ttl_secs: u64,
-    livekit_api_key: String,
-    livekit_api_secret: String,
-    livekit_token_ttl_secs: u64,
-    soundboard_dir: PathBuf,
-    soundboard_max_bytes: usize,
-    soundboard_max_sounds_per_room: usize,
-    chat_dir: PathBuf,
-    chat_uploads_dir: PathBuf,
-    chat_max_upload_bytes: usize,
-    turn_user: Option<String>,
-    turn_pass: Option<String>,
-    turn_host: Option<String>,
-    turn_port: u16,
-    github_pat: Option<String>,
-    github_repo: Option<String>,
-}
 
 #[derive(Clone)]
 struct SoundboardState {
@@ -940,155 +917,6 @@ async fn main() {
     }
 }
 
-fn load_dotenv() {
-    let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("CORE_ENV_PATH") {
-        candidates.push(PathBuf::from(path));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(core_dir) = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-        {
-            candidates.push(core_dir.join("control").join(".env"));
-        }
-    }
-    if let Ok(current) = std::env::current_dir() {
-        candidates.push(current.join("control").join(".env"));
-        candidates.push(current.join(".env"));
-    }
-
-    for path in candidates {
-        if !path.exists() {
-            continue;
-        }
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            for line in contents.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let mut parts = line.splitn(2, '=');
-                let key = parts.next().unwrap_or("").trim();
-                let value = parts.next().unwrap_or("").trim();
-                if key.is_empty() {
-                    continue;
-                }
-                std::env::set_var(key, value);
-            }
-            info!("loaded env from {:?}", path);
-            break;
-        }
-    }
-}
-
-fn resolve_viewer_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ECHO_CORE_VIEWER_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(current) = std::env::current_dir() {
-        if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
-            if name.eq_ignore_ascii_case("control") {
-                if let Some(parent) = current.parent() {
-                    return parent.join("viewer");
-                }
-            }
-            if name.eq_ignore_ascii_case("core") {
-                return current.join("viewer");
-            }
-        }
-        return current.join("core").join("viewer");
-    }
-    PathBuf::from("viewer")
-}
-
-/// Stamp cache-busting version query strings into viewer/index.html on disk.
-/// Called once at server startup so ServeDir serves the already-stamped file.
-/// Idempotent — strips old ?v= params before re-stamping.
-fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
-    let index_path = viewer_dir.join("index.html");
-    match fs::read_to_string(&index_path) {
-        Ok(html) => {
-            let assets = [
-                "style.css", "jam.css",
-                "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
-                "state.js", "debug.js", "urls.js", "settings.js", "identity.js",
-                "rnnoise.js", "chimes.js", "room-status.js", "auth.js", "theme.js",
-                "chat.js", "soundboard.js", "screen-share.js", "participants.js",
-                "audio-routing.js", "media-controls.js", "admin.js", "connect.js",
-                "app.js", "jam.js", "changelog.js",
-                "capture-picker.js", "capture-picker.css",
-            ];
-            let mut stamped = html;
-            for asset in &assets {
-                // Remove any existing ?v=... before the closing quote
-                // Use leading quote to avoid substring matches (e.g. "state.js" inside "room-switch-state.js")
-                let with_param = format!("\"{}?v=", asset);
-                if let Some(pos) = stamped.find(&with_param) {
-                    // Find the closing quote after the ?v= param
-                    let after = pos + with_param.len();
-                    if let Some(q) = stamped[after..].find('"') {
-                        stamped = format!("{}\"{}\"{}",
-                            &stamped[..pos],
-                            asset,
-                            &stamped[after + q + 1..]);
-                    }
-                }
-                // Now stamp the fresh version (also use leading quote for precision)
-                let plain = format!("\"{}\"", asset);
-                let versioned = format!("\"{}?v={}\"", asset, v);
-                stamped = stamped.replace(&plain, &versioned);
-            }
-            if let Err(e) = fs::write(&index_path, &stamped) {
-                eprintln!("WARNING: could not stamp index.html: {}", e);
-            } else {
-                info!("Stamped viewer/index.html with ?v={}", v);
-            }
-        }
-        Err(e) => eprintln!("WARNING: could not read index.html for stamping: {}", e),
-    }
-}
-
-fn resolve_deploy_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ECHO_CORE_DEPLOY_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(current) = std::env::current_dir() {
-        if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
-            if name.eq_ignore_ascii_case("control") {
-                if let Some(parent) = current.parent() {
-                    return parent.join("deploy");
-                }
-            }
-            if name.eq_ignore_ascii_case("core") {
-                return current.join("deploy");
-            }
-        }
-        return current.join("core").join("deploy");
-    }
-    PathBuf::from("deploy")
-}
-
-fn resolve_admin_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("ECHO_CORE_ADMIN_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Ok(current) = std::env::current_dir() {
-        if let Some(name) = current.file_name().and_then(|n| n.to_str()) {
-            if name.eq_ignore_ascii_case("control") {
-                if let Some(parent) = current.parent() {
-                    return parent.join("admin");
-                }
-            }
-            if name.eq_ignore_ascii_case("core") {
-                return current.join("admin");
-            }
-        }
-        return current.join("core").join("admin");
-    }
-    PathBuf::from("admin")
-}
 
 async fn sfu_proxy(
     ws: WebSocketUpgrade,
@@ -1206,31 +1034,6 @@ async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri, bearer_token
     info!("sfu proxy closed");
 }
 
-fn resolve_path(value: String) -> PathBuf {
-    let path = PathBuf::from(&value);
-    if path.is_absolute() {
-        return path;
-    }
-    if let Ok(current) = std::env::current_dir() {
-        return current.join(path);
-    }
-    PathBuf::from(value)
-}
-
-async fn generate_self_signed() -> RustlsConfig {
-    let rcgen::CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec![
-        "echo.fellowshipoftheboatrace.party".into(),
-        "echo-core.local".into(),
-        "localhost".into(),
-        "127.0.0.1".into(),
-    ])
-    .expect("failed to generate self-signed cert");
-    let cert_pem = cert.pem();
-    let key_pem = key_pair.serialize_pem();
-    RustlsConfig::from_pem(cert_pem.into_bytes(), key_pem.into_bytes())
-        .await
-        .expect("failed to load generated TLS cert")
-}
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -3496,33 +3299,6 @@ async fn jam_audio_ws_handler(mut socket: WebSocket, state: AppState) {
     info!("[jam-audio-ws] client disconnected");
 }
 
-/// Simple URL encoding for query parameters
-fn urlencoded(s: &str) -> String {
-    let mut result = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    result
-}
-
-/// Strip the -XXXX numeric suffix from identities like "sam-1234" -> "sam"
-/// Reconnects change the suffix, so compare base identities for host checks.
-fn identity_base(identity: &str) -> &str {
-    if let Some(pos) = identity.rfind('-') {
-        let suffix = &identity[pos + 1..];
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return &identity[..pos];
-        }
-    }
-    identity
-}
 
 // ── End Jam Session endpoints ──────────────────────────────────────────
 
@@ -4471,25 +4247,6 @@ fn load_config() -> Config {
     }
 }
 
-fn random_secret() -> String {
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-fn now_ts() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs()
-}
-
-fn now_ts_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_millis() as u64
-}
 
 fn default_soundboard_icon() -> String {
     "\u{1F50A}".to_string()
