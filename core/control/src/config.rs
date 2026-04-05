@@ -162,6 +162,7 @@ pub fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
                 "chat.js", "soundboard.js",
                 "screen-share-state.js", "screen-share-config.js", "screen-share-quality.js",
                 "screen-share-adaptive.js", "screen-share-native.js",
+                "participants-grid.js", "participants-avatar.js", "participants-fullscreen.js",
                 "participants.js",
                 "audio-routing.js", "media-controls.js", "admin.js", "connect.js",
                 "app.js", "jam.js", "changelog.js",
