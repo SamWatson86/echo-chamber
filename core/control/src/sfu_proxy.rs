@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{info, warn};
 
-pub async fn sfu_proxy(
+pub(crate) async fn sfu_proxy(
     ws: WebSocketUpgrade,
     uri: OriginalUri,
     headers: HeaderMap,
@@ -45,7 +45,7 @@ pub async fn sfu_proxy(
         .on_upgrade(move |socket| handle_sfu_socket(socket, uri.0, bearer_token))
 }
 
-pub async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri, bearer_token: Option<String>) {
+pub(crate) async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri, bearer_token: Option<String>) {
     let upstream_base =
         std::env::var("CORE_SFU_PROXY").unwrap_or_else(|_| "ws://127.0.0.1:7880".to_string());
     let mut query = uri.query().unwrap_or("").to_string();
