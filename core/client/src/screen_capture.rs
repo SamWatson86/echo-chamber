@@ -506,7 +506,7 @@ async fn share_loop(
 
     // 4. Start WGC capture — callback sends BGRA frames via channel
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
-    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(2);
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
 
     std::thread::spawn(move || {
@@ -654,49 +654,69 @@ async fn share_loop(
 
     // 5. Frame loop: receive BGRA → convert I420 → push to LiveKit
     let mut frame_count: u64 = 0;
+    let mut drop_count: u64 = 0;
     let start_time = std::time::Instant::now();
+    let mut yuv_total_us: u64 = 0;
+    let mut capture_total_us: u64 = 0;
 
+    // Drain channel aggressively: if multiple frames queued, skip to latest
     while running.load(Ordering::SeqCst) {
-        match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok((bgra_data, width, height)) => {
-                // Data arrives already downscaled to 1080p by GPU shader
-                let mut i420 = I420Buffer::new(width, height);
-                let (sy, su, sv) = i420.strides();
-                let (y, u, v) = i420.data_mut();
-
-                yuv_helper::argb_to_i420(
-                    &bgra_data, width * 4, y, sy, u, su, v, sv,
-                    width as i32, height as i32,
-                );
-
-                let vf = VideoFrame {
-                    rotation: VideoRotation::VideoRotation0,
-                    buffer: i420,
-                    timestamp_us: start_time.elapsed().as_micros() as i64,
-                };
-                source.capture_frame(&vf);
-                frame_count += 1;
-
-                if frame_count % 30 == 0 {
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let fps = if elapsed > 0.0 { (frame_count as f64 / elapsed) as u32 } else { 0 };
-                    eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames)",
-                        width, height, fps, frame_count);
-                    let _ = app.emit(
-                        "screen-capture-stats",
-                        ScreenShareStats {
-                            fps,
-                            width,
-                            height,
-                            bitrate_kbps: 0,
-                            encoder: "NVENC/H264".to_string(),
-                            status: "active".to_string(),
-                        },
-                    );
-                }
-            }
+        let frame = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(f) => f,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Skip to newest frame if channel has backed up
+        let mut latest = frame;
+        while let Ok(newer) = frame_rx.try_recv() {
+            drop_count += 1;
+            latest = newer;
+        }
+        let (bgra_data, width, height) = latest;
+
+        // Data arrives already downscaled to 1080p by GPU shader
+        let t0 = std::time::Instant::now();
+        let mut i420 = I420Buffer::new(width, height);
+        let (sy, su, sv) = i420.strides();
+        let (y, u, v) = i420.data_mut();
+
+        yuv_helper::argb_to_i420(
+            &bgra_data, width * 4, y, sy, u, su, v, sv,
+            width as i32, height as i32,
+        );
+        let t1 = std::time::Instant::now();
+
+        let vf = VideoFrame {
+            rotation: VideoRotation::VideoRotation0,
+            buffer: i420,
+            timestamp_us: start_time.elapsed().as_micros() as i64,
+        };
+        source.capture_frame(&vf);
+        let t2 = std::time::Instant::now();
+
+        yuv_total_us += (t1 - t0).as_micros() as u64;
+        capture_total_us += (t2 - t1).as_micros() as u64;
+        frame_count += 1;
+
+        if frame_count % 30 == 0 {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let fps = if elapsed > 0.0 { (frame_count as f64 / elapsed) as u32 } else { 0 };
+            let avg_yuv_ms = if frame_count > 0 { yuv_total_us as f64 / frame_count as f64 / 1000.0 } else { 0.0 };
+            let avg_cap_ms = if frame_count > 0 { capture_total_us as f64 / frame_count as f64 / 1000.0 } else { 0.0 };
+            eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms, cap={:.1}ms)",
+                width, height, fps, frame_count, drop_count, avg_yuv_ms, avg_cap_ms);
+            let _ = app.emit(
+                "screen-capture-stats",
+                ScreenShareStats {
+                    fps,
+                    width,
+                    height,
+                    bitrate_kbps: 0,
+                    encoder: "NVENC/H264".to_string(),
+                    status: "active".to_string(),
+                },
+            );
         }
     }
 

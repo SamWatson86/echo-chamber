@@ -262,6 +262,60 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── OS Detection ──
+
+#[tauri::command]
+fn get_os_build_number() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        // Use RtlGetVersion (ntdll) — GetVersionEx lies on Win8.1+
+        #[repr(C)]
+        struct OsVersionInfoExW {
+            dw_os_version_info_size: u32,
+            dw_major_version: u32,
+            dw_minor_version: u32,
+            dw_build_number: u32,
+            dw_platform_id: u32,
+            sz_csd_version: [u16; 128],
+            w_service_pack_major: u16,
+            w_service_pack_minor: u16,
+            w_suite_mask: u16,
+            w_product_type: u8,
+            w_reserved: u8,
+        }
+
+        unsafe {
+            let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(
+                windows::core::w!("ntdll.dll"),
+            );
+            if let Ok(h) = lib {
+                let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
+                    h,
+                    windows::core::s!("RtlGetVersion"),
+                );
+                if let Some(rtl_get_version) = proc {
+                    let func: extern "system" fn(*mut OsVersionInfoExW) -> i32 =
+                        std::mem::transmute(rtl_get_version);
+                    let mut info: OsVersionInfoExW = std::mem::zeroed();
+                    info.dw_os_version_info_size =
+                        std::mem::size_of::<OsVersionInfoExW>() as u32;
+                    func(&mut info);
+                    eprintln!(
+                        "[os] Windows {}.{} build {}",
+                        info.dw_major_version, info.dw_minor_version, info.dw_build_number
+                    );
+                    return info.dw_build_number;
+                }
+            }
+        }
+        0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
 // ── Native Screen Capture IPC Commands ──
 
 #[cfg(target_os = "windows")]
@@ -392,6 +446,7 @@ fn main() {
             stop_audio_capture,
             list_audio_output_devices,
             check_for_updates,
+            get_os_build_number,
             #[cfg(target_os = "windows")]
             list_screen_sources,
             #[cfg(target_os = "windows")]

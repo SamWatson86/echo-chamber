@@ -38,6 +38,107 @@ function getScreenSharePublishOptions(srcW, srcH) {
   };
 }
 
+// ── Stream quality warning (low FPS detection) ──
+var _qualityWarnUnlisten = null;    // Tauri event unlisten function
+var _qualityWarnLowSince = 0;       // timestamp when FPS first dropped below threshold
+var _qualityWarnShowing = false;     // whether banner is currently visible
+var _qualityWarnDismissed = false;   // dismissed for this session
+var _qualityWarnBannerEl = null;     // DOM element
+const QUALITY_WARN_FPS_THRESHOLD = 30;
+const QUALITY_WARN_DURATION_MS = 5000;
+
+function _onCaptureStats(stats) {
+  if (_qualityWarnDismissed) return;
+  if (localStorage.getItem('echo-no-quality-warn') === '1') return;
+
+  var fps = stats && stats.fps;
+  if (typeof fps !== 'number') return;
+
+  if (fps < QUALITY_WARN_FPS_THRESHOLD && fps > 0) {
+    if (_qualityWarnLowSince === 0) _qualityWarnLowSince = Date.now();
+    if (!_qualityWarnShowing && (Date.now() - _qualityWarnLowSince) >= QUALITY_WARN_DURATION_MS) {
+      _showQualityWarning(fps);
+    }
+  } else {
+    _qualityWarnLowSince = 0;
+    if (_qualityWarnShowing) _hideQualityWarning();
+  }
+}
+
+function _showQualityWarning(fps) {
+  if (_qualityWarnBannerEl) return;
+  _qualityWarnShowing = true;
+
+  var banner = document.createElement('div');
+  banner.id = 'quality-warn-banner';
+  banner.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:10000;' +
+    'background:rgba(30,30,30,0.95);color:#fbbf24;padding:8px 16px;border-radius:8px;' +
+    'font-size:13px;display:flex;align-items:center;gap:10px;box-shadow:0 2px 12px rgba(0,0,0,0.5);' +
+    'border:1px solid rgba(251,191,36,0.3);backdrop-filter:blur(8px);max-width:90vw;';
+
+  var text = document.createElement('span');
+  text.textContent = 'Your game is impacting stream quality (' + fps + ' fps)';
+
+  var dismissBtn = document.createElement('button');
+  dismissBtn.textContent = '\u00d7';
+  dismissBtn.title = 'Dismiss';
+  dismissBtn.style.cssText = 'background:none;border:none;color:#fbbf24;font-size:18px;cursor:pointer;padding:0 2px;line-height:1;';
+  dismissBtn.onclick = function() { _hideQualityWarning(); _qualityWarnDismissed = true; };
+
+  var muteBtn = document.createElement('button');
+  muteBtn.textContent = "Don't show again";
+  muteBtn.style.cssText = 'background:rgba(251,191,36,0.15);border:1px solid rgba(251,191,36,0.3);' +
+    'color:#fbbf24;font-size:11px;cursor:pointer;padding:2px 8px;border-radius:4px;white-space:nowrap;';
+  muteBtn.onclick = function() {
+    localStorage.setItem('echo-no-quality-warn', '1');
+    _hideQualityWarning();
+    _qualityWarnDismissed = true;
+  };
+
+  banner.appendChild(text);
+  banner.appendChild(muteBtn);
+  banner.appendChild(dismissBtn);
+  document.body.appendChild(banner);
+  _qualityWarnBannerEl = banner;
+}
+
+function _hideQualityWarning() {
+  _qualityWarnShowing = false;
+  if (_qualityWarnBannerEl) {
+    _qualityWarnBannerEl.remove();
+    _qualityWarnBannerEl = null;
+  }
+}
+
+function _startQualityWarnListener() {
+  _stopQualityWarnListener();
+  _qualityWarnLowSince = 0;
+  _qualityWarnDismissed = false;
+
+  if (typeof tauriListen !== 'function') return;
+
+  // Listen to all capture stats events
+  var events = ['screen-capture-stats', 'desktop-capture-stats', 'nvfbc-capture-stats', 'game-capture-stats'];
+  var unlisteners = [];
+  events.forEach(function(evt) {
+    tauriListen(evt, function(event) {
+      _onCaptureStats(event && event.payload);
+    }).then(function(unlisten) {
+      unlisteners.push(unlisten);
+    }).catch(function() {});
+  });
+  _qualityWarnUnlisten = function() {
+    unlisteners.forEach(function(fn) { try { fn(); } catch(e) {} });
+    unlisteners.length = 0;
+  };
+}
+
+function _stopQualityWarnListener() {
+  if (_qualityWarnUnlisten) { _qualityWarnUnlisten(); _qualityWarnUnlisten = null; }
+  _hideQualityWarning();
+  _qualityWarnLowSince = 0;
+}
+
 // Track refs for manual screen share (so we can unpublish on stop)
 let _screenShareVideoTrack = null;
 let _screenShareAudioTrack = null;
@@ -648,11 +749,22 @@ async function startScreenShareManual() {
 
     if (!screenToken) { showToast('No token received from server', 8000); return; }
 
+    // Detect OS build number for WGC availability (24H2+ = build 26100+)
+    var osBuild = 0;
+    try {
+      osBuild = await tauriInvoke('get_os_build_number');
+      debugLog('[os] Windows build: ' + osBuild);
+    } catch (e) {
+      debugLog('[os] build detection failed: ' + e);
+    }
+    var wgcSupported = osBuild >= 26100;
+
     // Step 3: start capture
     try {
       if (source.sourceType === 'game') {
-        // Capture fallback chain: NVFBC → DXGI DD → Present hook
+        // Capture fallback chain: NVFBC → WGC (24H2+) → DXGI DD → Present hook
         // NVFBC = GPU scanout capture, 50-60fps under any load (requires nvidia-patch on GeForce)
+        // WGC = Windows.Graphics.Capture, 30-60fps (MPO-aware, Win11 24H2+ only)
         // DXGI DD = DWM compositor, 4-35fps (universal fallback)
         // Present hook = DX11 game hook, 30-60fps (DX11 only, fails with DLSS FG)
         var captureStarted = false;
@@ -679,10 +791,10 @@ async function startScreenShareManual() {
           }
         }
 
-        // 2. Try WGC window capture first (MPO-aware, works at game's native FPS on 24H2+)
-        if (!captureStarted) {
+        // 2. Try WGC window capture (MPO-aware, works at game's native FPS — requires Win11 24H2+)
+        if (!captureStarted && wgcSupported) {
           try {
-            debugLog('[wgc] trying WGC window capture for HWND ' + source.id);
+            debugLog('[wgc] trying WGC window capture for HWND ' + source.id + ' (build ' + osBuild + ')');
             await tauriInvoke('start_screen_share', {
               sourceId: source.id,
               sfuUrl: sfuUrl,
@@ -693,6 +805,8 @@ async function startScreenShareManual() {
           } catch (wgcErr) {
             debugLog('[wgc] start failed: ' + (wgcErr.message || wgcErr));
           }
+        } else if (!captureStarted && !wgcSupported) {
+          debugLog('[wgc] skipped — requires Win11 24H2+ (build 26100+), current: ' + osBuild);
         }
 
         // 3. Fall back to DXGI Desktop Duplication (compositor capture)
@@ -728,15 +842,36 @@ async function startScreenShareManual() {
           captureStarted = true;
         }
       } else {
-        await tauriInvoke('start_screen_share', {
-          sourceId: source.id,
-          sfuUrl: sfuUrl,
-          token: screenToken,
-        });
-        window._echoNativeCaptureMode = 'wgc';
+        // Window/monitor capture — WGC on 24H2+, DXGI DD fallback for monitors on older
+        if (wgcSupported) {
+          await tauriInvoke('start_screen_share', {
+            sourceId: source.id,
+            sfuUrl: sfuUrl,
+            token: screenToken,
+          });
+          window._echoNativeCaptureMode = 'wgc';
+        } else if (source.sourceType === 'monitor') {
+          // Older Windows: DXGI DD works for full monitor capture
+          debugLog('[fallback] WGC unavailable (build ' + osBuild + '), using DXGI DD for monitor');
+          var ddResult = await tauriInvoke('check_desktop_capture_available');
+          if (ddResult && ddResult[0]) {
+            await tauriInvoke('start_desktop_capture', {
+              hwnd: source.id,
+              fullscreen: true,
+              sfuUrl: sfuUrl,
+              token: screenToken,
+            });
+            window._echoNativeCaptureMode = 'desktop-dd';
+          } else {
+            throw new Error('Desktop capture not available: ' + (ddResult ? ddResult[1] : 'unknown'));
+          }
+        } else {
+          throw new Error('Window capture requires Windows 11 24H2+ (current build: ' + osBuild + ')');
+        }
       }
       screenEnabled = true;
       window._echoNativeCaptureActive = true;
+      _startQualityWarnListener();
       renderPublishButtons();
       var modeLabel = window._echoNativeCaptureMode === 'nvfbc' ? 'NVFBC GPU Capture' :
                       window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' :
@@ -750,6 +885,7 @@ async function startScreenShareManual() {
           window._echoNativeCaptureActive = false;
           window._echoNativeCaptureMode = null;
           screenEnabled = false;
+          _stopQualityWarnListener();
           renderPublishButtons();
           showToast('Game capture ended', 3000);
         }).catch(function() {});
@@ -758,6 +894,7 @@ async function startScreenShareManual() {
           window._echoNativeCaptureActive = false;
           window._echoNativeCaptureMode = null;
           screenEnabled = false;
+          _stopQualityWarnListener();
           renderPublishButtons();
           showToast('Desktop capture ended', 3000);
         }).catch(function() {});
@@ -766,6 +903,7 @@ async function startScreenShareManual() {
           window._echoNativeCaptureActive = false;
           window._echoNativeCaptureMode = null;
           screenEnabled = false;
+          _stopQualityWarnListener();
           renderPublishButtons();
           showToast('NVFBC capture ended', 3000);
         }).catch(function() {});
@@ -802,8 +940,8 @@ async function startScreenShareManual() {
       }
     } catch (err) {
       showToast('Capture failed: ' + (err.message || err), 8000);
-      // If game capture failed, try WGC fallback
-      if (source.sourceType === 'game' && screenToken) {
+      // If game capture failed, try WGC fallback (only on 24H2+)
+      if (source.sourceType === 'game' && screenToken && wgcSupported) {
         try {
           await tauriInvoke('start_screen_share', {
             sourceId: source.id,
@@ -1518,6 +1656,7 @@ async function stopScreenShareManual() {
     window._echoNativeCaptureActive = false;
     window._echoNativeCaptureMode = null;
     screenEnabled = false;
+    _stopQualityWarnListener();
     renderPublishButtons();
     return; // Don't fall through to browser path
   }
