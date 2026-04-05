@@ -118,7 +118,7 @@ function _startQualityWarnListener() {
   if (typeof tauriListen !== 'function') return;
 
   // Listen to all capture stats events
-  var events = ['screen-capture-stats', 'desktop-capture-stats', 'nvfbc-capture-stats', 'game-capture-stats'];
+  var events = ['screen-capture-stats', 'desktop-capture-stats'];
   var unlisteners = [];
   events.forEach(function(evt) {
     tauriListen(evt, function(event) {
@@ -764,36 +764,12 @@ async function startScreenShareManual() {
     // Step 3: start capture
     try {
       if (source.sourceType === 'game') {
-        // Capture fallback chain: NVFBC → WGC (24H2+) → DXGI DD → Present hook
-        // NVFBC = GPU scanout capture, 50-60fps under any load (requires nvidia-patch on GeForce)
+        // Capture fallback chain: WGC (24H2+) → DXGI DD
         // WGC = Windows.Graphics.Capture, 30-60fps (MPO-aware, Win11 24H2+ only)
         // DXGI DD = DWM compositor, 4-35fps (universal fallback)
-        // Present hook = DX11 game hook, 30-60fps (DX11 only, fails with DLSS FG)
         var captureStarted = false;
 
-        // 1. Try NVFBC (GPU scanout — highest FPS, bypasses compositor entirely)
-        if (!captureStarted) {
-          try {
-            var nvfbcResult = await tauriInvoke('check_nvfbc_available');
-            if (nvfbcResult && nvfbcResult[0]) {
-              debugLog('[nvfbc] available: ' + nvfbcResult[1]);
-              await tauriInvoke('start_nvfbc_capture', {
-                hwnd: source.id,
-                fullscreen: source.isMonitor || false,
-                sfuUrl: sfuUrl,
-                token: screenToken,
-              });
-              window._echoNativeCaptureMode = 'nvfbc';
-              captureStarted = true;
-            } else {
-              debugLog('[nvfbc] not available: ' + (nvfbcResult ? nvfbcResult[1] : 'unknown'));
-            }
-          } catch (nvfbcErr) {
-            debugLog('[nvfbc] check/start failed: ' + (nvfbcErr.message || nvfbcErr));
-          }
-        }
-
-        // 2. Try WGC window capture (MPO-aware, works at game's native FPS — requires Win11 24H2+)
+        // 1. Try WGC window capture (MPO-aware, works at game's native FPS — requires Win11 24H2+)
         if (!captureStarted && wgcSupported) {
           try {
             debugLog('[wgc] trying WGC window capture for HWND ' + source.id + ' (build ' + osBuild + ')');
@@ -811,7 +787,7 @@ async function startScreenShareManual() {
           debugLog('[wgc] skipped — requires Win11 24H2+ (build 26100+), current: ' + osBuild);
         }
 
-        // 3. Fall back to DXGI Desktop Duplication (compositor capture)
+        // 2. Fall back to DXGI Desktop Duplication (compositor capture)
         if (!captureStarted) {
           try {
             var ddResult = await tauriInvoke('check_desktop_capture_available');
@@ -831,17 +807,6 @@ async function startScreenShareManual() {
           } catch (ddErr) {
             debugLog('[desktop-dd] check/start failed: ' + (ddErr.message || ddErr));
           }
-        }
-
-        // 4. Fall back to DX11 Present hook
-        if (!captureStarted) {
-          await tauriInvoke('start_game_capture', {
-            hwnd: source.id,
-            sfuUrl: sfuUrl,
-            token: screenToken,
-          });
-          window._echoNativeCaptureMode = 'game';
-          captureStarted = true;
         }
       } else {
         // Window/monitor capture — WGC on 24H2+, DXGI DD fallback for monitors on older
@@ -875,9 +840,7 @@ async function startScreenShareManual() {
       window._echoNativeCaptureActive = true;
       _startQualityWarnListener();
       renderPublishButtons();
-      var modeLabel = window._echoNativeCaptureMode === 'nvfbc' ? 'NVFBC GPU Capture' :
-                      window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' :
-                      window._echoNativeCaptureMode === 'game' ? 'Game Capture' : 'Window Capture';
+      var modeLabel = window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' : 'Window Capture';
       showToast('Screen sharing started (' + modeLabel + ')', 4000);
 
       // Immediately start WASAPI per-process audio + publish pipeline using picker's PID
@@ -896,15 +859,6 @@ async function startScreenShareManual() {
 
       // Listen for Rust-side auto-stop (e.g. game exited, timeouts)
       if (typeof tauriListen === 'function') {
-        tauriListen('game-capture-stopped', function() {
-          debugLog('[game-capture] stopped by Rust (game exited or manual stop)');
-          window._echoNativeCaptureActive = false;
-          window._echoNativeCaptureMode = null;
-          screenEnabled = false;
-          _stopQualityWarnListener();
-          renderPublishButtons();
-          showToast('Game capture ended', 3000);
-        }).catch(function() {});
         tauriListen('desktop-capture-stopped', function() {
           debugLog('[desktop-dd] stopped by Rust');
           window._echoNativeCaptureActive = false;
@@ -913,15 +867,6 @@ async function startScreenShareManual() {
           _stopQualityWarnListener();
           renderPublishButtons();
           showToast('Desktop capture ended', 3000);
-        }).catch(function() {});
-        tauriListen('nvfbc-capture-stopped', function() {
-          debugLog('[nvfbc] stopped by Rust');
-          window._echoNativeCaptureActive = false;
-          window._echoNativeCaptureMode = null;
-          screenEnabled = false;
-          _stopQualityWarnListener();
-          renderPublishButtons();
-          showToast('NVFBC capture ended', 3000);
         }).catch(function() {});
         // NOTE: WASAPI audio auto-start is handled by the immediate startNativeAudioCapture()
         // call above using the picker's PID. No event-based listeners needed — they would
@@ -1630,12 +1575,8 @@ async function stopScreenShareManual() {
   // ── Native capture stop path ──
   if (window._echoNativeCaptureActive) {
     try {
-      if (window._echoNativeCaptureMode === 'nvfbc') {
-        await tauriInvoke('stop_nvfbc_capture');
-      } else if (window._echoNativeCaptureMode === 'desktop-dd') {
+      if (window._echoNativeCaptureMode === 'desktop-dd') {
         await tauriInvoke('stop_desktop_capture');
-      } else if (window._echoNativeCaptureMode === 'game') {
-        await tauriInvoke('stop_game_capture');
       } else {
         await tauriInvoke('stop_screen_share');
       }
