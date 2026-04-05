@@ -33,19 +33,22 @@ document.querySelector("header")?.classList.add("portal-hidden");
 
 // Soundboard state vars (echoGet-dependent) are in soundboard.js
 
-// ── WebCodecs NVENC diagnostic ──
-// Test if hardware video encoding is available via WebCodecs API.
+// ── Hardware capability detection ──
+// Probe WebCodecs to detect hardware video encoding (NVENC/QSV/AMF).
+// Results stored in window.__echoHwCaps for publishing decisions.
+window.__echoHwCaps = { ready: false, h264Hw: false, h264Sw: false, av1Hw: false, av1Sw: false, canSimulcast: false };
 (async function testHardwareEncoding() {
   try {
     if (typeof VideoEncoder === "undefined") {
       console.log("[NVENC] WebCodecs VideoEncoder not available");
+      window.__echoHwCaps.ready = true;
       return;
     }
     const configs = [
-      { codec: "avc1.640028", label: "H264-High" },
-      { codec: "av01.0.08M.08", label: "AV1" },
+      { codec: "avc1.640028", label: "H264-High", hwKey: "h264Hw", swKey: "h264Sw" },
+      { codec: "av01.0.08M.08", label: "AV1", hwKey: "av1Hw", swKey: "av1Sw" },
     ];
-    for (const { codec, label } of configs) {
+    for (const { codec, label, hwKey, swKey } of configs) {
       const support = await VideoEncoder.isConfigSupported({
         codec,
         width: 1920,
@@ -62,10 +65,17 @@ document.querySelector("header")?.classList.add("portal-hidden");
         bitrate: 8_000_000,
         hardwareAcceleration: "prefer-software",
       });
+      window.__echoHwCaps[hwKey] = !!support.supported;
+      window.__echoHwCaps[swKey] = !!supportSw.supported;
       console.log(`[NVENC] ${label}: hw=${support.supported}, sw=${supportSw.supported}`);
     }
+    // Hardware H264 encoder = can handle multi-layer simulcast without crushing CPU/GPU
+    window.__echoHwCaps.canSimulcast = window.__echoHwCaps.h264Hw;
+    console.log("[NVENC] canSimulcast=" + window.__echoHwCaps.canSimulcast);
   } catch (e) {
     console.log("[NVENC] diagnostic error: " + e.message);
+  } finally {
+    window.__echoHwCaps.ready = true;
   }
 })();
 

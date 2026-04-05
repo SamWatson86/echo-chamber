@@ -4,8 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Echo Chamber</title>
-    <link rel="stylesheet" href="style.css?v=0.4.1.1773603094" />
-    <link rel="stylesheet" href="jam.css?v=0.4.1.1773603094" />
+    <link rel="stylesheet" href="style.css?v=0.4.1.1775365621" />
+    <link rel="stylesheet" href="jam.css?v=0.4.1.1775365621" />
+    <link rel="stylesheet" href="capture-picker.css?v=0.4.1.1773603094" />
   </head>
   <body>
     <main class="app">
@@ -172,6 +173,13 @@
           <button id="close-settings" type="button">Close</button>
         </div>
         <div id="settings-device-panel" class="settings-body"></div>
+        <div class="settings-body settings-perf-section">
+          <label class="settings-toggle-row">
+            <input type="checkbox" id="performance-mode-toggle">
+            <span>Performance Mode</span>
+          </label>
+          <p class="settings-hint">Reduces encoding load for older hardware. Auto-detected based on GPU. Changes take effect on next join.</p>
+        </div>
       </div>
       <!-- Soundboard Compact (Quick Play) -->
       <div id="soundboard-compact" class="soundboard-compact hidden" role="dialog" aria-label="Soundboard Quick Play">
@@ -410,30 +418,31 @@
       <pre id="debug-log"></pre>
     </div>
 
-    <script src="livekit-client.umd.js?v=0.4.1.1773603094"></script>
-    <script src="room-switch-state.js?v=0.4.1.1773603094"></script>
-    <script src="jam-session-state.js?v=0.4.1.1773603094"></script>
-    <script src="publish-state-reconcile.js?v=0.4.1.1773603094"></script>
-    <script src="state.js?v=0.4.1.1773603094"></script>
-    <script src="debug.js?v=0.4.1.1773603094"></script>
-    <script src="urls.js?v=0.4.1.1773603094"></script>
-    <script src="settings.js?v=0.4.1.1773603094"></script>
-    <script src="identity.js?v=0.4.1.1773603094"></script>
-    <script src="rnnoise.js?v=0.4.1.1773603094"></script>
-    <script src="chimes.js?v=0.4.1.1773603094"></script>
-    <script src="room-status.js?v=0.4.1.1773603094"></script>
-    <script src="auth.js?v=0.4.1.1773603094"></script>
-    <script src="theme.js?v=0.4.1.1773603094"></script>
-    <script src="chat.js?v=0.4.1.1773603094"></script>
-    <script src="soundboard.js?v=0.4.1.1773603094"></script>
-    <script src="screen-share.js?v=0.4.1.1773603094"></script>
-    <script src="participants.js?v=0.4.1.1773603094"></script>
-    <script src="audio-routing.js?v=0.4.1.1773603094"></script>
-    <script src="media-controls.js?v=0.4.1.1773603094"></script>
-    <script src="admin.js?v=0.4.1.1773603094"></script>
-    <script src="connect.js?v=0.4.1.1773603094"></script>
-    <script src="app.js?v=0.4.1.1773603094"></script>
-    <script src="jam.js?v=0.4.1.1773603094"></script>
-    <script src="changelog.js?v=0.4.1.1773603094"></script>
+    <script src="livekit-client.umd.js?v=0.4.1.1775365621"></script>
+    <script src="room-switch-state.js?v=0.4.1.1775365621"></script>
+    <script src="jam-session-state.js?v=0.4.1.1775365621"></script>
+    <script src="publish-state-reconcile.js?v=0.4.1.1775365621"></script>
+    <script src="state.js?v=0.4.1.1775365621"></script>
+    <script src="debug.js?v=0.4.1.1775365621"></script>
+    <script src="urls.js?v=0.4.1.1775365621"></script>
+    <script src="settings.js?v=0.4.1.1775365621"></script>
+    <script src="identity.js?v=0.4.1.1775365621"></script>
+    <script src="rnnoise.js?v=0.4.1.1775365621"></script>
+    <script src="chimes.js?v=0.4.1.1775365621"></script>
+    <script src="room-status.js?v=0.4.1.1775365621"></script>
+    <script src="auth.js?v=0.4.1.1775365621"></script>
+    <script src="theme.js?v=0.4.1.1775365621"></script>
+    <script src="chat.js?v=0.4.1.1775365621"></script>
+    <script src="soundboard.js?v=0.4.1.1775365621"></script>
+    <script src="screen-share.js?v=0.4.1.1775365621"></script>
+    <script src="participants.js?v=0.4.1.1775365621"></script>
+    <script src="audio-routing.js?v=0.4.1.1775365621"></script>
+    <script src="media-controls.js?v=0.4.1.1775365621"></script>
+    <script src="admin.js?v=0.4.1.1775365621"></script>
+    <script src="connect.js?v=0.4.1.1775365621"></script>
+    <script src="app.js?v=0.4.1.1775365621"></script>
+    <script src="capture-picker.js?v=0.4.1.1773603094"></script>
+    <script src="jam.js?v=0.4.1.1775365621"></script>
+    <script src="changelog.js?v=0.4.1.1775365621"></script>
   </body>
 </html>

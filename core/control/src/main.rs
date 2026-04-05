@@ -1103,17 +1103,46 @@ async fn sfu_proxy(
         .and_then(|q| q.split('&').find(|p| p.starts_with("access_token=")))
         .map(|p| p.trim_start_matches("access_token=").len())
         .unwrap_or(0);
+    // LiveKit Rust SDK sends token as Authorization: Bearer header instead of
+    // access_token query param. Extract it so we can inject into the upstream URL.
+    let bearer_token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+    let auth_source = if bearer_token.is_some() {
+        "bearer-header"
+    } else if token_len > 0 {
+        "query-param"
+    } else {
+        "none"
+    };
     info!(
-        "sfu proxy request: {} (subprotocol: {}, access_token_len: {})",
-        uri.0, subprotocol, token_len
+        "sfu proxy request: {} (subprotocol: {}, auth: {}, token_len: {})",
+        uri.0, subprotocol, auth_source, token_len.max(bearer_token.as_ref().map_or(0, |t| t.len()))
     );
-    ws.on_upgrade(move |socket| handle_sfu_socket(socket, uri.0))
+    // Negotiate the `livekit` WebSocket subprotocol — Rust SDK requires it in the
+    // handshake response or it closes the connection immediately.
+    ws.protocols(["livekit"])
+        .on_upgrade(move |socket| handle_sfu_socket(socket, uri.0, bearer_token))
 }
 
-async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri) {
+async fn handle_sfu_socket(socket: WebSocket, uri: axum::http::Uri, bearer_token: Option<String>) {
     let upstream_base =
         std::env::var("CORE_SFU_PROXY").unwrap_or_else(|_| "ws://127.0.0.1:7880".to_string());
-    let query = uri.query().unwrap_or("");
+    let mut query = uri.query().unwrap_or("").to_string();
+    // If the client sent Authorization: Bearer (Rust SDK) and no access_token in the
+    // query string, inject it so the upstream SFU receives the token.
+    if let Some(ref token) = bearer_token {
+        let has_access_token = query.split('&').any(|p| p.starts_with("access_token="));
+        if !has_access_token {
+            if query.is_empty() {
+                query = format!("access_token={}", token);
+            } else {
+                query = format!("{}&access_token={}", query, token);
+            }
+        }
+    }
     let trimmed = upstream_base.trim_end_matches('/');
     let needs_rtc = !trimmed.ends_with("/rtc");
     let base_with_path = if needs_rtc {

@@ -2,6 +2,23 @@
    PARTICIPANTS — Cards, video elements, tiles, and avatars
    ========================================================= */
 
+/**
+ * Check if an identity is a $screen companion.
+ */
+function isScreenIdentity(identity) {
+  return identity && identity.endsWith('$screen');
+}
+
+/**
+ * Get the real (parent) identity from a $screen identity.
+ */
+function getParentIdentity(identity) {
+  if (isScreenIdentity(identity)) {
+    return identity.slice(0, -7); // remove "$screen"
+  }
+  return identity;
+}
+
 // Fullscreen video helper — click video to exit, overlay hint shown on enter
 function enterVideoFullscreen(videoEl) {
   if (document.fullscreenElement) {
@@ -143,6 +160,23 @@ function addScreenTile(label, element, trackSid) {
   }
   ensureVideoPlays(element._lkTrack, element);
   const tile = addTile(label, element);
+
+  // Poster overlay: hide uninitialized GPU garbage (green/black flash) until first real frame.
+  // Uses a dark cover that fades out once the video has decoded data.
+  var poster = document.createElement("div");
+  poster.className = "tile-poster";
+  tile.appendChild(poster);
+  var removePoster = function() {
+    poster.classList.add("fade-out");
+    setTimeout(function() { poster.remove(); }, 400);
+  };
+  // loadeddata fires when the first frame is available for rendering
+  element.addEventListener("loadeddata", removePoster, { once: true });
+  // Safety fallback: remove after 5s even if event never fires
+  setTimeout(function() {
+    if (poster.parentNode) removePoster();
+  }, 5000);
+
   tile.addEventListener("click", () => {
     if (screenGridEl.classList.contains("is-focused") && tile.classList.contains("is-focused")) {
       screenGridEl.classList.remove("is-focused");
@@ -473,6 +507,7 @@ function createLockedVideoElement(track) {
   element.muted = true;  // CRITICAL: Must stay muted for autoplay
   element.autoplay = true;
   element.playsInline = true;
+
 
   // CRITICAL: Force video to STAY muted by locking the property
   // This prevents LiveKit or browser from unmuting and breaking autoplay
@@ -982,6 +1017,8 @@ function ensureParticipantCard(participant, isLocal = false) {
   const key = participant.identity;
   // Hide ghost subscriber from UI
   if (key.startsWith("__echo_ghost_")) return null;
+  // Hide $screen companion identities from participant list
+  if (isScreenIdentity(key)) return null;
   if (participantCards.has(key)) {
     debugLog(`participant card already exists for ${key}`);
     return participantCards.get(key);
@@ -2007,6 +2044,8 @@ function reconcileParticipantMedia(participant) {
   const pubs = getParticipantPublications(participant);
   pubs.forEach((pub) => {
     if (!pub) return;
+    // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
+    patchScreenCompanionSource(pub, pub?.track, participant);
     // Opt-in: skip unwatched remote screen shares entirely
     if (isUnwatchedScreenShare(pub, participant)) return;
     if (pub.setSubscribed) pub.setSubscribed(true);

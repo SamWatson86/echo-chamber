@@ -7,6 +7,23 @@ function getTrackSource(publication, track) {
   return publication?.source || track?.source || null;
 }
 
+/**
+ * $screen companions publish as Camera for SFU FPS optimization (SFU StreamAllocator
+ * drops temporal layers for ScreenShare sources). Patch publication.source to ScreenShare
+ * so all viewer routing, tile creation, and opt-in logic works unchanged.
+ * Call at every entry point that processes $screen companion publications.
+ */
+function patchScreenCompanionSource(publication, track, participant) {
+  if (!participant || !publication) return;
+  if (typeof isScreenIdentity !== 'function' || !isScreenIdentity(participant.identity)) return;
+  var kind = track?.kind || publication?.kind;
+  if (kind === 'video' && publication.source !== 'screen_share') {
+    publication.source = 'screen_share';
+  } else if (kind === 'audio' && publication.source !== 'screen_share_audio') {
+    publication.source = 'screen_share_audio';
+  }
+}
+
 function ensureIdentitySuffix() {
   // Check persistent storage first so identity survives app restarts
   const persisted = echoGet(IDENTITY_SUFFIX_KEY);

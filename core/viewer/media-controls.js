@@ -491,6 +491,7 @@ async function toggleCam() {
 async function toggleScreen() {
   if (!room) return;
   const desired = !screenEnabled;
+  debugLog("[toggleScreen] screenEnabled=" + screenEnabled + " desired=" + desired + " _nativeScreenShareActive=" + (typeof _nativeScreenShareActive !== "undefined" ? _nativeScreenShareActive : "undef"));
   screenBtn.disabled = true;
   try {
     if (desired) {

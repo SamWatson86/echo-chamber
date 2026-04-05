@@ -1347,6 +1347,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo-game-hook"
+version = "0.1.0"
+dependencies = [
+ "minhook",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2889,8 +2897,6 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 [[package]]
 name = "livekit"
 version = "0.7.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd316178ce26fb2ee1ccd453ac2d78d4a3b027ac56cc02f4538b06b54989afcf"
 dependencies = [
  "base64 0.22.1",
  "bmrng",
@@ -3096,6 +3102,16 @@ checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
 dependencies = [
  "mime",
  "unicase",
+]
+
+[[package]]
+name = "minhook"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "455e088cb1600ffa5f1524c9702c9eeb0ba3604e0f4932efa165b99973272a8d"
+dependencies = [
+ "cc",
+ "tracing",
 ]
 
 [[package]]
@@ -6761,8 +6777,6 @@ dependencies = [
 [[package]]
 name = "webrtc-sys"
 version = "0.3.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63493a8d3b0cfe1ac4cc947d7c7ebba8f2d5f9cc890ee4f807be8c27a7482764"
 dependencies = [
  "cc",
  "cxx",

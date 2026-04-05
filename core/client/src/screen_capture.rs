@@ -1,18 +1,33 @@
 //! Native screen capture via Windows.Graphics.Capture (WGC) + LiveKit Rust SDK
 //!
 //! Bypasses Chromium's getDisplayMedia entirely. WGC runs at the OS level and
-//! is immune to WebView background throttling.
+//! is immune to WebView background throttling. Frames are BGRA from the GPU,
+//! converted to I420 via libyuv, and published directly to the LiveKit SFU
+//! through the Rust SDK. H264 encoding uses Media Foundation → NVENC on NVIDIA GPUs.
+//!
+//! Architecture:
+//!   windows-capture (WGC/BGRA @ 60fps)
+//!     → argb_to_i420 (libyuv, sub-1ms)
+//!       → NativeVideoSource::capture_frame
+//!         → libwebrtc H264 encoder (MFT → NVENC)
+//!           → RTP → SFU
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
+// ── Types ──
+
 #[derive(Serialize, Clone, Debug)]
 pub struct CaptureSource {
     pub id: u64,
     pub title: String,
     pub is_monitor: bool,
+    /// "game", "window", or "monitor"
+    pub source_type: String,
+    /// Process ID (0 for monitors)
+    pub pid: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -20,9 +35,12 @@ pub struct ScreenShareStats {
     pub fps: u32,
     pub width: u32,
     pub height: u32,
+    pub bitrate_kbps: u32,
     pub encoder: String,
     pub status: String,
 }
+
+// ── Global State ──
 
 struct ShareHandle {
     running: Arc<AtomicBool>,
@@ -33,28 +51,154 @@ fn global_state() -> &'static Mutex<Option<ShareHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+// ── Public API (called from Tauri IPC) ──
+
+/// List available capture sources (monitors + windows).
 pub fn list_sources() -> Vec<CaptureSource> {
+    use windows::Win32::Foundation::{BOOL, LPARAM, RECT, TRUE};
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+
     let mut sources = Vec::new();
+
+    // ── 1. Enumerate monitors ──
+    unsafe extern "system" fn monitor_callback(
+        hmonitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let monitors = &mut *(lparam.0 as *mut Vec<CaptureSource>);
+        let mut info: MONITORINFOEXW = std::mem::zeroed();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(hmonitor, &mut info as *mut _ as *mut _).as_bool() {
+            let device = String::from_utf16_lossy(
+                &info.szDevice[..info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len())],
+            );
+            let idx = monitors.iter().filter(|s| s.is_monitor).count() + 1;
+            let title = format!("Monitor {} ({})", idx, device);
+            monitors.push(CaptureSource {
+                id: hmonitor.0 as u64,
+                title,
+                is_monitor: true,
+                source_type: "monitor".to_string(),
+                pid: 0,
+            });
+        }
+        TRUE
+    }
+
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(monitor_callback),
+            LPARAM(&mut sources as *mut Vec<CaptureSource> as isize),
+        );
+    }
+
+    // ── 2. Enumerate windows ──
+
+    // Known non-game executables for classification heuristic
+    const NON_GAME_EXES: &[&str] = &[
+        "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
+        "opera.exe", "vivaldi.exe", "discord.exe", "slack.exe", "teams.exe",
+        "code.exe", "devenv.exe", "rider64.exe", "idea64.exe",
+        "notepad.exe", "notepad++.exe", "sublime_text.exe",
+        "spotify.exe", "wmplayer.exe", "vlc.exe",
+        "powershell.exe", "pwsh.exe", "cmd.exe", "windowsterminal.exe",
+        "taskmgr.exe", "mmc.exe", "regedit.exe", "control.exe",
+        "outlook.exe", "winword.exe", "excel.exe", "powerpnt.exe",
+        "onenote.exe", "thunderbird.exe",
+        "filezilla.exe", "putty.exe", "winscp.exe",
+        "obs64.exe", "obs.exe", "streamlabs.exe",
+        "echo-core-client.exe", "echo-core-control.exe",
+        "applicationframehost.exe", "systemsettings.exe",
+        "searchhost.exe", "shellexperiencehost.exe",
+        "textinputhost.exe", "lockapp.exe",
+    ];
+
+    /// Get the executable name for a process ID.
+    fn exe_name_for_pid(pid: u32) -> Option<String> {
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+        use windows::Win32::Foundation::HMODULE;
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut buf = [0u16; 260];
+            let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+            if len == 0 {
+                return None;
+            }
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            path.rsplit('\\').next().map(|s| s.to_lowercase())
+        }
+    }
+
     match windows_capture::window::Window::enumerate() {
         Ok(windows) => {
             for w in windows {
-                if let Ok(title) = w.title() {
-                    if title.is_empty() { continue; }
-                    sources.push(CaptureSource {
-                        id: w.as_raw_hwnd() as u64,
-                        title,
-                        is_monitor: false,
-                    });
+                let hwnd = w.as_raw_hwnd() as isize;
+
+                // Filter: must be visible
+                let visible = unsafe {
+                    IsWindowVisible(windows::Win32::Foundation::HWND(hwnd as *mut _)).as_bool()
+                };
+                if !visible {
+                    continue;
                 }
+
+                // Filter: skip tool windows
+                let ex_style = unsafe {
+                    GetWindowLongW(windows::Win32::Foundation::HWND(hwnd as *mut _), GWL_EXSTYLE)
+                } as u32;
+                if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
+                    continue;
+                }
+
+                let title = match w.title() {
+                    Ok(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+
+                // Get PID
+                let mut pid: u32 = 0;
+                unsafe {
+                    GetWindowThreadProcessId(
+                        windows::Win32::Foundation::HWND(hwnd as *mut _),
+                        Some(&mut pid),
+                    );
+                }
+
+                // Classify: game vs window
+                let exe = exe_name_for_pid(pid);
+                let is_game = match &exe {
+                    Some(name) => !NON_GAME_EXES.iter().any(|&known| known == name.as_str()),
+                    None => false, // can't determine → default to window
+                };
+
+                sources.push(CaptureSource {
+                    id: hwnd as u64,
+                    title,
+                    is_monitor: false,
+                    source_type: if is_game { "game".to_string() } else { "window".to_string() },
+                    pid,
+                });
             }
         }
-        Err(e) => eprintln!("[screen-capture] enumerate error: {}", e),
+        Err(e) => eprintln!("[screen-capture] window enumerate error: {}", e),
     }
+
     sources
 }
 
-/// Start native screen share. Spawns the entire pipeline in a background task.
-/// Uses a oneshot channel to report success/failure back to the caller.
+/// Start native screen sharing: capture window → encode H264 → publish to SFU.
 pub async fn start_share(
     source_id: u64,
     sfu_url: String,
@@ -64,44 +208,246 @@ pub async fn start_share(
     stop_share();
 
     let running = Arc::new(AtomicBool::new(true));
+
     {
         let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle { running: running.clone() });
+        *state = Some(ShareHandle {
+            running: running.clone(),
+        });
     }
-
-    // Use a oneshot channel: background task reports Ok/Err after SFU connect + first frame
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
     let app2 = app.clone();
     let r2 = running.clone();
     tokio::spawn(async move {
-        let result = share_pipeline(source_id, &sfu_url, &token, &app2, &r2).await;
-        let _ = result_tx.send(result);
+        if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2).await {
+            eprintln!("[screen-capture] error: {}", e);
+            let _ = app2.emit("screen-capture-error", format!("{}", e));
+        }
+        let _ = app2.emit("screen-capture-stopped", ());
+        eprintln!("[screen-capture] task exited");
+        let mut state = global_state().lock().unwrap();
+        *state = None;
     });
 
-    // Wait for the pipeline to report success or failure (with timeout)
-    match tokio::time::timeout(std::time::Duration::from_secs(10), result_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => {
-            let mut state = global_state().lock().unwrap();
-            *state = None;
-            Err(e)
-        }
-        Ok(Err(_)) => {
-            let mut state = global_state().lock().unwrap();
-            *state = None;
-            Err("Screen capture task dropped unexpectedly".into())
-        }
-        Err(_) => {
-            running.store(false, Ordering::SeqCst);
-            let mut state = global_state().lock().unwrap();
-            *state = None;
-            Err("Screen capture timed out (10s)".into())
-        }
+    Ok(())
+}
+
+/// Stop the current screen share.
+pub fn stop_share() {
+    let mut state = global_state().lock().unwrap();
+    if let Some(handle) = state.take() {
+        handle.running.store(false, Ordering::SeqCst);
+        eprintln!("[screen-capture] stop requested");
     }
 }
 
-async fn share_pipeline(
+// ── Thumbnail Generation ──
+
+/// Generate a 240x135 thumbnail of a capture source as a base64 BMP data URI.
+pub fn get_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
+    use base64::Engine;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
+        GetDIBits, GetDC, ReleaseDC, SelectObject, SetStretchBltMode,
+        StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HALFTONE, SRCCOPY,
+    };
+    use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    const THUMB_W: i32 = 240;
+    const THUMB_H: i32 = 135;
+
+    unsafe {
+        let (src_dc, src_bmp_handle, src_w, src_h) = if is_monitor {
+            // Monitor: capture the monitor's region from the screen DC
+            use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFOEXW};
+
+            let hmonitor = HMONITOR(source_id as *mut _);
+            let mut info: MONITORINFOEXW = std::mem::zeroed();
+            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if !GetMonitorInfoW(hmonitor, &mut info as *mut _ as *mut _).as_bool() {
+                eprintln!("[thumbnail] GetMonitorInfoW failed");
+                return None;
+            }
+            let r = info.monitorInfo.rcMonitor;
+            let w = r.right - r.left;
+            let h = r.bottom - r.top;
+
+            let screen_dc = GetDC(HWND::default());
+            if screen_dc.is_invalid() {
+                return None;
+            }
+            let mem_dc = CreateCompatibleDC(screen_dc);
+            let src_bmp = CreateCompatibleBitmap(screen_dc, w, h);
+            SelectObject(mem_dc, src_bmp);
+            BitBlt(mem_dc, 0, 0, w, h, screen_dc, r.left, r.top, SRCCOPY).ok();
+            ReleaseDC(HWND::default(), screen_dc);
+            // src_bmp is selected into mem_dc, ready for StretchBlt
+            (mem_dc, src_bmp, w, h)
+        } else {
+            // Window: use PrintWindow
+            let hwnd = HWND(source_id as *mut _);
+            let mut rect = RECT::default();
+            if !GetClientRect(hwnd, &mut rect).is_ok() {
+                eprintln!("[thumbnail] GetClientRect failed");
+                return None;
+            }
+            let w = rect.right - rect.left;
+            let h = rect.bottom - rect.top;
+            if w <= 0 || h <= 0 {
+                return None;
+            }
+
+            let wnd_dc = GetDC(hwnd);
+            if wnd_dc.is_invalid() {
+                return None;
+            }
+            let mem_dc = CreateCompatibleDC(wnd_dc);
+            let src_bmp = CreateCompatibleBitmap(wnd_dc, w, h);
+            SelectObject(mem_dc, src_bmp);
+
+            // PrintWindow with PW_RENDERFULLCONTENT (0x2) captures GPU-rendered/DWM-composed
+            // content (Chrome, Discord, VSCode, games). Without this flag, PrintWindow only
+            // captures GDI content → black/empty thumbnails for modern apps.
+            // PW_CLIENTONLY (0x1) | PW_RENDERFULLCONTENT (0x2) = 0x3
+            let ok = PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(0x3));
+            ReleaseDC(hwnd, wnd_dc);
+            if !ok.as_bool() {
+                // Fallback: try BitBlt from window DC
+                let wnd_dc2 = GetDC(hwnd);
+                BitBlt(mem_dc, 0, 0, w, h, wnd_dc2, 0, 0, SRCCOPY).ok();
+                ReleaseDC(hwnd, wnd_dc2);
+            }
+
+            (mem_dc, src_bmp, w, h)
+        };
+
+        if src_w <= 0 || src_h <= 0 {
+            DeleteDC(src_dc);
+            DeleteObject(src_bmp_handle);
+            return None;
+        }
+
+        // Create thumbnail bitmap
+        let thumb_dc = CreateCompatibleDC(src_dc);
+        let thumb_bmp = CreateCompatibleBitmap(src_dc, THUMB_W, THUMB_H);
+        let old_thumb = SelectObject(thumb_dc, thumb_bmp);
+
+        SetStretchBltMode(thumb_dc, HALFTONE);
+        StretchBlt(
+            thumb_dc, 0, 0, THUMB_W, THUMB_H,
+            src_dc, 0, 0, src_w, src_h,
+            SRCCOPY,
+        ).ok();
+
+        // Read pixels from thumbnail
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: THUMB_W,
+                biHeight: -THUMB_H, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [Default::default()],
+        };
+
+        let row_size = (THUMB_W * 4) as usize;
+        let pixel_data_size = row_size * THUMB_H as usize;
+        let mut pixels = vec![0u8; pixel_data_size];
+
+        let lines = GetDIBits(
+            thumb_dc,
+            thumb_bmp,
+            0,
+            THUMB_H as u32,
+            Some(pixels.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        // Cleanup GDI
+        SelectObject(thumb_dc, old_thumb);
+        DeleteObject(thumb_bmp);
+        DeleteDC(thumb_dc);
+
+        // Clean up source DC and bitmap
+        DeleteDC(src_dc);
+        DeleteObject(src_bmp_handle);
+
+        if lines == 0 {
+            eprintln!("[thumbnail] GetDIBits returned 0 lines");
+            return None;
+        }
+
+        // Detect all-black thumbnails (PrintWindow failed silently) — check a sparse
+        // sample of pixels across the image. BMP pixels are BGRA, so check RGB channels.
+        let mut has_content = false;
+        let sample_step = (pixel_data_size / 64).max(4); // ~64 evenly-spaced sample points
+        let mut offset = 0;
+        while offset + 3 < pixel_data_size {
+            // Check BGR channels (skip alpha at offset+3)
+            if pixels[offset] != 0 || pixels[offset + 1] != 0 || pixels[offset + 2] != 0 {
+                has_content = true;
+                break;
+            }
+            offset += sample_step;
+        }
+        if !has_content {
+            // All sampled pixels are black — thumbnail is empty/failed
+            return None;
+        }
+
+        // Build BMP file in memory (header + pixel data)
+        let file_header_size = 14u32;
+        let info_header_size = 40u32;
+        let headers_size = file_header_size + info_header_size;
+        let file_size = headers_size + pixel_data_size as u32;
+
+        let mut bmp_data = Vec::with_capacity(file_size as usize);
+
+        // BMP file header (14 bytes)
+        bmp_data.extend_from_slice(b"BM");
+        bmp_data.extend_from_slice(&file_size.to_le_bytes());
+        bmp_data.extend_from_slice(&0u16.to_le_bytes()); // reserved1
+        bmp_data.extend_from_slice(&0u16.to_le_bytes()); // reserved2
+        bmp_data.extend_from_slice(&headers_size.to_le_bytes()); // pixel data offset
+
+        // BITMAPINFOHEADER (40 bytes) — bottom-up for BMP file format
+        bmp_data.extend_from_slice(&info_header_size.to_le_bytes());
+        bmp_data.extend_from_slice(&THUMB_W.to_le_bytes());
+        bmp_data.extend_from_slice(&THUMB_H.to_le_bytes()); // positive = bottom-up
+        bmp_data.extend_from_slice(&1u16.to_le_bytes()); // planes
+        bmp_data.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        bmp_data.extend_from_slice(&0u32.to_le_bytes()); // compression (BI_RGB)
+        bmp_data.extend_from_slice(&(pixel_data_size as u32).to_le_bytes());
+        bmp_data.extend_from_slice(&0i32.to_le_bytes()); // x ppm
+        bmp_data.extend_from_slice(&0i32.to_le_bytes()); // y ppm
+        bmp_data.extend_from_slice(&0u32.to_le_bytes()); // colors used
+        bmp_data.extend_from_slice(&0u32.to_le_bytes()); // colors important
+
+        // Flip rows (GetDIBits gave us top-down, BMP wants bottom-up)
+        for y in (0..THUMB_H as usize).rev() {
+            let start = y * row_size;
+            bmp_data.extend_from_slice(&pixels[start..start + row_size]);
+        }
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bmp_data);
+        Some(format!("data:image/bmp;base64,{}", b64))
+    }
+}
+
+// ── Capture + Publish Loop ──
+
+async fn share_loop(
     source_id: u64,
     sfu_url: &str,
     token: &str,
@@ -112,127 +458,250 @@ async fn share_pipeline(
     use livekit::webrtc::prelude::*;
     use livekit::webrtc::video_source::native::NativeVideoSource;
     use livekit::webrtc::native::yuv_helper;
-    use livekit::options::{TrackPublishOptions, VideoCodec};
+    use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 
-    // 1. Connect to SFU
     eprintln!("[screen-capture] connecting to SFU: {}", sfu_url);
+
+    // 1. Connect to LiveKit SFU
     let (room, _events) = Room::connect(sfu_url, token, RoomOptions::default())
         .await
         .map_err(|e| format!("SFU connect failed: {}", e))?;
-    eprintln!("[screen-capture] connected as {}", room.local_participant().identity().as_str());
 
-    // 2. Create source + track + publish
-    let source = NativeVideoSource::new(VideoResolution { width: 1280, height: 720 }, false);
-    let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
+    eprintln!(
+        "[screen-capture] connected as {}",
+        room.local_participant().identity().as_str()
+    );
+
+    // 2. Create video source at 1080p — NVENC fails at 4K, so we downscale first.
+    // WGC captures at native resolution (3840x2160), we scale down before encoding.
+    let source = NativeVideoSource::new(VideoResolution {
+        width: 1920,
+        height: 1080,
+    }, false); // NOT screencast — game streaming, prioritize FPS
+    let track = LocalVideoTrack::create_video_track(
+        "screen",
+        RtcVideoSource::Native(source.clone()),
+    );
+
+    // 3. Publish as Camera (SFU preserves FPS, not resolution) with proper bitrate
+    let publish_options = TrackPublishOptions {
+        source: TrackSource::Camera,
+        video_codec: VideoCodec::H264,
+        simulcast: false,
+        video_encoding: Some(VideoEncoding {
+            max_bitrate: 20_000_000,
+            max_framerate: 60.0,
+        }),
+        ..Default::default()
+    };
     room.local_participant()
-        .publish_track(LocalTrack::Video(track), TrackPublishOptions {
-            source: TrackSource::Screenshare,
-            video_codec: VideoCodec::H264,
-            ..Default::default()
-        })
+        .publish_track(LocalTrack::Video(track), publish_options)
         .await
-        .map_err(|e| format!("Publish failed: {}", e))?;
-    eprintln!("[screen-capture] track published, starting WGC for HWND {}", source_id);
+        .map_err(|e| format!("publish failed: {}", e))?;
 
-    // 3. Start WGC capture thread
+    eprintln!("[screen-capture] track published, waiting for negotiation...");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    eprintln!("[screen-capture] starting WGC capture");
+    let _ = app.emit("screen-capture-started", ());
+
+    // 4. Start WGC capture — callback sends BGRA frames via channel
+    // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(2);
-    let cr = running.clone();
+    let capture_running = running.clone();
+
     std::thread::spawn(move || {
         use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
         use windows_capture::settings::*;
         use windows_capture::window::Window;
+        use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        use crate::gpu_converter::GpuConverter;
 
-        struct H {
+        const ENC_W: u32 = 1920;
+        const ENC_H: u32 = 1080;
+
+        struct Handler {
             tx: std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>,
             running: Arc<AtomicBool>,
-            n: u64,
+            wgc_frame_count: u64,
+            wgc_start: std::time::Instant,
+            /// GPU pipeline: (device, context, converter) — lazily created on first frame
+            gpu: Option<(ID3D11Device, ID3D11DeviceContext, GpuConverter)>,
         }
-        impl GraphicsCaptureApiHandler for H {
-            type Flags = (std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>, Arc<AtomicBool>);
+
+        impl GraphicsCaptureApiHandler for Handler {
+            type Flags = (
+                std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>,
+                Arc<AtomicBool>,
+            );
             type Error = Box<dyn std::error::Error + Send + Sync>;
+
             fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
                 let (tx, running) = ctx.flags;
-                eprintln!("[WGC] handler created");
-                Ok(Self { tx, running, n: 0 })
+                Ok(Self {
+                    tx, running,
+                    wgc_frame_count: 0,
+                    wgc_start: std::time::Instant::now(),
+                    gpu: None,
+                })
             }
-            fn on_frame_arrived(&mut self, frame: &mut windows_capture::frame::Frame, ctrl: windows_capture::graphics_capture_api::InternalCaptureControl) -> Result<(), Self::Error> {
-                if !self.running.load(Ordering::SeqCst) { ctrl.stop(); return Ok(()); }
+
+            fn on_frame_arrived(
+                &mut self,
+                frame: &mut windows_capture::frame::Frame,
+                capture_control: windows_capture::graphics_capture_api::InternalCaptureControl,
+            ) -> Result<(), Self::Error> {
+                if !self.running.load(Ordering::SeqCst) {
+                    capture_control.stop();
+                    return Ok(());
+                }
+
+                self.wgc_frame_count += 1;
                 let w = frame.width();
                 let h = frame.height();
-                let mut buf = frame.buffer()?;
-                let pixels = buf.as_nopadding_buffer()?.to_vec();
-                let _ = self.tx.try_send((pixels, w, h));
-                self.n += 1;
-                if self.n == 1 { eprintln!("[WGC] FIRST FRAME {}x{}", w, h); }
+
+                // Log WGC callback FPS every 60 frames
+                if self.wgc_frame_count % 60 == 0 {
+                    let elapsed = self.wgc_start.elapsed().as_secs_f64();
+                    let fps = if elapsed > 0.0 { (self.wgc_frame_count as f64 / elapsed) as u32 } else { 0 };
+                    eprintln!("[wgc-callback] {}x{} @ {}fps ({} frames)", w, h, fps, self.wgc_frame_count);
+                }
+
+                // Get the GPU texture directly (no CPU copy!)
+                // windows-capture uses windows v0.61, we use v0.58.
+                // Both are #[repr(transparent)] COM wrappers for the same interface.
+                // Safe to transmute the reference.
+                let frame_texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D = unsafe {
+                    std::mem::transmute(frame.as_raw_texture())
+                };
+
+                // Lazily initialize GPU pipeline on WGC's own device
+                if self.gpu.is_none() {
+                    unsafe {
+                        let device: ID3D11Device = frame_texture.GetDevice()
+                            .map_err(|e| format!("GetDevice: {e}"))?;
+                        let context = device.GetImmediateContext()
+                            .map_err(|e| format!("GetImmediateContext: {e}"))?;
+                        let converter = GpuConverter::new(
+                            &device, w, h,
+                            DXGI_FORMAT_B8G8R8A8_UNORM,
+                            ENC_W, ENC_H,
+                        ).map_err(|e| format!("GpuConverter: {e}"))?;
+                        eprintln!("[wgc-gpu] pipeline initialized on WGC device: {}x{} → {}x{}", w, h, ENC_W, ENC_H);
+                        self.gpu = Some((device, context, converter));
+                    }
+                }
+
+                let (_, context, converter) = self.gpu.as_ref().unwrap();
+
+                // GPU pipeline: CopyResource → compute shader → staging → Map → CPU buffer
+                unsafe {
+                    let (ptr, pitch, out_w, out_h) = converter.convert(
+                        context, frame_texture,
+                        0, 0, w, h,
+                    ).map_err(|e| format!("convert: {e}"))?;
+
+                    // Copy from mapped staging to owned buffer
+                    let row_bytes = (out_w * 4) as usize;
+                    let mut bgra = vec![0u8; (out_w * out_h * 4) as usize];
+                    for y in 0..out_h as usize {
+                        std::ptr::copy_nonoverlapping(
+                            ptr.add(y * pitch as usize),
+                            bgra.as_mut_ptr().add(y * row_bytes),
+                            row_bytes,
+                        );
+                    }
+                    converter.unmap(context);
+
+                    // Non-blocking: drop frame if receiver is behind
+                    let _ = self.tx.try_send((bgra, out_w, out_h));
+                }
+
                 Ok(())
             }
-            fn on_closed(&mut self) -> Result<(), Self::Error> { eprintln!("[WGC] closed"); Ok(()) }
+
+            fn on_closed(&mut self) -> Result<(), Self::Error> {
+                eprintln!("[screen-capture] WGC closed");
+                Ok(())
+            }
         }
 
-        let win = unsafe { Window::from_raw_hwnd(source_id as *mut std::ffi::c_void) };
-        let s = Settings::new(win, CursorCaptureSettings::Default, DrawBorderSettings::Default,
-            SecondaryWindowSettings::Default, MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default, ColorFormat::Bgra8, (frame_tx, cr.clone()));
-        eprintln!("[WGC] launching...");
-        match H::start_free_threaded(s) {
-            Ok(c) => { eprintln!("[WGC] running"); let _ = c.wait(); }
-            Err(e) => eprintln!("[WGC] FAILED: {:?}", e),
+        let hwnd = source_id as isize;
+        let window = unsafe { Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void) };
+
+        // MinimumUpdateInterval MUST be >= 1ms. The default (0ms) has a Windows bug
+        // that caps capture at ~50fps. With 1ms, WGC captures at the app's native FPS.
+        let settings = Settings::new(
+            window,
+            CursorCaptureSettings::Default,
+            DrawBorderSettings::WithoutBorder,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
+            DirtyRegionSettings::Default,
+            ColorFormat::Bgra8,
+            (frame_tx, capture_running),
+        );
+
+        eprintln!("[screen-capture] WGC starting for HWND {}", source_id);
+        match Handler::start_free_threaded(settings) {
+            Ok(ctrl) => {
+                let _ = ctrl.wait();
+            }
+            Err(e) => eprintln!("[screen-capture] WGC start error: {:?}", e),
         }
+        eprintln!("[screen-capture] WGC thread exiting");
     });
 
-    // 4. Wait for first frame (proves capture works)
-    let (first, fw, fh) = frame_rx.recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "No WGC frames in 5s — capture may not support this window".to_string())?;
-    eprintln!("[screen-capture] first frame OK {}x{}", fw, fh);
+    // 5. Frame loop: receive BGRA → convert I420 → push to LiveKit
+    let mut frame_count: u64 = 0;
+    let start_time = std::time::Instant::now();
 
-    // Process first frame
-    let mut i420 = I420Buffer::new(fw, fh);
-    let (sy, su, sv) = i420.strides();
-    let (y, u, v) = i420.data_mut();
-    yuv_helper::argb_to_i420(&first, fw * 4, y, sy, u, su, v, sv, fw as i32, fh as i32);
-    source.capture_frame(&VideoFrame { rotation: VideoRotation::VideoRotation0, buffer: i420, timestamp_us: 0 });
-
-    let _ = app.emit("screen-capture-started", ());
-
-    // 5. Continuous frame loop
-    let app2 = app.clone();
-    let running2 = running.clone();
-    let start = std::time::Instant::now();
-    let mut count: u64 = 1;
-    loop {
+    while running.load(Ordering::SeqCst) {
         match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok((bgra, w, h)) => {
-                let mut buf = I420Buffer::new(w, h);
-                let (sy, su, sv) = buf.strides();
-                let (y, u, v) = buf.data_mut();
-                yuv_helper::argb_to_i420(&bgra, w * 4, y, sy, u, su, v, sv, w as i32, h as i32);
-                source.capture_frame(&VideoFrame {
-                    rotation: VideoRotation::VideoRotation0, buffer: buf,
-                    timestamp_us: start.elapsed().as_micros() as i64,
-                });
-                count += 1;
-                if count % 60 == 0 {
-                    let fps = (count as f64 / start.elapsed().as_secs_f64()) as u32;
-                    let _ = app2.emit("screen-capture-stats", ScreenShareStats {
-                        fps, width: w, height: h, encoder: "NVENC/H264".into(), status: "active".into(),
-                    });
+            Ok((bgra_data, width, height)) => {
+                // Data arrives already downscaled to 1080p by GPU shader
+                let mut i420 = I420Buffer::new(width, height);
+                let (sy, su, sv) = i420.strides();
+                let (y, u, v) = i420.data_mut();
+
+                yuv_helper::argb_to_i420(
+                    &bgra_data, width * 4, y, sy, u, su, v, sv,
+                    width as i32, height as i32,
+                );
+
+                let vf = VideoFrame {
+                    rotation: VideoRotation::VideoRotation0,
+                    buffer: i420,
+                    timestamp_us: start_time.elapsed().as_micros() as i64,
+                };
+                source.capture_frame(&vf);
+                frame_count += 1;
+
+                if frame_count % 30 == 0 {
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    let fps = if elapsed > 0.0 { (frame_count as f64 / elapsed) as u32 } else { 0 };
+                    eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames)",
+                        width, height, fps, frame_count);
+                    let _ = app.emit(
+                        "screen-capture-stats",
+                        ScreenShareStats {
+                            fps,
+                            width,
+                            height,
+                            bitrate_kbps: 0,
+                            encoder: "NVENC/H264".to_string(),
+                            status: "active".to_string(),
+                        },
+                    );
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if !running2.load(Ordering::SeqCst) { break; }
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    eprintln!("[screen-capture] done, {} frames", count);
+
+    running.store(false, Ordering::SeqCst);
+    eprintln!("[screen-capture] shutting down, {} frames captured", frame_count);
     room.close().await.ok();
     Ok(())
-}
-
-pub fn stop_share() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
-        handle.running.store(false, Ordering::SeqCst);
-        eprintln!("[screen-capture] stop requested");
-    }
 }

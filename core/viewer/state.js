@@ -170,6 +170,13 @@ const BITRATE_CAP_TTL = 15000;       // 15s before a requester's cap expires
 const BITRATE_DEFAULT_HIGH = 15_000_000;
 const BITRATE_DEFAULT_MED = 5_000_000;
 const BITRATE_DEFAULT_LOW = 1_500_000;
+const AIMD_DRY_RUN = true; // When true, AIMD logs but never sends cap messages — diagnostic mode
+
+// ── Performance Mode ──
+// When true, publishing uses single-layer (no simulcast) at reduced settings.
+// Auto-detected from hardware probe (no HW encoder = auto-enable).
+// User can override via Settings toggle. Persisted via echoGet/echoSet.
+var performanceMode = false;
 const screenReshareRequests = new Map();
 const ENABLE_SCREEN_WATCHDOG = true;
 // ── Shared AudioContext for participant volume boost (GainNode) ──

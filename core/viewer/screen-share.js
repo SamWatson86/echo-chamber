@@ -3,6 +3,17 @@
    ========================================================= */
 
 function getScreenSharePublishOptions(srcW, srcH) {
+  // Performance Mode: single layer, reduced settings — saves GPU on weak hardware
+  if (performanceMode) {
+    debugLog("[simulcast] performance mode — single layer screen share");
+    return {
+      videoCodec: "h264",
+      simulcast: false,
+      screenShareEncoding: { maxBitrate: 5_000_000, maxFramerate: 30 },
+      degradationPreference: "balanced",
+    };
+  }
+
   // Compute simulcast layers dynamically based on actual source dimensions.
   // This prevents the MEDIUM layer from matching HIGH when the source height
   // is less than 1080 (e.g. ultrawide 1920x804 after canvas cap).
@@ -16,24 +27,13 @@ function getScreenSharePublishOptions(srcW, srcH) {
   debugLog("[simulcast] layers: HIGH=" + (srcW||1920) + "x" + (srcH||1080) +
     " MED=" + medW + "x" + medH + " LOW=" + lowW + "x" + lowH);
   return {
-    // H264 High profile with hardware encoding (NVENC/QSV/AMF) via WebView2 flags.
-    // SDP is munged to upgrade Constrained Baseline (42e0) -> High (6400) to force
-    // hardware encoder selection. Software encoders (OpenH264, libvpx) max ~25fps.
     videoCodec: "h264",
-    // Simulcast: 3 quality layers so each receiver gets what their hardware can decode.
-    // HIGH = source resolution @60fps. MEDIUM = half @60fps. LOW = third @30fps.
-    // Layers are computed dynamically to guarantee MEDIUM < HIGH (ultrawide fix).
-    // SFU selects the best layer per subscriber based on bandwidth + decode capability.
     simulcast: true,
     screenShareEncoding: { maxBitrate: 15_000_000, maxFramerate: 60 },
     screenShareSimulcastLayers: [
       { width: medW, height: medH, encoding: { maxBitrate: 5_000_000, maxFramerate: 60 } },
       { width: lowW, height: lowH, encoding: { maxBitrate: 1_500_000, maxFramerate: 30 } },
     ],
-    // "maintain-framerate" drops resolution under pressure instead of FPS.
-    // Critical for gaming — smooth 60fps at lower quality beats choppy high-res.
-    // Old note: "caused encoder startup issues with NVENC (0fps)" — that was the
-    // 12-second encoder death bug, now fixed by the canvas pipeline keeping frames flowing.
     degradationPreference: "maintain-framerate",
   };
 }
@@ -52,79 +52,6 @@ let _inboundDropTracker = new Map(); // "identity-source" -> { lastDropped, last
 // optimal bitrate cap and send it to the publisher via data channel. The publisher
 // applies it to their RTCRtpSender, reducing upload without changing resolution.
 let _pubBitrateControl = new Map(); // publisherIdentity -> AIMD controller state
-
-var _nativeScreenShareActive = false;
-
-async function startNativeScreenShare() {
-  try {
-    var sources = await tauriInvoke("list_screen_sources");
-    if (!sources || sources.length === 0) {
-      debugLog("[native-capture] no sources found — falling back to browser");
-      return false;
-    }
-    var selected = await showNativeCapturePicker(sources);
-    if (!selected) {
-      debugLog("[native-capture] picker cancelled — falling back to browser");
-      return false;
-    }
-    var identity = room?.localParticipant?.identity;
-    if (!identity) throw new Error("not connected");
-    var screenIdentity = identity + "$screen";
-    var roomId = currentRoomName || "main";
-    var tokenResp = await fetch(apiUrl("/v1/auth/token"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
-      body: JSON.stringify({ room: roomId, identity: screenIdentity, name: (room?.localParticipant?.name || "Guest") + " (Screen)" }),
-    });
-    if (!tokenResp.ok) throw new Error("token failed: " + tokenResp.status);
-    var tokenData = await tokenResp.json();
-    var sfuUrl = sfuUrlInput?.value?.trim();
-    if (!sfuUrl) throw new Error("no SFU URL");
-    setStatus("Starting native capture...");
-    await tauriInvoke("start_screen_share", { sourceId: selected.id, sfuUrl: sfuUrl, token: tokenData.token });
-    // If we get here, SFU connected + track published + first WGC frame received
-    _nativeScreenShareActive = true;
-    setStatus("Native screen capture active!");
-    debugLog("[native-capture] started: " + screenIdentity);
-    tauriListen("screen-capture-stats", function(ev) {
-      debugLog("[native-capture] " + ev.payload.fps + "fps " + ev.payload.width + "x" + ev.payload.height);
-    });
-    tauriListen("screen-capture-stopped", function() { _nativeScreenShareActive = false; });
-    tauriListen("screen-capture-error", function(ev) { _nativeScreenShareActive = false; setStatus("Capture error: " + ev.payload, true); });
-    return true;
-  } catch (e) {
-    debugLog("[native-capture] failed: " + e.message);
-    setStatus("Native capture failed — using browser fallback", true);
-    _nativeScreenShareActive = false;
-    return false;
-  }
-}
-
-function showNativeCapturePicker(sources) {
-  return new Promise(function(resolve) {
-    var overlay = document.createElement("div");
-    overlay.style.cssText = "position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;";
-    var dialog = document.createElement("div");
-    dialog.style.cssText = "background:#1a1a2e;border:1px solid #333;border-radius:12px;padding:24px;max-width:500px;width:90%;max-height:70vh;overflow-y:auto;color:#e2e8f0;";
-    dialog.innerHTML = '<h3 style="margin:0 0 16px;">Select Window to Share</h3>';
-    var list = document.createElement("div");
-    list.style.cssText = "display:flex;flex-direction:column;gap:6px;";
-    sources.forEach(function(src) {
-      var btn = document.createElement("button");
-      btn.textContent = src.title;
-      btn.style.cssText = "padding:10px 14px;background:#2a2a3e;border:1px solid #444;border-radius:8px;color:#e2e8f0;cursor:pointer;text-align:left;";
-      btn.onclick = function() { document.body.removeChild(overlay); resolve(src); };
-      list.appendChild(btn);
-    });
-    var cancelBtn = document.createElement("button");
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.style.cssText = "margin-top:16px;padding:8px 16px;background:#444;border:none;border-radius:6px;color:#999;cursor:pointer;";
-    cancelBtn.onclick = function() { document.body.removeChild(overlay); resolve(null); };
-    dialog.appendChild(list); dialog.appendChild(cancelBtn);
-    overlay.appendChild(dialog); document.body.appendChild(overlay);
-    overlay.onclick = function(e) { if (e.target === overlay) { document.body.removeChild(overlay); resolve(null); } };
-  });
-}
 
 function startInboundScreenStatsMonitor() {
   if (_inboundScreenStatsInterval) return;
@@ -228,6 +155,8 @@ function startInboundScreenStatsMonitor() {
                 };
                 _inboundDropTracker.set(key, dt);
               }
+              // Localhost/LAN subscribers skip adaptive downgrades — SFU BWE is broken on localhost
+              var isLocalhost = _echoServerUrl && (_echoServerUrl.includes("127.0.0.1") || _echoServerUrl.includes("localhost") || _echoServerUrl.includes("192.168."));
               var deltaDropped = dropped - dt.lastDropped;
               var deltaDecoded = decoded - dt.lastDecoded;
               dt.lastDropped = dropped;
@@ -498,7 +427,7 @@ function startInboundScreenStatsMonitor() {
                 // Require meaningful loss (>5 packets), not just TURN relay noise
                 var shouldDropLow = (isStalled && deltaLost > 5) || isTanking || isBurstNuke;
 
-                if (shouldDropLow && dt.currentQuality !== "LOW" && timeSinceLastLossChange >= 15000 && LK?.VideoQuality) {
+                if (shouldDropLow && !isLocalhost && dt.currentQuality !== "LOW" && timeSinceLastLossChange >= 15000 && LK?.VideoQuality) {
                   var oldQ = dt.currentQuality;
                   dt.currentQuality = "LOW";
                   dt.lossDowngraded = true;
@@ -563,7 +492,7 @@ function startInboundScreenStatsMonitor() {
               // - avgFps < 30 over 15 seconds = consistently struggling (catches Jeff's 13-29fps oscillation)
               // - OR decode struggles (> 40% frame drop ratio)
               // Spencer on fiber at 50-60fps will never hit avgFps < 30.
-              var shouldDowngrade = (dt.fpsHistory.length >= 4 && avgFps < 30) || dropRatio > 0.4;
+              var shouldDowngrade = !isLocalhost && ((dt.fpsHistory.length >= 4 && avgFps < 30) || dropRatio > 0.4);
               var reason = dropRatio > 0.4 ? "decode (drop=" + Math.round(dropRatio * 100) + "%)"
                 : "low avg fps (" + Math.round(avgFps) + "fps avg over " + dt.fpsHistory.length + " ticks)";
 
@@ -684,22 +613,217 @@ var _nativeAudioActive = false;
 
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
+
+  // ── Native client path: custom picker → Tauri IPC ──
   var isNativeClient = !!window.__ECHO_NATIVE__;
-  // Native screen capture — Rust WGC + LiveKit SDK, bypasses Chromium entirely
-  if (isNativeClient && hasTauriIPC()) {
+
+  if (isNativeClient) {
+    var source = await showCapturePicker();
+    if (!source) return;
+
+    // Step 1: get control URL
+    var controlUrl = _echoServerUrl;
+    if (!controlUrl) { showToast('No server URL configured', 8000); return; }
+
+    // Step 2: get $screen token using existing auth flow
+    var screenToken = null;
+    var identity = room.localParticipant.identity;
+    var roomName = currentRoomName || 'main';
+    // Rust SDK must go through the control plane's WebSocket proxy (same host:port as
+    // control URL, just wss://). Direct ws://localhost:7880 bypasses the proxy so the
+    // viewer never sees the $screen tracks. The domain URL has valid Let's Encrypt certs
+    // so the Rust TLS stack accepts it without issues.
+    var sfuUrl = controlUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
+
     try {
-      var hasNativeCapture = await tauriInvoke("list_screen_sources").then(function() { return true; }).catch(function() { return false; });
-      if (hasNativeCapture) {
-        debugLog("[native-capture] native available — launching picker");
-        var nativeOk = await startNativeScreenShare();
-        if (nativeOk) return;
-        debugLog("[native-capture] native failed or cancelled — falling back to browser");
+      screenToken = await fetchRoomToken(
+        controlUrl, adminToken, roomName,
+        identity + '$screen',
+        (room.localParticipant.name || identity) + "'s screen"
+      );
+    } catch (err) {
+      showToast('Token fetch failed: ' + (err.message || err), 8000);
+      return;
+    }
+
+    if (!screenToken) { showToast('No token received from server', 8000); return; }
+
+    // Step 3: start capture
+    try {
+      if (source.sourceType === 'game') {
+        // Capture fallback chain: NVFBC → DXGI DD → Present hook
+        // NVFBC = GPU scanout capture, 50-60fps under any load (requires nvidia-patch on GeForce)
+        // DXGI DD = DWM compositor, 4-35fps (universal fallback)
+        // Present hook = DX11 game hook, 30-60fps (DX11 only, fails with DLSS FG)
+        var captureStarted = false;
+
+        // 1. Try NVFBC (GPU scanout — highest FPS, bypasses compositor entirely)
+        if (!captureStarted) {
+          try {
+            var nvfbcResult = await tauriInvoke('check_nvfbc_available');
+            if (nvfbcResult && nvfbcResult[0]) {
+              debugLog('[nvfbc] available: ' + nvfbcResult[1]);
+              await tauriInvoke('start_nvfbc_capture', {
+                hwnd: source.id,
+                fullscreen: source.isMonitor || false,
+                sfuUrl: sfuUrl,
+                token: screenToken,
+              });
+              window._echoNativeCaptureMode = 'nvfbc';
+              captureStarted = true;
+            } else {
+              debugLog('[nvfbc] not available: ' + (nvfbcResult ? nvfbcResult[1] : 'unknown'));
+            }
+          } catch (nvfbcErr) {
+            debugLog('[nvfbc] check/start failed: ' + (nvfbcErr.message || nvfbcErr));
+          }
+        }
+
+        // 2. Try WGC window capture first (MPO-aware, works at game's native FPS on 24H2+)
+        if (!captureStarted) {
+          try {
+            debugLog('[wgc] trying WGC window capture for HWND ' + source.id);
+            await tauriInvoke('start_screen_share', {
+              sourceId: source.id,
+              sfuUrl: sfuUrl,
+              token: screenToken,
+            });
+            window._echoNativeCaptureMode = 'wgc';
+            captureStarted = true;
+          } catch (wgcErr) {
+            debugLog('[wgc] start failed: ' + (wgcErr.message || wgcErr));
+          }
+        }
+
+        // 3. Fall back to DXGI Desktop Duplication (compositor capture)
+        if (!captureStarted) {
+          try {
+            var ddResult = await tauriInvoke('check_desktop_capture_available');
+            if (ddResult && ddResult[0]) {
+              debugLog('[desktop-dd] available: ' + ddResult[1]);
+              await tauriInvoke('start_desktop_capture', {
+                hwnd: source.id,
+                fullscreen: source.isMonitor || false,
+                sfuUrl: sfuUrl,
+                token: screenToken,
+              });
+              window._echoNativeCaptureMode = 'desktop-dd';
+              captureStarted = true;
+            } else {
+              debugLog('[desktop-dd] not available: ' + (ddResult ? ddResult[1] : 'unknown'));
+            }
+          } catch (ddErr) {
+            debugLog('[desktop-dd] check/start failed: ' + (ddErr.message || ddErr));
+          }
+        }
+
+        // 4. Fall back to DX11 Present hook
+        if (!captureStarted) {
+          await tauriInvoke('start_game_capture', {
+            hwnd: source.id,
+            sfuUrl: sfuUrl,
+            token: screenToken,
+          });
+          window._echoNativeCaptureMode = 'game';
+          captureStarted = true;
+        }
+      } else {
+        await tauriInvoke('start_screen_share', {
+          sourceId: source.id,
+          sfuUrl: sfuUrl,
+          token: screenToken,
+        });
+        window._echoNativeCaptureMode = 'wgc';
       }
-    } catch (e) { debugLog("[native-capture] check failed: " + e); }
+      screenEnabled = true;
+      window._echoNativeCaptureActive = true;
+      renderPublishButtons();
+      var modeLabel = window._echoNativeCaptureMode === 'nvfbc' ? 'NVFBC GPU Capture' :
+                      window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' :
+                      window._echoNativeCaptureMode === 'game' ? 'Game Capture' : 'Window Capture';
+      showToast('Screen sharing started (' + modeLabel + ')', 4000);
+
+      // Listen for Rust-side auto-stop (e.g. game exited, timeouts)
+      if (typeof tauriListen === 'function') {
+        tauriListen('game-capture-stopped', function() {
+          debugLog('[game-capture] stopped by Rust (game exited or manual stop)');
+          window._echoNativeCaptureActive = false;
+          window._echoNativeCaptureMode = null;
+          screenEnabled = false;
+          renderPublishButtons();
+          showToast('Game capture ended', 3000);
+        }).catch(function() {});
+        tauriListen('desktop-capture-stopped', function() {
+          debugLog('[desktop-dd] stopped by Rust');
+          window._echoNativeCaptureActive = false;
+          window._echoNativeCaptureMode = null;
+          screenEnabled = false;
+          renderPublishButtons();
+          showToast('Desktop capture ended', 3000);
+        }).catch(function() {});
+        tauriListen('nvfbc-capture-stopped', function() {
+          debugLog('[nvfbc] stopped by Rust');
+          window._echoNativeCaptureActive = false;
+          window._echoNativeCaptureMode = null;
+          screenEnabled = false;
+          renderPublishButtons();
+          showToast('NVFBC capture ended', 3000);
+        }).catch(function() {});
+        // Auto-start WASAPI per-process audio for game captures (NVFBC, DD, or hook)
+        if (source.sourceType === 'game' && source.id) {
+          tauriListen('nvfbc-capture-started', function(event) {
+            var pid = event && event.payload;
+            if (pid && pid > 0) {
+              debugLog('[nvfbc] auto-starting audio capture for PID ' + pid);
+              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
+                debugLog('[nvfbc] audio capture start failed: ' + e);
+              });
+            }
+          }).catch(function() {});
+          tauriListen('desktop-capture-started', function(event) {
+            var pid = event && event.payload;
+            if (pid && pid > 0) {
+              debugLog('[desktop-dd] auto-starting audio capture for PID ' + pid);
+              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
+                debugLog('[desktop-dd] audio capture start failed: ' + e);
+              });
+            }
+          }).catch(function() {});
+          tauriListen('game-capture-started', function(event) {
+            var pid = event && event.payload;
+            if (pid && pid > 0) {
+              debugLog('[game-capture] auto-starting audio capture for PID ' + pid);
+              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
+                debugLog('[game-capture] audio capture start failed: ' + e);
+              });
+            }
+          }).catch(function() {});
+        }
+      }
+    } catch (err) {
+      showToast('Capture failed: ' + (err.message || err), 8000);
+      // If game capture failed, try WGC fallback
+      if (source.sourceType === 'game' && screenToken) {
+        try {
+          await tauriInvoke('start_screen_share', {
+            sourceId: source.id,
+            sfuUrl: sfuUrl,
+            token: screenToken,
+          });
+          window._echoNativeCaptureMode = 'wgc';
+          screenEnabled = true;
+          window._echoNativeCaptureActive = true;
+          renderPublishButtons();
+          showToast('Using standard capture (game hook unavailable)', 5000);
+        } catch (e2) {
+          showToast('Fallback capture also failed: ' + (e2.message || e2), 8000);
+        }
+      }
+    }
+    return;
   }
 
-  // Call getDisplayMedia ourselves — no fixed width/height so ultrawides
-  // capture at native aspect ratio instead of being forced to 16:9
+  // ── Browser path (getDisplayMedia) ──
   var gdmConstraints = {
     video: {
       // Capture at native resolution — NVENC handles 4K with zero CPU cost.
@@ -1376,12 +1500,29 @@ async function startScreenShareManual() {
 }
 
 async function stopScreenShareManual() {
-  // Stop native screen capture if active
-  if (typeof _nativeScreenShareActive !== "undefined" && _nativeScreenShareActive) {
-    try { await tauriInvoke("stop_screen_share"); } catch(e) {}
-    _nativeScreenShareActive = false;
-    return;
+  // ── Native capture stop path ──
+  if (window._echoNativeCaptureActive) {
+    try {
+      if (window._echoNativeCaptureMode === 'nvfbc') {
+        await tauriInvoke('stop_nvfbc_capture');
+      } else if (window._echoNativeCaptureMode === 'desktop-dd') {
+        await tauriInvoke('stop_desktop_capture');
+      } else if (window._echoNativeCaptureMode === 'game') {
+        await tauriInvoke('stop_game_capture');
+      } else {
+        await tauriInvoke('stop_screen_share');
+      }
+    } catch (e) {
+      console.error('[screen-share] native stop error:', e);
+    }
+    window._echoNativeCaptureActive = false;
+    window._echoNativeCaptureMode = null;
+    screenEnabled = false;
+    renderPublishButtons();
+    return; // Don't fall through to browser path
   }
+
+  // ── Browser stop path ──
   // Stop native per-process audio capture if active
   await stopNativeAudioCapture();
   // Clean up canvas pipeline (Web Worker frame timer)

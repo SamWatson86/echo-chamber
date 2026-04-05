@@ -4,6 +4,8 @@
 
 function hookPublication(publication, participant) {
   if (!publication || !participant) return;
+  // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
+  patchScreenCompanionSource(publication, publication?.track, participant);
   if (!publication._echoHooked) {
     publication._echoHooked = true;
     if (publication.setSubscribed && !isUnwatchedScreenShare(publication, participant)) {
@@ -185,7 +187,7 @@ function reconcileLocalPublishIndicators(reason) {
   const cameraPublished = !!room.localParticipant.isCameraEnabled;
   const LK = getLiveKitClient();
   const pubs = getParticipantPublications(room.localParticipant);
-  const screenPublished = pubs.some((pub) =>
+  const screenPublished = window._echoNativeCaptureActive || pubs.some((pub) =>
     pub &&
     pub.source === LK?.Track?.Source?.ScreenShare &&
     pub.kind === LK?.Track?.Kind?.Video &&
@@ -276,14 +278,6 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       return result.join("\r\n");
     }
 
-    function _stripTWCC(sdp) {
-      return sdp.split("\r\n").filter(function(line) {
-        if (line.indexOf("transport-wide-cc") !== -1) return false;
-        if (/^a=rtcp-fb:\d+ transport-cc/.test(line)) return false;
-        return true;
-      }).join("\r\n");
-    }
-
     // Profile + level upgrade — only for local/offer SDPs (publisher side).
     // Changing profiles in remote (SFU answer) SDPs breaks negotiation.
     function _upgradeH264Profile(sdp) {
@@ -368,15 +362,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       return offer;
     };
 
-    var _isLocalSfu = false;
-    try { var _sfuHost = new URL(sfuUrl).hostname; _isLocalSfu = (_sfuHost === "127.0.0.1" || _sfuHost === "localhost"); } catch {}
-    var _applyTWCC = _isLocalSfu ? _stripTWCC : function(s) { return s; };
-
     const _origSLD = RTCPeerConnection.prototype.setLocalDescription;
     RTCPeerConnection.prototype.setLocalDescription = function(desc, ...args) {
       if (desc && desc.sdp) {
         // Local descriptions (our offers/answers): upgrade profile + level
-        desc = { type: desc.type, sdp: _applyTWCC(_upgradeH264Profile(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp)))) };
+        desc = { type: desc.type, sdp: _upgradeH264Profile(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp))) };
         debugLog("[SDP] LOCAL munged (profile+level+bw)");
       } else if (!desc) {
         debugLog("[SDP] WARNING: implicit setLocalDescription (no SDP to munge)");
@@ -389,7 +379,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       if (desc && desc.sdp) {
         // Remote descriptions (SFU answers): level upgrade + bandwidth only.
         // Do NOT change profiles — SFU negotiated a specific profile, changing it breaks encoding.
-        desc = { type: desc.type, sdp: _applyTWCC(_upgradeLevelOnly(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp)))) };
+        desc = { type: desc.type, sdp: _upgradeLevelOnly(_addCodecBitrateHints(_mungeSDPBandwidth(desc.sdp))) };
         debugLog("[SDP] REMOTE munged: level+bw (profile preserved)");
       }
       return _origSRD.apply(this, [desc, ...args]);
@@ -410,7 +400,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           if (!isScreenTrack && trackOrKind.contentHint === "motion" && _screenShareVideoTrack) isScreenTrack = true;
         }
       } catch (_) {}
-      if (isScreenTrack && init && init.sendEncodings) {
+      if (isScreenTrack && init && init.sendEncodings && !performanceMode) {
         for (const enc of init.sendEncodings) {
           var isLow = enc.rid === "q" || (enc.scaleResolutionDownBy && enc.scaleResolutionDownBy >= 2.5);
           if (isLow) {
@@ -455,7 +445,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           if (this.track === _screenShareVideoTrack.mediaStreamTrack) isScreenSender = true;
         }
       } catch (_) {}
-      if (isScreenSender && params && params.encodings) {
+      if (isScreenSender && params && params.encodings && !performanceMode) {
         for (const enc of params.encodings) {
           var isLow = enc.rid === "q";
           var minFps = isLow ? 30 : 60;
@@ -484,14 +474,20 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     debugLog("[fast-switch] using pre-warmed Room for " + roomId);
   } else {
     if (prewarmed) prewarmedRooms.delete(roomId);
-    newRoom = new LK.Room({
-      adaptiveStream: false,
-      dynacast: false,
-      autoSubscribe: true,
-      videoCaptureDefaults: {
-        resolution: { width: 1920, height: 1080, frameRate: 60 },
-      },
-      publishDefaults: {
+    // Performance Mode: single-layer publishing for weak GPUs (no simulcast)
+    // Normal Mode: multi-layer simulcast for capable hardware
+    var _pubDefaults;
+    if (performanceMode) {
+      _pubDefaults = {
+        simulcast: false,
+        videoCodec: "h264",
+        videoEncoding: { maxBitrate: 1_500_000, maxFramerate: 30 },
+        screenShareEncoding: { maxBitrate: 5_000_000, maxFramerate: 30 },
+        dtx: true,
+        degradationPreference: "balanced",
+      };
+    } else {
+      _pubDefaults = {
         simulcast: true,
         videoCodec: "h264",
         videoEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 },
@@ -501,7 +497,19 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         screenShareEncoding: { maxBitrate: 8_000_000, maxFramerate: 60 },
         dtx: true,
         degradationPreference: "maintain-resolution",
+      };
+    }
+    debugLog("[connect] performanceMode=" + performanceMode + " simulcast=" + _pubDefaults.simulcast);
+    newRoom = new LK.Room({
+      adaptiveStream: false,
+      dynacast: false,
+      autoSubscribe: true,
+      videoCaptureDefaults: {
+        resolution: performanceMode
+          ? { width: 1280, height: 720, frameRate: 30 }
+          : { width: 1920, height: 1080, frameRate: 60 },
       },
+      publishDefaults: _pubDefaults,
     });
   }
   try {
@@ -613,17 +621,39 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   const localIdentity = identity;
   ensureParticipantCard({ identity: localIdentity, name }, true);
   newRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+    // DEBUG: log ALL track subscriptions
+    console.log('[TRACK-SUB] ' + (participant?.identity || '?') + ' kind=' + track.kind + ' source=' + (publication?.source || track?.source));
+    // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
+    patchScreenCompanionSource(publication, track, participant);
+    if (participant && participant.identity.endsWith('$screen')) {
+      debugLog('[screen-merge] $screen track received: ' + track.kind + ' ' + (publication?.source || ''));
+    }
+    // $screen identity merging: route tracks from companion identity under parent's name
+    var _effectiveParticipant = participant;
+    if (participant && isScreenIdentity(participant.identity)) {
+      var _subSrc = getTrackSource(publication, track);
+      if (_subSrc === LK.Track.Source.ScreenShare || _subSrc === LK.Track.Source.ScreenShareAudio) {
+        var _parentId = getParentIdentity(participant.identity);
+        // Create a proxy participant with the parent identity so tile logic
+        // creates/updates the screen tile under the real user's name
+        _effectiveParticipant = Object.create(participant);
+        _effectiveParticipant.identity = _parentId;
+        _effectiveParticipant.name = participant.name || _parentId;
+        debugLog('[screen-merge] routing $screen track from ' + participant.identity + ' to parent ' + _parentId);
+      }
+    }
+
     // Opt-in: if a remote screen share arrives but identity isn't in hiddenScreens yet
     // (TrackSubscribed fired before TrackPublished race), add to hiddenScreens now
     // But skip if user explicitly opted in via watchedScreens
     var _subSource = getTrackSource(publication, track);
-    var _subIsRemoteScreen = participant && room && room.localParticipant &&
-      participant.identity !== room.localParticipant.identity &&
+    var _subIsRemoteScreen = _effectiveParticipant && room && room.localParticipant &&
+      _effectiveParticipant.identity !== room.localParticipant.identity &&
       (_subSource === LK.Track.Source.ScreenShare || _subSource === LK.Track.Source.ScreenShareAudio);
-    if (_subIsRemoteScreen && !hiddenScreens.has(participant.identity) && !watchedScreens.has(participant.identity)) {
-      hiddenScreens.add(participant.identity);
+    if (_subIsRemoteScreen && !hiddenScreens.has(_effectiveParticipant.identity) && !watchedScreens.has(_effectiveParticipant.identity)) {
+      hiddenScreens.add(_effectiveParticipant.identity);
     }
-    handleTrackSubscribed(track, publication, participant);
+    handleTrackSubscribed(track, publication, _effectiveParticipant);
     scheduleReconcileWaves("track-subscribed");
     if (participant) hookPublication(publication, participant);
     debugLog(`track subscribed ${participant?.identity || "unknown"} src=${publication?.source || track.source} kind=${track.kind}`);
@@ -659,29 +689,37 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
   if (LK.RoomEvent?.TrackPublished) {
     newRoom.on(LK.RoomEvent.TrackPublished, (publication, participant) => {
+      // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
+      patchScreenCompanionSource(publication, publication?.track, participant);
       var pubSource = getTrackSource(publication, publication?.track);
-      var isRemoteScreen = participant && room && room.localParticipant &&
-        participant.identity !== room.localParticipant.identity &&
+      // $screen merging: resolve companion identity to parent for screen tracks
+      var _pubIdentity = participant ? participant.identity : null;
+      if (_pubIdentity && isScreenIdentity(_pubIdentity) &&
+          (pubSource === LK.Track.Source.ScreenShare || pubSource === LK.Track.Source.ScreenShareAudio)) {
+        _pubIdentity = getParentIdentity(_pubIdentity);
+      }
+      var isRemoteScreen = _pubIdentity && room && room.localParticipant &&
+        _pubIdentity !== room.localParticipant.identity &&
         (pubSource === LK.Track.Source.ScreenShare || pubSource === LK.Track.Source.ScreenShareAudio);
 
       if (isRemoteScreen) {
         // Opt-in: don't subscribe to remote screen shares by default
-        if (!hiddenScreens.has(participant.identity)) {
-          hiddenScreens.add(participant.identity);
+        if (!hiddenScreens.has(_pubIdentity)) {
+          hiddenScreens.add(_pubIdentity);
         }
         // Play screen share chime for video track only (not audio), and not during room switches
         if (!_isRoomSwitch && pubSource === LK.Track.Source.ScreenShare) {
-          var ssState = participantState.get(participant.identity);
+          var ssState = participantState.get(_pubIdentity);
           var ssVol = (ssState && ssState.chimeVolume != null) ? ssState.chimeVolume : 0.5;
           playScreenShareChime(ssVol);
         }
-        var cardRef = participantCards.get(participant.identity);
+        var cardRef = participantCards.get(_pubIdentity);
         if (cardRef && cardRef.watchToggleBtn) {
           cardRef.watchToggleBtn.style.display = "";
           cardRef.watchToggleBtn.textContent = "Start Watching";
           if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
         }
-        debugLog(`[opt-in] track published (screen, unwatched) ${participant.identity} src=${pubSource}`);
+        debugLog(`[opt-in] track published (screen, unwatched) ${_pubIdentity} src=${pubSource}`);
         // Still hook so we can subscribe later when user opts in
         if (participant) hookPublication(publication, participant);
         return;
@@ -720,8 +758,15 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (LK.RoomEvent?.TrackUnpublished) {
     newRoom.on(LK.RoomEvent.TrackUnpublished, (publication, participant) => {
       if (!publication || !participant) return;
+      // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
+      patchScreenCompanionSource(publication, publication?.track, participant);
       const source = publication.source;
-      const identity = participant.identity;
+      // $screen merging: resolve companion to parent for cleanup
+      // Identity suffix is the authoritative signal — no source check needed
+      var identity = participant.identity;
+      if (isScreenIdentity(identity)) {
+        identity = getParentIdentity(identity);
+      }
       if (!identity) return;
 
       // Helper: get remaining publications for this participant
@@ -782,12 +827,12 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     });
   }
   newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
-    var _pIdent = typeof participant.identity === "string" ? participant.identity : String(participant.identity);
-    if (_pIdent.endsWith("$screen")) {
-      debugLog("$screen identity connected: " + _pIdent + " — skipping card");
-    } else {
-      ensureParticipantCard(participant);
+    console.log('[PARTICIPANT] connected: ' + participant.identity);
+    if (participant.identity.endsWith('$screen')) {
+      debugLog('[screen-merge] $screen companion joined: ' + participant.identity);
+      // Don't toast $screen companion joins — they're internal implementation detail
     }
+    ensureParticipantCard(participant);
     debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
     // Cancel any pending disconnect cleanup — this participant just came back
     var wasPendingDisconnect = _pendingDisconnects.has(participant.identity);
