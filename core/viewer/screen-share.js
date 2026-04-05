@@ -750,12 +750,14 @@ async function startScreenShareManual() {
     if (!screenToken) { showToast('No token received from server', 8000); return; }
 
     // Detect OS build number for WGC availability (24H2+ = build 26100+)
-    var osBuild = 0;
+    // If the IPC command doesn't exist (older client binary), assume WGC is supported
+    // and let it fail naturally in the fallback chain rather than skipping it.
+    var osBuild = 99999;
     try {
       osBuild = await tauriInvoke('get_os_build_number');
       debugLog('[os] Windows build: ' + osBuild);
     } catch (e) {
-      debugLog('[os] build detection failed: ' + e);
+      debugLog('[os] build detection unavailable (older client), assuming WGC supported');
     }
     var wgcSupported = osBuild >= 26100;
 
@@ -877,6 +879,15 @@ async function startScreenShareManual() {
                       window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' :
                       window._echoNativeCaptureMode === 'game' ? 'Game Capture' : 'Window Capture';
       showToast('Screen sharing started (' + modeLabel + ')', 4000);
+
+      // Immediately start WASAPI per-process audio using picker's PID
+      // (don't wait for Rust event — older clients emit no PID)
+      if (source.sourceType === 'game' && source.pid && source.pid > 0) {
+        debugLog('[audio] auto-starting audio capture for PID ' + source.pid + ' (from picker)');
+        tauriInvoke('start_audio_capture', { pid: source.pid }).catch(function(e) {
+          debugLog('[audio] auto-start failed: ' + e);
+        });
+      }
 
       // Listen for Rust-side auto-stop (e.g. game exited, timeouts)
       if (typeof tauriListen === 'function') {
