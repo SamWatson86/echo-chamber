@@ -1,12 +1,14 @@
 mod audio_capture;
+mod auth;
 mod config;
 mod jam_bot;
 
+use auth::*;
 use config::*;
 
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use base64::Engine as _;
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use axum::extract::OriginalUri;
 use axum::http::HeaderValue;
 use axum::{
@@ -19,7 +21,6 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -38,40 +39,40 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::{error, info, warn};
 
 #[derive(Clone)]
-struct AppState {
-    config: Arc<Config>,
-    rooms: Arc<Mutex<HashMap<String, RoomInfo>>>,
-    participants: Arc<Mutex<HashMap<String, ParticipantEntry>>>,
-    soundboard: Arc<Mutex<SoundboardState>>,
-    chat: Arc<Mutex<ChatState>>,
-    avatars: Arc<Mutex<HashMap<String, String>>>, // identity_base -> filename
-    avatars_dir: PathBuf,
-    chimes: Arc<Mutex<HashMap<String, ChimeEntry>>>, // key: "identityBase-enter" or "identityBase-exit"
-    chimes_dir: PathBuf,
-    client_stats: Arc<Mutex<HashMap<String, ClientStats>>>,
-    joined_at: Arc<Mutex<HashMap<String, u64>>>, // identity -> join timestamp
-    session_log_dir: PathBuf,
-    stats_history: Arc<Mutex<Vec<StatsSnapshot>>>,
-    bug_reports: Arc<Mutex<Vec<BugReport>>>,
-    bug_log_dir: PathBuf,
+pub(crate) struct AppState {
+    pub(crate) config: Arc<Config>,
+    pub(crate) rooms: Arc<Mutex<HashMap<String, RoomInfo>>>,
+    pub(crate) participants: Arc<Mutex<HashMap<String, ParticipantEntry>>>,
+    pub(crate) soundboard: Arc<Mutex<SoundboardState>>,
+    pub(crate) chat: Arc<Mutex<ChatState>>,
+    pub(crate) avatars: Arc<Mutex<HashMap<String, String>>>, // identity_base -> filename
+    pub(crate) avatars_dir: PathBuf,
+    pub(crate) chimes: Arc<Mutex<HashMap<String, ChimeEntry>>>, // key: "identityBase-enter" or "identityBase-exit"
+    pub(crate) chimes_dir: PathBuf,
+    pub(crate) client_stats: Arc<Mutex<HashMap<String, ClientStats>>>,
+    pub(crate) joined_at: Arc<Mutex<HashMap<String, u64>>>, // identity -> join timestamp
+    pub(crate) session_log_dir: PathBuf,
+    pub(crate) stats_history: Arc<Mutex<Vec<StatsSnapshot>>>,
+    pub(crate) bug_reports: Arc<Mutex<Vec<BugReport>>>,
+    pub(crate) bug_log_dir: PathBuf,
     // Jam Session (Spotify)
-    jam: Arc<Mutex<JamState>>,
-    jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
-    spotify_client_id: String,
-    spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
-    spotify_token_file: PathBuf,
-    http_client: reqwest::Client,
-    viewer_stamp: Arc<RwLock<String>>,
-    login_attempts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
+    pub(crate) jam: Arc<Mutex<JamState>>,
+    pub(crate) jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
+    pub(crate) spotify_client_id: String,
+    pub(crate) spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
+    pub(crate) spotify_token_file: PathBuf,
+    pub(crate) http_client: reqwest::Client,
+    pub(crate) viewer_stamp: Arc<RwLock<String>>,
+    pub(crate) login_attempts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
 }
 
 #[derive(Clone, Serialize)]
-struct ParticipantEntry {
-    identity: String,
-    name: String,
-    room_id: String,
-    last_seen: u64,
-    viewer_version: Option<String>,
+pub(crate) struct ParticipantEntry {
+    pub(crate) identity: String,
+    pub(crate) name: String,
+    pub(crate) room_id: String,
+    pub(crate) last_seen: u64,
+    pub(crate) viewer_version: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -376,27 +377,6 @@ struct HealthResponse {
 }
 
 #[derive(Deserialize)]
-struct LoginRequest {
-    password: String,
-}
-
-#[derive(Serialize)]
-struct LoginResponse {
-    ok: bool,
-    token: String,
-    expires_in_seconds: u64,
-}
-
-#[derive(Deserialize)]
-struct TokenRequest {
-    room: String,
-    identity: String,
-    name: Option<String>,
-    #[serde(default)]
-    viewer_version: Option<String>,
-}
-
-#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SoundboardListQuery {
     room_id: String,
@@ -422,12 +402,6 @@ struct SoundboardUpdateRequest {
 }
 
 #[derive(Serialize)]
-struct TokenResponse {
-    token: String,
-    expires_in_seconds: u64,
-}
-
-#[derive(Serialize)]
 struct SoundboardListResponse {
     ok: bool,
     sounds: Vec<SoundboardPublic>,
@@ -438,35 +412,6 @@ struct SoundboardSoundResponse {
     ok: bool,
     sound: Option<SoundboardPublic>,
     error: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct AdminClaims {
-    sub: String,
-    role: String,
-    exp: usize,
-    iat: usize,
-}
-
-#[derive(Serialize, Deserialize)]
-struct LiveKitClaims {
-    iss: String,
-    sub: String,
-    exp: usize,
-    iat: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    video: LiveKitVideoGrant,
-}
-
-#[derive(Serialize, Deserialize)]
-#[allow(non_snake_case)]
-struct LiveKitVideoGrant {
-    room: String,
-    roomJoin: bool,
-    canPublish: bool,
-    canSubscribe: bool,
-    canPublishData: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1109,189 +1054,6 @@ async fn root_route(
         return sfu_proxy(ws, uri, headers).await.into_response();
     }
     Redirect::temporary("/viewer/").into_response()
-}
-
-async fn login(
-    State(state): State<AppState>,
-    connect_info: axum::extract::ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Json(payload): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
-    let ua = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("-");
-    info!("login request (ua: {})", ua);
-
-    // Rate limit: 5 failed attempts per 15 minutes per IP
-    let ip = connect_info.0.ip();
-    {
-        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
-        // Clean up expired entries while we have the lock
-        let window = Duration::from_secs(15 * 60);
-        attempts.retain(|_, (_, first)| first.elapsed() < window);
-        if let Some((count, first)) = attempts.get(&ip) {
-            if *count >= 5 && first.elapsed() < window {
-                warn!("login rate-limited ip={}", ip);
-                return Err(StatusCode::TOO_MANY_REQUESTS);
-            }
-        }
-    }
-
-    if !verify_password(&state.config, &payload.password) {
-        warn!("login failed (bad password) ip={}", ip);
-        // Record failed attempt
-        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = attempts.entry(ip).or_insert((0, Instant::now()));
-        entry.0 += 1;
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Successful login — clear any failed attempts for this IP
-    {
-        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
-        attempts.remove(&ip);
-    }
-
-    let now = now_ts();
-    let exp = now + state.config.admin_token_ttl_secs;
-    let claims = AdminClaims {
-        sub: "admin".to_string(),
-        role: "admin".to_string(),
-        iat: now as usize,
-        exp: exp as usize,
-    };
-
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.config.admin_jwt_secret.as_bytes()),
-    )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(LoginResponse {
-        ok: true,
-        token,
-        expires_in_seconds: state.config.admin_token_ttl_secs,
-    }))
-}
-
-async fn issue_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<TokenRequest>,
-) -> Result<Json<TokenResponse>, StatusCode> {
-    info!(
-        "issue token for room={} identity={}",
-        payload.room, payload.identity
-    );
-    ensure_admin(&state, &headers)?;
-
-    let now = now_ts();
-    let exp = now + state.config.livekit_token_ttl_secs;
-
-    // $screen identities are companion connections for native screen capture.
-    // They publish video only (no subscribe needed) and skip name conflict checks.
-    let is_screen_identity = payload.identity.ends_with("$screen");
-
-    let claims = LiveKitClaims {
-        iss: state.config.livekit_api_key.clone(),
-        sub: payload.identity.clone(),
-        iat: now as usize,
-        exp: exp as usize,
-        name: payload.name.clone(),
-        video: LiveKitVideoGrant {
-            room: payload.room.clone(),
-            roomJoin: true,
-            canPublish: true,
-            canSubscribe: !is_screen_identity, // screen identity only publishes
-            canPublishData: true,
-        },
-    };
-
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
-    )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // $screen identities skip participant tracking — they're not real users
-    if is_screen_identity {
-        info!("issued $screen token for room={} identity={}", payload.room, payload.identity);
-        return Ok(Json(TokenResponse {
-            token,
-            expires_in_seconds: state.config.livekit_token_ttl_secs,
-        }));
-    }
-
-    // Track participant in room (dedup old sessions, reject active name conflicts)
-    {
-        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-        let name_base = payload
-            .identity
-            .rsplitn(2, '-')
-            .last()
-            .unwrap_or(&payload.identity)
-            .to_string();
-        let same_name_entries: Vec<(String, u64)> = participants
-            .iter()
-            .filter(|(k, _)| {
-                *k != &payload.identity && k.rsplitn(2, '-').last().unwrap_or(k) == name_base
-            })
-            .map(|(k, v)| (k.clone(), v.last_seen))
-            .collect();
-        for (key, last_seen) in &same_name_entries {
-            if now.saturating_sub(*last_seen) < 20 {
-                // Another user with this name is currently connected — reject
-                info!(
-                    "name conflict: {} is active, rejecting {}",
-                    key, payload.identity
-                );
-                return Err(StatusCode::CONFLICT);
-            }
-        }
-        // Remove stale entries with same name base (old sessions)
-        for (key, _) in same_name_entries {
-            info!(
-                "dedup: removing stale identity {} (replaced by {})",
-                key, payload.identity
-            );
-            participants.remove(&key);
-        }
-        // Only update room_id if the participant is NEW or STALE (>20s since last seen).
-        // Prefetching tokens for breakout rooms (fast room switching) should NOT overwrite
-        // the participant's actual current room — that's the heartbeat's job.
-        if let Some(existing) = participants.get_mut(&payload.identity) {
-            if now.saturating_sub(existing.last_seen) >= 20 {
-                // Stale entry — treat as new join, update everything
-                existing.room_id = payload.room.clone();
-                existing.last_seen = now;
-                if let Some(ref name) = payload.name {
-                    existing.name = name.clone();
-                }
-            }
-            // Active entry: DON'T overwrite room_id (prefetch tokens shouldn't move them)
-            // Just refresh last_seen so dedup logic considers them active
-        } else {
-            // Brand new participant — register them
-            participants.insert(
-                payload.identity.clone(),
-                ParticipantEntry {
-                    identity: payload.identity.clone(),
-                    name: payload.name.clone().unwrap_or_default(),
-                    room_id: payload.room.clone(),
-                    last_seen: now,
-                    viewer_version: None,
-                },
-            );
-        }
-    }
-
-    Ok(Json(TokenResponse {
-        token,
-        expires_in_seconds: state.config.livekit_token_ttl_secs,
-    }))
 }
 
 async fn list_rooms(
@@ -3496,63 +3258,6 @@ async fn admin_mute_participant(
     Ok(Json(
         serde_json::json!({ "ok": true, "muted_tracks": muted_count }),
     ))
-}
-
-fn ensure_admin(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
-    let Some(auth) = headers.get("authorization") else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let auth = auth.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let validation = Validation::default();
-    let decoded = decode::<AdminClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.admin_jwt_secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if decoded.claims.role != "admin" {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(())
-}
-
-fn verify_password(config: &Config, password: &str) -> bool {
-    if let Some(hash) = &config.admin_password_hash {
-        if let Ok(parsed) = PasswordHash::new(hash) {
-            return Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .is_ok();
-        }
-    }
-    if let Some(plain) = &config.admin_password {
-        return plain == password;
-    }
-    warn!("admin password not configured");
-    false
-}
-
-fn ensure_livekit(state: &AppState, headers: &HeaderMap) -> Result<LiveKitClaims, StatusCode> {
-    let Some(auth) = headers.get("authorization") else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let auth = auth.to_str().map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let validation = Validation::default();
-    let decoded = decode::<LiveKitClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.livekit_api_secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if decoded.claims.iss != state.config.livekit_api_key {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(decoded.claims)
 }
 
 fn soundboard_public(sound: &SoundboardSound) -> SoundboardPublic {
