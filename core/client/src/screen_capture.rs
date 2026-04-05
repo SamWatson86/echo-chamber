@@ -501,8 +501,20 @@ async fn share_loop(
 
     eprintln!("[screen-capture] track published, waiting for negotiation...");
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Resolve HWND → PID for WASAPI audio auto-start
+    let target_pid = unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        let hwnd = HWND(source_id as *mut _);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        eprintln!("[screen-capture] HWND {} → PID {}", source_id, pid);
+        pid
+    };
+
     eprintln!("[screen-capture] starting WGC capture");
-    let _ = app.emit("screen-capture-started", ());
+    let _ = app.emit("screen-capture-started", target_pid);
 
     // 4. Start WGC capture — callback sends BGRA frames via channel
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)

@@ -907,8 +907,17 @@ async function startScreenShareManual() {
           renderPublishButtons();
           showToast('NVFBC capture ended', 3000);
         }).catch(function() {});
-        // Auto-start WASAPI per-process audio for game captures (NVFBC, DD, or hook)
+        // Auto-start WASAPI per-process audio for ALL capture methods
         if (source.sourceType === 'game' && source.id) {
+          tauriListen('screen-capture-started', function(event) {
+            var pid = event && event.payload;
+            if (pid && pid > 0) {
+              debugLog('[wgc] auto-starting audio capture for PID ' + pid);
+              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
+                debugLog('[wgc] audio capture start failed: ' + e);
+              });
+            }
+          }).catch(function() {});
           tauriListen('nvfbc-capture-started', function(event) {
             var pid = event && event.payload;
             if (pid && pid > 0) {
