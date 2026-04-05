@@ -176,13 +176,23 @@ pub fn is_running() -> bool {
 
 // ── DXGI Desktop Duplication Setup ──
 
-/// Find the DXGI output (monitor) that contains the given window.
+/// Find the DXGI output (monitor) that contains the given window or monitor handle.
+///
+/// `hwnd_or_hmonitor` — either a window HWND or a monitor HMONITOR.
+/// `is_monitor` — if true, treat the value as an HMONITOR directly.
 fn find_output_for_window(
     factory: &IDXGIFactory1,
-    hwnd: u64,
+    hwnd_or_hmonitor: u64,
+    is_monitor: bool,
 ) -> Result<(IDXGIAdapter1, IDXGIOutput1, u32, u32), String> {
-    let hwnd_val = HWND(hwnd as *mut _);
-    let monitor = unsafe { MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST) };
+    let monitor = if is_monitor {
+        // Value is already an HMONITOR from the picker
+        use windows::Win32::Graphics::Gdi::HMONITOR;
+        HMONITOR(hwnd_or_hmonitor as *mut _)
+    } else {
+        let hwnd_val = HWND(hwnd_or_hmonitor as *mut _);
+        unsafe { MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST) }
+    };
 
     // Get monitor rect
     let mut mi = MONITORINFO {
@@ -191,7 +201,7 @@ fn find_output_for_window(
     };
     unsafe {
         if !GetMonitorInfoW(monitor, &mut mi).as_bool() {
-            return Err("GetMonitorInfoW failed".into());
+            return Err(format!("GetMonitorInfoW failed (is_monitor={}, handle={})", is_monitor, hwnd_or_hmonitor));
         }
     }
     let mon_w = (mi.rcMonitor.right - mi.rcMonitor.left) as u32;
@@ -368,14 +378,19 @@ fn capture_loop_blocking(
     let factory: IDXGIFactory1 =
         unsafe { CreateDXGIFactory1() }.map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
 
-    let (adapter, output1, mon_w, mon_h) = find_output_for_window(&factory, hwnd)?;
+    let (adapter, output1, mon_w, mon_h) = find_output_for_window(&factory, hwnd, fullscreen)?;
 
     // 1b. Create anti-MPO overlay to force DWM Composed Flip.
     // Without this, borderless windowed games trigger Independent Flip / MPO,
     // causing DXGI DD to capture at 5-15fps instead of the game's native framerate.
     let anti_mpo_hwnd = unsafe {
-        let hwnd_val = HWND(hwnd as *mut _);
-        let monitor = MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST);
+        let monitor = if fullscreen {
+            use windows::Win32::Graphics::Gdi::HMONITOR;
+            HMONITOR(hwnd as *mut _)
+        } else {
+            let hwnd_val = HWND(hwnd as *mut _);
+            MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST)
+        };
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
