@@ -880,13 +880,18 @@ async function startScreenShareManual() {
                       window._echoNativeCaptureMode === 'game' ? 'Game Capture' : 'Window Capture';
       showToast('Screen sharing started (' + modeLabel + ')', 4000);
 
-      // Immediately start WASAPI per-process audio using picker's PID
-      // (don't wait for Rust event — older clients emit no PID)
+      // Immediately start WASAPI per-process audio + publish pipeline using picker's PID
       if (source.sourceType === 'game' && source.pid && source.pid > 0) {
-        debugLog('[audio] auto-starting audio capture for PID ' + source.pid + ' (from picker)');
-        tauriInvoke('start_audio_capture', { pid: source.pid }).catch(function(e) {
-          debugLog('[audio] auto-start failed: ' + e);
+        debugLog('[audio] auto-starting native audio capture+publish for PID ' + source.pid);
+        startNativeAudioCapture(source.pid).then(function() {
+          debugLog('[audio] native audio pipeline started for PID ' + source.pid);
+          showToast('Game audio streaming', 3000);
+        }).catch(function(e) {
+          debugLog('[audio] native audio failed: ' + e);
+          showToast('Game audio failed: ' + e, 8000);
         });
+      } else {
+        debugLog('[audio] skipped — type=' + source.sourceType + ' pid=' + (source.pid || 'none'));
       }
 
       // Listen for Rust-side auto-stop (e.g. game exited, timeouts)
@@ -918,45 +923,9 @@ async function startScreenShareManual() {
           renderPublishButtons();
           showToast('NVFBC capture ended', 3000);
         }).catch(function() {});
-        // Auto-start WASAPI per-process audio for ALL capture methods
-        if (source.sourceType === 'game' && source.id) {
-          tauriListen('screen-capture-started', function(event) {
-            var pid = event && event.payload;
-            if (pid && pid > 0) {
-              debugLog('[wgc] auto-starting audio capture for PID ' + pid);
-              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
-                debugLog('[wgc] audio capture start failed: ' + e);
-              });
-            }
-          }).catch(function() {});
-          tauriListen('nvfbc-capture-started', function(event) {
-            var pid = event && event.payload;
-            if (pid && pid > 0) {
-              debugLog('[nvfbc] auto-starting audio capture for PID ' + pid);
-              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
-                debugLog('[nvfbc] audio capture start failed: ' + e);
-              });
-            }
-          }).catch(function() {});
-          tauriListen('desktop-capture-started', function(event) {
-            var pid = event && event.payload;
-            if (pid && pid > 0) {
-              debugLog('[desktop-dd] auto-starting audio capture for PID ' + pid);
-              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
-                debugLog('[desktop-dd] audio capture start failed: ' + e);
-              });
-            }
-          }).catch(function() {});
-          tauriListen('game-capture-started', function(event) {
-            var pid = event && event.payload;
-            if (pid && pid > 0) {
-              debugLog('[game-capture] auto-starting audio capture for PID ' + pid);
-              tauriInvoke('start_audio_capture', { pid: pid }).catch(function(e) {
-                debugLog('[game-capture] audio capture start failed: ' + e);
-              });
-            }
-          }).catch(function() {});
-        }
+        // NOTE: WASAPI audio auto-start is handled by the immediate startNativeAudioCapture()
+        // call above using the picker's PID. No event-based listeners needed — they would
+        // double-start and kill the first capture.
       }
     } catch (err) {
       showToast('Capture failed: ' + (err.message || err), 8000);

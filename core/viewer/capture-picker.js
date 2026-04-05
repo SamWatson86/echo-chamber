@@ -139,6 +139,7 @@ async function _loadSources() {
                     title: card.dataset.title,
                     sourceType: card.dataset.type,
                     isMonitor: card.dataset.type === 'monitor',
+                    pid: parseInt(card.dataset.pid) || 0,
                 };
                 document.getElementById('cp-share').disabled = false;
             };
@@ -168,7 +169,8 @@ function _renderSection(title, badge, sources) {
         var s = sources[i];
         html += '<div class="capture-source-card" data-id="' + s.id +
             '" data-title="' + _escHtml(s.title) +
-            '" data-type="' + s.source_type + '">' +
+            '" data-type="' + s.source_type +
+            '" data-pid="' + (s.pid || 0) + '">' +
             '<div class="capture-source-thumb" id="thumb-container-' + s.id + '">' +
                 '<div class="shimmer" id="thumb-' + s.id + '"></div>' +
             '</div>' +
