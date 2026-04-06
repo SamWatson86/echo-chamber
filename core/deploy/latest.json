@@ -1,7 +1,7 @@
 {
   "platforms": {
     "windows-x86_64": {
-      "signature": "",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEFvaWJCdFJiRnhmNU1sYW0zc1Bxb3N4M3k2UGlrRXdlQnhCcm5rSHNkbmJ2SVJoNnNDb25hb3AwRk1TWVpCdldBUlkxU2ozeG01ek5KbkV3Q1l4QWdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NDM3NjQ2CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4xX3g2NC1zZXR1cC5leGUKRndhbThweFVvK0FoUWw1OFlzWFc1bVArV3pteHFDd0FYUS9qWU56QVBCR0Nvd2k1UU00S0ZJYk9HMXZoWmQ3ZVlJL1UrNEpCbkhiVmEra1lsWGVnRFE9PQo=",
       "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.1/Echo.Chamber_0.6.1_x64-setup.exe"
     }
   },
