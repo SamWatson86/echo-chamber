@@ -101,17 +101,11 @@ async function startScreenShareManual() {
           }
         }
       } else {
-        // Window/monitor capture — WGC on 24H2+, DXGI DD fallback for monitors on older
-        if (wgcSupported) {
-          await tauriInvoke('start_screen_share', {
-            sourceId: source.id,
-            sfuUrl: sfuUrl,
-            token: screenToken,
-          });
-          window._echoNativeCaptureMode = 'wgc';
-        } else if (source.sourceType === 'monitor') {
-          // Older Windows: DXGI DD works for full monitor capture
-          debugLog('[fallback] WGC unavailable (build ' + osBuild + '), using DXGI DD for monitor');
+        // Window/monitor capture
+        // Monitors ALWAYS use DXGI DD (WGC can't capture HMONITOR handles)
+        // Windows use WGC on 24H2+, error on older
+        if (source.sourceType === 'monitor') {
+          debugLog('[monitor] using DXGI DD for monitor capture');
           var ddResult = await tauriInvoke('check_desktop_capture_available');
           if (ddResult && ddResult[0]) {
             await tauriInvoke('start_desktop_capture', {
@@ -124,6 +118,13 @@ async function startScreenShareManual() {
           } else {
             throw new Error('Desktop capture not available: ' + (ddResult ? ddResult[1] : 'unknown'));
           }
+        } else if (wgcSupported) {
+          await tauriInvoke('start_screen_share', {
+            sourceId: source.id,
+            sfuUrl: sfuUrl,
+            token: screenToken,
+          });
+          window._echoNativeCaptureMode = 'wgc';
         } else {
           throw new Error('Window capture requires Windows 11 24H2+ (current build: ' + osBuild + ')');
         }
@@ -879,6 +880,7 @@ async function stopScreenShareManual() {
     window._echoNativeCaptureMode = null;
     screenEnabled = false;
     _stopQualityWarnListener();
+    await stopNativeAudioCapture();
     renderPublishButtons();
     return; // Don't fall through to browser path
   }
