@@ -12,18 +12,11 @@ use audio_capture_stub as audio_capture;
 mod screen_capture;
 
 #[cfg(target_os = "windows")]
-mod control_block_client;
-#[cfg(target_os = "windows")]
-mod injector;
-#[cfg(target_os = "windows")]
-mod game_capture;
-#[cfg(target_os = "windows")]
 mod gpu_converter;
 #[cfg(target_os = "windows")]
-mod desktop_capture;
+mod capture_pipeline;
 #[cfg(target_os = "windows")]
-mod nvfbc_capture;
-
+mod desktop_capture;
 #[cfg(target_os = "windows")]
 mod audio_output;
 #[cfg(not(target_os = "windows"))]
@@ -262,6 +255,60 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── OS Detection ──
+
+#[tauri::command]
+fn get_os_build_number() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        // Use RtlGetVersion (ntdll) — GetVersionEx lies on Win8.1+
+        #[repr(C)]
+        struct OsVersionInfoExW {
+            dw_os_version_info_size: u32,
+            dw_major_version: u32,
+            dw_minor_version: u32,
+            dw_build_number: u32,
+            dw_platform_id: u32,
+            sz_csd_version: [u16; 128],
+            w_service_pack_major: u16,
+            w_service_pack_minor: u16,
+            w_suite_mask: u16,
+            w_product_type: u8,
+            w_reserved: u8,
+        }
+
+        unsafe {
+            let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(
+                windows::core::w!("ntdll.dll"),
+            );
+            if let Ok(h) = lib {
+                let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
+                    h,
+                    windows::core::s!("RtlGetVersion"),
+                );
+                if let Some(rtl_get_version) = proc {
+                    let func: extern "system" fn(*mut OsVersionInfoExW) -> i32 =
+                        std::mem::transmute(rtl_get_version);
+                    let mut info: OsVersionInfoExW = std::mem::zeroed();
+                    info.dw_os_version_info_size =
+                        std::mem::size_of::<OsVersionInfoExW>() as u32;
+                    func(&mut info);
+                    eprintln!(
+                        "[os] Windows {}.{} build {}",
+                        info.dw_major_version, info.dw_minor_version, info.dw_build_number
+                    );
+                    return info.dw_build_number;
+                }
+            }
+        }
+        0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
 // ── Native Screen Capture IPC Commands ──
 
 #[cfg(target_os = "windows")]
@@ -293,25 +340,6 @@ fn get_source_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
     screen_capture::get_thumbnail(source_id, is_monitor)
 }
 
-// ── Game Capture IPC Commands ──
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn start_game_capture(
-    hwnd: u64,
-    sfu_url: String,
-    token: String,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    game_capture::start(hwnd, sfu_url, token, app).await
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn stop_game_capture() {
-    game_capture::stop();
-}
-
 // ── Desktop Capture (DXGI Desktop Duplication) IPC Commands ──
 
 #[cfg(target_os = "windows")]
@@ -336,32 +364,6 @@ async fn start_desktop_capture(
 #[tauri::command]
 fn stop_desktop_capture() {
     desktop_capture::stop();
-}
-
-// ── NVFBC Capture (GPU scanout — highest FPS) IPC Commands ──
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn check_nvfbc_available() -> Result<(bool, String), String> {
-    Ok(nvfbc_capture::check_available())
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-async fn start_nvfbc_capture(
-    hwnd: u64,
-    fullscreen: bool,
-    sfu_url: String,
-    token: String,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    nvfbc_capture::start(hwnd, fullscreen, sfu_url, token, app).await
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn stop_nvfbc_capture() {
-    nvfbc_capture::stop();
 }
 
 fn main() {
@@ -392,6 +394,7 @@ fn main() {
             stop_audio_capture,
             list_audio_output_devices,
             check_for_updates,
+            get_os_build_number,
             #[cfg(target_os = "windows")]
             list_screen_sources,
             #[cfg(target_os = "windows")]
@@ -401,21 +404,11 @@ fn main() {
             #[cfg(target_os = "windows")]
             get_source_thumbnail,
             #[cfg(target_os = "windows")]
-            start_game_capture,
-            #[cfg(target_os = "windows")]
-            stop_game_capture,
-            #[cfg(target_os = "windows")]
             check_desktop_capture_available,
             #[cfg(target_os = "windows")]
             start_desktop_capture,
             #[cfg(target_os = "windows")]
             stop_desktop_capture,
-            #[cfg(target_os = "windows")]
-            check_nvfbc_available,
-            #[cfg(target_os = "windows")]
-            start_nvfbc_capture,
-            #[cfg(target_os = "windows")]
-            stop_nvfbc_capture,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected

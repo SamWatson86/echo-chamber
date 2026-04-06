@@ -1,15 +1,11 @@
 {
-    "platforms":  {
-                      "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMENYVHhleDVEYVFSOUUzVFVaNHBwVnpzWnVUb3NNTWpscmp4TXVCY0ZhbGtSZVF6SnNGalNiaFFTc1JVNFVWQnpveFh3RnEwT0dTU0QwcGJWbjQ1NEFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1MTY4NDQxCWZpbGU6RWNobyBDaGFtYmVyXzAuNS4xX3g2NC1zZXR1cC5leGUKWXp5V2x5RWNLQmpQREdiUG90cHNHTTdFSE9veVFwZnJHR21EZk9xejFINHRia1lqWXpoVkFFMmdXdWRMVnlWY201djNVbkpFTURpZGRzZjRNR3JjQVE9PQo=",
-                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.5.1/Echo.Chamber_0.5.1_x64-setup.exe"
-                                         },
-                      "darwin-aarch64":  {
-                                             "signature":  "",
-                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.5.1/Echo.Chamber.app.tar.gz"
-                                         }
-                  },
-    "pub_date":  "2026-04-02T22:20:41Z",
-    "version":  "0.5.1",
-    "notes":  "Echo Chamber v0.5.1"
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjME4wTnNobkkrTURnNnM3OUYxdUhnSGF3M29UczdlalNrcXpKTEIraWhjbFgwaUZOT3hxcVdjWElrb3M1dXB1eWFPQXZBZTEyOXBQS1BQdTNXRlU5WFE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1MzcxMzA2CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4wX3g2NC1zZXR1cC5leGUKWGk2MXFYUHFibmFRUy9sT3V1bk8xOTRPTkV0ZStFUkFGcWJMU2hvU0MxUEt3WU1kWUFGWnYyNFpoQlBzbWFjT28zU0RRYlhpQTNUZWlyRGVvTUVIQmc9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.0/Echo.Chamber_0.6.0_x64-setup.exe"
+    }
+  },
+  "pub_date": "2026-04-05T06:21:00Z",
+  "version": "0.6.0",
+  "notes": "Echo Chamber v0.6.0 — WGC capture + GPU pipeline + SFU bandwidth fix"
 }

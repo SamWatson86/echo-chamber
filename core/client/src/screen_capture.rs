@@ -12,14 +12,15 @@
 //!         → libwebrtc H264 encoder (MFT → NVENC)
 //!           → RTP → SFU
 
-use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
+use crate::capture_pipeline::CapturePublisher;
+
 // ── Types ──
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct CaptureSource {
     pub id: u64,
     pub title: String,
@@ -28,16 +29,6 @@ pub struct CaptureSource {
     pub source_type: String,
     /// Process ID (0 for monitors)
     pub pid: u32,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct ScreenShareStats {
-    pub fps: u32,
-    pub width: u32,
-    pub height: u32,
-    pub bitrate_kbps: u32,
-    pub encoder: String,
-    pub status: String,
 }
 
 // ── Global State ──
@@ -454,59 +445,28 @@ async fn share_loop(
     app: &AppHandle,
     running: &Arc<AtomicBool>,
 ) -> Result<(), String> {
-    use livekit::prelude::*;
-    use livekit::webrtc::prelude::*;
-    use livekit::webrtc::video_source::native::NativeVideoSource;
-    use livekit::webrtc::native::yuv_helper;
-    use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+    // 1. Connect to SFU and publish track via shared pipeline
+    let mut publisher = CapturePublisher::connect_and_publish(
+        sfu_url, token, 1920, 1080, "screen-capture",
+    ).await?;
 
-    eprintln!("[screen-capture] connecting to SFU: {}", sfu_url);
-
-    // 1. Connect to LiveKit SFU
-    let (room, _events) = Room::connect(sfu_url, token, RoomOptions::default())
-        .await
-        .map_err(|e| format!("SFU connect failed: {}", e))?;
-
-    eprintln!(
-        "[screen-capture] connected as {}",
-        room.local_participant().identity().as_str()
-    );
-
-    // 2. Create video source at 1080p — NVENC fails at 4K, so we downscale first.
-    // WGC captures at native resolution (3840x2160), we scale down before encoding.
-    let source = NativeVideoSource::new(VideoResolution {
-        width: 1920,
-        height: 1080,
-    }, false); // NOT screencast — game streaming, prioritize FPS
-    let track = LocalVideoTrack::create_video_track(
-        "screen",
-        RtcVideoSource::Native(source.clone()),
-    );
-
-    // 3. Publish as Camera (SFU preserves FPS, not resolution) with proper bitrate
-    let publish_options = TrackPublishOptions {
-        source: TrackSource::Camera,
-        video_codec: VideoCodec::H264,
-        simulcast: false,
-        video_encoding: Some(VideoEncoding {
-            max_bitrate: 20_000_000,
-            max_framerate: 60.0,
-        }),
-        ..Default::default()
+    // Resolve HWND -> PID for WASAPI audio auto-start
+    let target_pid = unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        let hwnd = HWND(source_id as *mut _);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        eprintln!("[screen-capture] HWND {} -> PID {}", source_id, pid);
+        pid
     };
-    room.local_participant()
-        .publish_track(LocalTrack::Video(track), publish_options)
-        .await
-        .map_err(|e| format!("publish failed: {}", e))?;
 
-    eprintln!("[screen-capture] track published, waiting for negotiation...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     eprintln!("[screen-capture] starting WGC capture");
-    let _ = app.emit("screen-capture-started", ());
+    let _ = app.emit("screen-capture-started", target_pid);
 
-    // 4. Start WGC capture — callback sends BGRA frames via channel
+    // 2. Start WGC capture -- callback sends BGRA frames via channel
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
-    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(2);
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
 
     std::thread::spawn(move || {
@@ -525,7 +485,7 @@ async fn share_loop(
             running: Arc<AtomicBool>,
             wgc_frame_count: u64,
             wgc_start: std::time::Instant,
-            /// GPU pipeline: (device, context, converter) — lazily created on first frame
+            /// GPU pipeline: (device, context, converter) -- lazily created on first frame
             gpu: Option<(ID3D11Device, ID3D11DeviceContext, GpuConverter)>,
         }
 
@@ -587,14 +547,14 @@ async fn share_loop(
                             DXGI_FORMAT_B8G8R8A8_UNORM,
                             ENC_W, ENC_H,
                         ).map_err(|e| format!("GpuConverter: {e}"))?;
-                        eprintln!("[wgc-gpu] pipeline initialized on WGC device: {}x{} → {}x{}", w, h, ENC_W, ENC_H);
+                        eprintln!("[wgc-gpu] pipeline initialized on WGC device: {}x{} -> {}x{}", w, h, ENC_W, ENC_H);
                         self.gpu = Some((device, context, converter));
                     }
                 }
 
                 let (_, context, converter) = self.gpu.as_ref().unwrap();
 
-                // GPU pipeline: CopyResource → compute shader → staging → Map → CPU buffer
+                // GPU pipeline: CopyResource -> compute shader -> staging -> Map -> CPU buffer
                 unsafe {
                     let (ptr, pitch, out_w, out_h) = converter.convert(
                         context, frame_texture,
@@ -652,56 +612,47 @@ async fn share_loop(
         eprintln!("[screen-capture] WGC thread exiting");
     });
 
-    // 5. Frame loop: receive BGRA → convert I420 → push to LiveKit
-    let mut frame_count: u64 = 0;
-    let start_time = std::time::Instant::now();
+    // 3. Frame loop: receive BGRA -> push to SFU via CapturePublisher
+    let mut drop_count: u64 = 0;
+    let mut yuv_total_us: u64 = 0;
+    let mut capture_total_us: u64 = 0;
 
+    // Drain channel aggressively: if multiple frames queued, skip to latest
     while running.load(Ordering::SeqCst) {
-        match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok((bgra_data, width, height)) => {
-                // Data arrives already downscaled to 1080p by GPU shader
-                let mut i420 = I420Buffer::new(width, height);
-                let (sy, su, sv) = i420.strides();
-                let (y, u, v) = i420.data_mut();
-
-                yuv_helper::argb_to_i420(
-                    &bgra_data, width * 4, y, sy, u, su, v, sv,
-                    width as i32, height as i32,
-                );
-
-                let vf = VideoFrame {
-                    rotation: VideoRotation::VideoRotation0,
-                    buffer: i420,
-                    timestamp_us: start_time.elapsed().as_micros() as i64,
-                };
-                source.capture_frame(&vf);
-                frame_count += 1;
-
-                if frame_count % 30 == 0 {
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let fps = if elapsed > 0.0 { (frame_count as f64 / elapsed) as u32 } else { 0 };
-                    eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames)",
-                        width, height, fps, frame_count);
-                    let _ = app.emit(
-                        "screen-capture-stats",
-                        ScreenShareStats {
-                            fps,
-                            width,
-                            height,
-                            bitrate_kbps: 0,
-                            encoder: "NVENC/H264".to_string(),
-                            status: "active".to_string(),
-                        },
-                    );
-                }
-            }
+        let frame = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(f) => f,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Skip to newest frame if channel has backed up
+        let mut latest = frame;
+        while let Ok(newer) = frame_rx.try_recv() {
+            drop_count += 1;
+            latest = newer;
+        }
+        let (bgra_data, width, height) = latest;
+
+        // Data arrives already downscaled to 1080p by GPU shader
+        let t0 = std::time::Instant::now();
+        publisher.push_frame(&bgra_data, width, height);
+        let t1 = std::time::Instant::now();
+
+        yuv_total_us += (t1 - t0).as_micros() as u64;
+        let fc = publisher.frame_count();
+
+        if fc % 30 == 0 {
+            let elapsed = publisher.elapsed().as_secs_f64();
+            let fps = if elapsed > 0.0 { (fc as f64 / elapsed) as u32 } else { 0 };
+            let avg_yuv_ms = if fc > 0 { yuv_total_us as f64 / fc as f64 / 1000.0 } else { 0.0 };
+            eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
+                width, height, fps, fc, drop_count, avg_yuv_ms);
+            publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", width, height, 30);
         }
     }
 
     running.store(false, Ordering::SeqCst);
-    eprintln!("[screen-capture] shutting down, {} frames captured", frame_count);
-    room.close().await.ok();
+    eprintln!("[screen-capture] shutting down, {} frames captured", publisher.frame_count());
+    publisher.shutdown().await;
     Ok(())
 }

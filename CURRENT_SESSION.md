@@ -1,12 +1,13 @@
 # Echo Chamber - Current Session Notes
 
-**Last Updated**: 2026-04-05 (evening)
-**Current Version**: v0.5.0 (client Cargo.toml) / v0.5.1 (last released)
+**Last Updated**: 2026-04-05 (night)
+**Current Version**: v0.6.0 (released, CI building installer)
 **GitHub**: https://github.com/SamWatson86/echo-chamber
+**Release PR**: #121 (merged), tag v0.6.0 pushed, CI run 23995841806
 
 ## SESSION SUMMARY — Major Breakthroughs (2026-04-05)
 
-### STATUS: WGC + GPU Pipeline Working — 53fps BF6 4K, SFU Fixed
+### STATUS: v0.6.0 RELEASED — WGC + GPU Pipeline + SFU Fix
 
 Three major fixes this session:
 1. **SFU BWE fix** — re-enabled `congestion_control: true`, allocation now "optimal"
@@ -144,6 +145,17 @@ SFU config:
 
 - **Extremely GPU-heavy games (CD 4K + DLSS FG) cap at ~15fps capture.** This is a Windows GPU scheduler issue — no software fix exists. Present() hooks don't work with DLSS Frame Generation (proxy swap chain sends garbled data). NVFBC blocked on consumer GeForce. Disabling MPO makes it worse. Every streaming tool (OBS Display Capture, Discord, Sunshine) hits the same wall.
 - **Most games work fine.** BF6 4K = 53fps. The GPU contention only matters when the game maxes out the GPU.
+
+### URGENT — UPDATER NEEDS SIGNATURE
+
+CI run 23995841806 is building the v0.6.0 installer. Once complete:
+1. Get the `.sig` file from the GitHub Release artifacts
+2. Update `core/deploy/latest.json` with the real signature (currently empty)
+3. Without the signature, friends' auto-updater will fail verification
+4. Check: `gh release view v0.6.0 --json assets`
+5. The signature file is typically `Echo.Chamber_0.6.0_x64-setup.exe.sig`
+
+Also: control plane Cargo.toml was bumped to 0.6.0 but the control plane binary needs rebuilding + restarting for the dashboard version to persist across restarts. Currently running the rebuilt binary.
 
 ### IMPORTANT NOTES
 

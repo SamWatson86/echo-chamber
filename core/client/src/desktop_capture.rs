@@ -48,11 +48,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 
-use livekit::prelude::*;
-use livekit::webrtc::prelude::*;
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::native::yuv_helper;
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+use crate::capture_pipeline::CapturePublisher;
 
 // ── GPU HDR→SDR Conversion Pipeline (shared module) ──
 
@@ -176,13 +172,23 @@ pub fn is_running() -> bool {
 
 // ── DXGI Desktop Duplication Setup ──
 
-/// Find the DXGI output (monitor) that contains the given window.
+/// Find the DXGI output (monitor) that contains the given window or monitor handle.
+///
+/// `hwnd_or_hmonitor` — either a window HWND or a monitor HMONITOR.
+/// `is_monitor` — if true, treat the value as an HMONITOR directly.
 fn find_output_for_window(
     factory: &IDXGIFactory1,
-    hwnd: u64,
+    hwnd_or_hmonitor: u64,
+    is_monitor: bool,
 ) -> Result<(IDXGIAdapter1, IDXGIOutput1, u32, u32), String> {
-    let hwnd_val = HWND(hwnd as *mut _);
-    let monitor = unsafe { MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST) };
+    let monitor = if is_monitor {
+        // Value is already an HMONITOR from the picker
+        use windows::Win32::Graphics::Gdi::HMONITOR;
+        HMONITOR(hwnd_or_hmonitor as *mut _)
+    } else {
+        let hwnd_val = HWND(hwnd_or_hmonitor as *mut _);
+        unsafe { MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST) }
+    };
 
     // Get monitor rect
     let mut mi = MONITORINFO {
@@ -191,7 +197,7 @@ fn find_output_for_window(
     };
     unsafe {
         if !GetMonitorInfoW(monitor, &mut mi).as_bool() {
-            return Err("GetMonitorInfoW failed".into());
+            return Err(format!("GetMonitorInfoW failed (is_monitor={}, handle={})", is_monitor, hwnd_or_hmonitor));
         }
     }
     let mon_w = (mi.rcMonitor.right - mi.rcMonitor.left) as u32;
@@ -368,14 +374,19 @@ fn capture_loop_blocking(
     let factory: IDXGIFactory1 =
         unsafe { CreateDXGIFactory1() }.map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
 
-    let (adapter, output1, mon_w, mon_h) = find_output_for_window(&factory, hwnd)?;
+    let (adapter, output1, mon_w, mon_h) = find_output_for_window(&factory, hwnd, fullscreen)?;
 
     // 1b. Create anti-MPO overlay to force DWM Composed Flip.
     // Without this, borderless windowed games trigger Independent Flip / MPO,
     // causing DXGI DD to capture at 5-15fps instead of the game's native framerate.
     let anti_mpo_hwnd = unsafe {
-        let hwnd_val = HWND(hwnd as *mut _);
-        let monitor = MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST);
+        let monitor = if fullscreen {
+            use windows::Win32::Graphics::Gdi::HMONITOR;
+            HMONITOR(hwnd as *mut _)
+        } else {
+            let hwnd_val = HWND(hwnd as *mut _);
+            MonitorFromWindow(hwnd_val, MONITOR_DEFAULTTONEAREST)
+        };
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -474,50 +485,11 @@ fn capture_loop_blocking(
         cap_w, cap_h, enc_w, enc_h, fullscreen, crop,
     );
 
-    // 4. Connect to LiveKit (must use tokio runtime)
+    // 4. Connect to LiveKit and publish track via shared pipeline
     let rt = tokio::runtime::Handle::current();
-    let (room, _events) = rt
-        .block_on(Room::connect(sfu_url, token, RoomOptions::default()))
-        .map_err(|e| format!("SFU connect: {e}"))?;
-
-    eprintln!(
-        "[desktop-capture] connected as {}",
-        room.local_participant().identity().as_str(),
-    );
-
-    // 5. Create video source and track at encode resolution (not capture resolution)
-    let source = NativeVideoSource::new(
-        VideoResolution {
-            width: enc_w,
-            height: enc_h,
-        },
-        false, // NOT screencast — game streaming is motion content, prioritize framerate
-    );
-    let track = LocalVideoTrack::create_video_track(
-        "screen",
-        RtcVideoSource::Native(source.clone()),
-    );
-
-    let max_bitrate = 20_000_000u64;
-    let publish_options = TrackPublishOptions {
-        source: TrackSource::Camera, // Publish as Camera so SFU preserves FPS (not resolution) and WebRTC uses PassthroughAdapter
-        video_codec: VideoCodec::H264,
-        simulcast: false,
-        video_encoding: Some(VideoEncoding {
-            max_bitrate,
-            max_framerate: 60.0,
-        }),
-        ..Default::default()
-    };
-
-    rt.block_on(
-        room.local_participant()
-            .publish_track(LocalTrack::Video(track), publish_options),
-    )
-    .map_err(|e| format!("publish: {e}"))?;
-
-    eprintln!("[desktop-capture] track published, waiting for negotiation...");
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    let mut publisher = CapturePublisher::connect_and_publish_blocking(
+        &rt, sfu_url, token, enc_w, enc_h, "desktop-capture",
+    )?;
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
     let mut gpu_converter: Option<GpuConverter> = None;
@@ -527,8 +499,6 @@ fn capture_loop_blocking(
     let mut staging_h = 0u32;
     let mut scale_buf: Vec<u8> = vec![0u8; (enc_w * enc_h * 4) as usize];
 
-    let mut frame_count: u64 = 0;
-    let start_time = std::time::Instant::now();
     let mut consecutive_timeouts = 0u32;
 
     eprintln!("[desktop-capture] starting frame loop");
@@ -671,38 +641,26 @@ fn capture_loop_blocking(
             let dst_stride = enc_w * 4;
             let dst_needed = (dst_stride * enc_h) as usize;
 
-            // === GPU PATH: HDR→SDR + downscale via compute shader ===
+            // === GPU PATH: HDR->SDR + downscale via compute shader ===
             if is_hdr && gpu_converter.is_some() {
                 let converter = gpu_converter.as_ref().unwrap();
                 match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
                         let bgra_data = std::slice::from_raw_parts(bgra_ptr, (stride * h) as usize);
-                        let mut i420 = I420Buffer::new(w, h);
-                        let (sy, su, sv) = i420.strides();
-                        let (y_plane, u_plane, v_plane) = i420.data_mut();
-                        yuv_helper::argb_to_i420(
-                            bgra_data, stride,
-                            y_plane, sy, u_plane, su, v_plane, sv,
-                            w as i32, h as i32,
-                        );
+                        publisher.push_frame_strided(bgra_data, stride, w, h);
                         converter.unmap(&context);
-                        source.capture_frame(&VideoFrame {
-                            rotation: VideoRotation::VideoRotation0,
-                            buffer: i420,
-                            timestamp_us: start_time.elapsed().as_micros() as i64,
-                        });
                     }
                     Err(e) => {
                         duplication.ReleaseFrame().ok();
-                        eprintln!("[desktop-capture] GPU convert error (frame {}): {e}", frame_count);
+                        eprintln!("[desktop-capture] GPU convert error (frame {}): {e}", publisher.frame_count());
                         // Disable GPU path, fall back to CPU next frame
                         gpu_converter = None;
                         continue;
                     }
                 }
             } else {
-                // === CPU PATH: staging → map → convert ===
+                // === CPU PATH: staging -> map -> convert ===
                 if staging.is_none() || frame_w != staging_w || frame_h != staging_h {
                     staging = create_staging_texture_fmt(&device, frame_w, frame_h, frame_fmt).ok();
                     staging_w = frame_w;
@@ -726,7 +684,7 @@ fn capture_loop_blocking(
                 );
 
                 if is_hdr {
-                    // Fused HDR→SDR + downscale (CPU fallback)
+                    // Fused HDR->SDR + downscale (CPU fallback)
                     let src_ptr = src_data.as_ptr();
                     let dst_ptr = scale_buf.as_mut_ptr();
                     let src_row_stride = src_stride as usize;
@@ -778,23 +736,11 @@ fn capture_loop_blocking(
                 }
                 context.Unmap(staging_tex, 0);
 
-                let mut i420 = I420Buffer::new(enc_w, enc_h);
-                let (sy, su, sv) = i420.strides();
-                let (y_plane, u_plane, v_plane) = i420.data_mut();
-                yuv_helper::argb_to_i420(
-                    &scale_buf[..dst_needed], dst_stride,
-                    y_plane, sy, u_plane, su, v_plane, sv,
-                    enc_w as i32, enc_h as i32,
-                );
-                source.capture_frame(&VideoFrame {
-                    rotation: VideoRotation::VideoRotation0,
-                    buffer: i420,
-                    timestamp_us: start_time.elapsed().as_micros() as i64,
-                });
+                publisher.push_frame(&scale_buf[..dst_needed], enc_w, enc_h);
             }
         }
 
-        frame_count += 1;
+        let frame_count = publisher.frame_count();
 
         // Reassert anti-MPO overlay topmost status every 60 frames (~1s).
         // Games can temporarily promote themselves above our overlay.
@@ -806,36 +752,24 @@ fn capture_loop_blocking(
 
         // Stats every 60 frames
         if frame_count % 60 == 0 {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let fps = if elapsed > 0.0 {
-                (frame_count as f64 / elapsed) as u32
-            } else {
-                0
-            };
-            eprintln!("[desktop-capture] {enc_w}x{enc_h} @ {fps}fps ({frame_count} frames)");
-            let _ = app.emit(
-                "desktop-capture-stats",
-                serde_json::json!({
-                    "fps": fps,
-                    "width": enc_w,
-                    "height": enc_h,
-                    "frames": frame_count,
-                    "method": "dxgi-dd",
-                }),
-            );
+            if let Some(fps) = publisher.maybe_emit_stats(
+                app, "desktop-capture-stats", "dxgi-dd", enc_w, enc_h, 60,
+            ) {
+                eprintln!("[desktop-capture] {enc_w}x{enc_h} @ {fps}fps ({frame_count} frames)");
+            }
         }
     }
 
     running.store(false, Ordering::SeqCst);
-    eprintln!("[desktop-capture] shutting down, {} frames captured", frame_count);
+    eprintln!("[desktop-capture] shutting down, {} frames captured", publisher.frame_count());
 
-    // Destroy anti-MPO overlay — restore normal DWM flip behavior
+    // Destroy anti-MPO overlay -- restore normal DWM flip behavior
     if let Some(h) = anti_mpo_hwnd {
         unsafe { let _ = DestroyWindow(h); }
         eprintln!("[anti-mpo] overlay window destroyed");
     }
 
-    rt.block_on(room.close()).ok();
+    publisher.shutdown_blocking(&rt);
     eprintln!("[desktop-capture] SFU room closed");
 
     Ok(())

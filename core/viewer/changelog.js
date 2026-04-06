@@ -8,6 +8,16 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-05b",
+    title: "Smart Capture + Quality Alerts",
+    notes: [
+      "OS-aware capture — auto-detects Windows version, uses WGC on Win11 24H2+, falls back to DXGI DD on older Windows",
+      "Stream quality warning — dismissable banner when your game is impacting stream FPS, with 'Don't show again' option",
+      "WGC throughput optimization — larger frame buffer + skip-to-latest reduces frame drops during heavy gaming",
+      "Friends on Win10 can now screen share (monitor capture via DXGI DD fallback)"
+    ]
+  },
+  {
     version: "2026-04-05",
     title: "WGC Capture + SFU Bandwidth Fix (v0.6.0)",
     notes: [
