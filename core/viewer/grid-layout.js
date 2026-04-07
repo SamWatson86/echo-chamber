@@ -12,14 +12,18 @@
 
   /**
    * Given a container and N tiles, find the column count (1..N)
-   * that maximizes the tile area while fitting all tiles in the container.
+   * that maximizes the tile area, biased toward balanced (square-ish)
+   * grids. The bias prevents the visually-bad case where 3 tiles end up
+   * in a single horizontal row just because the container is wide and
+   * short — with the bias, 3 tiles default to 2x2 (2 top + 1 bottom)
+   * like every modern video conferencing app does.
    */
   function computeOptimalColumns(containerW, containerH, tileCount) {
     if (tileCount <= 0) return 1;
     if (tileCount === 1) return 1;
 
     var bestCols = 1;
-    var bestArea = 0;
+    var bestScore = 0;
 
     for (var cols = 1; cols <= tileCount; cols++) {
       var rows = Math.ceil(tileCount / cols);
@@ -46,8 +50,15 @@
       }
 
       var area = fitW * fitH;
-      if (area > bestArea) {
-        bestArea = area;
+      // Balance bias: prefer near-square grids when areas are comparable.
+      // For 2x2 (3 tiles): aspectBalance = 1.0 → multiplier = 1.0
+      // For 3x1 (3 tiles): aspectBalance = 0.333 → multiplier = 0.8
+      // Area still dominates but balanced grids win ties and near-ties.
+      var aspectBalance = Math.min(cols, rows) / Math.max(cols, rows);
+      var score = area * (0.7 + 0.3 * aspectBalance);
+
+      if (score > bestScore) {
+        bestScore = score;
         bestCols = cols;
       }
     }
@@ -107,9 +118,14 @@
     });
     _resizeObserver.observe(grid);
 
-    // Also watch for child additions/removals (tiles being added/removed)
+    // Also watch for child additions/removals (tiles being added/removed).
+    // Some tiles are added invisibly (e.g. before subscription completes)
+    // and become visible later without firing a mutation. We schedule
+    // delayed recalcs as well to catch the deferred-visibility case.
     var mutObs = new MutationObserver(function () {
       scheduleUpdate();
+      setTimeout(scheduleUpdate, 250);
+      setTimeout(scheduleUpdate, 1000);
     });
     mutObs.observe(grid, { childList: true, subtree: false });
 

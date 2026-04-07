@@ -102,8 +102,13 @@ async function startScreenShareManual() {
         }
       } else {
         // Window/monitor capture
-        // Monitors ALWAYS use DXGI DD (WGC can't capture HMONITOR handles)
-        // Windows use WGC on 24H2+, error on older
+        // Monitors use DXGI Desktop Duplication. WGC monitor capture
+        // (start_screen_share_monitor) is implemented but causes display flicker
+        // on some HDR + high-refresh setups due to WGC's internal display state
+        // polling. The Tauri command is left in place for future investigation.
+        // Trade-off: DXGI DD doesn't include the mouse cursor in captured frames.
+        // Cursor compositing into DXGI DD output is a v0.6.3 task.
+        // Windows use WGC on 24H2+, error on older.
         if (source.sourceType === 'monitor') {
           debugLog('[monitor] using DXGI DD for monitor capture');
           var ddResult = await tauriInvoke('check_desktop_capture_available');

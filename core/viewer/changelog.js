@@ -8,6 +8,24 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-07",
+    title: "Stream Stability + Image Quality (v0.6.2)",
+    notes: [
+      "Colors fixed — HDR displays no longer produce washed-out, lifted-black screen shares. If you have an HDR monitor and your colors looked grey before, this is the big one.",
+      "Text is readable again — NVENC tuning switched to LOW_LATENCY with spatial/temporal adaptive quantization and a 1-second rate control buffer. Text, cursor, and fine detail stay sharp instead of turning into 'blob smearing.'",
+      "Colorspace correctly tagged — H.264 bitstream now declares BT.709 so receiving clients apply the right color matrix. No more subtle green/red shifts.",
+      "Proxy stability — full-duplex SFU proxy rewrite eliminates the 10-15 second reconnect cycles that plagued external viewers under real internet conditions. Validated with a 21-minute continuous share over WAN.",
+      "No more zero-FPS drops — 2.5 Mbps minimum bitrate floor prevents the rate controller from collapsing the stream under packet loss. Stream stays visible and recovers on its own.",
+      "Capture self-recovery — screen share no longer dies if the desktop capture briefly stalls under heavy load. The capture loop automatically reinitializes instead of quitting.",
+      "Aspect ratio preserved — ultrawide displays (3440×1440 etc.) no longer stretched when shared.",
+      "Grid layout fix — 3 screen shares now land in a 2x2 grid instead of stacking horizontally.",
+      "Fullscreen + volume button layout — no more overlap on screen tiles.",
+      "Screen share chime fix — the shared-screen companion no longer plays the enter/exit chime of the person who started the share.",
+      "Known limitation: cursor not visible in entire-screen shares (landing in v0.6.3).",
+      "Known limitation: stream quality can dip briefly when a slow receiver joins mid-stream (landing in v0.6.3)."
+    ]
+  },
+  {
     version: "2026-04-05b",
     title: "Smart Capture + Quality Alerts",
     notes: [

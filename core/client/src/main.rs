@@ -360,6 +360,20 @@ async fn start_desktop_capture(
     desktop_capture::start(hwnd, fullscreen, sfu_url, token, app).await
 }
 
+/// Start WGC monitor capture (entire screen). Includes the cursor automatically
+/// via Microsoft's Windows Graphics Capture API. Replaces the DXGI Desktop
+/// Duplication path which doesn't include the cursor in the captured frames.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_screen_share_monitor(
+    hmonitor: u64,
+    sfu_url: String,
+    token: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    screen_capture::start_share_monitor(hmonitor, sfu_url, token, app).await
+}
+
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn stop_desktop_capture() {
@@ -409,6 +423,8 @@ fn main() {
             start_desktop_capture,
             #[cfg(target_os = "windows")]
             stop_desktop_capture,
+            #[cfg(target_os = "windows")]
+            start_screen_share_monitor,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected

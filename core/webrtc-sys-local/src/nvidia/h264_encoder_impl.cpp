@@ -3,6 +3,7 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -228,9 +229,15 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   GUID encodeGuid = NV_ENC_CODEC_H264_GUID;
   GUID presetGuid = NV_ENC_PRESET_P4_GUID;
 
+  // LOW_LATENCY (vs ULTRA) adds ~1 frame of latency (~16ms at 60fps) but
+  // enables spatial/temporal AQ and proper rate control allocation. For
+  // screen content this is essential — ULTRA_LOW_LATENCY produces "blob"
+  // smearing because AQ is forced off and the rate controller spreads bits
+  // uniformly instead of preserving fine text/cursor detail. OBS uses
+  // LOW_LATENCY by default for screen recording for the same reason.
   encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
                                        presetGuid,
-                                       NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
+                                       NV_ENC_TUNING_INFO_LOW_LATENCY);
 
   nv_initialize_params_.frameRateNum =
       static_cast<uint32_t>(configuration_.max_frame_rate);
@@ -240,19 +247,109 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   nv_encode_config_.profileGUID = nv_profile_guid_;
   nv_encode_config_.gopLength = NVENC_INFINITE_GOPLENGTH;
   nv_encode_config_.frameIntervalP = 1;
-  nv_encode_config_.encodeCodecConfig.h264Config.level = nv_enc_level_;
+  // Do NOT copy the SDP-negotiated H.264 level into the encoder config.
+  //
+  // The SDP factory negotiates profile-level-id=42e01f (level 3.1) for WebRTC
+  // H.264. Level 3.1's hard max is 1280x720@30fps — it's invalid for 1080p at
+  // ANY framerate. NVENC doesn't strictly enforce at 60fps (init works), but
+  // at 144fps the init params validation trips on level-incompatible-with-fps
+  // and returns NV_ENC_ERR_INVALID_PARAM (error 8). OBS never sets
+  // h264Config.level explicitly — it lets NVENC auto-select based on actual
+  // encodeWidth/encodeHeight/frameRateNum. Match that pattern. The SDP level
+  // is still declared in the negotiated SDP to the peer (separate concern),
+  // the encoder just needs a level that matches reality.
+  //
+  // 2026-04-07: hypothesis-driven fix for NVENC 144fps init failure.
+  nv_encode_config_.encodeCodecConfig.h264Config.level = NV_ENC_LEVEL_AUTOSELECT;
   nv_encode_config_.encodeCodecConfig.h264Config.idrPeriod =
       NVENC_INFINITE_GOPLENGTH;
   nv_encode_config_.rcParams.version = NV_ENC_RC_PARAMS_VER;
   nv_encode_config_.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
   nv_encode_config_.rcParams.averageBitRate = configuration_.target_bps;
+  // VBV = 1 second of bitrate (was: 5 frames = ~83ms at 60fps).
+  // Larger VBV lets the rate controller save bits during static frames and
+  // spend them on motion/keyframes — much better quality stability for
+  // screen content with mixed static/active regions.
   nv_encode_config_.rcParams.vbvBufferSize =
-      (nv_encode_config_.rcParams.averageBitRate *
-       nv_initialize_params_.frameRateDen /
-       nv_initialize_params_.frameRateNum) *
-      5;
+      nv_encode_config_.rcParams.averageBitRate;
   nv_encode_config_.rcParams.vbvInitialDelay =
       nv_encode_config_.rcParams.vbvBufferSize;
+  // Spatial Adaptive Quantization — preserves fine detail (text, cursor,
+  // edges) by giving high-frequency areas more bits. Critical for screen
+  // content quality. Strength 8 is a balanced default (range 1-15).
+  nv_encode_config_.rcParams.enableAQ = 1;
+  nv_encode_config_.rcParams.aqStrength = 8;
+  // Temporal AQ — improves quality of slow-motion / static regions over time.
+  nv_encode_config_.rcParams.enableTemporalAQ = 1;
+
+  // ── VUI parameters: tag the bitstream with the colorspace we actually
+  // produce. Without this, decoders default to BT.709 limited for HD content,
+  // but we feed libyuv's ARGBToI420 which produces BT.601 limited Y'CbCr.
+  // The matrix mismatch causes the "washed out, lifted blacks, blob colors"
+  // appearance because:
+  //   1. sRGB full-range desktop pixels → squashed into Y∈[16,235] by libyuv
+  //   2. Encoded with no tag → decoder assumes BT.709 limited
+  //   3. Decoder applies BT.709 inverse matrix to BT.601 data → wrong colors
+  // Tagging as BT.601 limited makes the decoder use the matching inverse,
+  // restoring proper blacks/whites/saturation.
+  // Source: NVIDIA Video Codec SDK NV_ENC_CONFIG_H264_VUI_PARAMETERS,
+  // libyuv formats.md (ARGBToI420 → BT.601 limited).
+  {
+    auto& vui = nv_encode_config_.encodeCodecConfig.h264Config.h264VUIParameters;
+    vui.videoSignalTypePresentFlag = 1;
+    vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+    vui.videoFullRangeFlag = 0;             // Limited (TV) range Y∈[16,235]
+    vui.colourDescriptionPresentFlag = 1;
+    // BT.709 limited — every modern decoder (Chromium/WebView2) assumes
+    // BT.709 limited for HD content when VUI is missing. Tagging as BT.709
+    // matches that expectation. libyuv ARGBToI420 actually produces BT.601
+    // limited, so the COLOR MATRIX is slightly off (minor green/red shifts)
+    // but the RANGE matches, which is what was causing the dominant
+    // "washed out, lifted blacks" symptom. Range mismatch is far more
+    // visible than matrix mismatch.
+    vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+    vui.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+    vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+  }
+
+  // Dump every field we pass to nvEncInitializeEncoder so init failures are
+  // diagnosable without a rebuild. Fires once per encoder lifetime.
+  {
+    const auto& ip = nv_initialize_params_;
+    const auto& cfg = nv_encode_config_;
+    const auto& h264 = cfg.encodeCodecConfig.h264Config;
+    const auto& rc = cfg.rcParams;
+    std::cout << "[NVENC] InitEncode params dump:"
+              << "\n  encodeWidth=" << ip.encodeWidth
+              << " encodeHeight=" << ip.encodeHeight
+              << "\n  darWidth=" << ip.darWidth
+              << " darHeight=" << ip.darHeight
+              << "\n  maxEncodeWidth=" << ip.maxEncodeWidth
+              << " maxEncodeHeight=" << ip.maxEncodeHeight
+              << "\n  frameRateNum=" << ip.frameRateNum
+              << " frameRateDen=" << ip.frameRateDen
+              << "\n  enableEncodeAsync=" << ip.enableEncodeAsync
+              << " enablePTD=" << ip.enablePTD
+              << "\n  tuningInfo=" << static_cast<int>(ip.tuningInfo)
+              << " bufferFormat=" << static_cast<int>(ip.bufferFormat)
+              << "\n  config.gopLength=" << cfg.gopLength
+              << " frameIntervalP=" << cfg.frameIntervalP
+              << "\n  rc.rateControlMode=" << static_cast<int>(rc.rateControlMode)
+              << " averageBitRate=" << rc.averageBitRate
+              << "\n  rc.maxBitRate=" << rc.maxBitRate
+              << " vbvBufferSize=" << rc.vbvBufferSize
+              << " vbvInitialDelay=" << rc.vbvInitialDelay
+              << "\n  rc.enableAQ=" << rc.enableAQ
+              << " aqStrength=" << rc.aqStrength
+              << " enableTemporalAQ=" << rc.enableTemporalAQ
+              << "\n  h264.level=" << static_cast<int>(h264.level)
+              << " idrPeriod=" << h264.idrPeriod
+              << " maxNumRefFrames=" << h264.maxNumRefFrames
+              << "\n  h264.sliceMode=" << static_cast<int>(h264.sliceMode)
+              << " sliceModeData=" << h264.sliceModeData
+              << " enableFillerDataInsertion=" << h264.enableFillerDataInsertion
+              << std::endl;
+  }
 
   try {
     encoder_->CreateEncoder(&nv_initialize_params_);
@@ -493,28 +590,23 @@ void NvidiaH264EncoderImpl::SetRates(
     return;
   }
 
-  // Don't let WebRTC's BWE reduce our codec max framerate — NVENC handles
-  // rate control via CBR. Accepting a low fps target (e.g., 9fps) creates
-  // huge per-frame bursts that trigger pacer congestion and more fps drops.
-  // Keep NVENC configured for high fps so it produces small, smooth frames.
+  // NVENC framerate is locked at INIT time (set via codec_.maxFramerate from
+  // VideoEncoding.max_framerate in capture_pipeline.rs). We do NOT change fps
+  // at runtime — NVENC rejects more than ~3 reconfigures with INVALID_PARAM
+  // and the encoder gets stuck. Only bitrate is adjusted at runtime here.
   codec_.maxBitrate = parameters.bitrate.GetSpatialLayerSum(0);
 
   uint32_t new_target_bps = parameters.bitrate.GetSpatialLayerSum(0);
-  // Always tell NVENC to target 60fps — it distributes bitrate evenly
-  // across frames, producing small ~20KB frames instead of huge ~200KB bursts.
-  float nvenc_fps = 60.0f;
+  float nvenc_fps = configuration_.max_frame_rate;
+  if (nvenc_fps < 1.0f) nvenc_fps = 60.0f;
 
   if (new_target_bps != configuration_.target_bps) {
     nv_encode_config_.rcParams.averageBitRate = new_target_bps;
     nv_encode_config_.rcParams.maxBitRate = new_target_bps * 2;
-    nv_encode_config_.rcParams.vbvBufferSize =
-        (new_target_bps / std::max(1u, static_cast<uint32_t>(nvenc_fps))) * 5;
-    nv_encode_config_.rcParams.vbvInitialDelay =
-        nv_encode_config_.rcParams.vbvBufferSize;
-
-    // Keep framerate high — NVENC at 60fps produces smooth, small frames
-    nv_initialize_params_.frameRateNum = static_cast<uint32_t>(nvenc_fps);
-    nv_initialize_params_.frameRateDen = 1;
+    // 1-second VBV buffer (matches InitEncode); allows the rate controller
+    // to spend bits intelligently across static and active regions.
+    nv_encode_config_.rcParams.vbvBufferSize = new_target_bps;
+    nv_encode_config_.rcParams.vbvInitialDelay = new_target_bps;
 
     NV_ENC_RECONFIGURE_PARAMS reconfig = {};
     reconfig.version = NV_ENC_RECONFIGURE_PARAMS_VER;
@@ -530,7 +622,6 @@ void NvidiaH264EncoderImpl::SetRates(
   }
 
   configuration_.target_bps = new_target_bps;
-  configuration_.max_frame_rate = nvenc_fps;
 
   if (configuration_.target_bps) {
     configuration_.SetStreamState(true);

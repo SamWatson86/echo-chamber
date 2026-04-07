@@ -31,6 +31,14 @@ pub struct CaptureStats {
 
 // ── CapturePublisher ──
 
+/// Hard cap for the capture push rate. Set to 240fps so 144Hz/165Hz/240Hz
+/// monitors push their full native rate without being throttled. NVENC is
+/// initialized at the same rate via VideoEncoding.max_framerate so its
+/// bitrate-per-frame budget matches reality.
+const TARGET_ENCODE_FPS: f64 = 240.0;
+const MIN_FRAME_INTERVAL: std::time::Duration =
+    std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS) as u64);
+
 /// Shared publisher that connects to the LiveKit SFU, creates a NativeVideoSource,
 /// publishes a Camera track, and provides helpers to push BGRA frames and emit stats.
 pub struct CapturePublisher {
@@ -38,6 +46,7 @@ pub struct CapturePublisher {
     source: NativeVideoSource,
     start_time: Instant,
     frame_count: u64,
+    last_pushed: Option<Instant>,
 }
 
 impl CapturePublisher {
@@ -83,6 +92,13 @@ impl CapturePublisher {
             simulcast: false,
             video_encoding: Some(VideoEncoding {
                 max_bitrate: 20_000_000,
+                // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
+                // to zero under packet loss / RTT spikes, so the stream stays
+                // visible instead of dropping to 0fps and slowly probing back up.
+                min_bitrate: 2_500_000,
+                // 60fps for safe stable testing with David (remote friend).
+                // The level=AUTOSELECT fix is still in h264_encoder_impl.cpp
+                // for later 144fps retest on SAM-PC — harmless at 60fps.
                 max_framerate: 60.0,
             }),
             ..Default::default()
@@ -101,6 +117,7 @@ impl CapturePublisher {
             source,
             start_time: Instant::now(),
             frame_count: 0,
+            last_pushed: None,
         })
     }
 
@@ -146,6 +163,13 @@ impl CapturePublisher {
             simulcast: false,
             video_encoding: Some(VideoEncoding {
                 max_bitrate: 20_000_000,
+                // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
+                // to zero under packet loss / RTT spikes, so the stream stays
+                // visible instead of dropping to 0fps and slowly probing back up.
+                min_bitrate: 2_500_000,
+                // 60fps for safe stable testing with David (remote friend).
+                // The level=AUTOSELECT fix is still in h264_encoder_impl.cpp
+                // for later 144fps retest on SAM-PC — harmless at 60fps.
                 max_framerate: 60.0,
             }),
             ..Default::default()
@@ -165,6 +189,7 @@ impl CapturePublisher {
             source,
             start_time: Instant::now(),
             frame_count: 0,
+            last_pushed: None,
         })
     }
 
@@ -178,6 +203,20 @@ impl CapturePublisher {
 
     /// Convert a BGRA frame with explicit stride to I420 and push to the video source.
     pub fn push_frame_strided(&mut self, bgra: &[u8], stride: u32, width: u32, height: u32) {
+        // Frame rate limiter — drop frames if we'd exceed TARGET_ENCODE_FPS.
+        // NVENC is initialized at 60fps; pushing 143fps from a high-refresh
+        // monitor causes pacer overflow and visual corruption (smearing).
+        // Dropping frames in software is the cleanest fix because NVENC
+        // rejects runtime fps reconfiguration and the rate control math
+        // assumes the configured framerate.
+        let now = Instant::now();
+        if let Some(last) = self.last_pushed {
+            if now.duration_since(last) < MIN_FRAME_INTERVAL {
+                return; // drop this frame
+            }
+        }
+        self.last_pushed = Some(now);
+
         let mut i420 = I420Buffer::new(width, height);
         let (sy, su, sv) = i420.strides();
         let (y, u, v) = i420.data_mut();

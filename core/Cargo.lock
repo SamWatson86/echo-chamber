@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "livekit",
@@ -2850,8 +2850,6 @@ dependencies = [
 [[package]]
 name = "libwebrtc"
 version = "0.3.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6e6738afd128524d26e4896f59574f52118883b7fb6c3146d4acdb4e0dec590"
 dependencies = [
  "cxx",
  "glib 0.21.5",

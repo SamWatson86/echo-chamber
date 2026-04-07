@@ -13,4 +13,5 @@ resolver = "2"
 
 [patch.crates-io]
 livekit = { path = "livekit-local" }
+libwebrtc = { path = "libwebrtc-local" }
 webrtc-sys = { path = "webrtc-sys-local" }

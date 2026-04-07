@@ -23,9 +23,19 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 
-/// HLSL compute shader: reads source texture, writes SDR BGRA8 at encode resolution.
-/// Nearest-neighbor sampling with saturate() for HDR→SDR tonemap.
-/// For SDR input (BGRA8), saturate() is a no-op — works universally.
+/// HLSL compute shader: reads source texture (HDR scRGB or SDR BGRA8),
+/// downscales, and writes SDR sRGB BGRA8 at encode resolution.
+///
+/// CRITICAL: HDR sources (DXGI_FORMAT_R16G16B16A16_FLOAT) use scRGB color
+/// space which is LINEAR. Display bytes (sRGB) are GAMMA-ENCODED. Without
+/// the linear→sRGB gamma curve, linear 0.5 maps to byte 127, but the
+/// display's "50% gray" sRGB byte is ~188. The result is everything 60%
+/// darker than it should be — washed out, lifted blacks, gray everything.
+///
+/// We apply: saturate() to clip HDR highlights → linear_to_srgb() for the
+/// gamma curve. For SDR sources (BGRA8), the values are already gamma-
+/// encoded sRGB in [0,1] — we detect this via the `is_hdr_source` constant
+/// and skip the gamma conversion.
 const HDR_TO_SDR_HLSL: &[u8] = b"
 Texture2D<float4> src : register(t0);
 RWTexture2D<unorm float4> dst : register(u0);
@@ -33,16 +43,37 @@ RWTexture2D<unorm float4> dst : register(u0);
 cbuffer Params : register(b0) {
     uint src_w, src_h, dst_w, dst_h;
     uint crop_x, crop_y, crop_w, crop_h;
+    uint is_hdr_source, _pad1, _pad2, _pad3;
 };
+
+// Linear scRGB to sRGB gamma encode (IEC 61966-2-1).
+// Required for HDR scRGB sources because the values are linear and need
+// gamma correction before being stored as 8-bit sRGB display bytes.
+float3 linear_to_srgb(float3 linear_rgb) {
+    float3 c = saturate(linear_rgb);
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(c, 1.0/2.4) - 0.055;
+    return (c <= 0.0031308) ? lo : hi;
+}
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= dst_w || id.y >= dst_h) return;
     uint sx = crop_x + id.x * crop_w / dst_w;
     uint sy = crop_y + id.y * crop_h / dst_h;
-    float4 hdr = src[uint2(sx, sy)];
-    // Output as BGRA memory layout via R8G8B8A8 UAV (swap R and B in shader)
-    dst[id.xy] = float4(saturate(hdr.b), saturate(hdr.g), saturate(hdr.r), 1.0);
+    float4 src_px = src[uint2(sx, sy)];
+
+    float3 rgb;
+    if (is_hdr_source != 0) {
+        // HDR scRGB linear -> sRGB gamma encoded
+        rgb = linear_to_srgb(src_px.rgb);
+    } else {
+        // SDR BGRA8 -- already gamma-encoded sRGB, just clip
+        rgb = saturate(src_px.rgb);
+    }
+
+    // Output as BGRA memory layout via R8G8B8A8 UAV (swap R and B)
+    dst[id.xy] = float4(rgb.b, rgb.g, rgb.r, 1.0);
 }
 \0";
 
@@ -58,15 +89,47 @@ pub struct GpuConverter {
     pub src_h: u32,
     pub dst_w: u32,
     pub dst_h: u32,
+    /// True when source is DXGI_FORMAT_R16G16B16A16_FLOAT (HDR scRGB linear).
+    /// The shader applies linear→sRGB gamma correction when this is set.
+    is_hdr: bool,
+}
+
+/// Calculate aspect-ratio-preserving destination dimensions that fit within
+/// the given maximums. For 3440x1440 → max 1920x1080, returns 1920x804.
+/// For 1920x1080 → max 1920x1080, returns 1920x1080. Always rounds to even
+/// numbers (NVENC requires it).
+fn fit_aspect(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 { return (max_w, max_h); }
+    let src_aspect = src_w as f64 / src_h as f64;
+    let max_aspect = max_w as f64 / max_h as f64;
+    let (mut w, mut h) = if src_aspect > max_aspect {
+        // Source is wider than max — fit to max width, scale height down
+        let h = (max_w as f64 / src_aspect).round() as u32;
+        (max_w, h)
+    } else {
+        // Source is taller (or equal) — fit to max height, scale width down
+        let w = (max_h as f64 * src_aspect).round() as u32;
+        (w, max_h)
+    };
+    // Round to even (NVENC requirement for H.264)
+    if w % 2 != 0 { w -= 1; }
+    if h % 2 != 0 { h -= 1; }
+    (w, h)
 }
 
 impl GpuConverter {
+    /// Create a GPU converter that preserves source aspect ratio while staying
+    /// within the given maximum destination dimensions. Use `dst_w()` / `dst_h()`
+    /// after creation to get the actual output size.
     pub fn new(
         device: &ID3D11Device,
         src_w: u32, src_h: u32,
         src_fmt: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
-        dst_w: u32, dst_h: u32,
+        dst_max_w: u32, dst_max_h: u32,
     ) -> Result<Self, String> {
+        // Preserve aspect ratio — fixes ultrawide (3440x1440) being squished
+        // to 1920x1080. We now produce 1920x804 (or whatever fits) instead.
+        let (dst_w, dst_h) = fit_aspect(src_w, src_h, dst_max_w, dst_max_h);
         // Compile compute shader
         let mut blob: Option<ID3DBlob> = None;
         let mut err_blob: Option<ID3DBlob> = None;
@@ -185,10 +248,14 @@ impl GpuConverter {
             tex.ok_or("staging null")?
         };
 
-        // Constant buffer for shader params
+        // Constant buffer for shader params (12 uint32 = 48 bytes, must be
+        // 16-byte aligned per D3D11). Layout matches the cbuffer in HLSL:
+        //   src_w, src_h, dst_w, dst_h,
+        //   crop_x, crop_y, crop_w, crop_h,
+        //   is_hdr_source, _pad1, _pad2, _pad3
         let cb_buf = unsafe {
             let desc = windows::Win32::Graphics::Direct3D11::D3D11_BUFFER_DESC {
-                ByteWidth: 32, // 8 x uint32
+                ByteWidth: 48,
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_CONSTANT_BUFFER.0 as u32,
                 ..Default::default()
@@ -199,10 +266,14 @@ impl GpuConverter {
             buf.ok_or("cbuffer null")?
         };
 
-        eprintln!("[gpu-converter] initialized: {}x{} {:?} → {}x{} BGRA8",
-            src_w, src_h, src_fmt, dst_w, dst_h);
+        let is_hdr = src_fmt == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+        eprintln!("[gpu-converter] initialized: {}x{} {:?} → {}x{} BGRA8 (hdr={})",
+            src_w, src_h, src_fmt, dst_w, dst_h, is_hdr);
 
-        Ok(Self { shader, gpu_src, gpu_src_srv, gpu_dst, gpu_dst_uav, staging, cb_buf, src_w, src_h, dst_w, dst_h })
+        Ok(Self {
+            shader, gpu_src, gpu_src_srv, gpu_dst, gpu_dst_uav, staging, cb_buf,
+            src_w, src_h, dst_w, dst_h, is_hdr,
+        })
     }
 
     /// Run GPU conversion: copy frame → shader → staging → map.
@@ -216,10 +287,11 @@ impl GpuConverter {
         // 1. Copy captured frame → gpu_src (GPU→GPU, preserves format)
         context.CopyResource(&self.gpu_src, frame_texture);
 
-        // 2. Update constant buffer with crop/scale params
-        let params: [u32; 8] = [
+        // 2. Update constant buffer with crop/scale params + HDR flag
+        let params: [u32; 12] = [
             self.src_w, self.src_h, self.dst_w, self.dst_h,
             crop_x, crop_y, crop_w, crop_h,
+            if self.is_hdr { 1 } else { 0 }, 0, 0, 0,
         ];
         context.UpdateSubresource(
             &self.cb_buf,

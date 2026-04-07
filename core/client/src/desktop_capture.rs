@@ -421,38 +421,42 @@ fn capture_loop_blocking(
     let context = unsafe { device.GetImmediateContext() }
         .map_err(|e| format!("GetImmediateContext: {e}"))?;
 
-    // 3. Create output duplication
+    // 3. Create output duplication — as a closure so we can reinit on
+    // recoverable stalls (5+ seconds of AcquireNextFrame timeouts from
+    // driver hiccups, UAC intrusions, desktop mode flickers, GPU contention
+    // during heavy encode load, etc). Prior behavior was to bail the capture
+    // loop entirely on 50 consecutive timeouts, which crashed the share.
     // Try IDXGIOutput5::DuplicateOutput1 first — supports HDR formats and
     // captures DirectFlip content that DuplicateOutput misses (black frames).
-    let duplication: IDXGIOutputDuplication = unsafe {
-        let output5: Result<windows::Win32::Graphics::Dxgi::IDXGIOutput5, _> = output1.cast();
-        if let Ok(out5) = output5 {
-            // Request both formats — prefer BGRA (SDR, no conversion needed),
-            // accept float16 (HDR) if SDR not available.
-            let formats = [
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT,
-                windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM,
-            ];
-            match out5.DuplicateOutput1(&device, 0, &formats) {
-                Ok(dup) => {
-                    eprintln!("[desktop-capture] using DuplicateOutput1 (HDR-capable)");
-                    dup
+    let create_duplication = || -> Result<IDXGIOutputDuplication, String> {
+        unsafe {
+            let output5: Result<windows::Win32::Graphics::Dxgi::IDXGIOutput5, _> = output1.cast();
+            if let Ok(out5) = output5 {
+                // Request both formats — prefer BGRA (SDR, no conversion needed),
+                // accept float16 (HDR) if SDR not available.
+                let formats = [
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM,
+                ];
+                match out5.DuplicateOutput1(&device, 0, &formats) {
+                    Ok(dup) => {
+                        eprintln!("[desktop-capture] using DuplicateOutput1 (HDR-capable)");
+                        return Ok(dup);
+                    }
+                    Err(e) => {
+                        eprintln!("[desktop-capture] DuplicateOutput1 failed: {e}, falling back");
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[desktop-capture] DuplicateOutput1 failed: {e}, falling back");
-                    output1
-                        .DuplicateOutput(&device)
-                        .map_err(|e| format!("DuplicateOutput: {e}"))?
-                }
+            } else {
+                eprintln!("[desktop-capture] IDXGIOutput5 not available, using DuplicateOutput");
             }
-        } else {
-            eprintln!("[desktop-capture] IDXGIOutput5 not available, using DuplicateOutput");
             output1
                 .DuplicateOutput(&device)
-                .map_err(|e| format!("DuplicateOutput: {e}"))?
+                .map_err(|e| format!("DuplicateOutput: {e}"))
         }
     };
+    let mut duplication: IDXGIOutputDuplication = create_duplication()?;
 
     // Determine capture dimensions
     let crop = if fullscreen {
@@ -517,17 +521,64 @@ fn capture_loop_blocking(
             Err(e) => {
                 let code = e.code().0 as u32;
                 if code == 0x887A0027 {
-                    // DXGI_ERROR_WAIT_TIMEOUT — no new frame, just loop
+                    // DXGI_ERROR_WAIT_TIMEOUT — no new frame, just loop.
+                    // 50 consecutive = ~5 seconds of stall (100ms per timeout).
+                    // Reinit the duplication interface instead of bailing —
+                    // transient stalls are caused by GPU contention under heavy
+                    // encode load, driver hiccups, UAC intrusions, display mode
+                    // changes, etc. Reinit typically recovers immediately.
                     consecutive_timeouts += 1;
                     if consecutive_timeouts >= 50 {
-                        eprintln!("[desktop-capture] 50 consecutive timeouts, stopping");
-                        break;
+                        eprintln!(
+                            "[desktop-capture] 50 consecutive timeouts (~5s stall) \
+                             — reinitializing DXGI Desktop Duplication"
+                        );
+                        // Drop the old duplication interface before creating a
+                        // new one (the old one may be holding a locked frame
+                        // we never released due to the error path).
+                        drop(duplication);
+                        match create_duplication() {
+                            Ok(new_dup) => {
+                                duplication = new_dup;
+                                consecutive_timeouts = 0;
+                                eprintln!(
+                                    "[desktop-capture] DXGI DD reinit OK, capture continuing"
+                                );
+                                continue;
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "[desktop-capture] DXGI DD reinit FAILED: {err} — stopping"
+                                );
+                                break;
+                            }
+                        }
                     }
                     continue;
                 } else if code == 0x887A0026 {
-                    // DXGI_ERROR_ACCESS_LOST — desktop switch, need to recreate
-                    eprintln!("[desktop-capture] access lost (desktop switch?), stopping");
-                    break;
+                    // DXGI_ERROR_ACCESS_LOST — desktop switch, secure desktop
+                    // (UAC), display mode change. Recoverable by reinit.
+                    eprintln!(
+                        "[desktop-capture] access lost (desktop switch/UAC/mode change) \
+                         — reinitializing DXGI Desktop Duplication"
+                    );
+                    drop(duplication);
+                    match create_duplication() {
+                        Ok(new_dup) => {
+                            duplication = new_dup;
+                            consecutive_timeouts = 0;
+                            eprintln!(
+                                "[desktop-capture] DXGI DD reinit OK after access-lost"
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[desktop-capture] DXGI DD reinit FAILED after access-lost: {err} — stopping"
+                            );
+                            break;
+                        }
+                    }
                 } else {
                     eprintln!("[desktop-capture] AcquireNextFrame error: {e}");
                     consecutive_timeouts += 1;
