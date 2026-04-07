@@ -705,14 +705,10 @@ fn capture_loop_blocking(
 
     let mut consecutive_timeouts = 0u32;
 
-    // Mouse cursor state. DXGI DD does NOT include the cursor in captured
-    // frames — we query it separately and composite it into scale_buf before
-    // pushing to the publisher. PointerPosition is only updated when DXGI
-    // reports LastMouseUpdateTime > 0; otherwise we reuse the last known value.
-    let mut cursor_cache: Option<CursorCache> = None;
-    let mut cursor_visible: bool = false;
-    let mut cursor_x: i32 = 0;
-    let mut cursor_y: i32 = 0;
+    // Cursor state vars REVERTED 2026-04-07. See cursor query block reversion
+    // comment below. Helper functions remain in this file as dead code for
+    // the v0.6.3 in-shader cursor composite work.
+    let _ = composite_cursor; // silence unused-fn warning
 
     eprintln!("[desktop-capture] starting frame loop");
 
@@ -802,55 +798,12 @@ fn capture_loop_blocking(
             }
         }
 
-        // Update cursor state from this frame's metadata. DXGI reports pointer
-        // position updates via LastMouseUpdateTime (any nonzero = changed) and
-        // pointer shape updates via PointerShapeBufferSize (any nonzero = new
-        // shape available). Either can fire independently of visual frame
-        // updates — so this block runs BEFORE the LastPresentTime==0 skip.
-        if frame_info.LastMouseUpdateTime != 0 {
-            let pp = &frame_info.PointerPosition;
-            cursor_visible = pp.Visible.as_bool();
-            cursor_x = pp.Position.x;
-            cursor_y = pp.Position.y;
-        }
-        if frame_info.PointerShapeBufferSize > 0 {
-            // New cursor shape available. Fetch it into a sized buffer.
-            let mut buf = vec![0u8; frame_info.PointerShapeBufferSize as usize];
-            let mut required: u32 = 0;
-            let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
-            let shape_res = unsafe {
-                duplication.GetFramePointerShape(
-                    buf.len() as u32,
-                    buf.as_mut_ptr() as *mut _,
-                    &mut required,
-                    &mut info,
-                )
-            };
-            match shape_res {
-                Ok(()) => {
-                    let (width, height) = match info.Type {
-                        t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 => {
-                            // MONOCHROME buffer is 2x tall (AND + XOR stacked).
-                            // Store the visual height (half of buffer height).
-                            (info.Width, info.Height / 2)
-                        }
-                        _ => (info.Width, info.Height),
-                    };
-                    cursor_cache = Some(CursorCache {
-                        pixels: buf,
-                        pitch: info.Pitch,
-                        width,
-                        height,
-                        hotspot_x: info.HotSpot.x as u32,
-                        hotspot_y: info.HotSpot.y as u32,
-                        kind: info.Type,
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[desktop-capture] GetFramePointerShape: {e}");
-                }
-            }
-        }
+        // Cursor state polling REVERTED 2026-04-07: caused capture FPS
+        // degradation under high-frequency pointer updates. Cursor compositing
+        // for entire-screen captures will land in v0.6.3 via in-shader
+        // composite (the right architecture — see CURRENT_SESSION.md).
+        // Helper struct + composite_cursor() function remain in this file
+        // as dead code, ready for a future fix.
 
         // Skip frames with no visual update
         if frame_info.LastPresentTime == 0 {
@@ -957,42 +910,22 @@ fn capture_loop_blocking(
                 match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
-                        // Copy GPU-mapped staging memory into scale_buf (tight-packed)
-                        // so we can composite the mouse cursor into it. GPU staging is
-                        // read-only, hence the copy; ~8MB/frame, cheap compared to the
-                        // GPU→CPU transfer that just happened.
-                        let row_bytes = (w * 4) as usize;
-                        let dst_row_stride = (enc_w * 4) as usize;
-                        for y in 0..h as usize {
-                            let src_off = y * stride as usize;
-                            let dst_off = y * dst_row_stride;
-                            let src = std::slice::from_raw_parts(
-                                bgra_ptr.add(src_off),
-                                row_bytes,
-                            );
-                            scale_buf[dst_off..dst_off + row_bytes].copy_from_slice(src);
-                        }
+                        // GPU path is intentionally zero-copy — the mapped GPU
+                        // staging memory is read-only AND much slower to read
+                        // from CPU than regular RAM. The earlier attempt to
+                        // copy the whole frame into scale_buf for cursor
+                        // compositing crashed capture FPS from 140 to ~4fps
+                        // because reading 8MB/frame from mapped GPU memory is
+                        // not feasible at high framerates. Cursor compositing
+                        // for HDR/GPU captures will land in v0.6.3 via a
+                        // proper in-shader composite pass on the GPU side.
+                        // CPU fallback path below DOES composite cursor.
+                        let bgra_data = std::slice::from_raw_parts(
+                            bgra_ptr,
+                            (stride * h) as usize,
+                        );
+                        publisher.push_frame_strided(bgra_data, stride, w, h);
                         converter.unmap(&context);
-
-                        // Composite cursor into scale_buf if we have a visible cursor.
-                        if cursor_visible {
-                            if let Some(ref cursor) = cursor_cache {
-                                composite_cursor(
-                                    &mut scale_buf,
-                                    enc_w,
-                                    enc_h,
-                                    cursor,
-                                    cursor_x,
-                                    cursor_y,
-                                    crop_x,
-                                    crop_y,
-                                    crop_w,
-                                    crop_h,
-                                );
-                            }
-                        }
-
-                        publisher.push_frame(&scale_buf[..dst_needed], enc_w, enc_h);
                     }
                     Err(e) => {
                         duplication.ReleaseFrame().ok();
@@ -1078,25 +1011,6 @@ fn capture_loop_blocking(
                     }
                 }
                 context.Unmap(staging_tex, 0);
-
-                // Composite cursor into scale_buf for the CPU path too.
-                if cursor_visible {
-                    if let Some(ref cursor) = cursor_cache {
-                        composite_cursor(
-                            &mut scale_buf,
-                            enc_w,
-                            enc_h,
-                            cursor,
-                            cursor_x,
-                            cursor_y,
-                            crop_x,
-                            crop_y,
-                            crop_w,
-                            crop_h,
-                        );
-                    }
-                }
-
                 publisher.push_frame(&scale_buf[..dst_needed], enc_w, enc_h);
             }
         }

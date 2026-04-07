@@ -1,10 +1,16 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-07 (evening — comprehensive rewrite after remote-validated session)
+**Last Updated**: 2026-04-07 (late evening — after cursor work attempted + reverted)
 **Current Version**: v0.6.1 (released), v0.6.2 **VALIDATED AND READY TO SHIP**
-**Branch**: `claude/funny-davinci` worktree — NEW WORK in main repo working tree, pending commit
-**Release branch**: `release/v0.6.2` on GitHub is **STILL STALE** (the broken WGC state from previous session). Must be force-updated before release.
+**Branch**: `claude/v0.6.2-ship` in main repo. THREE commits banked:
+  - `8d21a3b` — main / v0.6.1 baseline (untouched)
+  - `1dc7f98` — proven wins + DXGI reinit hotfix + NVENC level autoselect
+  - `6c6d6ae` — feat: cursor compositing (**superseded by next commit, do NOT ship as-is**)
+  - **next commit pending**: revert of cursor work back to `1dc7f98` baseline
+**Release branch**: `release/v0.6.2` on GitHub is **STILL STALE** (the broken WGC state from prior session). Must be force-updated before release.
 **Tag**: `v0.6.2` on GitHub is also **STILL STALE**. Must be force-moved to the clean commit.
+
+**Ship target**: the post-revert commit (next commit on top of `6c6d6ae`). Equivalent to `1dc7f98` content-wise but with cleaner git history including the failed cursor experiment for posterity.
 
 ## ⚠️ READ THIS FIRST
 
@@ -178,6 +184,39 @@ Sample output captured during 144fps failure test:
 
 ### C. DXGI DD capture bail pre-existing bug
 See hotfix section above. Bug was real, in the code since whoever wrote the capture loop, never triggered until today's multi-client WAN test.
+
+### E. Cursor compositing — ATTEMPTED AND REVERTED
+**Tried this session**, after the David validation, as a Phase 5 add-on to v0.6.2.
+Implementation went smoothly: ~250 lines in `desktop_capture.rs` (CursorCache struct + composite_cursor helper + per-frame DXGI pointer query + GPU/CPU path integration). Build was clean first try. Sam confirmed "I can see the cursor" on first verification and the commit landed (`6c6d6ae`).
+
+**Then performance crashed.** Capture FPS degraded from steady 91-143fps → 70fps → 40fps → 4fps over a few minutes. Memory grew from 166MB → 320MB+. Cause: the GPU path's new copy from D3D11 mapped staging memory into `scale_buf` (required so we could write the cursor pixels into it) was reading 8MB/frame from memory that's much slower to read from CPU than regular RAM. Tried optimizing with single `ptr::copy_nonoverlapping` instead of row-by-row — still crashed FPS. Tried reverting the GPU path entirely (`push_frame_strided` zero-copy as before) but keeping the cursor query block — STILL caused gradual FPS degradation, suggesting per-frame `GetFramePointerShape` overhead OR something subtler.
+
+**Final action this session**: reverted the cursor query block AND the CPU path composite ENTIRELY. The helper `CursorCache` struct and `composite_cursor()` function REMAIN in the file as dead code (silenced via `let _ = composite_cursor;`) for v0.6.3 reuse. Commit `6c6d6ae` is on the branch but is **superseded by the revert commit on top of it** — anyone shipping v0.6.2 should ship the post-revert state, NOT `6c6d6ae`.
+
+**The right architecture for v0.6.3 cursor compositing**:
+- Composite cursor INSIDE the GPU compute shader in `gpu_converter.rs`, not on the CPU side
+- Pass cursor pixels as a small shader resource view (texture)
+- Pass cursor position + size as constants
+- HLSL shader blends cursor in-place during the HDR→SDR + downscale pass
+- Output already-composited BGRA → existing zero-copy CPU read path stays unchanged
+- This preserves zero-copy AND gets cursor on HDR captures
+- Estimated complexity: 2-4 hours of HLSL + Rust shader-binding work
+- Per-frame DXGI pointer query is fine if it only runs when shape actually changes — investigate why per-frame poll seemed to degrade performance even after zero-copy was restored
+
+### F. Multi-reshare crash / WebView2 zombie accumulation — NEW THIS SESSION
+**Symptom**: After 4-6 cycles of stop-share / start-share within a single client session, the Tauri client window enters a "Not Responding" state with hung UI thread (`tasklist /V` shows status `Not Responding` and very low CPU time). The capture/encode background thread continues running and producing frames, but the WebView2 display can't render — including the FPS indicator, the self-preview tile, and any banners. From the user's perspective the FPS appears to drop to 0 because the viewer can't paint.
+
+**Root cause hypothesis**: orphan `msedgewebview2.exe` child processes accumulate across rapid client kill/restart cycles. We observed 6 zombie WebView2 processes (sizes 9MB, 21MB, 40MB, 68MB, 94MB, 123MB) hanging around after multiple `wmic process delete` operations. WebView2 runtime gets confused when too many stale instances exist.
+
+**Confirmed mitigation**: hard-killing the hung client (`taskkill /F /PID <pid>`), waiting 3-5 seconds for Windows to release WebView2 references, then launching fresh resolves the issue. Each fresh client launch creates a new clean WebView2 instance.
+
+**Recommended v0.6.3 fix**:
+1. On client startup, scan for orphan `msedgewebview2.exe` processes whose parent is no longer alive and kill them (carefully — don't kill Edge browser instances)
+2. OR call WebView2's `clear_cache_on_upgrade()` more aggressively
+3. OR add a watchdog: if the Tauri main thread hasn't ticked in N seconds, self-restart the client process
+4. OR investigate why WebView2 isn't reaping its own zombies — may be a Tauri issue
+
+**Sam asked specifically** for "some kind of safety net" against this. Real ask. Worth doing.
 
 ### D. David's game audio missing
 **Observation**: When Sam watched David's Grind Survivors stream, David's game audio was not coming through.
