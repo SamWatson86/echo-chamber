@@ -1,11 +1,15 @@
 {
+  "version": "0.6.2",
+  "notes": "Echo Chamber v0.6.2 — HDR color fix, NVENC text quality, full-duplex SFU proxy stability, 2.5 Mbps bitrate floor, DXGI capture self-recovery, aspect ratio + grid layout fixes",
+  "pub_date": "2026-04-07T23:19:51Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEFvaWJCdFJiRnhmNU1sYW0zc1Bxb3N4M3k2UGlrRXdlQnhCcm5rSHNkbmJ2SVJoNnNDb25hb3AwRk1TWVpCdldBUlkxU2ozeG01ek5KbkV3Q1l4QWdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NDM3NjQ2CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4xX3g2NC1zZXR1cC5leGUKRndhbThweFVvK0FoUWw1OFlzWFc1bVArV3pteHFDd0FYUS9qWU56QVBCR0Nvd2k1UU00S0ZJYk9HMXZoWmQ3ZVlJL1UrNEpCbkhiVmEra1lsWGVnRFE9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.1/Echo.Chamber_0.6.1_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEdVcWRRL3BDT0xTVEtJSmlDcHVRNVo1RVovejVyOXIwRE9xWmFxaklNczE5Mks5aE54Wk5WMjNrY0tRNTVIU3BNa0dkZ29VNDRwQkF6SkVPMzQ2d2cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NjAzNTEwCWZpbGU6RWNobyBDaGFtYmVyXzAuNi4yX3g2NC1zZXR1cC5leGUKZFM5OXgzS0Z6cllUZy9RbVJnMkg3bnRxQmpVZHJvN2pjemdTMTdndUlTOGJrL2x6d09rQUhMZXM5cWxIL2ROR1NqN3RnMWhobXRQdGIrUkNqdk5YREE9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.2/Echo.Chamber_0.6.2_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEVJOFFvemdXNld2eWttZk5tWnNWWnQ1cy9aVnFYL0JOY1RMM3JmSFFJOE5OUVpjOGtseU44NGowYzd3VnV3WUxTNHBuS2VWb3N3RHdlS2E0NnlFcVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NjAzOTUzCWZpbGU6RWNobyBDaGFtYmVyLmFwcC50YXIuZ3oKWW95dVJpUU5xd2VGK1dnb3I4VFZyZE82MGNCM1R2dHNDVW1nNm9mbDNPZTkveER5VzNuaTk0MllGUXFRTlo3dzFPc09tUmxRRGd0SmFlblVMcXFIQVE9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.2/Echo.Chamber.app.tar.gz"
     }
-  },
-  "pub_date": "2026-04-06T00:45:00Z",
-  "version": "0.6.1",
-  "notes": "Echo Chamber v0.6.1 — Hardening refactor + game audio fix + capture improvements"
+  }
 }
