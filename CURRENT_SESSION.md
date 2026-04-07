@@ -1,16 +1,29 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-07 (late evening — after cursor work attempted + reverted)
-**Current Version**: v0.6.1 (released), v0.6.2 **VALIDATED AND READY TO SHIP**
-**Branch**: `claude/v0.6.2-ship` in main repo. THREE commits banked:
-  - `8d21a3b` — main / v0.6.1 baseline (untouched)
-  - `1dc7f98` — proven wins + DXGI reinit hotfix + NVENC level autoselect
-  - `6c6d6ae` — feat: cursor compositing (**superseded by next commit, do NOT ship as-is**)
-  - **next commit pending**: revert of cursor work back to `1dc7f98` baseline
-**Release branch**: `release/v0.6.2` on GitHub is **STILL STALE** (the broken WGC state from prior session). Must be force-updated before release.
-**Tag**: `v0.6.2` on GitHub is also **STILL STALE**. Must be force-moved to the clean commit.
+**Last Updated**: 2026-04-07 (end of ship session)
+**Current Version**: **v0.6.2 — SHIPPED ✅**
+**Status**: 🎉 Released. Friends pick up update on next auto-updater poll.
 
-**Ship target**: the post-revert commit (next commit on top of `6c6d6ae`). Equivalent to `1dc7f98` content-wise but with cleaner git history including the failed cursor experiment for posterity.
+**Ship sequence completed**:
+  1. ✅ Bumped `Cargo.toml` + `tauri.conf.json` to 0.6.2 (`dfb7288`)
+  2. ✅ PR #127 merged to main (`d914eb6`)
+  3. ✅ `v0.6.2` tag force-updated `6abeb2a` → `d914eb6`
+  4. ✅ `release/v0.6.2` branch force-updated `6abeb2a` → `d914eb6`
+  5. ✅ CI Release workflow `24108444525` built NSIS installer + signed + uploaded to GitHub release
+  6. ✅ PR #128 merged: `core/deploy/latest.json` updated with v0.6.2 signature (`230f490`)
+
+**Final state on main**: `230f490 Merge pull request #128 from SamWatson86/fix/v0.6.2-signature`
+
+**Auto-updater wiring** (verified this session, write down for next time):
+  - Tauri client polls `https://echo.fellowshipoftheboatrace.party:9443/api/update/latest.json` (`tauri.conf.json:45`)
+  - Control plane serves it from repo file `core/deploy/latest.json` via `file_serving.rs:46` — read on every request, hot-reloads (no server restart needed after `latest.json` changes)
+  - CI uploads `latest.json` to GitHub release as an asset, but **this is not what friends fetch** — it's just the canonical generated copy. The repo file is the source of truth for live distribution.
+  - **Lesson for next ship**: branch protection requires PR for `main` pushes. Don't try to push the signature commit directly — open PR (use `fix/v0.6.X-signature` branch), wait for `verify` check, merge.
+
+**Auto-updater wiring** (verified this session, write down for next time):
+  - Tauri client polls `https://echo.fellowshipoftheboatrace.party:9443/api/update/latest.json` (`tauri.conf.json:45`)
+  - Control plane serves it from repo file `core/deploy/latest.json` via `file_serving.rs:46` — read on every request, hot-reloads
+  - CI uploads `latest.json` to GitHub release as an asset, but **this is not what friends fetch** — it's just the canonical generated copy. The repo file is the source of truth for live distribution.
 
 ## ⚠️ READ THIS FIRST
 
