@@ -484,8 +484,11 @@ impl PeerTransport {
             if let Some(max_bps) = inner.max_send_bitrate_bps {
                 let max_kbps = (max_bps / 1000) as u32;
                 if max_kbps >= 1000 {
-                    // min = 30% of max, start = 70% of max
-                    let min_kbps = (max_kbps as f64 * 0.3).round() as u32;
+                    // min = 12.5% of max (soft SDP hint), start = 70% of max.
+                    // The real hard floor is RtpEncodingParameters.min_bitrate_bps
+                    // set in capture_pipeline.rs; this SDP hint is aligned to it
+                    // so the encoder target and GoogCC allocator agree.
+                    let min_kbps = (max_kbps as f64 * 0.125).round() as u32;
                     let start_kbps = (max_kbps as f64 * 0.7).round() as u32;
                     log::info!(
                         "Applying H264 bitrate hints: min={}kbps start={}kbps (max={}kbps)",

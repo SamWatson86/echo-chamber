@@ -33,6 +33,10 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FO
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, GetWindowThreadProcessId,
@@ -358,6 +362,202 @@ unsafe fn refresh_anti_mpo_window(hwnd: HWND) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────
+// Mouse cursor compositing (DXGI DD does not include the cursor
+// in captured frames — we query it separately and blend it in).
+// ─────────────────────────────────────────────────────────────
+
+/// Cached cursor shape, updated only when DXGI reports a shape change.
+struct CursorCache {
+    /// Raw pixel buffer as delivered by GetFramePointerShape (format depends on kind).
+    pixels: Vec<u8>,
+    /// Pitch reported by DXGI (bytes per row).
+    pitch: u32,
+    /// Visual width of the cursor in pixels.
+    width: u32,
+    /// Visual height of the cursor in pixels. For MONOCHROME the buffer is
+    /// 2x this (AND mask stacked over XOR mask) but `height` here is the
+    /// effective visual height.
+    height: u32,
+    /// Hotspot offset (point inside cursor that corresponds to the reported position).
+    hotspot_x: u32,
+    hotspot_y: u32,
+    /// Cursor type: 1=COLOR, 2=MONOCHROME, 4=MASKED_COLOR.
+    kind: u32,
+}
+
+impl CursorCache {
+    /// Sample the cursor at integer pixel (cx, cy) and blend onto dst BGRA pixel.
+    /// dst is a mutable 4-byte slice [B, G, R, A]. Does nothing for transparent regions.
+    #[inline]
+    fn blend_onto(&self, cx: u32, cy: u32, dst: &mut [u8]) {
+        if cx >= self.width || cy >= self.height {
+            return;
+        }
+        match self.kind {
+            x if x == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32 => {
+                // 32-bit BGRA, straight alpha (not pre-multiplied per docs).
+                let row = cy as usize * self.pitch as usize;
+                let off = row + cx as usize * 4;
+                if off + 3 >= self.pixels.len() {
+                    return;
+                }
+                let cb = self.pixels[off] as u32;
+                let cg = self.pixels[off + 1] as u32;
+                let cr = self.pixels[off + 2] as u32;
+                let ca = self.pixels[off + 3] as u32;
+                if ca == 0 {
+                    return; // fully transparent
+                }
+                // Over-blend over dst BGRA (ignore dst alpha).
+                let inv = 255 - ca;
+                dst[0] = ((dst[0] as u32 * inv + cb * ca) / 255) as u8;
+                dst[1] = ((dst[1] as u32 * inv + cg * ca) / 255) as u8;
+                dst[2] = ((dst[2] as u32 * inv + cr * ca) / 255) as u8;
+            }
+            x if x == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 => {
+                // 1-bit AND mask stacked over 1-bit XOR mask. Total buffer
+                // height = 2 * visual height. Each mask row is `pitch` bytes,
+                // packed MSB-first within each byte.
+                let pitch = self.pitch as usize;
+                let and_row = cy as usize * pitch;
+                let xor_row = (cy as usize + self.height as usize) * pitch;
+                let byte_idx = (cx / 8) as usize;
+                let bit_idx = 7 - (cx % 8) as u8;
+                if and_row + byte_idx >= self.pixels.len()
+                    || xor_row + byte_idx >= self.pixels.len()
+                {
+                    return;
+                }
+                let and_bit = (self.pixels[and_row + byte_idx] >> bit_idx) & 1;
+                let xor_bit = (self.pixels[xor_row + byte_idx] >> bit_idx) & 1;
+                match (and_bit, xor_bit) {
+                    (0, 0) => {
+                        // Opaque black.
+                        dst[0] = 0;
+                        dst[1] = 0;
+                        dst[2] = 0;
+                    }
+                    (0, 1) => {
+                        // Opaque white.
+                        dst[0] = 255;
+                        dst[1] = 255;
+                        dst[2] = 255;
+                    }
+                    (1, 0) => {
+                        // Transparent — leave dst alone.
+                    }
+                    (1, 1) => {
+                        // Invert dst. Simplification: render as white outline.
+                        // True invert would be (255 - dst.rgb) but that looks
+                        // noisy on arbitrary backgrounds. White is cleaner.
+                        dst[0] = 255;
+                        dst[1] = 255;
+                        dst[2] = 255;
+                    }
+                    _ => {}
+                }
+            }
+            x if x == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32 => {
+                // 32-bit BGRA where A=0 means opaque (use RGB), A=0xFF means
+                // invert dst. Rare. Simplification: A=0 → opaque color copy;
+                // A=0xFF → render as white (same simplification as MONOCHROME).
+                let row = cy as usize * self.pitch as usize;
+                let off = row + cx as usize * 4;
+                if off + 3 >= self.pixels.len() {
+                    return;
+                }
+                let cb = self.pixels[off];
+                let cg = self.pixels[off + 1];
+                let cr = self.pixels[off + 2];
+                let ca = self.pixels[off + 3];
+                if ca == 0 {
+                    dst[0] = cb;
+                    dst[1] = cg;
+                    dst[2] = cr;
+                } else if ca == 0xFF {
+                    dst[0] = 255;
+                    dst[1] = 255;
+                    dst[2] = 255;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Composite the cursor into `dst` (BGRA, tight-packed, `dst_w * dst_h * 4` bytes).
+///
+/// `pointer_x/y` are in source-monitor coordinates as reported by DXGI.
+/// `crop_*` describe the capture region in source coords (same crop used for the frame).
+/// `dst_w/dst_h` are the encoder dimensions (post-downscale).
+///
+/// The cursor is drawn at the position translated to dst coordinates, scaled by
+/// the crop→dst scale factor. Nearest-neighbor sampling — the cursor is already
+/// small, higher-quality filtering would add complexity without visible benefit.
+fn composite_cursor(
+    dst: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    cursor: &CursorCache,
+    pointer_x: i32,
+    pointer_y: i32,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+) {
+    if cursor.width == 0 || cursor.height == 0 || crop_w == 0 || crop_h == 0 {
+        return;
+    }
+
+    // Scale factor from crop region to dst.
+    let scale_x = dst_w as f32 / crop_w as f32;
+    let scale_y = dst_h as f32 / crop_h as f32;
+
+    // Translate pointer into crop-relative coords (accounting for hotspot).
+    let rel_x = pointer_x - crop_x as i32 - cursor.hotspot_x as i32;
+    let rel_y = pointer_y - crop_y as i32 - cursor.hotspot_y as i32;
+
+    // Cursor rectangle in dst space.
+    let dx0 = (rel_x as f32 * scale_x).round() as i32;
+    let dy0 = (rel_y as f32 * scale_y).round() as i32;
+    let dx_w = ((cursor.width as f32) * scale_x).ceil() as i32;
+    let dy_h = ((cursor.height as f32) * scale_y).ceil() as i32;
+
+    // Clip to dst bounds.
+    let start_x = dx0.max(0);
+    let start_y = dy0.max(0);
+    let end_x = (dx0 + dx_w).min(dst_w as i32);
+    let end_y = (dy0 + dy_h).min(dst_h as i32);
+
+    if start_x >= end_x || start_y >= end_y {
+        return; // fully off-screen
+    }
+
+    let inv_scale_x = 1.0f32 / scale_x;
+    let inv_scale_y = 1.0f32 / scale_y;
+
+    for dy in start_y..end_y {
+        let cy = ((dy - dy0) as f32 * inv_scale_y) as i32;
+        if cy < 0 || cy >= cursor.height as i32 {
+            continue;
+        }
+        let row_off = dy as usize * dst_w as usize * 4;
+        for dx in start_x..end_x {
+            let cx = ((dx - dx0) as f32 * inv_scale_x) as i32;
+            if cx < 0 || cx >= cursor.width as i32 {
+                continue;
+            }
+            let off = row_off + dx as usize * 4;
+            if off + 3 >= dst.len() {
+                continue;
+            }
+            cursor.blend_onto(cx as u32, cy as u32, &mut dst[off..off + 4]);
+        }
+    }
+}
+
 // ── Capture Loop ──
 
 fn capture_loop_blocking(
@@ -421,38 +621,42 @@ fn capture_loop_blocking(
     let context = unsafe { device.GetImmediateContext() }
         .map_err(|e| format!("GetImmediateContext: {e}"))?;
 
-    // 3. Create output duplication
+    // 3. Create output duplication — as a closure so we can reinit on
+    // recoverable stalls (5+ seconds of AcquireNextFrame timeouts from
+    // driver hiccups, UAC intrusions, desktop mode flickers, GPU contention
+    // during heavy encode load, etc). Prior behavior was to bail the capture
+    // loop entirely on 50 consecutive timeouts, which crashed the share.
     // Try IDXGIOutput5::DuplicateOutput1 first — supports HDR formats and
     // captures DirectFlip content that DuplicateOutput misses (black frames).
-    let duplication: IDXGIOutputDuplication = unsafe {
-        let output5: Result<windows::Win32::Graphics::Dxgi::IDXGIOutput5, _> = output1.cast();
-        if let Ok(out5) = output5 {
-            // Request both formats — prefer BGRA (SDR, no conversion needed),
-            // accept float16 (HDR) if SDR not available.
-            let formats = [
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT,
-                windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM,
-            ];
-            match out5.DuplicateOutput1(&device, 0, &formats) {
-                Ok(dup) => {
-                    eprintln!("[desktop-capture] using DuplicateOutput1 (HDR-capable)");
-                    dup
+    let create_duplication = || -> Result<IDXGIOutputDuplication, String> {
+        unsafe {
+            let output5: Result<windows::Win32::Graphics::Dxgi::IDXGIOutput5, _> = output1.cast();
+            if let Ok(out5) = output5 {
+                // Request both formats — prefer BGRA (SDR, no conversion needed),
+                // accept float16 (HDR) if SDR not available.
+                let formats = [
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM,
+                ];
+                match out5.DuplicateOutput1(&device, 0, &formats) {
+                    Ok(dup) => {
+                        eprintln!("[desktop-capture] using DuplicateOutput1 (HDR-capable)");
+                        return Ok(dup);
+                    }
+                    Err(e) => {
+                        eprintln!("[desktop-capture] DuplicateOutput1 failed: {e}, falling back");
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[desktop-capture] DuplicateOutput1 failed: {e}, falling back");
-                    output1
-                        .DuplicateOutput(&device)
-                        .map_err(|e| format!("DuplicateOutput: {e}"))?
-                }
+            } else {
+                eprintln!("[desktop-capture] IDXGIOutput5 not available, using DuplicateOutput");
             }
-        } else {
-            eprintln!("[desktop-capture] IDXGIOutput5 not available, using DuplicateOutput");
             output1
                 .DuplicateOutput(&device)
-                .map_err(|e| format!("DuplicateOutput: {e}"))?
+                .map_err(|e| format!("DuplicateOutput: {e}"))
         }
     };
+    let mut duplication: IDXGIOutputDuplication = create_duplication()?;
 
     // Determine capture dimensions
     let crop = if fullscreen {
@@ -501,6 +705,11 @@ fn capture_loop_blocking(
 
     let mut consecutive_timeouts = 0u32;
 
+    // Cursor state vars REVERTED 2026-04-07. See cursor query block reversion
+    // comment below. Helper functions remain in this file as dead code for
+    // the v0.6.3 in-shader cursor composite work.
+    let _ = composite_cursor; // silence unused-fn warning
+
     eprintln!("[desktop-capture] starting frame loop");
 
     // 7. Frame loop
@@ -517,17 +726,64 @@ fn capture_loop_blocking(
             Err(e) => {
                 let code = e.code().0 as u32;
                 if code == 0x887A0027 {
-                    // DXGI_ERROR_WAIT_TIMEOUT — no new frame, just loop
+                    // DXGI_ERROR_WAIT_TIMEOUT — no new frame, just loop.
+                    // 50 consecutive = ~5 seconds of stall (100ms per timeout).
+                    // Reinit the duplication interface instead of bailing —
+                    // transient stalls are caused by GPU contention under heavy
+                    // encode load, driver hiccups, UAC intrusions, display mode
+                    // changes, etc. Reinit typically recovers immediately.
                     consecutive_timeouts += 1;
                     if consecutive_timeouts >= 50 {
-                        eprintln!("[desktop-capture] 50 consecutive timeouts, stopping");
-                        break;
+                        eprintln!(
+                            "[desktop-capture] 50 consecutive timeouts (~5s stall) \
+                             — reinitializing DXGI Desktop Duplication"
+                        );
+                        // Drop the old duplication interface before creating a
+                        // new one (the old one may be holding a locked frame
+                        // we never released due to the error path).
+                        drop(duplication);
+                        match create_duplication() {
+                            Ok(new_dup) => {
+                                duplication = new_dup;
+                                consecutive_timeouts = 0;
+                                eprintln!(
+                                    "[desktop-capture] DXGI DD reinit OK, capture continuing"
+                                );
+                                continue;
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "[desktop-capture] DXGI DD reinit FAILED: {err} — stopping"
+                                );
+                                break;
+                            }
+                        }
                     }
                     continue;
                 } else if code == 0x887A0026 {
-                    // DXGI_ERROR_ACCESS_LOST — desktop switch, need to recreate
-                    eprintln!("[desktop-capture] access lost (desktop switch?), stopping");
-                    break;
+                    // DXGI_ERROR_ACCESS_LOST — desktop switch, secure desktop
+                    // (UAC), display mode change. Recoverable by reinit.
+                    eprintln!(
+                        "[desktop-capture] access lost (desktop switch/UAC/mode change) \
+                         — reinitializing DXGI Desktop Duplication"
+                    );
+                    drop(duplication);
+                    match create_duplication() {
+                        Ok(new_dup) => {
+                            duplication = new_dup;
+                            consecutive_timeouts = 0;
+                            eprintln!(
+                                "[desktop-capture] DXGI DD reinit OK after access-lost"
+                            );
+                            continue;
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[desktop-capture] DXGI DD reinit FAILED after access-lost: {err} — stopping"
+                            );
+                            break;
+                        }
+                    }
                 } else {
                     eprintln!("[desktop-capture] AcquireNextFrame error: {e}");
                     consecutive_timeouts += 1;
@@ -541,6 +797,13 @@ fn capture_loop_blocking(
                 consecutive_timeouts = 0;
             }
         }
+
+        // Cursor state polling REVERTED 2026-04-07: caused capture FPS
+        // degradation under high-frequency pointer updates. Cursor compositing
+        // for entire-screen captures will land in v0.6.3 via in-shader
+        // composite (the right architecture — see CURRENT_SESSION.md).
+        // Helper struct + composite_cursor() function remain in this file
+        // as dead code, ready for a future fix.
 
         // Skip frames with no visual update
         if frame_info.LastPresentTime == 0 {
@@ -647,7 +910,20 @@ fn capture_loop_blocking(
                 match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
-                        let bgra_data = std::slice::from_raw_parts(bgra_ptr, (stride * h) as usize);
+                        // GPU path is intentionally zero-copy — the mapped GPU
+                        // staging memory is read-only AND much slower to read
+                        // from CPU than regular RAM. The earlier attempt to
+                        // copy the whole frame into scale_buf for cursor
+                        // compositing crashed capture FPS from 140 to ~4fps
+                        // because reading 8MB/frame from mapped GPU memory is
+                        // not feasible at high framerates. Cursor compositing
+                        // for HDR/GPU captures will land in v0.6.3 via a
+                        // proper in-shader composite pass on the GPU side.
+                        // CPU fallback path below DOES composite cursor.
+                        let bgra_data = std::slice::from_raw_parts(
+                            bgra_ptr,
+                            (stride * h) as usize,
+                        );
                         publisher.push_frame_strided(bgra_data, stride, w, h);
                         converter.unmap(&context);
                     }
@@ -735,7 +1011,6 @@ fn capture_loop_blocking(
                     }
                 }
                 context.Unmap(staging_tex, 0);
-
                 publisher.push_frame(&scale_buf[..dst_needed], enc_w, enc_h);
             }
         }

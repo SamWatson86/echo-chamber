@@ -656,3 +656,243 @@ async fn share_loop(
     publisher.shutdown().await;
     Ok(())
 }
+
+// ── Public API: Monitor capture (full screen) ──
+
+/// Start native monitor sharing: capture entire monitor via WGC → encode H264 → publish.
+/// Unlike `start_share` (window capture), this:
+///   - Includes the cursor automatically (via WGC's CursorCaptureSettings::Default)
+///   - Uses Microsoft's HDR→SDR conversion (no manual gamma shader needed)
+///   - Captures system-wide audio mixing rather than per-process WASAPI
+pub async fn start_share_monitor(
+    hmonitor: u64,
+    sfu_url: String,
+    token: String,
+    app: AppHandle,
+) -> Result<(), String> {
+    stop_share();
+
+    let running = Arc::new(AtomicBool::new(true));
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(ShareHandle {
+            running: running.clone(),
+        });
+    }
+
+    let app2 = app.clone();
+    let r2 = running.clone();
+    tokio::spawn(async move {
+        if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2).await {
+            eprintln!("[screen-capture-monitor] error: {}", e);
+            let _ = app2.emit("screen-capture-error", format!("{}", e));
+        }
+        let _ = app2.emit("screen-capture-stopped", ());
+        eprintln!("[screen-capture-monitor] task exited");
+        let mut state = global_state().lock().unwrap();
+        *state = None;
+    });
+
+    Ok(())
+}
+
+async fn share_loop_monitor(
+    hmonitor: u64,
+    sfu_url: &str,
+    token: &str,
+    app: &AppHandle,
+    running: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    // 1. Connect to SFU and publish track via shared pipeline
+    let mut publisher = CapturePublisher::connect_and_publish(
+        sfu_url, token, 1920, 1080, "screen-capture-monitor",
+    ).await?;
+
+    eprintln!("[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}", hmonitor);
+    // No PID for monitor capture — system-wide audio not per-process
+    let _ = app.emit("screen-capture-started", 0u32);
+
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
+    let capture_running = running.clone();
+
+    std::thread::spawn(move || {
+        use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
+        use windows_capture::settings::*;
+        use windows_capture::monitor::Monitor;
+        use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
+        use crate::gpu_converter::GpuConverter;
+
+        const ENC_W: u32 = 1920;
+        const ENC_H: u32 = 1080;
+
+        struct Handler {
+            tx: std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>,
+            running: Arc<AtomicBool>,
+            wgc_frame_count: u64,
+            wgc_start: std::time::Instant,
+            gpu: Option<(ID3D11Device, ID3D11DeviceContext, GpuConverter)>,
+        }
+
+        impl GraphicsCaptureApiHandler for Handler {
+            type Flags = (
+                std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>,
+                Arc<AtomicBool>,
+            );
+            type Error = Box<dyn std::error::Error + Send + Sync>;
+
+            fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+                let (tx, running) = ctx.flags;
+                Ok(Self {
+                    tx, running,
+                    wgc_frame_count: 0,
+                    wgc_start: std::time::Instant::now(),
+                    gpu: None,
+                })
+            }
+
+            fn on_frame_arrived(
+                &mut self,
+                frame: &mut windows_capture::frame::Frame,
+                capture_control: windows_capture::graphics_capture_api::InternalCaptureControl,
+            ) -> Result<(), Self::Error> {
+                if !self.running.load(Ordering::SeqCst) {
+                    capture_control.stop();
+                    return Ok(());
+                }
+
+                self.wgc_frame_count += 1;
+                let w = frame.width();
+                let h = frame.height();
+
+                if self.wgc_frame_count % 60 == 0 {
+                    let elapsed = self.wgc_start.elapsed().as_secs_f64();
+                    let fps = if elapsed > 0.0 { (self.wgc_frame_count as f64 / elapsed) as u32 } else { 0 };
+                    eprintln!("[wgc-monitor-callback] {}x{} @ {}fps ({} frames)", w, h, fps, self.wgc_frame_count);
+                }
+
+                let frame_texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D = unsafe {
+                    std::mem::transmute(frame.as_raw_texture())
+                };
+
+                if self.gpu.is_none() {
+                    unsafe {
+                        let device: ID3D11Device = frame_texture.GetDevice()
+                            .map_err(|e| format!("GetDevice: {e}"))?;
+                        let context = device.GetImmediateContext()
+                            .map_err(|e| format!("GetImmediateContext: {e}"))?;
+                        // Capture in HDR scRGB float — avoids forcing Windows to do
+                        // HDR->SDR mode conversion (which causes monitor flicker on
+                        // HDR displays). Our GpuConverter detects this format and
+                        // applies linear->sRGB gamma correction in the shader.
+                        let converter = GpuConverter::new(
+                            &device, w, h,
+                            DXGI_FORMAT_R16G16B16A16_FLOAT,
+                            ENC_W, ENC_H,
+                        ).map_err(|e| format!("GpuConverter: {e}"))?;
+                        eprintln!("[wgc-monitor-gpu] pipeline initialized: {}x{} HDR -> {}x{} SDR", w, h, ENC_W, ENC_H);
+                        self.gpu = Some((device, context, converter));
+                    }
+                }
+
+                let (_, context, converter) = self.gpu.as_ref().unwrap();
+
+                unsafe {
+                    let (ptr, pitch, out_w, out_h) = converter.convert(
+                        context, frame_texture,
+                        0, 0, w, h,
+                    ).map_err(|e| format!("convert: {e}"))?;
+
+                    let row_bytes = (out_w * 4) as usize;
+                    let mut bgra = vec![0u8; (out_w * out_h * 4) as usize];
+                    for y in 0..out_h as usize {
+                        std::ptr::copy_nonoverlapping(
+                            ptr.add(y * pitch as usize),
+                            bgra.as_mut_ptr().add(y * row_bytes),
+                            row_bytes,
+                        );
+                    }
+                    converter.unmap(context);
+
+                    let _ = self.tx.try_send((bgra, out_w, out_h));
+                }
+
+                Ok(())
+            }
+
+            fn on_closed(&mut self) -> Result<(), Self::Error> {
+                eprintln!("[screen-capture-monitor] WGC closed");
+                Ok(())
+            }
+        }
+
+        // Create monitor capture target from HMONITOR pointer
+        let monitor = Monitor::from_raw_hmonitor(hmonitor as *mut std::ffi::c_void);
+
+        // Same settings as window capture: cursor enabled, 1ms update interval
+        // (default 0ms has Windows bug capping at ~50fps).
+        // ColorFormat::Rgba16F (HDR scRGB float) — requesting Bgra8 from an HDR
+        // monitor forces Windows to renegotiate the display mode, causing
+        // visible monitor flicker. Capturing in HDR native and converting in
+        // our shader eliminates the mode-switch flicker entirely.
+        let settings = Settings::new(
+            monitor,
+            CursorCaptureSettings::Default,  // cursor INCLUDED — this is the win
+            DrawBorderSettings::WithoutBorder,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
+            DirtyRegionSettings::Default,
+            ColorFormat::Rgba16F,
+            (frame_tx, capture_running),
+        );
+
+        eprintln!("[screen-capture-monitor] WGC starting for HMONITOR {}", hmonitor);
+        match Handler::start_free_threaded(settings) {
+            Ok(ctrl) => {
+                let _ = ctrl.wait();
+            }
+            Err(e) => eprintln!("[screen-capture-monitor] WGC start error: {:?}", e),
+        }
+        eprintln!("[screen-capture-monitor] WGC thread exiting");
+    });
+
+    let mut drop_count: u64 = 0;
+    let mut yuv_total_us: u64 = 0;
+
+    while running.load(Ordering::SeqCst) {
+        let frame = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(f) => f,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        let mut latest = frame;
+        while let Ok(newer) = frame_rx.try_recv() {
+            drop_count += 1;
+            latest = newer;
+        }
+        let (bgra_data, width, height) = latest;
+
+        let t0 = std::time::Instant::now();
+        publisher.push_frame(&bgra_data, width, height);
+        let t1 = std::time::Instant::now();
+
+        yuv_total_us += (t1 - t0).as_micros() as u64;
+        let fc = publisher.frame_count();
+
+        if fc % 30 == 0 {
+            let elapsed = publisher.elapsed().as_secs_f64();
+            let fps = if elapsed > 0.0 { (fc as f64 / elapsed) as u32 } else { 0 };
+            let avg_yuv_ms = if fc > 0 { yuv_total_us as f64 / fc as f64 / 1000.0 } else { 0.0 };
+            eprintln!("[wgc-monitor-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
+                width, height, fps, fc, drop_count, avg_yuv_ms);
+            publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc-monitor", width, height, 30);
+        }
+    }
+
+    running.store(false, Ordering::SeqCst);
+    eprintln!("[screen-capture-monitor] shutting down, {} frames captured", publisher.frame_count());
+    publisher.shutdown().await;
+    Ok(())
+}

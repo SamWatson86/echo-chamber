@@ -49,6 +49,10 @@ pub struct VideoResolution {
 #[derive(Debug, Clone)]
 pub struct VideoEncoding {
     pub max_bitrate: u64,
+    /// Minimum bitrate floor (0 = no floor). Echo Chamber sets this for $screen
+    /// tracks to prevent libwebrtc's GoogCC from throttling to zero under congestion.
+    /// Flows through RtpEncodingParameters.min_bitrate_bps as a hard allocator floor.
+    pub min_bitrate: u64,
     pub max_framerate: f64,
 }
 
@@ -108,7 +112,11 @@ impl Default for TrackPublishOptions {
 
 impl VideoPreset {
     pub const fn new(width: u32, height: u32, max_bitrate: u64, max_framerate: f64) -> Self {
-        Self { width, height, encoding: VideoEncoding { max_bitrate, max_framerate } }
+        Self {
+            width,
+            height,
+            encoding: VideoEncoding { max_bitrate, min_bitrate: 0, max_framerate },
+        }
     }
 
     pub fn resolution(&self) -> VideoResolution {
@@ -139,6 +147,7 @@ pub fn compute_video_encodings(
         height,
         encoding: VideoEncoding {
             max_bitrate: encoding.max_bitrate,
+            min_bitrate: encoding.min_bitrate,
             max_framerate: encoding.max_framerate,
         },
     };
@@ -260,6 +269,13 @@ pub fn into_rtp_encodings(
                 size as f64 / u32::min(preset.width, preset.height) as f64,
             )),
             max_bitrate: Some(preset.encoding.max_bitrate),
+            // Hard GoogCC allocator floor — prevents throttle-to-zero under congestion.
+            // 0 means "no floor" (the upstream LiveKit default).
+            min_bitrate: if preset.encoding.min_bitrate > 0 {
+                Some(preset.encoding.min_bitrate)
+            } else {
+                None
+            },
             max_framerate: Some(preset.encoding.max_framerate),
             ..Default::default()
         })
