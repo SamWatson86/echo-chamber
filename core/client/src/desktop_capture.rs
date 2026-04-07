@@ -33,6 +33,10 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FO
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, GetWindowThreadProcessId,
@@ -358,6 +362,202 @@ unsafe fn refresh_anti_mpo_window(hwnd: HWND) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────
+// Mouse cursor compositing (DXGI DD does not include the cursor
+// in captured frames — we query it separately and blend it in).
+// ─────────────────────────────────────────────────────────────
+
+/// Cached cursor shape, updated only when DXGI reports a shape change.
+struct CursorCache {
+    /// Raw pixel buffer as delivered by GetFramePointerShape (format depends on kind).
+    pixels: Vec<u8>,
+    /// Pitch reported by DXGI (bytes per row).
+    pitch: u32,
+    /// Visual width of the cursor in pixels.
+    width: u32,
+    /// Visual height of the cursor in pixels. For MONOCHROME the buffer is
+    /// 2x this (AND mask stacked over XOR mask) but `height` here is the
+    /// effective visual height.
+    height: u32,
+    /// Hotspot offset (point inside cursor that corresponds to the reported position).
+    hotspot_x: u32,
+    hotspot_y: u32,
+    /// Cursor type: 1=COLOR, 2=MONOCHROME, 4=MASKED_COLOR.
+    kind: u32,
+}
+
+impl CursorCache {
+    /// Sample the cursor at integer pixel (cx, cy) and blend onto dst BGRA pixel.
+    /// dst is a mutable 4-byte slice [B, G, R, A]. Does nothing for transparent regions.
+    #[inline]
+    fn blend_onto(&self, cx: u32, cy: u32, dst: &mut [u8]) {
+        if cx >= self.width || cy >= self.height {
+            return;
+        }
+        match self.kind {
+            x if x == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32 => {
+                // 32-bit BGRA, straight alpha (not pre-multiplied per docs).
+                let row = cy as usize * self.pitch as usize;
+                let off = row + cx as usize * 4;
+                if off + 3 >= self.pixels.len() {
+                    return;
+                }
+                let cb = self.pixels[off] as u32;
+                let cg = self.pixels[off + 1] as u32;
+                let cr = self.pixels[off + 2] as u32;
+                let ca = self.pixels[off + 3] as u32;
+                if ca == 0 {
+                    return; // fully transparent
+                }
+                // Over-blend over dst BGRA (ignore dst alpha).
+                let inv = 255 - ca;
+                dst[0] = ((dst[0] as u32 * inv + cb * ca) / 255) as u8;
+                dst[1] = ((dst[1] as u32 * inv + cg * ca) / 255) as u8;
+                dst[2] = ((dst[2] as u32 * inv + cr * ca) / 255) as u8;
+            }
+            x if x == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 => {
+                // 1-bit AND mask stacked over 1-bit XOR mask. Total buffer
+                // height = 2 * visual height. Each mask row is `pitch` bytes,
+                // packed MSB-first within each byte.
+                let pitch = self.pitch as usize;
+                let and_row = cy as usize * pitch;
+                let xor_row = (cy as usize + self.height as usize) * pitch;
+                let byte_idx = (cx / 8) as usize;
+                let bit_idx = 7 - (cx % 8) as u8;
+                if and_row + byte_idx >= self.pixels.len()
+                    || xor_row + byte_idx >= self.pixels.len()
+                {
+                    return;
+                }
+                let and_bit = (self.pixels[and_row + byte_idx] >> bit_idx) & 1;
+                let xor_bit = (self.pixels[xor_row + byte_idx] >> bit_idx) & 1;
+                match (and_bit, xor_bit) {
+                    (0, 0) => {
+                        // Opaque black.
+                        dst[0] = 0;
+                        dst[1] = 0;
+                        dst[2] = 0;
+                    }
+                    (0, 1) => {
+                        // Opaque white.
+                        dst[0] = 255;
+                        dst[1] = 255;
+                        dst[2] = 255;
+                    }
+                    (1, 0) => {
+                        // Transparent — leave dst alone.
+                    }
+                    (1, 1) => {
+                        // Invert dst. Simplification: render as white outline.
+                        // True invert would be (255 - dst.rgb) but that looks
+                        // noisy on arbitrary backgrounds. White is cleaner.
+                        dst[0] = 255;
+                        dst[1] = 255;
+                        dst[2] = 255;
+                    }
+                    _ => {}
+                }
+            }
+            x if x == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32 => {
+                // 32-bit BGRA where A=0 means opaque (use RGB), A=0xFF means
+                // invert dst. Rare. Simplification: A=0 → opaque color copy;
+                // A=0xFF → render as white (same simplification as MONOCHROME).
+                let row = cy as usize * self.pitch as usize;
+                let off = row + cx as usize * 4;
+                if off + 3 >= self.pixels.len() {
+                    return;
+                }
+                let cb = self.pixels[off];
+                let cg = self.pixels[off + 1];
+                let cr = self.pixels[off + 2];
+                let ca = self.pixels[off + 3];
+                if ca == 0 {
+                    dst[0] = cb;
+                    dst[1] = cg;
+                    dst[2] = cr;
+                } else if ca == 0xFF {
+                    dst[0] = 255;
+                    dst[1] = 255;
+                    dst[2] = 255;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Composite the cursor into `dst` (BGRA, tight-packed, `dst_w * dst_h * 4` bytes).
+///
+/// `pointer_x/y` are in source-monitor coordinates as reported by DXGI.
+/// `crop_*` describe the capture region in source coords (same crop used for the frame).
+/// `dst_w/dst_h` are the encoder dimensions (post-downscale).
+///
+/// The cursor is drawn at the position translated to dst coordinates, scaled by
+/// the crop→dst scale factor. Nearest-neighbor sampling — the cursor is already
+/// small, higher-quality filtering would add complexity without visible benefit.
+fn composite_cursor(
+    dst: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    cursor: &CursorCache,
+    pointer_x: i32,
+    pointer_y: i32,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+) {
+    if cursor.width == 0 || cursor.height == 0 || crop_w == 0 || crop_h == 0 {
+        return;
+    }
+
+    // Scale factor from crop region to dst.
+    let scale_x = dst_w as f32 / crop_w as f32;
+    let scale_y = dst_h as f32 / crop_h as f32;
+
+    // Translate pointer into crop-relative coords (accounting for hotspot).
+    let rel_x = pointer_x - crop_x as i32 - cursor.hotspot_x as i32;
+    let rel_y = pointer_y - crop_y as i32 - cursor.hotspot_y as i32;
+
+    // Cursor rectangle in dst space.
+    let dx0 = (rel_x as f32 * scale_x).round() as i32;
+    let dy0 = (rel_y as f32 * scale_y).round() as i32;
+    let dx_w = ((cursor.width as f32) * scale_x).ceil() as i32;
+    let dy_h = ((cursor.height as f32) * scale_y).ceil() as i32;
+
+    // Clip to dst bounds.
+    let start_x = dx0.max(0);
+    let start_y = dy0.max(0);
+    let end_x = (dx0 + dx_w).min(dst_w as i32);
+    let end_y = (dy0 + dy_h).min(dst_h as i32);
+
+    if start_x >= end_x || start_y >= end_y {
+        return; // fully off-screen
+    }
+
+    let inv_scale_x = 1.0f32 / scale_x;
+    let inv_scale_y = 1.0f32 / scale_y;
+
+    for dy in start_y..end_y {
+        let cy = ((dy - dy0) as f32 * inv_scale_y) as i32;
+        if cy < 0 || cy >= cursor.height as i32 {
+            continue;
+        }
+        let row_off = dy as usize * dst_w as usize * 4;
+        for dx in start_x..end_x {
+            let cx = ((dx - dx0) as f32 * inv_scale_x) as i32;
+            if cx < 0 || cx >= cursor.width as i32 {
+                continue;
+            }
+            let off = row_off + dx as usize * 4;
+            if off + 3 >= dst.len() {
+                continue;
+            }
+            cursor.blend_onto(cx as u32, cy as u32, &mut dst[off..off + 4]);
+        }
+    }
+}
+
 // ── Capture Loop ──
 
 fn capture_loop_blocking(
@@ -505,6 +705,15 @@ fn capture_loop_blocking(
 
     let mut consecutive_timeouts = 0u32;
 
+    // Mouse cursor state. DXGI DD does NOT include the cursor in captured
+    // frames — we query it separately and composite it into scale_buf before
+    // pushing to the publisher. PointerPosition is only updated when DXGI
+    // reports LastMouseUpdateTime > 0; otherwise we reuse the last known value.
+    let mut cursor_cache: Option<CursorCache> = None;
+    let mut cursor_visible: bool = false;
+    let mut cursor_x: i32 = 0;
+    let mut cursor_y: i32 = 0;
+
     eprintln!("[desktop-capture] starting frame loop");
 
     // 7. Frame loop
@@ -590,6 +799,56 @@ fn capture_loop_blocking(
             }
             Ok(()) => {
                 consecutive_timeouts = 0;
+            }
+        }
+
+        // Update cursor state from this frame's metadata. DXGI reports pointer
+        // position updates via LastMouseUpdateTime (any nonzero = changed) and
+        // pointer shape updates via PointerShapeBufferSize (any nonzero = new
+        // shape available). Either can fire independently of visual frame
+        // updates — so this block runs BEFORE the LastPresentTime==0 skip.
+        if frame_info.LastMouseUpdateTime != 0 {
+            let pp = &frame_info.PointerPosition;
+            cursor_visible = pp.Visible.as_bool();
+            cursor_x = pp.Position.x;
+            cursor_y = pp.Position.y;
+        }
+        if frame_info.PointerShapeBufferSize > 0 {
+            // New cursor shape available. Fetch it into a sized buffer.
+            let mut buf = vec![0u8; frame_info.PointerShapeBufferSize as usize];
+            let mut required: u32 = 0;
+            let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+            let shape_res = unsafe {
+                duplication.GetFramePointerShape(
+                    buf.len() as u32,
+                    buf.as_mut_ptr() as *mut _,
+                    &mut required,
+                    &mut info,
+                )
+            };
+            match shape_res {
+                Ok(()) => {
+                    let (width, height) = match info.Type {
+                        t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 => {
+                            // MONOCHROME buffer is 2x tall (AND + XOR stacked).
+                            // Store the visual height (half of buffer height).
+                            (info.Width, info.Height / 2)
+                        }
+                        _ => (info.Width, info.Height),
+                    };
+                    cursor_cache = Some(CursorCache {
+                        pixels: buf,
+                        pitch: info.Pitch,
+                        width,
+                        height,
+                        hotspot_x: info.HotSpot.x as u32,
+                        hotspot_y: info.HotSpot.y as u32,
+                        kind: info.Type,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[desktop-capture] GetFramePointerShape: {e}");
+                }
             }
         }
 
@@ -698,9 +957,42 @@ fn capture_loop_blocking(
                 match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
-                        let bgra_data = std::slice::from_raw_parts(bgra_ptr, (stride * h) as usize);
-                        publisher.push_frame_strided(bgra_data, stride, w, h);
+                        // Copy GPU-mapped staging memory into scale_buf (tight-packed)
+                        // so we can composite the mouse cursor into it. GPU staging is
+                        // read-only, hence the copy; ~8MB/frame, cheap compared to the
+                        // GPU→CPU transfer that just happened.
+                        let row_bytes = (w * 4) as usize;
+                        let dst_row_stride = (enc_w * 4) as usize;
+                        for y in 0..h as usize {
+                            let src_off = y * stride as usize;
+                            let dst_off = y * dst_row_stride;
+                            let src = std::slice::from_raw_parts(
+                                bgra_ptr.add(src_off),
+                                row_bytes,
+                            );
+                            scale_buf[dst_off..dst_off + row_bytes].copy_from_slice(src);
+                        }
                         converter.unmap(&context);
+
+                        // Composite cursor into scale_buf if we have a visible cursor.
+                        if cursor_visible {
+                            if let Some(ref cursor) = cursor_cache {
+                                composite_cursor(
+                                    &mut scale_buf,
+                                    enc_w,
+                                    enc_h,
+                                    cursor,
+                                    cursor_x,
+                                    cursor_y,
+                                    crop_x,
+                                    crop_y,
+                                    crop_w,
+                                    crop_h,
+                                );
+                            }
+                        }
+
+                        publisher.push_frame(&scale_buf[..dst_needed], enc_w, enc_h);
                     }
                     Err(e) => {
                         duplication.ReleaseFrame().ok();
@@ -786,6 +1078,24 @@ fn capture_loop_blocking(
                     }
                 }
                 context.Unmap(staging_tex, 0);
+
+                // Composite cursor into scale_buf for the CPU path too.
+                if cursor_visible {
+                    if let Some(ref cursor) = cursor_cache {
+                        composite_cursor(
+                            &mut scale_buf,
+                            enc_w,
+                            enc_h,
+                            cursor,
+                            cursor_x,
+                            cursor_y,
+                            crop_x,
+                            crop_y,
+                            crop_w,
+                            crop_h,
+                        );
+                    }
+                }
 
                 publisher.push_frame(&scale_buf[..dst_needed], enc_w, enc_h);
             }
