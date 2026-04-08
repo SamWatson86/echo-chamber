@@ -301,3 +301,134 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
 
     (level, reasons)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nominal() -> CaptureHealthSnapshot {
+        CaptureHealthSnapshot {
+            level: HealthLevel::Green,
+            reasons: vec![],
+            capture_active: true,
+            capture_mode: "DXGI-DD".into(),
+            encoder_type: "NVENC".into(),
+            current_fps: 60,
+            target_fps: 60,
+            reinit_count_5m: 0,
+            consecutive_timeouts: 0,
+            consecutive_timeouts_max_5m: 0,
+            encoder_skip_rate_pct: 0.0,
+            shader_errors_5m: 0,
+        }
+    }
+
+    #[test]
+    fn nominal_is_green() {
+        let (lvl, reasons) = classify(&nominal());
+        assert_eq!(lvl, HealthLevel::Green);
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn inactive_capture_is_always_green() {
+        let mut s = nominal();
+        s.capture_active = false;
+        s.reinit_count_5m = 99;
+        s.encoder_type = "OpenH264".into();
+        let (lvl, reasons) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Green);
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn one_reinit_is_yellow() {
+        let mut s = nominal();
+        s.reinit_count_5m = 1;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Yellow);
+    }
+
+    #[test]
+    fn three_reinits_is_red() {
+        let mut s = nominal();
+        s.reinit_count_5m = 3;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn five_consecutive_timeouts_is_yellow() {
+        let mut s = nominal();
+        s.consecutive_timeouts = 5;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Yellow);
+    }
+
+    #[test]
+    fn ten_consecutive_timeouts_is_red() {
+        let mut s = nominal();
+        s.consecutive_timeouts = 10;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn fps_47_of_60_is_yellow() {
+        let mut s = nominal();
+        s.current_fps = 47;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Yellow);
+    }
+
+    #[test]
+    fn fps_28_of_60_is_red() {
+        let mut s = nominal();
+        s.current_fps = 28;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn openh264_fallback_is_always_red() {
+        let mut s = nominal();
+        s.encoder_type = "OpenH264".into();
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn shader_error_is_red() {
+        let mut s = nominal();
+        s.shader_errors_5m = 1;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn skip_rate_3pct_is_yellow() {
+        let mut s = nominal();
+        s.encoder_skip_rate_pct = 3.0;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Yellow);
+    }
+
+    #[test]
+    fn skip_rate_15pct_is_red() {
+        let mut s = nominal();
+        s.encoder_skip_rate_pct = 15.0;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn multiple_signals_take_max_level_and_list_all_reasons() {
+        let mut s = nominal();
+        s.reinit_count_5m = 1;             // yellow
+        s.consecutive_timeouts = 10;       // red
+        s.encoder_skip_rate_pct = 3.0;     // yellow
+        let (lvl, reasons) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+        assert!(reasons.len() >= 3);
+    }
+}
