@@ -287,8 +287,26 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
         reasons.push(format!("{} consecutive capture timeouts", snap.consecutive_timeouts));
     }
 
-    // FPS vs target
-    if snap.target_fps > 0 {
+    // FPS vs target — ONLY meaningful for polling capture modes (DXGI DD).
+    //
+    // WGC window capture is EVENT-DRIVEN: on_frame_arrived only fires when
+    // DWM actually repaints the captured window. A static browser page or
+    // text editor produces ~1-5 fps naturally because that's all the window
+    // redraws. The classifier was incorrectly flagging this as degraded
+    // capture when in reality the stream was flowing cleanly at the content
+    // update rate. Discovered 2026-04-08 during live friend testing when
+    // David's browser-window share triggered continuous Red alerts with
+    // zero actual capture problems (reinits=0, timeouts=0, encoder fine).
+    //
+    // For WGC mode we trust the other signals (reinits, timeouts, encoder
+    // fallback, shader errors) and skip the raw fps threshold entirely.
+    // Real WGC capture problems surface as reinit storms or consecutive
+    // frame-arrival timeouts, not as a low fps number.
+    //
+    // DXGI Desktop Duplication is pollng-based so fps vs target is still
+    // a meaningful signal there — compositor starvation under GPU load
+    // drops the poll success rate visibly.
+    if snap.capture_mode == "DXGI-DD" && snap.target_fps > 0 {
         let frac = snap.current_fps as f32 / snap.target_fps as f32;
         if frac < RED_FPS_FRACTION {
             level = level.max(HealthLevel::Red);
@@ -412,6 +430,32 @@ mod tests {
     fn fps_28_of_60_is_red() {
         let mut s = nominal();
         s.current_fps = 28;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn wgc_low_fps_is_green_because_capture_is_content_driven() {
+        // WGC window capture is event-driven — only fires on actual window
+        // repaints. A static browser page at 1fps is normal, not degraded.
+        // Classifier must NOT flag this as Yellow/Red on the fps threshold.
+        let mut s = nominal();
+        s.capture_mode = "WGC".into();
+        s.current_fps = 1;
+        s.target_fps = 30;
+        let (lvl, reasons) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Green);
+        assert!(reasons.is_empty(), "WGC low fps should not produce reasons, got {:?}", reasons);
+    }
+
+    #[test]
+    fn wgc_still_red_on_real_problems() {
+        // WGC skips the fps check, but real problems (reinits, encoder
+        // fallback, shader errors, consecutive timeouts) must still fire.
+        let mut s = nominal();
+        s.capture_mode = "WGC".into();
+        s.current_fps = 1;
+        s.encoder_type = "OpenH264".into();
         let (lvl, _) = classify(&s);
         assert_eq!(lvl, HealthLevel::Red);
     }
