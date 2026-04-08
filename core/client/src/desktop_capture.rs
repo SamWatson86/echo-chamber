@@ -700,7 +700,12 @@ fn capture_loop_blocking(
         &rt, sfu_url, token, enc_w, enc_h, "desktop-capture",
     )?;
 
-    health.set_active(true, CaptureMode::DxgiDd, EncoderType::Nvenc, 60);
+    health.set_active(
+        true,
+        CaptureMode::DxgiDd,
+        EncoderType::Nvenc,
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+    );
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
     let mut gpu_converter: Option<GpuConverter> = None;

@@ -466,7 +466,12 @@ async fn share_loop(
 
     eprintln!("[screen-capture] starting WGC capture");
     let _ = app.emit("screen-capture-started", target_pid);
-    health.set_active(true, CaptureMode::Wgc, EncoderType::Nvenc, 60);
+    health.set_active(
+        true,
+        CaptureMode::Wgc,
+        EncoderType::Nvenc,
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+    );
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
@@ -721,7 +726,12 @@ async fn share_loop_monitor(
     eprintln!("[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}", hmonitor);
     // No PID for monitor capture — system-wide audio not per-process
     let _ = app.emit("screen-capture-started", 0u32);
-    health.set_active(true, CaptureMode::Wgc, EncoderType::Nvenc, 60);
+    health.set_active(
+        true,
+        CaptureMode::Wgc,
+        EncoderType::Nvenc,
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+    );
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();

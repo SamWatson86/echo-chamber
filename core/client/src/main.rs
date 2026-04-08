@@ -401,6 +401,15 @@ fn get_capture_health(
     if !snap.capture_active { None } else { Some(snap) }
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn report_encoder_implementation(
+    state: tauri::State<Arc<CaptureHealthState>>,
+    encoder: String,
+) {
+    state.set_encoder_type_from_string(&encoder);
+}
+
 fn main() {
     // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
     #[cfg(target_os = "windows")]
@@ -449,6 +458,8 @@ fn main() {
             start_screen_share_monitor,
             #[cfg(target_os = "windows")]
             get_capture_health,
+            #[cfg(target_os = "windows")]
+            report_encoder_implementation,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected

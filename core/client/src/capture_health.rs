@@ -174,6 +174,33 @@ impl CaptureHealthState {
         }
     }
 
+    /// Update the encoder type at runtime when the viewer detects what
+    /// libwebrtc actually selected for encoderImplementation. The viewer
+    /// reads this from getStats() which is the canonical source — Rust
+    /// side has no easy way to know which encoder libwebrtc chose at
+    /// publish time. We default-assume Nvenc in set_active() and let the
+    /// viewer correct us if WebRTC picked OpenH264 or anything else.
+    pub fn set_encoder_type_from_string(&self, raw: &str) {
+        let lower = raw.to_lowercase();
+        let new_type = if lower.contains("openh264")
+            || lower == "open h264"
+            || lower.contains("software")
+        {
+            EncoderType::OpenH264
+        } else if lower.contains("nvenc")
+            || lower.contains("nvidia")
+            || lower.contains("nvcodec")
+            || lower.contains("external")
+            || lower.contains("hardware")
+        {
+            EncoderType::Nvenc
+        } else {
+            // Unknown encoder string — leave whatever set_active put there.
+            return;
+        };
+        *self.encoder_type.write() = new_type;
+    }
+
     pub fn snapshot(&self) -> CaptureHealthSnapshot {
         let now = Instant::now();
         let reinit_count_5m = {
