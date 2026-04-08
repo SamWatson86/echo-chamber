@@ -137,3 +137,42 @@ function cleanupPrewarmedRooms() {
   prewarmedRooms.clear();
   tokenCache.clear();
 }
+
+// ── Admin login (Tauri viewer) ──────────────────────────────────────
+// Lets Sam (or anyone with the password) become admin from the viewer
+// itself instead of opening a separate Edge tab. The admin token is
+// kept in module-level `adminToken` (already declared in state.js) and
+// persisted to localStorage so it survives reload.
+
+const ADMIN_TOKEN_STORAGE_KEY = "echo_admin_token";
+
+async function adminLogin(baseUrl, password) {
+  const token = await fetchAdminToken(baseUrl, password);
+  adminToken = token;
+  try { localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token); } catch (e) {}
+  return token;
+}
+
+function adminLogout() {
+  adminToken = "";
+  try { localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY); } catch (e) {}
+}
+
+async function restoreAdminFromStorage(baseUrl) {
+  let stored = "";
+  try { stored = localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || ""; } catch (e) {}
+  if (!stored) return false;
+  // Probe a cheap admin endpoint to verify the token is still valid.
+  try {
+    const probe = await fetch(`${baseUrl}/admin/api/dashboard`, {
+      headers: { Authorization: `Bearer ${stored}` },
+    });
+    if (probe.ok) {
+      adminToken = stored;
+      return true;
+    }
+  } catch (e) {}
+  // Stale or rejected — clear it.
+  try { localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY); } catch (e) {}
+  return false;
+}
