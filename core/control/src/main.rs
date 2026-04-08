@@ -404,6 +404,7 @@ async fn main() {
         .route("/admin/api/bugs", get(admin_bug_reports))
         .route("/admin/api/metrics/dashboard", get(admin_dashboard_metrics))
         .route("/admin/api/deploys", get(admin_deploys))
+        .route("/admin/api/force-reload", post(admin_force_reload))
         .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
