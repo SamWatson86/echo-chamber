@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-08b",
+    title: "Fewer False Alarms (v0.6.4)",
+    notes: [
+      "The capture-health chip no longer flashes red when you share a specific window of static content (like a web page that isn't changing). Window capture is 'event-driven' — it only fires when the window actually repaints — so a still browser naturally produces only 1-5 frames per second, and the classifier was incorrectly interpreting that as degraded capture. Now the fps threshold only applies to entire-screen captures (which poll at full rate) so WGC window sharing stays green when things are fine.",
+      "Other real problems (reinits, encoder fallback, shader errors, consecutive capture timeouts) still trigger the red banner correctly on window capture — only the 'low fps' false positive is removed.",
+      "Known limitation (will fix in v0.6.5): when you share a specific window that isn't changing, viewers will see your mouse and scrolling at a lower frame rate. Switching back to 'entire screen' share gives smoother playback for mostly-static content, at the cost of more CPU. Heartbeat frame duplication for static window captures is planned for the next release."
+    ]
+  },
+  {
     version: "2026-04-08",
     title: "Hardware Encoding for Everyone (v0.6.3)",
     notes: [
