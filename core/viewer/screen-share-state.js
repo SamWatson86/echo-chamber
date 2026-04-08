@@ -9,7 +9,10 @@ var _qualityWarnLowSince = 0;       // timestamp when FPS first dropped below th
 var _qualityWarnShowing = false;     // whether banner is currently visible
 var _qualityWarnDismissed = false;   // dismissed for this session
 var _qualityWarnBannerEl = null;     // DOM element
-const QUALITY_WARN_FPS_THRESHOLD = 30;
+// Capture is intentionally capped at 30fps in capture_pipeline.rs.
+// Under multi-publisher GPU contention, capture floats 22-28fps which is
+// fine — only warn when it drops below 18fps (real degradation).
+const QUALITY_WARN_FPS_THRESHOLD = 18;
 const QUALITY_WARN_DURATION_MS = 5000;
 
 // ── Screen share track refs (so we can unpublish on stop) ──

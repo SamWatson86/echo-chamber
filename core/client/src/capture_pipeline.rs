@@ -91,7 +91,13 @@ impl CapturePublisher {
             video_codec: VideoCodec::H264,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                max_bitrate: 20_000_000,
+                // Capped at 4 Mbps for multi-publisher rooms. Validated 2026-04-07
+                // with 3 simultaneous 1080p shares and a residential-WAN viewer
+                // (David) who saw 0fps at 8Mbps. 4Mbps × 3 publishers = 12Mbps
+                // aggregate, comfortably under most residential downloads. Per-stream
+                // quality at 1080p30 H264 is still excellent for screen content.
+                // Twitch source quality reference: 6 Mbps at 1080p60 gameplay.
+                max_bitrate: 4_000_000,
                 // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
                 // to zero under packet loss / RTT spikes, so the stream stays
                 // visible instead of dropping to 0fps and slowly probing back up.
@@ -99,7 +105,13 @@ impl CapturePublisher {
                 // 60fps for safe stable testing with David (remote friend).
                 // The level=AUTOSELECT fix is still in h264_encoder_impl.cpp
                 // for later 144fps retest on SAM-PC — harmless at 60fps.
-                max_framerate: 60.0,
+                // Capped at 30fps for multi-publisher rooms. With 3 simultaneous
+                // 1920x1080 H264 publishers, the cumulative NVDEC decode load
+                // and SFU forwarding pressure makes 60fps unsustainable —
+                // receivers see 10fps after pacing kicks in. 30fps gives
+                // headroom for all parties and is plenty for screen content.
+                // Spencer's recommendation, validated 2026-04-07 with 3 sharers.
+                max_framerate: 30.0,
             }),
             ..Default::default()
         };
@@ -162,7 +174,13 @@ impl CapturePublisher {
             video_codec: VideoCodec::H264,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                max_bitrate: 20_000_000,
+                // Capped at 4 Mbps for multi-publisher rooms. Validated 2026-04-07
+                // with 3 simultaneous 1080p shares and a residential-WAN viewer
+                // (David) who saw 0fps at 8Mbps. 4Mbps × 3 publishers = 12Mbps
+                // aggregate, comfortably under most residential downloads. Per-stream
+                // quality at 1080p30 H264 is still excellent for screen content.
+                // Twitch source quality reference: 6 Mbps at 1080p60 gameplay.
+                max_bitrate: 4_000_000,
                 // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
                 // to zero under packet loss / RTT spikes, so the stream stays
                 // visible instead of dropping to 0fps and slowly probing back up.
@@ -170,7 +188,13 @@ impl CapturePublisher {
                 // 60fps for safe stable testing with David (remote friend).
                 // The level=AUTOSELECT fix is still in h264_encoder_impl.cpp
                 // for later 144fps retest on SAM-PC — harmless at 60fps.
-                max_framerate: 60.0,
+                // Capped at 30fps for multi-publisher rooms. With 3 simultaneous
+                // 1920x1080 H264 publishers, the cumulative NVDEC decode load
+                // and SFU forwarding pressure makes 60fps unsustainable —
+                // receivers see 10fps after pacing kicks in. 30fps gives
+                // headroom for all parties and is plenty for screen content.
+                // Spencer's recommendation, validated 2026-04-07 with 3 sharers.
+                max_framerate: 30.0,
             }),
             ..Default::default()
         };

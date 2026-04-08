@@ -1,8 +1,144 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-07 (end of ship session)
-**Current Version**: **v0.6.2 — SHIPPED ✅**
-**Status**: 🎉 Released. Friends pick up update on next auto-updater poll.
+**Last Updated**: 2026-04-07 (very late — after live multi-friend stream debugging session)
+**Current Version**: **v0.6.2 SHIPPED ✅** + several follow-on fixes from friend testing session
+**Status**: Live testing exposed multiple regressions and one stubborn per-receiver mystery. All capture-side fixes are committed; per-receiver path investigation is BLOCKED on instrumentation and deferred to next session.
+
+---
+
+## ⚠️ READ THIS FIRST — TOMORROW'S TOP PRIORITIES
+
+The "FPS counter" we've been reading from the viewer tiles **may not be accurate**. Late in the session, Sam observed his SELF-VIEW reporting the same low FPS as remote viewers — but per CURRENT_SESSION findings C, self-view is "known unreliable." If self and remote both show the same low number, we may have been chasing a measurement bug, not a real performance bug.
+
+**Before any more performance debugging next session, do these in order:**
+
+1. **Enable LiveKit Prometheus metrics** (one-time cost: SFU restart) — add `prometheus_port: 6789` to `core/sfu/livekit.yaml`. This gives PER-DOWNTRACK packet loss / NACK / PLI / bitrate counters that the twirp API does not expose. Without this, you are debugging blind.
+2. **Add a `/admin/api/getstats` endpoint** that polls each connected client's `room.engine.client.peerConnectionRTC.getStats()` via a data-channel command and dumps to a JSON. This lets you see real `framesPerSecond`, `framesDecoded`, `framesDropped`, `nackCount` from each receiver's perspective, INCLUDING David's.
+3. **Add a debug overlay in the viewer** showing source-of-truth getStats() data on each tile (separate from the existing UI FPS counter). The current FPS readout might be doing something wrong.
+4. **Test changes ONE AT A TIME** with a 5-minute observation window between each. The session below cycled through 6+ rebuild/relaunch loops, each of which caused LiveKit "duplicate participant" events that disrupted everyone's streams temporarily — making it impossible to tell if any change actually helped.
+
+---
+
+## 🧩 THE PER-RECEIVER MYSTERY (UNSOLVED)
+
+### Symptom matrix (last observed)
+
+| Source → Sink   | Sam        | David      | Decker    |
+|-----------------|------------|------------|-----------|
+| Sam (publisher) | self: low  | 4 fps      | 7 fps     |
+| David (pub)     | 35 fps     | self: ?    | 60 fps    |
+| Decker (pub)    | ?          | ?          | self: ?   |
+
+**Asymmetry**: Decker can RECEIVE everything fine; David specifically struggles to receive from Sam. But also: Sam's self-view shows the same low FPS as David's view of Sam. So either Sam's encoder→SFU→loopback path is broken OR the FPS counter is lying.
+
+### What we know is TRUE
+- Sam's NVENC encoder log shows `encoded=N skipped=0 sending=1` continuously at 90+fps capture, 30fps wire output
+- Sam's localhost path to SFU cannot have NAT/ICE/network problems (it's localhost!)
+- David has 678 Mbps fiber / 11 ms jitter / 40 ms RTT (speedtest)
+- David CAN publish to Decker successfully (60 fps observed)
+- All clients are on viewer JS that has the new forced-banner code
+- LiveKit's `rtc.turn_servers` is configured (verified syntax against config-sample.yaml)
+- LiveKit's `congestion_control.enabled: false` and `allow_pause: false` (allocator disabled)
+- Force-reload + kick-all are reliably working server-side (LiveKit twirp confirmed kicks)
+
+### What we know is FALSE
+- ❌ NOT bandwidth (David has 678 Mbps)
+- ❌ NOT LiveKit allocator pausing (already disabled)
+- ❌ NOT decoder CPU saturation (when Decker stopped sharing, David's view of Sam did NOT recover)
+- ❌ NOT a publisher encoder issue (Sam's encoder log is clean)
+- ❌ NOT NVENC fallback to OpenH264 (Sam's installed binary now has NVENC compiled in)
+- ❌ NOT the WebRTC pacer / capture loop pacer (reverted, capture is back to 100+fps)
+- ❌ NOT the LiveKit StreamAllocator pausing tracks (research-confirmed via subagent, then verified config)
+
+### What we DON'T know
+- David's actual ICE candidate pair selection (direct UDP / TCP fallback / TURN relay)
+- David's actual receive-side packet loss & NACK rate (not exposed by twirp API at v1.9.11)
+- Whether the viewer FPS counter is even measuring correctly
+- Whether `removing duplicate participant` events from kick/restart cycles caused some of the chaos
+- Decker's location/network (he's WAN like David but no other detail gathered)
+- Whether the "$screen companion" identity reconnect storm during force-reload causes lasting subscriber drift
+
+### The single most-leverage diagnostic for tomorrow
+
+Add `getStats()` plumbing. The viewer JS already uses livekit-client SDK; `room.engine.pcManager.publisher.getStats()` and `...subscriber.getStats()` give the canonical WebRTC stats with `framesPerSecond`, `framesDecoded`, `nackCount`, `bytesReceived`, `jitter`, plus `iceCandidatePair` showing the actual selected ICE pair (host/srflx/relay/tcp). Plumb this to a /api/admin/client-stats endpoint that polls each connected client. This single addition would have collapsed the entire hypothesis space tonight.
+
+---
+
+## ✅ WHAT SHIPPED THIS SESSION (post-v0.6.2 fixes)
+
+### 1. v0.6.2 release sequence (PR #127, #128, #129)
+Three PRs to ship v0.6.2 with installer signature + handover doc.
+
+### 2. Control plane version bump fix (PR #130)
+`core/control/Cargo.toml` was missed during v0.6.2 ship. The dashboard reported v0.6.0 because that's what `CARGO_PKG_VERSION` returned. Bumped to 0.6.2. **Memory rule added: bump THREE version files, not two.** See `feedback_release_checklist.md`.
+
+### 3. Forced auto-reload banner + nuclear /admin/api/force-reload (PR #131)
+- Viewer-side forced banner with 5-second countdown + procedural smooth-jazz Web Audio chord progression (Dm7→G7→Cmaj7) + robot-voice "The server is restarting" via SpeechSynthesis. Validated live with friends.
+- Server-side `POST /admin/api/force-reload` endpoint: bumps `viewer_stamp` AND rewrites `index.html` on disk via `stamp_viewer_index()` (without the disk rewrite, clients infinite-loop), then iterates LiveKit `ListRooms` → `ListParticipants` → `RemoveParticipant` for every room/participant including `$screen` companion publishers (which the dashboard filters out by design, leaving them as ghost zombies after parent client death).
+- `admin_kick_participant` now also best-effort kicks `{identity}$screen`.
+- New helpers in `rooms.rs`: `livekit_list_rooms`, `livekit_list_participants`, `livekit_remove_participant`.
+- New "⚠️ Force Reload All" button in admin dashboard top-right.
+- **Memory rule added**: after any server-state change (SFU/TURN restart, livekit.yaml edit), POST to `/admin/api/force-reload`. See `feedback_force_reload_after_server_changes.md`.
+- **Memory rule added**: always launch the installed binary (`%LocalAppData%\Echo Chamber\echo-core-client.exe`), never the dev build at `core/target/release/`. See `feedback_installed_vs_dev_client.md`.
+
+### 4. NVENC discovery (uncommitted as a code change but documented)
+**The CI-built v0.6.2 release binary has ZERO NVENC support.** GitHub Actions runners don't have CUDA Toolkit installed → `webrtc-sys-local/build.rs:204` falls through the conditional and emits `cargo:warning=cuda.h not found ... building without NVIDIA hardware encoding`. The released installer is OpenH264-only, which caps at ~9fps for 1080p. This is a critical CI gap.
+
+**Current workaround**: build `cargo build -p echo-core-client --release` locally on Sam's machine (where CUDA is at `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\`) and copy the binary over `%LocalAppData%\Echo Chamber\echo-core-client.exe`. Verified working — log shows `Nvidia Encoder is supported. ... [encoder-factory] HW factory matched! Delegating. ... [NVENC-factory] >>> CREATING NVENC H264 ENCODER <<<`.
+
+**v0.6.3 P0**: get NVENC into CI builds. Either install CUDA Toolkit on the runner or vendor `cuda.h` + `cuda.lib` stubs into `webrtc-sys-local/`.
+
+### 5. Per-publisher caps (capture_pipeline.rs — IN THIS COMMIT)
+- `max_framerate: 30.0` (was 60). Validated as the right cap with 3 simultaneous publishers.
+- `max_bitrate: 4_000_000` (was 20_000_000 → 8_000_000 → 4_000_000). 4 Mbps × 3 publishers = 12 Mbps aggregate, friendly to residential downlinks.
+
+### 6. DXGI capture loop pacer EXPERIMENT — REVERTED (desktop_capture.rs — IN THIS COMMIT)
+Tried capping the capture loop at 30fps to reduce wasted GPU shader work (HDR→SDR converter ran 100x/sec when only 30 frames/sec were encoded). Implementation slept 33ms before each `AcquireNextFrame(100ms)` call. Under multi-publisher GPU contention, this caused DWM's duplication interface to enter a degraded state where every-other AcquireNextFrame returned `DXGI_ERROR_WAIT_TIMEOUT`, triggering 50-consecutive-timeout reinit loops every few frames. Effective capture dropped to 9fps. **Reverted.** NVENC's `frame_drop=1` already throttles wire output regardless of capture rate, so the pacer was a premature optimization. Comment block in desktop_capture.rs documents this so we don't try it again.
+
+### 7. DXGI reinit retry-with-backoff (desktop_capture.rs — IN THIS COMMIT)
+The v0.6.2 reinit hotfix gave up after a single retry. During tonight's session, the elevated `Start-Process -Verb RunAs` UAC prompt for restarting LiveKit triggered DXGI ACCESS_LOST on Sam's capture; the immediate reinit failed with `E_ACCESSDENIED` because the secure-desktop transition wasn't complete; the loop bailed and Sam silently stopped publishing while everyone saw frozen tail-end frames. Fix: `reinit_with_backoff()` closure retries 5 times spaced 200ms / 400ms / 800ms / 1500ms / 2000ms (~5 seconds total) before giving up. Idle when not exercised; safety net for future UAC prompts and display mode changes.
+
+### 8. Misleading "your game is impacting" warning fixed (screen-share-quality.js + screen-share-state.js — IN THIS COMMIT)
+- Threshold lowered from 30fps to 18fps (since we now intentionally cap at 30, anything 18+ is healthy).
+- Message changed from "Your game is impacting stream quality" to "Stream FPS is low — GPU may be contended" (Sam isn't running a game; the message was confusing).
+
+### 9. TURN servers advertised in livekit.yaml (LOCAL-ONLY, not in commit since file is gitignored)
+Added `rtc.turn_servers` block pointing to the existing `echo-turn.exe` on UDP 3478 with username `echo` and credential `chamber`. Verified syntax against LiveKit v1.9.11 `config-sample.yaml`. Was supposed to fix David's per-receiver path by giving his client a TURN relay candidate when direct UDP hole-punch failed. **Did not actually verify this fixed anything** — David's symptom persisted after restart + force-reload. Possibly correct config but not addressing the actual root cause; possibly David's client cached the old ICE servers list and never re-fetched.
+
+---
+
+## 🐛 BUGS DISCOVERED, NOT YET FIXED
+
+### B1. CI builds have no NVENC
+See section 4 above. v0.6.3 P0.
+
+### B2. `removing duplicate participant` events disrupt all subscribers
+Every kick/relaunch cycle (which happened ~6 times tonight) creates duplicate participant identities in LiveKit. The duplicate-removal causes SSRC changes that cascade as packet-loss / sequence-gap warnings to every subscriber. Symptoms include massive jitter spikes (6.5 SECONDS observed in livekit.err.log) that propagate. **Tomorrow**: don't kick Sam from his own SFU during testing. Use a separate test-only branch or test-only client identity.
+
+### B3. `viewer_stamp` change without disk rewrite causes infinite reload loop
+Already fixed in PR #131 — added `stamp_viewer_index()` call inside `admin_force_reload`. Documented as a "discovered live during testing" note in the code. Don't remove it.
+
+### B4. Self-view FPS counter is unreliable, possibly all-tile FPS counters too
+CURRENT_SESSION findings C already noted self-view unreliability. Tonight we observed BOTH self and remote tiles showing the same suspicious numbers. Suspect the JS-side FPS measurement uses something like `framesPerSecond` from getStats() but at the wrong layer or wrong sampling interval. **Tomorrow**: add a parallel debug overlay using known-good getStats() data and compare.
+
+### B5. The TWO "Echo Chamber" apps on Sam's machine
+Sam has an unrelated Node-based "Echo Chamber" at `C:\Users\Sam\AppData\Local\Programs\@echodesktop\Echo Chamber.exe` from some other project. Its Start Menu shortcut also says "Echo Chamber" and confused diagnostic earlier. **Action for Sam (manual)**: uninstall the @echodesktop one when convenient.
+
+---
+
+## 🔧 IN-FLIGHT FILES (this commit)
+
+- `core/client/src/capture_pipeline.rs` — max_framerate=30, max_bitrate=4_000_000, comments
+- `core/client/src/desktop_capture.rs` — reinit_with_backoff helper, pacer reverted, Instant import added then unused
+- `core/viewer/index.html` — runtime-stamped, automatic
+- `core/viewer/screen-share-quality.js` — message renamed
+- `core/viewer/screen-share-state.js` — threshold 30→18
+
+NOT in this commit (intentionally):
+- `core/sfu/livekit.yaml` (gitignored, server-local)
+- Any speculative per-receiver fixes — those need instrumentation first
+
+---
 
 **Ship sequence completed**:
   1. ✅ Bumped `Cargo.toml` + `tauri.conf.json` to 0.6.2 (`dfb7288`)
