@@ -18,6 +18,8 @@ mod capture_pipeline;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
+mod capture_health;
+#[cfg(target_os = "windows")]
 mod audio_output;
 #[cfg(not(target_os = "windows"))]
 mod audio_output_stub;
