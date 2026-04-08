@@ -160,46 +160,72 @@ fn main() {
                 //.flag("/wd4068")
                 .flag("/EHsc");
 
-            // NVIDIA NVENC hardware encoding (Windows) — same as Linux section
+            // NVIDIA NVENC hardware encoding (Windows).
+            //
+            // Two independent gates:
+            //   1. cuda.h present  → compile NVENC *encoder* (h264/h265 impl + factory)
+            //   2. nvcuvid.lib present → ALSO compile NVDEC *decoder* path
+            //
+            // The decoder link depends on nvcuvid which is generated from the
+            // NVIDIA Video Codec SDK and is NOT part of the stock CUDA Toolkit.
+            // CI runners that install CUDA via Jimver/cuda-toolkit get cuda.h
+            // but NOT nvcuvid — so they should compile the encoder only and
+            // skip all decoder files (otherwise the link fails on unresolved
+            // nvcuvid symbols). Sam's local machine has nvcuvid.lib vendored
+            // at `core/nvcuvid.lib` and gets the full decoder + encoder.
             let cuda_home = PathBuf::from(match env::var("CUDA_HOME") {
                 Ok(p) => p,
                 Err(_) => "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6".to_owned(),
             });
             let cuda_include_dir = cuda_home.join("include");
             if cuda_include_dir.join("cuda.h").exists() {
+                // Repo-relative nvcuvid.lib lookup: core/webrtc-sys-local → ../nvcuvid.lib
+                // Previously hardcoded to F:/Codex AI/The Echo Chamber/core/nvcuvid.lib
+                // which broke every CI runner and any other dev machine.
+                let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+                let core_dir = manifest_dir.parent().unwrap_or(Path::new(".")).to_path_buf();
+                let nvcuvid_lib = core_dir.join("nvcuvid.lib");
+                let has_nvcuvid = nvcuvid_lib.exists();
+
+                // Always-include encoder files + CUDA context
                 builder
                     .include(&cuda_include_dir)
                     .flag(&format!("-Isrc/nvidia/NvCodec/include"))
                     .flag(&format!("-Isrc/nvidia/NvCodec/NvCodec"))
-                    .file("src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp")
                     .file("src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp")
                     .file("src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp")
                     .file("src/nvidia/h264_encoder_impl.cpp")
                     .file("src/nvidia/h265_encoder_impl.cpp")
-                    .file("src/nvidia/h264_decoder_impl.cpp")
-                    .file("src/nvidia/h265_decoder_impl.cpp")
-                    .file("src/nvidia/nvidia_decoder_factory.cpp")
                     .file("src/nvidia/nvidia_encoder_factory.cpp")
                     .file("src/nvidia/cuda_context.cpp")
                     .flag("/DUSE_NVIDIA_VIDEO_CODEC=1")
                     .flag("/FIwinsock2.h")
                     .flag("/FIwindows.h");
 
-                // Link CUDA driver API + NVDEC video codec
+                // Decoder files ONLY when nvcuvid.lib is present — these
+                // transitively reference cuvid* symbols that require the
+                // NVIDIA Video Codec SDK.
+                if has_nvcuvid {
+                    builder
+                        .file("src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp")
+                        .file("src/nvidia/h264_decoder_impl.cpp")
+                        .file("src/nvidia/h265_decoder_impl.cpp")
+                        .file("src/nvidia/nvidia_decoder_factory.cpp")
+                        .flag("/DUSE_NVIDIA_VIDEO_DECODER=1");
+                }
+
+                // Link CUDA driver API
                 let cuda_lib_dir = cuda_home.join("lib").join("x64");
                 println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
                 println!("cargo:rustc-link-lib=dylib=cuda");
-                // nvcuvid.lib generated from nvcuvid.dll exports (NVIDIA Video Codec SDK)
-                let nvcuvid_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
-                    .parent().unwrap_or(Path::new(".")).parent().unwrap_or(Path::new(".")).to_path_buf();
-                let nvcuvid_lib = PathBuf::from("F:/Codex AI/The Echo Chamber/core/nvcuvid.lib");
-                if nvcuvid_lib.exists() {
-                    println!("cargo:rustc-link-search=native=F:/Codex AI/The Echo Chamber/core");
+
+                if has_nvcuvid {
+                    println!("cargo:rustc-link-search=native={}", core_dir.display());
                     println!("cargo:rustc-link-lib=dylib=nvcuvid");
+                    println!("cargo:warning=NVIDIA NVENC + NVDEC support enabled (cuda.h at {:?}, nvcuvid at {:?})", cuda_include_dir, nvcuvid_lib);
                 } else {
-                    println!("cargo:warning=nvcuvid.lib not found — NVIDIA decoder disabled");
+                    println!("cargo:warning=NVIDIA NVENC support enabled (cuda.h at {:?}); NVDEC disabled (nvcuvid.lib not found at {:?})", cuda_include_dir, nvcuvid_lib);
                 }
-                println!("cargo:warning=NVIDIA NVENC support enabled (cuda.h found at {:?})", cuda_include_dir);
             } else {
                 println!("cargo:warning=cuda.h not found at {:?}; building without NVIDIA hardware encoding", cuda_include_dir);
             }
