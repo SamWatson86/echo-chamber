@@ -5429,3 +5429,65 @@ body.admin-mode .room-top {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ── Admin panel: chips, rows, banner ────────────────────────────── */
+.admin-meta { color: #888; font-size: 11px; margin-bottom: 12px; }
+.admin-room { margin-bottom: 16px; }
+.admin-room-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #666;
+  border-bottom: 1px solid #222;
+  padding-bottom: 4px;
+  margin-bottom: 8px;
+}
+.admin-participant {
+  padding: 8px 0;
+  border-bottom: 1px solid #1a1a1a;
+}
+.admin-row1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.admin-name { color: #ddd; font-weight: 500; font-size: 12px; }
+.admin-chip {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.chip-green  { color: #6dd86d; border-color: #2a5a2a; background: rgba(40,90,40,0.15); }
+.chip-yellow { color: #ffd266; border-color: #6a5a1a; background: rgba(120,90,20,0.18); }
+.chip-red    { color: #ff6666; border-color: #6a1a1a; background: rgba(120,20,20,0.20); }
+.chip-none   { color: #555;    border-color: #2a2a2a; background: transparent; }
+
+.admin-row2 { color: #888; font-size: 10px; padding-left: 4px; margin-top: 4px; }
+.admin-row3 { color: #ffd266; font-size: 10px; padding-left: 4px; margin-top: 2px; }
+
+.admin-top-banner {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  background: #5a1212;
+  color: #fff;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 10000;
+  font-size: 13px;
+  border-bottom: 2px solid #ff3030;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.admin-top-banner-actions { display: flex; gap: 8px; }
+.admin-top-banner button {
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.3);
+  color: #fff;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
