@@ -5384,20 +5384,33 @@ body.admin-mode .room-top {
   text-decoration: underline;
   padding: 0;
 }
+.admin-badge .admin-badge-label {
+  cursor: pointer;
+  user-select: none;
+}
+.admin-badge .admin-badge-label:hover {
+  text-decoration: underline;
+}
 
 /* ── Admin side panel ──────────────────────────────────────────── */
+/* Floats in the lower-right corner with margin so it doesn't cover
+   share/mute controls or the right-edge participant tile column.
+   Sam can toggle it from the badge — Phase 2 hotfix 2026-04-08. */
 .admin-panel {
   position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 480px;
-  background: #0d0d0d;
-  border-left: 1px solid #333;
+  bottom: 16px;
+  right: 16px;
+  top: auto;
+  width: 360px;
+  max-height: 65vh;
+  background: rgba(13, 13, 13, 0.96);
+  backdrop-filter: blur(8px);
+  border: 1px solid #333;
+  border-radius: 8px;
   z-index: 9998;
   display: flex;
   flex-direction: column;
-  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
 }
 .admin-panel[hidden] { display: none; }
 .admin-panel-header {
