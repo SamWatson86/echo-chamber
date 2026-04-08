@@ -981,7 +981,7 @@ fn capture_loop_blocking(
             // === GPU PATH: HDR->SDR + downscale via compute shader ===
             if is_hdr && gpu_converter.is_some() {
                 let converter = gpu_converter.as_ref().unwrap();
-                match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h) {
+                match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h, Some(&*health)) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
                         // GPU path is intentionally zero-copy — the mapped GPU

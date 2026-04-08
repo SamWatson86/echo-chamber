@@ -562,7 +562,7 @@ async fn share_loop(
                 unsafe {
                     let (ptr, pitch, out_w, out_h) = converter.convert(
                         context, frame_texture,
-                        0, 0, w, h,
+                        0, 0, w, h, None,
                     ).map_err(|e| format!("convert: {e}"))?;
 
                     // Copy from mapped staging to owned buffer
@@ -811,7 +811,7 @@ async fn share_loop_monitor(
                 unsafe {
                     let (ptr, pitch, out_w, out_h) = converter.convert(
                         context, frame_texture,
-                        0, 0, w, h,
+                        0, 0, w, h, None,
                     ).map_err(|e| format!("convert: {e}"))?;
 
                     let row_bytes = (out_w * 4) as usize;
