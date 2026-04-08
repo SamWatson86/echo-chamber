@@ -790,6 +790,16 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (!isVideo) return;
         var trackSid = publication.trackSid || publication.track?.sid;
         debugLog("[unpublished] remote screen share unpublished: " + identity + " sid=" + trackSid);
+        // Universal "stop share" chime — descending mirror of the start chime.
+        // Suppressed during room switch (we'd hear it on every room change)
+        // and during reconnect (transient unpublish doesn't deserve a chime).
+        if (!_isRoomSwitch && !_isReconnecting) {
+          var ssDownState = participantState.get(identity);
+          var ssDownVol = (ssDownState && ssDownState.chimeVolume != null) ? ssDownState.chimeVolume : 0.5;
+          if (typeof playStopShareChime === "function") {
+            playStopShareChime(ssDownVol);
+          }
+        }
         var stillSharing = pubs.some(function(pub) { return pub && pub.source === LK.Track.Source.ScreenShare; });
         if (!stillSharing) {
           var tile = trackSid ? screenTileBySid.get(trackSid) : null;
@@ -861,7 +871,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     }
     // Real-time enter chime — fires instantly via WebSocket, no polling delay
     // Suppress during reconnection (they never actually left) or brief disconnect/rejoin
-    if (!_isRoomSwitch && !_isReconnecting && !wasPendingDisconnect) {
+    // ALSO suppress for $screen companion publishers — those are an internal
+    // implementation detail (parent client created them to publish a screen
+    // share), and the universal "share started" chime is fired separately
+    // from the TrackPublished handler. Without this guard the parent client's
+    // PERSONAL enter music plays every time anyone starts a screen share.
+    // Bug reported by Sam during 2026-04-08 v0.6.4 friend testing.
+    if (!_isRoomSwitch && !_isReconnecting && !wasPendingDisconnect &&
+        !participant.identity.endsWith('$screen')) {
       playChimeForParticipant(participant.identity, "enter");
     }
     // Attach tracks — immediate on room switch (tracks already published), delayed on first connect
@@ -976,7 +993,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         }
       });
       // Check if they moved to another room or fully left
-      if (!_isRoomSwitch) {
+      // Skip ALL personal exit chimes for $screen companion disconnects —
+      // those are internal screen-share lifecycle events, not human leaves.
+      // The universal "stop share" chime is fired separately from
+      // TrackUnpublished. See sibling guard in ParticipantConnected handler.
+      if (key.endsWith('$screen')) {
+        // no chime — handled by TrackUnpublished -> playStopShareChime
+      } else if (!_isRoomSwitch) {
         (async function() {
           try {
             var statusList = await fetchRoomStatus(controlUrlInput.value.trim(), adminToken);
