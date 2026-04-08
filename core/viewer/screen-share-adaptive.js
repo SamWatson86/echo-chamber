@@ -551,7 +551,7 @@ function startInboundScreenStatsMonitor() {
     // viewer). Server merges into client_stats map keyed by JWT subject.
     // Critical for diagnosing per-receiver mysteries — added 2026-04-08.
     try {
-      if (room && currentAccessToken && _inboundDropTracker.size > 0) {
+      if (room && currentAccessToken) {
         var inboundArr2 = [];
         _inboundDropTracker.forEach(function(dt, key) {
           if (!dt._lastReport) return;
@@ -572,16 +572,22 @@ function startInboundScreenStatsMonitor() {
             ice_remote_type: dt._lastReport.ice_remote_type || null,
           });
         });
-        if (inboundArr2.length > 0) {
-          // Capture health from Tauri client (null when running in browser viewer
-          // or when no capture is active — both are fine, server schema is optional).
-          var captureHealth = null;
-          try {
-            if (typeof tauriInvoke === "function") {
-              captureHealth = await tauriInvoke("get_capture_health");
-            }
-          } catch (e) { /* IPC unavailable, e.g. browser viewer */ }
 
+        // Capture health from Tauri client (null when running in browser viewer
+        // or when no capture is active — both are fine, server schema is optional).
+        var captureHealth = null;
+        try {
+          if (typeof tauriInvoke === "function") {
+            captureHealth = await tauriInvoke("get_capture_health");
+          }
+        } catch (e) { /* IPC unavailable, e.g. browser viewer */ }
+
+        // Fire the POST whenever we have ANYTHING to report — either receive-side
+        // inbound stats (other publishers exist) OR local capture health (we are
+        // a Tauri publisher). Without this OR, a publisher alone in the room
+        // would never report their own capture telemetry. Discovered live
+        // 2026-04-08 during Phase 2 smoke test.
+        if (inboundArr2.length > 0 || captureHealth) {
           fetch(apiUrl("/api/client-stats-report"), {
             method: "POST",
             headers: {
