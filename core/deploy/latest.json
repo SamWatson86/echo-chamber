@@ -1,15 +1,15 @@
 {
-  "version": "0.6.3",
-  "notes": "Echo Chamber v0.6.3 \u2014 hardware NVENC encoding in the installer (finally!), capture pipeline health monitor, admin login inside the client, per-receiver stats, DXGI Win+P recovery fix, encoder fallback detection. See the What's New popup for details.",
-  "pub_date": "2026-04-08T19:30:00Z",
+  "version": "0.6.4",
+  "notes": "Echo Chamber v0.6.4 \u2014 no more false red alarms when sharing a specific window (classifier now understands WGC window capture is content-driven). Known limitation: static window content still shows at low fps to viewers. Fix coming in v0.6.5.",
+  "pub_date": "2026-04-08T22:09:15Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEFJTVljUDgwcVJGamYrcDhZeFRRdWl4aEtyR2FOUHpBMU9GeHlROXlyZXh4emJxaW5sMkhtQkRrdE1PLzZpZ29UMVppR29adUYxd0dDb0tLR1VFT2dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1Njc3NTQ1CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4zX3g2NC1zZXR1cC5leGUKUTVPZGxoVFFSSjZ3Q2tqOXcxOUVNaUo4bjlzSlBQZi9GZkd3ZWpKN2FxUmdCWURxZ05FeW9XdU5rVlpySEJzY1N5WG0xQ2lkZFJYQk1OVW1MeWNYQmc9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.3/Echo.Chamber_0.6.3_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEN1cmlSZnBhOUhLanVLbzl5c0VCaVJDaVUyYXRCWU5tdzFCb01VcllWaEZnVFlOR2dWMlpwd2hiejdSaGNzYmpqdXk0Qk1TSlNGYVNDSTRZSFVWa2dFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1Njg1NTU2CWZpbGU6RWNobyBDaGFtYmVyXzAuNi40X3g2NC1zZXR1cC5leGUKVVhNd3VONHBzd3dxd0tLaFlyMkZhRyt3Q0w1aTJLMlVsMVdWTHgrd3MvZWExQ2NQSUtqTFJFb0FkOVhodzdaM0JsRlhRU2htazJZQjluVyt6SDBpQ0E9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.4/Echo.Chamber_0.6.4_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEVJOFFvemdXNld2eWttZk5tWnNWWnQ1cy9aVnFYL0JOY1RMM3JmSFFJOE5OUVpjOGtseU44NGowYzd3VnV3WUxTNHBuS2VWb3N3RHdlS2E0NnlFcVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NjAzOTUzCWZpbGU6RWNobyBDaGFtYmVyLmFwcC50YXIuZ3oKWW95dVJpUU5xd2VGK1dnb3I4VFZyZE82MGNCM1R2dHNDVW1nNm9mbDNPZTkveER5VzNuaTk0MllGUXFRTlo3dzFPc09tUmxRRGd0SmFlblVMcXFIQVE9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.2/Echo.Chamber.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjME8xL0hXdkExVDQ3enhQWVRIaHBCVjQ4eGlCd0d6a3dGTVh4bSttMkZNNW5wS1dnVUlwc1g2WTFmNzgwejZoVXA5Y242c1dUNFlMRURjalRYS01vWkFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1Njg2MTI5CWZpbGU6RWNobyBDaGFtYmVyLmFwcC50YXIuZ3oKWlB6ZzVWckhCdTJqd21QZ2hROVhhdkZ2cmRlRDhjZ2FvOCsyVStqK1hoTk0zT3REeDVGaVZabFJGQzZxM0dZNzQ2TENUMU1YOS9LT0dnd29HdGZaQnc9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.4/Echo.Chamber.app.tar.gz"
     }
   }
 }
