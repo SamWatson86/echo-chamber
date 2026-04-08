@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-07b",
+    title: "No More Stuck Sessions",
+    notes: [
+      "Forced auto-reload — when the server is updated or a session-disrupting change happens, you'll see a red countdown banner and the app will refresh itself in 5 seconds. No more sitting in a dead room wondering why nobody's there.",
+      "Sam can also push a manual reload to all connected clients from the admin dashboard, useful when SFU/network state goes weird without a full server restart."
+    ]
+  },
+  {
     version: "2026-04-07",
     title: "Stream Stability + Image Quality (v0.6.2)",
     notes: [

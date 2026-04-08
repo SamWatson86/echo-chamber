@@ -202,32 +202,133 @@ function showUpdateBanner(version) {
   document.body.appendChild(banner);
 }
 
-// ─── Stale Version Banner ───
-var _staleDismissed = false;
+// ─── Stale Version Banner (FORCED — non-dismissable, auto-reloads) ───
+// When heartbeat reports stale: true (server has been restarted/updated),
+// show a full-width banner with a 5-second countdown, then force window.location.reload().
+// Friends were getting stuck talking to no one after server restarts because they didn't
+// know to refresh. This makes it impossible to miss.
+//
+// Plays a 5-second procedural smooth-jazz ii-V-I chord progression (Dm7 → G7 → Cmaj7)
+// via Web Audio API, with a robot-voiced "The server is restarting" via SpeechSynthesis
+// layered on top. Entirely synthesized — no audio files.
+var _staleReloadTimer = null;
+
+function playStaleJazz() {
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    var ctx = new AC();
+    var now = ctx.currentTime;
+
+    // Master gain — keep it gentle, this is smooth jazz not metal
+    var master = ctx.createGain();
+    master.gain.value = 0.18;
+    master.connect(ctx.destination);
+
+    // Soft hi-pass to remove muddiness
+    var filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 2400;
+    filter.Q.value = 0.7;
+    filter.connect(master);
+
+    // ii-V-I in C major: Dm7 → G7 → Cmaj7
+    // Each chord ≈ 1.5s, total ≈ 4.5s of music + 0.5s tail
+    var chords = [
+      { time: 0.0, dur: 1.5, freqs: [146.83, 220.00, 261.63, 349.23] }, // Dm7  (D2, A3, C4, F4)
+      { time: 1.5, dur: 1.5, freqs: [196.00, 246.94, 349.23, 440.00] }, // G7   (G3, B3, F4, A4)
+      { time: 3.0, dur: 2.0, freqs: [130.81, 261.63, 329.63, 493.88] }, // Cmaj7 (C3, C4, E4, B4)
+    ];
+
+    chords.forEach(function(ch) {
+      ch.freqs.forEach(function(f, idx) {
+        // Two layered oscillators per note for warmth: sine (fundamental) + triangle (slight detune)
+        ["sine", "triangle"].forEach(function(type, layer) {
+          var osc = ctx.createOscillator();
+          osc.type = type;
+          osc.frequency.value = f * (layer === 1 ? 1.003 : 1.0); // tiny detune on layer 2
+
+          var g = ctx.createGain();
+          // Soft attack + release ADSR per note
+          var startT = now + ch.time;
+          var peakT = startT + 0.08;
+          var releaseT = startT + ch.dur - 0.15;
+          var endT = startT + ch.dur;
+          var peakGain = (layer === 0 ? 0.22 : 0.14) / Math.max(1, idx === 0 ? 1 : 1.4); // bass slightly louder
+          g.gain.setValueAtTime(0, startT);
+          g.gain.linearRampToValueAtTime(peakGain, peakT);
+          g.gain.linearRampToValueAtTime(peakGain * 0.7, releaseT);
+          g.gain.linearRampToValueAtTime(0, endT);
+
+          osc.connect(g).connect(filter);
+          osc.start(startT);
+          osc.stop(endT + 0.05);
+        });
+      });
+    });
+
+    // Robot voice over the top — layered around 1.0-4.0s so it sits in the chord progression
+    if (window.speechSynthesis && window.SpeechSynthesisUtterance) {
+      // Cancel anything currently speaking
+      window.speechSynthesis.cancel();
+      var utter = new SpeechSynthesisUtterance("The server is restarting");
+      utter.rate = 0.65;     // slow = more deliberate, more robotic
+      utter.pitch = 0.3;     // very low = robot
+      utter.volume = 0.95;
+      // Try to grab a robot/synthetic voice if one exists
+      var voices = window.speechSynthesis.getVoices();
+      var robotVoice = voices.find(function(v) {
+        return /microsoft david|google.*us|robot|synth/i.test(v.name);
+      });
+      if (robotVoice) utter.voice = robotVoice;
+      // Slight delay so the chord lands first
+      setTimeout(function() {
+        try { window.speechSynthesis.speak(utter); } catch (e) {}
+      }, 600);
+    }
+
+    // Clean up the audio context after the music finishes
+    setTimeout(function() {
+      try { ctx.close(); } catch (e) {}
+    }, 5500);
+  } catch (e) {
+    // Audio is best-effort — never block the reload
+    console.warn("[stale-banner] jazz playback failed:", e);
+  }
+}
 
 function showStaleBanner() {
-  if (_staleDismissed) return;
   if (document.getElementById("stale-banner")) return;
   var banner = document.createElement("div");
   banner.id = "stale-banner";
-  banner.className = "stale-banner";
+  banner.className = "stale-banner stale-banner-forced";
   banner.innerHTML =
-    '<span>A newer version is available — refresh to update</span>' +
-    '<button type="button" class="stale-refresh-btn">Refresh Now</button>' +
-    '<button type="button" class="stale-dismiss-btn" title="Dismiss">&times;</button>';
-  banner.querySelector(".stale-refresh-btn").addEventListener("click", function() {
-    window.location.reload();
-  });
-  banner.querySelector(".stale-dismiss-btn").addEventListener("click", function() {
-    banner.remove();
-    _staleDismissed = true;
-  });
+    '<span class="stale-banner-text">🎷 Server was updated — reloading in <strong class="stale-countdown">5</strong>s…</span>';
   document.body.appendChild(banner);
+
+  // Smooth jazz robot serenade
+  playStaleJazz();
+
+  var secondsLeft = 5;
+  var countdownEl = banner.querySelector(".stale-countdown");
+  _staleReloadTimer = setInterval(function() {
+    secondsLeft -= 1;
+    if (countdownEl) countdownEl.textContent = String(Math.max(0, secondsLeft));
+    if (secondsLeft <= 0) {
+      clearInterval(_staleReloadTimer);
+      _staleReloadTimer = null;
+      window.location.reload();
+    }
+  }, 1000);
 }
 
 function hideStaleBanner() {
   var banner = document.getElementById("stale-banner");
   if (banner) banner.remove();
+  if (_staleReloadTimer) {
+    clearInterval(_staleReloadTimer);
+    _staleReloadTimer = null;
+  }
 }
 
 // ─── Heartbeat ───

@@ -353,7 +353,143 @@ pub(crate) fn livekit_service_token(api_key: &str, api_secret: &str, room: &str)
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// POST /v1/rooms/:room_id/kick/:identity — Remove a participant from a room
+// ── LiveKit twirp RPC helpers ────────────────────────────────────────
+//
+// Used by admin_kick_participant (single kick) and admin_force_reload (nuclear).
+// All call LiveKit's twirp API directly via reqwest with a service token.
+
+fn livekit_sfu_url() -> String {
+    std::env::var("CORE_SFU_HTTP").unwrap_or_else(|_| "http://127.0.0.1:7880".to_string())
+}
+
+/// Call LiveKit ListRooms. Returns the room names known to the SFU.
+/// This is the source of truth — the control plane's tracked room map can drift
+/// (e.g. ghost screen-share publishers in a room the control plane forgot about).
+pub(crate) async fn livekit_list_rooms(state: &AppState) -> Result<Vec<String>, String> {
+    let token = livekit_service_token(
+        &state.config.livekit_api_key,
+        &state.config.livekit_api_secret,
+        "*",
+    )
+    .map_err(|_| "service token build failed".to_string())?;
+    let sfu = livekit_sfu_url();
+    let resp = state
+        .http_client
+        .post(format!("{}/twirp/livekit.RoomService/ListRooms", sfu))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("ListRooms request failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("ListRooms HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("ListRooms parse failed: {}", e))?;
+    let rooms = body
+        .get("rooms")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(rooms)
+}
+
+/// Call LiveKit ListParticipants for a given room. Returns identity strings
+/// (including `$screen` companion publishers, which the control plane filters
+/// out of its dashboard but which still hold media tracks in the SFU).
+pub(crate) async fn livekit_list_participants(
+    state: &AppState,
+    room: &str,
+) -> Result<Vec<String>, String> {
+    let token = livekit_service_token(
+        &state.config.livekit_api_key,
+        &state.config.livekit_api_secret,
+        room,
+    )
+    .map_err(|_| "service token build failed".to_string())?;
+    let sfu = livekit_sfu_url();
+    let resp = state
+        .http_client
+        .post(format!("{}/twirp/livekit.RoomService/ListParticipants", sfu))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "room": room }))
+        .send()
+        .await
+        .map_err(|e| format!("ListParticipants request failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("ListParticipants HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("ListParticipants parse failed: {}", e))?;
+    let identities = body
+        .get("participants")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    p.get("identity")
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(identities)
+}
+
+/// Call LiveKit RemoveParticipant. Returns Ok(true) on success, Ok(false) if the
+/// participant was not in the room (404 — already gone), Err on other failures.
+pub(crate) async fn livekit_remove_participant(
+    state: &AppState,
+    room: &str,
+    identity: &str,
+) -> Result<bool, String> {
+    let token = livekit_service_token(
+        &state.config.livekit_api_key,
+        &state.config.livekit_api_secret,
+        room,
+    )
+    .map_err(|_| "service token build failed".to_string())?;
+    let sfu = livekit_sfu_url();
+    let resp = state
+        .http_client
+        .post(format!(
+            "{}/twirp/livekit.RoomService/RemoveParticipant",
+            sfu
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "room": room, "identity": identity }))
+        .send()
+        .await
+        .map_err(|e| format!("RemoveParticipant request failed: {}", e))?;
+    if resp.status().is_success() {
+        return Ok(true);
+    }
+    if resp.status().as_u16() == 404 {
+        return Ok(false); // already gone — not an error
+    }
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("RemoveParticipant HTTP {}: {}", status, body))
+}
+
+/// POST /v1/rooms/:room_id/kick/:identity — Remove a participant from a room.
+///
+/// Also kicks `{identity}$screen` if present, since the screen-share companion
+/// is a separate LiveKit participant that won't be removed by kicking the parent.
+/// Without this, dropped clients leave behind ghost screen-share publishers that
+/// keep streaming until LiveKit's idle timeout.
 pub(crate) async fn admin_kick_participant(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -362,49 +498,39 @@ pub(crate) async fn admin_kick_participant(
     ensure_admin(&state, &headers)?;
     info!("ADMIN KICK: room={} identity={}", room_id, identity);
 
-    let sfu_url =
-        std::env::var("CORE_SFU_HTTP").unwrap_or_else(|_| "http://127.0.0.1:7880".to_string());
-    let token = livekit_service_token(
-        &state.config.livekit_api_key,
-        &state.config.livekit_api_secret,
-        &room_id,
-    )?;
-
-    // Call LiveKit RemoveParticipant API
-    let resp = state
-        .http_client
-        .post(format!(
-            "{}/twirp/livekit.RoomService/RemoveParticipant",
-            sfu_url
-        ))
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "room": room_id,
-            "identity": identity,
-        }))
-        .send()
+    // Kick main identity
+    let main_kicked = livekit_remove_participant(&state, &room_id, &identity)
         .await
         .map_err(|e| {
-            error!("kick SFU call failed: {}", e);
+            error!("kick {} failed: {}", identity, e);
             StatusCode::BAD_GATEWAY
         })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        error!("SFU RemoveParticipant failed ({}): {}", status, body);
-        return Err(StatusCode::BAD_GATEWAY);
+    // Best-effort: also kick the $screen companion. Ignore "not found" since
+    // most participants don't have one.
+    let screen_identity = format!("{}$screen", identity);
+    let screen_kicked = livekit_remove_participant(&state, &room_id, &screen_identity)
+        .await
+        .unwrap_or(false);
+    if screen_kicked {
+        info!("ADMIN KICK: also removed companion {}", screen_identity);
     }
 
-    // Also remove from our local participant tracking
+    // Remove from our local participant tracking
     {
         let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
         participants.retain(|_, p| p.identity != identity);
     }
 
-    info!("ADMIN KICK success: {} from {}", identity, room_id);
-    Ok(Json(serde_json::json!({ "ok": true })))
+    info!(
+        "ADMIN KICK success: {} from {} (main_kicked={}, screen_kicked={})",
+        identity, room_id, main_kicked, screen_kicked
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "main_kicked": main_kicked,
+        "screen_kicked": screen_kicked,
+    })))
 }
 
 /// POST /v1/rooms/:room_id/mute/:identity — Mute all published tracks for a participant

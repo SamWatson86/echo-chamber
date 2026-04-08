@@ -96,6 +96,47 @@ loginForm.addEventListener('submit', (e) => {
   if (pw) login(pw);
 });
 
+// ── Force Reload All ──
+//
+// POSTs to /admin/api/force-reload which bumps the server's viewer_stamp.
+// All connected clients see the change on their next 10-second heartbeat
+// and trigger the forced auto-reload countdown banner.
+//
+// Use after ANY server-state change that disturbs sessions but doesn't
+// already trigger a control plane restart: SFU restart, TURN restart,
+// livekit.yaml edits, etc.
+const forceReloadBtn = document.getElementById('force-reload-btn');
+if (forceReloadBtn) {
+  forceReloadBtn.addEventListener('click', async () => {
+    if (!confirm('Force ALL connected clients to reload?\n\nUse after SFU/TURN restarts, livekit.yaml changes, or any server-state change that disturbed in-flight sessions.')) {
+      return;
+    }
+    forceReloadBtn.disabled = true;
+    const originalText = forceReloadBtn.textContent;
+    forceReloadBtn.textContent = '⏳ Broadcasting…';
+    try {
+      const res = await fetch(apiUrl('/admin/api/force-reload'), {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      forceReloadBtn.textContent = '✅ Sent (' + (data.viewer_stamp || 'ok') + ')';
+      setTimeout(() => {
+        forceReloadBtn.textContent = originalText;
+        forceReloadBtn.disabled = false;
+      }, 3000);
+    } catch (e) {
+      forceReloadBtn.textContent = '❌ Failed';
+      console.error('force-reload failed:', e);
+      setTimeout(() => {
+        forceReloadBtn.textContent = originalText;
+        forceReloadBtn.disabled = false;
+      }, 3000);
+    }
+  });
+}
+
 // ── Dashboard ──
 
 function showDashboard() {

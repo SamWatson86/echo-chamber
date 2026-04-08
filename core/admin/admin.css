@@ -158,6 +158,28 @@ body {
   color: #ef4444;
 }
 
+.force-reload-btn {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.18), rgba(185, 28, 28, 0.18));
+  color: #fca5a5;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  letter-spacing: 0.02em;
+}
+.force-reload-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.32), rgba(185, 28, 28, 0.32));
+  color: #fee2e2;
+  border-color: rgba(239, 68, 68, 0.85);
+}
+.force-reload-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .section-title {
   font-size: 11px;
   font-weight: 700;

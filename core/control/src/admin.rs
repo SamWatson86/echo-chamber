@@ -1024,3 +1024,132 @@ pub(crate) async fn create_github_issue(client: reqwest::Client, pat: String, re
     }
     None
 }
+
+/// POST /admin/api/force-reload — Nuclear option.
+///
+/// Does TWO things atomically:
+///
+/// 1. **Bumps `viewer_stamp`** so any connected viewer's next heartbeat returns
+///    `stale: true`, triggering the forced auto-reload countdown banner client-side.
+///
+/// 2. **Kicks every participant in every LiveKit room**, including `$screen`
+///    companion publishers. This severs all in-flight WebRTC connections,
+///    eliminates ghost stale publishers (parent client died but $screen kept
+///    streaming), and forces every live client to reconnect from scratch.
+///    On reconnect, the heartbeat fires the new stamp comparison → banner →
+///    reload. Ghost publishers without a live viewer simply don't reconnect.
+///
+/// Use this whenever a server-side change requires clients to refresh their
+/// session, EVEN IF the control plane was not rebuilt or restarted:
+///   - LiveKit SFU restart
+///   - TURN server restart
+///   - LiveKit config edit (livekit.yaml) hot-reloaded
+///   - Manual room state edit
+///   - Stale ghost publishers
+///   - Anything that disturbs in-flight WebRTC connections
+///
+/// Returns the count of removed participants per room.
+pub(crate) async fn admin_force_reload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_admin(&state, &headers)?;
+
+    // 1. Bump viewer_stamp so reconnecting clients see the new value.
+    // CRITICAL: We must ALSO rewrite index.html on disk via stamp_viewer_index().
+    // The in-memory stamp drives the heartbeat staleness check, but the
+    // client-reported `viewer_version` comes from index.html stamps that
+    // ServeDir serves. If only the in-memory stamp is bumped, every reload
+    // re-fetches the OLD stamped index.html → heartbeat returns stale → reload
+    // → infinite reload loop. (Discovered live during 2026-04-07 testing.)
+    let new_stamp = format!("{}.{}", env!("CARGO_PKG_VERSION"), now_ts());
+    {
+        let mut stamp = state
+            .viewer_stamp
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *stamp = new_stamp.clone();
+    }
+    let viewer_dir = resolve_viewer_dir();
+    stamp_viewer_index(&viewer_dir, &new_stamp);
+    info!("force-reload: bumped viewer_stamp to {} (index.html updated)", new_stamp);
+
+    // 2. Iterate every LiveKit room and kick everyone in it.
+    // We use LiveKit's ListRooms as the source of truth (the control plane's
+    // tracked room map can drift).
+    let mut total_kicked: u64 = 0;
+    let mut rooms_processed: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    match crate::rooms::livekit_list_rooms(&state).await {
+        Ok(rooms) => {
+            for room_name in rooms {
+                let mut kicked_in_room: u64 = 0;
+                let mut identities_kicked: Vec<String> = Vec::new();
+                match crate::rooms::livekit_list_participants(&state, &room_name).await {
+                    Ok(identities) => {
+                        for ident in identities {
+                            match crate::rooms::livekit_remove_participant(
+                                &state,
+                                &room_name,
+                                &ident,
+                            )
+                            .await
+                            {
+                                Ok(true) => {
+                                    kicked_in_room += 1;
+                                    total_kicked += 1;
+                                    identities_kicked.push(ident);
+                                }
+                                Ok(false) => {
+                                    info!("force-reload: {} already gone from {}", ident, room_name);
+                                }
+                                Err(e) => {
+                                    let msg = format!("kick {} from {} failed: {}", ident, room_name, e);
+                                    warn!("{}", msg);
+                                    errors.push(msg);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("ListParticipants {} failed: {}", room_name, e);
+                        warn!("{}", msg);
+                        errors.push(msg);
+                    }
+                }
+                rooms_processed.push(serde_json::json!({
+                    "room": room_name,
+                    "kicked": kicked_in_room,
+                    "identities": identities_kicked,
+                }));
+            }
+        }
+        Err(e) => {
+            let msg = format!("ListRooms failed: {}", e);
+            warn!("{}", msg);
+            errors.push(msg);
+        }
+    }
+
+    // Clear local participant tracking — they'll repopulate on reconnect
+    {
+        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+        participants.clear();
+    }
+
+    info!(
+        "force-reload: kicked {} participant(s) across {} room(s), {} error(s)",
+        total_kicked,
+        rooms_processed.len(),
+        errors.len()
+    );
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "viewer_stamp": new_stamp,
+        "total_kicked": total_kicked,
+        "rooms": rooms_processed,
+        "errors": errors,
+    })))
+}

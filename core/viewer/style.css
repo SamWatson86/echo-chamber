@@ -3367,6 +3367,30 @@ video {
   color: #fff;
 }
 
+/* Forced (non-dismissable) variant — auto-reloads after 5s.
+   Bigger, more urgent, can't be ignored. */
+.stale-banner-forced {
+  padding: 14px 20px;
+  font-size: 15px;
+  font-weight: 600;
+  animation: stale-slide-in 0.3s ease-out, stale-pulse 1s ease-in-out infinite alternate;
+  letter-spacing: 0.01em;
+}
+.stale-banner-forced .stale-countdown {
+  display: inline-block;
+  min-width: 1.4em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 1px 8px;
+  border-radius: 4px;
+  margin: 0 2px;
+}
+@keyframes stale-pulse {
+  from { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4); }
+  to   { box-shadow: 0 2px 24px rgba(239, 68, 68, 0.85); }
+}
+
 /* ─── Theme Panel ─── */
 .theme-panel {
   position: fixed;
