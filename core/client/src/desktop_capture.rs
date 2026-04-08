@@ -16,6 +16,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri::Emitter;
 
@@ -697,6 +698,41 @@ fn capture_loop_blocking(
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
     let mut gpu_converter: Option<GpuConverter> = None;
+    // Reinit-with-backoff: try to recreate the DXGI Desktop Duplication
+    // interface, with retries spaced 200ms / 400ms / 800ms / 1500ms / 2000ms
+    // (~5 seconds total). The first attempt after ACCESS_LOST often fails
+    // with E_ACCESSDENIED because the secure-desktop transition (UAC prompt,
+    // session switch, display mode change) hasn't fully completed yet.
+    // Without backoff, capture dies on the very first UAC prompt.
+    let reinit_with_backoff = |creator: &dyn Fn() -> Result<IDXGIOutputDuplication, String>,
+                               reason: &str|
+     -> Option<IDXGIOutputDuplication> {
+        let backoffs_ms: [u64; 5] = [200, 400, 800, 1500, 2000];
+        for (idx, delay) in backoffs_ms.iter().enumerate() {
+            std::thread::sleep(Duration::from_millis(*delay));
+            match creator() {
+                Ok(new_dup) => {
+                    eprintln!(
+                        "[desktop-capture] DXGI DD reinit OK after {} (attempt {}/{}, delayed {}ms)",
+                        reason, idx + 1, backoffs_ms.len(), delay
+                    );
+                    return Some(new_dup);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[desktop-capture] DXGI DD reinit attempt {}/{} after {} failed ({}ms delay): {}",
+                        idx + 1, backoffs_ms.len(), reason, delay, e
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "[desktop-capture] DXGI DD reinit gave up after {} attempts ({}) — stopping capture loop",
+            backoffs_ms.len(), reason
+        );
+        None
+    };
+
     // CPU fallback staging (only used if GPU path fails)
     let mut staging: Option<ID3D11Texture2D> = None;
     let mut staging_w = 0u32;
@@ -712,8 +748,46 @@ fn capture_loop_blocking(
 
     eprintln!("[desktop-capture] starting frame loop");
 
+    // ── Capture-loop frame rate limiter ──────────────────────────────
+    //
+    // Cap the capture loop at the same rate as the WebRTC publisher
+    // (currently 30fps in capture_pipeline.rs). Without this, DXGI Desktop
+    // Duplication runs at the full compositor rate (~100fps on a 4090) and
+    // every captured frame goes through the GPU compute shader (HDR→SDR +
+    // downscale) before being handed to the encoder, which only consumes
+    // 30 of them. The other ~70 are wasted GPU work that competes with
+    // NVDEC (decoding incoming streams), NVENC (encoding our own), and DWM
+    // — under multi-publisher rooms this contention starves the encoder
+    // and causes friend-side stutter.
+    //
+    // 33ms minimum interval = 30fps cap. Should match max_framerate in
+    // capture_pipeline.rs. If we ever make framerate adaptive, this needs
+    // to be plumbed through dynamically.
+    // CAPTURE LOOP PACER REVERTED 2026-04-07.
+    //
+    // I tried capping the capture loop to 30fps to reduce GPU shader work
+    // (HDR→SDR conversion ran 100 times/sec when only 30 frames/sec were
+    // being encoded). The implementation slept 33ms before each
+    // AcquireNextFrame(100ms) call. Under multi-publisher contention this
+    // caused DWM's duplication interface to enter a degraded state where
+    // every-other AcquireNextFrame returned DXGI_ERROR_WAIT_TIMEOUT,
+    // triggering 50-consecutive-timeout reinit loops every few frames.
+    // Effective capture dropped to 9fps and the stream became unwatchable.
+    //
+    // Pre-pacer, capture ran cleanly at 100+fps. NVENC's frame_drop=1 with
+    // target fps=30 already throttles the wire output to the publish rate
+    // regardless of capture rate, so the pacer was a premature optimization.
+    // Accept the GPU shader running ~100 times/sec — it's survivable on
+    // RTX 4090 and the wire rate is what friends see.
+    //
+    // If the GPU contention from over-pacing the shader becomes a problem
+    // again in the future, the right architecture is to track frame deltas
+    // (skip processing when the previous frame is identical) instead of
+    // forcing the capture loop to sleep.
+
     // 7. Frame loop
     while running.load(Ordering::SeqCst) {
+
         // Acquire next frame from compositor (blocks up to 100ms)
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
@@ -742,47 +816,34 @@ fn capture_loop_blocking(
                         // new one (the old one may be holding a locked frame
                         // we never released due to the error path).
                         drop(duplication);
-                        match create_duplication() {
-                            Ok(new_dup) => {
+                        match reinit_with_backoff(&create_duplication, "stall") {
+                            Some(new_dup) => {
                                 duplication = new_dup;
                                 consecutive_timeouts = 0;
-                                eprintln!(
-                                    "[desktop-capture] DXGI DD reinit OK, capture continuing"
-                                );
                                 continue;
                             }
-                            Err(err) => {
-                                eprintln!(
-                                    "[desktop-capture] DXGI DD reinit FAILED: {err} — stopping"
-                                );
-                                break;
-                            }
+                            None => break,
                         }
                     }
                     continue;
                 } else if code == 0x887A0026 {
                     // DXGI_ERROR_ACCESS_LOST — desktop switch, secure desktop
-                    // (UAC), display mode change. Recoverable by reinit.
+                    // (UAC), display mode change. Recoverable by reinit, but
+                    // the FIRST reinit attempt often fails with E_ACCESSDENIED
+                    // because we're still in the secure-desktop transition.
+                    // Retry with backoff over ~5 seconds before giving up.
                     eprintln!(
                         "[desktop-capture] access lost (desktop switch/UAC/mode change) \
                          — reinitializing DXGI Desktop Duplication"
                     );
                     drop(duplication);
-                    match create_duplication() {
-                        Ok(new_dup) => {
+                    match reinit_with_backoff(&create_duplication, "access-lost") {
+                        Some(new_dup) => {
                             duplication = new_dup;
                             consecutive_timeouts = 0;
-                            eprintln!(
-                                "[desktop-capture] DXGI DD reinit OK after access-lost"
-                            );
                             continue;
                         }
-                        Err(err) => {
-                            eprintln!(
-                                "[desktop-capture] DXGI DD reinit FAILED after access-lost: {err} — stopping"
-                            );
-                            break;
-                        }
+                        None => break,
                     }
                 } else {
                     eprintln!("[desktop-capture] AcquireNextFrame error: {e}");

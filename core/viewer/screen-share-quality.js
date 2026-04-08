@@ -33,7 +33,7 @@ function _showQualityWarning(fps) {
     'border:1px solid rgba(251,191,36,0.3);backdrop-filter:blur(8px);max-width:90vw;';
 
   var text = document.createElement('span');
-  text.textContent = 'Your game is impacting stream quality (' + fps + ' fps)';
+  text.textContent = 'Stream FPS is low (' + fps + ' fps) — GPU may be contended';
 
   var dismissBtn = document.createElement('button');
   dismissBtn.textContent = '\u00d7';
