@@ -214,17 +214,43 @@ fn main() {
                         .flag("/DUSE_NVIDIA_VIDEO_DECODER=1");
                 }
 
-                // Link CUDA driver API
+                // Link CUDA driver API via DELAY-LOADED import.
+                //
+                // CRITICAL: nvcuda.dll only ships with NVIDIA drivers. AMD/Intel
+                // GPU machines do not have it. A normal hard import would make
+                // the Windows loader resolve nvcuda.dll at PROCESS STARTUP,
+                // which fails with "The code execution cannot proceed because
+                // nvcuda.dll was not found" before any of our code can run.
+                // Bricked Jeff's install during 2026-04-08 v0.6.4 friend testing.
+                //
+                // Fix: /DELAYLOAD:nvcuda.dll defers DLL resolution until the
+                // FIRST CALL to a cuda function. The existing safety check in
+                // cuda_context.cpp::load_cuda_modules() does a runtime
+                // LoadLibrary("nvcuda.dll") test BEFORE any cuda symbol is
+                // touched, returns false on AMD machines, which makes
+                // NvidiaVideoEncoderFactory::IsSupported() return false, which
+                // makes libwebrtc skip NVENC factory registration entirely.
+                // No cuda symbol is ever called → delay-load never has to
+                // actually resolve → AMD machines run cleanly with OpenH264.
+                //
+                // Same pattern OBS/Discord use for optional GPU codec libs.
+                // Requires linking delayimp.lib (Windows SDK delay-load helper).
                 let cuda_lib_dir = cuda_home.join("lib").join("x64");
                 println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
                 println!("cargo:rustc-link-lib=dylib=cuda");
+                println!("cargo:rustc-link-lib=dylib=delayimp");
+                println!("cargo:rustc-link-arg=/DELAYLOAD:nvcuda.dll");
 
                 if has_nvcuvid {
                     println!("cargo:rustc-link-search=native={}", core_dir.display());
                     println!("cargo:rustc-link-lib=dylib=nvcuvid");
-                    println!("cargo:warning=NVIDIA NVENC + NVDEC support enabled (cuda.h at {:?}, nvcuvid at {:?})", cuda_include_dir, nvcuvid_lib);
+                    // nvcuvid.dll has the same problem — delay-load it too so
+                    // AMD machines don't fail to launch over the decoder DLL.
+                    // The decoder factory has the same IsSupported gate pattern.
+                    println!("cargo:rustc-link-arg=/DELAYLOAD:nvcuvid.dll");
+                    println!("cargo:warning=NVIDIA NVENC + NVDEC support enabled with /DELAYLOAD (cuda.h at {:?}, nvcuvid at {:?})", cuda_include_dir, nvcuvid_lib);
                 } else {
-                    println!("cargo:warning=NVIDIA NVENC support enabled (cuda.h at {:?}); NVDEC disabled (nvcuvid.lib not found at {:?})", cuda_include_dir, nvcuvid_lib);
+                    println!("cargo:warning=NVIDIA NVENC support enabled with /DELAYLOAD:nvcuda.dll (cuda.h at {:?}); NVDEC disabled (nvcuvid.lib not found at {:?})", cuda_include_dir, nvcuvid_lib);
                 }
             } else {
                 println!("cargo:warning=cuda.h not found at {:?}; building without NVIDIA hardware encoding", cuda_include_dir);
