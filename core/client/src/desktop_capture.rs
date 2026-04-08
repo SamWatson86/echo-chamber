@@ -54,6 +54,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 
 use crate::capture_pipeline::CapturePublisher;
+use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
 
 // ── GPU HDR→SDR Conversion Pipeline (shared module) ──
 
@@ -118,6 +119,7 @@ pub async fn start(
     sfu_url: String,
     token: String,
     app: AppHandle,
+    health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     stop();
 
@@ -141,10 +143,11 @@ pub async fn start(
     let _ = app.emit("desktop-capture-started", target_pid);
 
     let r2 = running.clone();
+    let health_clone = Arc::clone(&health);
     tokio::spawn(async move {
         // Run DXGI capture on a blocking thread — it uses COM and blocking waits
         let result = tokio::task::spawn_blocking(move || {
-            capture_loop_blocking(&sfu_url, &token, &app, &r2, hwnd, fullscreen)
+            capture_loop_blocking(&sfu_url, &token, &app, &r2, hwnd, fullscreen, health_clone)
         })
         .await
         .map_err(|e| format!("spawn_blocking: {e}"))?;
@@ -568,6 +571,7 @@ fn capture_loop_blocking(
     running: &Arc<AtomicBool>,
     hwnd: u64,
     fullscreen: bool,
+    health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     eprintln!("[desktop-capture] initializing DXGI Desktop Duplication...");
 
@@ -696,6 +700,8 @@ fn capture_loop_blocking(
         &rt, sfu_url, token, enc_w, enc_h, "desktop-capture",
     )?;
 
+    health.set_active(true, CaptureMode::DxgiDd, EncoderType::Nvenc, 60);
+
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
     let mut gpu_converter: Option<GpuConverter> = None;
     // Reinit-with-backoff: try to recreate the DXGI Desktop Duplication
@@ -807,6 +813,7 @@ fn capture_loop_blocking(
                     // encode load, driver hiccups, UAC intrusions, display mode
                     // changes, etc. Reinit typically recovers immediately.
                     consecutive_timeouts += 1;
+                    health.record_consecutive_timeout(consecutive_timeouts);
                     if consecutive_timeouts >= 50 {
                         eprintln!(
                             "[desktop-capture] 50 consecutive timeouts (~5s stall) \
@@ -820,6 +827,8 @@ fn capture_loop_blocking(
                             Some(new_dup) => {
                                 duplication = new_dup;
                                 consecutive_timeouts = 0;
+                                health.reset_consecutive_timeouts();
+                                health.record_reinit();
                                 continue;
                             }
                             None => break,
@@ -841,6 +850,8 @@ fn capture_loop_blocking(
                         Some(new_dup) => {
                             duplication = new_dup;
                             consecutive_timeouts = 0;
+                            health.reset_consecutive_timeouts();
+                            health.record_reinit();
                             continue;
                         }
                         None => break,
@@ -848,6 +859,7 @@ fn capture_loop_blocking(
                 } else {
                     eprintln!("[desktop-capture] AcquireNextFrame error: {e}");
                     consecutive_timeouts += 1;
+                    health.record_consecutive_timeout(consecutive_timeouts);
                     if consecutive_timeouts >= 10 {
                         break;
                     }
@@ -856,6 +868,7 @@ fn capture_loop_blocking(
             }
             Ok(()) => {
                 consecutive_timeouts = 0;
+                health.reset_consecutive_timeouts();
             }
         }
 
@@ -1092,9 +1105,12 @@ fn capture_loop_blocking(
                 app, "desktop-capture-stats", "dxgi-dd", enc_w, enc_h, 60,
             ) {
                 eprintln!("[desktop-capture] {enc_w}x{enc_h} @ {fps}fps ({frame_count} frames)");
+                health.record_capture_fps(fps);
             }
         }
     }
+
+    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
 
     running.store(false, Ordering::SeqCst);
     eprintln!("[desktop-capture] shutting down, {} frames captured", publisher.frame_count());

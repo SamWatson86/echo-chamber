@@ -362,8 +362,10 @@ async fn start_desktop_capture(
     sfu_url: String,
     token: String,
     app: tauri::AppHandle,
+    health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
-    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app).await
+    let health_arc = std::sync::Arc::clone(&*health);
+    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically
