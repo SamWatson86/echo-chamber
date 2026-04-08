@@ -1,12 +1,58 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-08 (continuation — Capture Health Monitor SHIPPED, Sam visually confirmed)
-**Current Version**: **v0.6.2 SHIPPED ✅** + per-receiver instrumentation + capture pipeline health monitor + admin login from Tauri viewer — all committed locally on `feat/per-receiver-instrumentation` (NOT pushed)
-**Status**: The diagnostic blackout from prior sessions is OVER. Per-receiver getStats() pipeline + capture-side telemetry are both live and visible in a working admin panel inside the Tauri client. When friends rejoin, we'll see side-by-side per-receiver data AND each publisher's local capture health within seconds.
+**Last Updated**: 2026-04-08 (post-session — 3 PRs merged, CI NVENC enabled, GPU flicker bug logged)
+**Current Version**: **v0.6.2 SHIPPED ✅**. Merged to main: per-receiver instrumentation (#133), capture pipeline health monitor (#133), admin login from Tauri viewer (#133), DXGI INVALID_CALL fix + target_fps plumbing + encoder fallback detection (#134), NVENC in CI release builds (#135).
+**Status**: Three major diagnostic and quality improvements shipped this session. Next v0.6.3 release will ship an installer that actually has hardware encode, which is the upstream fix for the "~9fps friends" mystery.
 
 ---
 
-## ✅ CAPTURE PIPELINE HEALTH MONITOR — SHIPPED 2026-04-08 (SECOND HALF OF SESSION)
+## ✅ NVENC IN CI RELEASE BUILDS — SHIPPED 2026-04-08 (#135)
+
+**Root cause of the ~9fps mystery that drove all of v0.6.2 debugging:** the CI-built installer every friend downloaded via auto-updater had ZERO NVENC support. GitHub's `windows-latest` runner didn't have CUDA Toolkit, so `webrtc-sys-local/build.rs` saw no `cuda.h`, emitted `cargo:warning=cuda.h not found ... building without NVIDIA hardware encoding`, and produced a binary that could only OpenH264 software encode at ~9 fps. Meanwhile the capture-health classifier from #133 treats `encoder_type == "OpenH264"` as auto-Red — so friends' installed clients would light up red in the admin panel the moment they joined, while not understanding why. Fixing CI is the upstream fix for all of it.
+
+**What shipped in PR #135:**
+- `release.yml` adds a `Jimver/cuda-toolkit@v0.2.21` step before the cargo tauri build. Installs CUDA 12.6.0 with minimal sub-packages (nvcc, cudart, visual_studio_integration). Cached via `use-github-cache` so subsequent runs are fast. Passes `CUDA_HOME` through to the build step.
+- `release.yml` adds a `workflow_dispatch` trigger with a `dry_run` boolean input, so we can validate CI builds end-to-end without cutting a real release tag. When `dry_run=true`: Windows build runs fully, but `Create GitHub Release`, `build-macos`, and `publish-manifest` jobs are skipped. This is the ONLY way to validate the CUDA-in-CI path without polluting release history.
+- `build.rs` refactored into TWO independent gates instead of one:
+  - **Gate A** (`cuda.h` present) → compile encoder path only (h264/h265 impl, NvEncoder, NvEncoderCuda, nvidia_encoder_factory, cuda_context). Defines `USE_NVIDIA_VIDEO_CODEC=1`.
+  - **Gate B** (`nvcuvid.lib` present) → ADDITIONALLY compile decoder path + link nvcuvid. Defines `USE_NVIDIA_VIDEO_DECODER=1`.
+- `build.rs` replaces the hardcoded `F:/Codex AI/The Echo Chamber/core/nvcuvid.lib` path with `CARGO_MANIFEST_DIR`-based repo-relative lookup (`<repo>/core/nvcuvid.lib`). This unblocks CI AND any other dev machine that clones the repo.
+- `video_decoder_factory.cpp` updated to gate decoder registration on `USE_NVIDIA_VIDEO_DECODER` instead of `USE_NVIDIA_VIDEO_CODEC`, so encoder-only builds don't reference `NvidiaVideoDecoderFactory` symbols that weren't compiled.
+
+**Validated via dry-run** (workflow_dispatch on the PR branch before merge):
+- CUDA Toolkit installed on the runner (5-6 min cold, cached after)
+- `Verify CUDA install` step confirmed cuda.h + cuda.lib at expected paths
+- `cargo tauri build` completed successfully
+- Build log contained: `warning: webrtc-sys@0.3.27: NVIDIA NVENC + NVDEC support enabled (cuda.h at "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include", nvcuvid at "D:\a\echo-chamber\echo-chamber\core\nvcuvid.lib")`
+- **Bonus discovery**: `core/nvcuvid.lib` is vendored in the repo (10KB import library, already git-tracked). Previously invisible because of the hardcoded `F:/` path. With the new resolution, CI gets BOTH encoder AND decoder (not just encoder-only as planned). Friends get NVENC + NVDEC on the next release.
+
+**What's left:**
+- Cut a v0.6.3 release tag to actually ship the NVENC-enabled installer to friends via auto-updater
+- Next session or whenever v0.6.3 is ready, verify friends' installed clients report `encoder_type: "NVENC"` in the admin panel chip instead of OpenH264 Red
+
+---
+
+## ✅ DXGI INVALID_CALL FIX + CAPTURE-HEALTH FOLLOW-UPS — SHIPPED 2026-04-08 (#134)
+
+Three related fixes that came out of capture-health validation:
+
+1. **DXGI_ERROR_INVALID_CALL on display switch** — Win+P display mode changes were silently killing screen-share streams. The `reinit_with_backoff` handler only matched `DXGI_ERROR_ACCESS_LOST` (0x887A0026) and `DXGI_ERROR_WAIT_TIMEOUT` (0x887A0027). On Win+P switches, DXGI returns `DXGI_ERROR_INVALID_CALL` (0x887A0001) instead — the old code routed this into the generic-error branch which broke the loop after 10 hits, killing capture entirely. Fix: treat 0x887A0001 the same as 0x887A0026 (drop the broken interface, run `reinit_with_backoff`). Discovered live during capture-health validation — the new chip was supposed to go yellow on a single Win+P switch but the stream died before the chip could report.
+
+2. **Real `target_fps` in capture_health** — Rust `set_active()` calls were hardcoding `target_fps=60`, but the actual wire publish framerate is 30 (NVENC frame_drop=1 throttles down to 30). Extracted `PUBLISH_TARGET_FPS` constant in `capture_pipeline.rs` and use it from both DXGI DD and WGC `set_active()` call sites + the existing `max_framerate` hardcodes. The chip now shows a meaningful capture/wire ratio.
+
+3. **NVENC → OpenH264 fallback detection** — `set_active()` default-assumes NVENC but only WebRTC's `getStats()` knows which encoder libwebrtc actually selected. New `CaptureHealthState::set_encoder_type_from_string()` method + Tauri IPC `report_encoder_implementation`. `screen-share-native.js` stats reporter posts the codec back through this IPC whenever it changes. The classifier already auto-Reds on `encoder_type == "OpenH264"` so the chip will go red automatically if libwebrtc falls back.
+
+---
+
+## 🔴 GPU DRIVER FLICKER BUG — P1 BACKLOG (2026-04-08)
+
+**Recurring, now documented twice.** Sam's RTX 4090 / 4K HDR / 144Hz multi-monitor setup enters a wedged flickering state on certain capture pipeline transitions. First incident: WGC monitor capture in Rgba16F. Second incident this session: Win+P display mode switching while screen-sharing. Both times required a full reboot — `Win+Ctrl+Shift+B`, sign-out, and process kills did not clear it.
+
+Full diagnosis + workaround paths logged in `~/.claude/projects/F--Codex-AI-The-Echo-Chamber/memory/bug_gpu_driver_flicker_recurring.md`. MEMORY.md index updated with a critical-rule entry. P1 backlog item for v0.6.3: investigate `pnputil /restart-device` as a non-reboot recovery path, pre-stage an elevated PS script Sam can run when it happens, and consider whether `IDXGIOutputDuplication::ReleaseFrame()` ordering or catching `DXGI_ERROR_DEVICE_REMOVED` prevents the wedge in the first place.
+
+---
+
+## ✅ CAPTURE PIPELINE HEALTH MONITOR — SHIPPED 2026-04-08 (#133)
 
 The instrumentation pipeline from earlier this session has been extended with a full capture-side health monitor: every publisher's local capture pipeline emits real-time telemetry (DXGI reinits, consecutive timeouts, capture FPS, encoder type, shader errors) that flows from the Tauri client → IPC → viewer reporter → server merge → admin dashboard with a colored chip and banner UI inside the same Tauri viewer.
 
