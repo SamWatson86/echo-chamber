@@ -1308,6 +1308,7 @@ version = "0.6.2"
 dependencies = [
  "base64 0.22.1",
  "livekit",
+ "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
