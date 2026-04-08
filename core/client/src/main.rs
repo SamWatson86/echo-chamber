@@ -18,6 +18,8 @@ mod capture_pipeline;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
+mod capture_health;
+#[cfg(target_os = "windows")]
 mod audio_output;
 #[cfg(not(target_os = "windows"))]
 mod audio_output_stub;
@@ -26,8 +28,12 @@ use audio_output_stub as audio_output;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
+
+#[cfg(target_os = "windows")]
+use crate::capture_health::{CaptureHealthSnapshot, CaptureHealthState};
 
 const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 
@@ -324,8 +330,10 @@ async fn start_screen_share(
     sfu_url: String,
     token: String,
     app: tauri::AppHandle,
+    health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
-    screen_capture::start_share(source_id, sfu_url, token, app).await
+    let health_arc = std::sync::Arc::clone(&*health);
+    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
 }
 
 #[cfg(target_os = "windows")]
@@ -356,8 +364,10 @@ async fn start_desktop_capture(
     sfu_url: String,
     token: String,
     app: tauri::AppHandle,
+    health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
-    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app).await
+    let health_arc = std::sync::Arc::clone(&*health);
+    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically
@@ -370,14 +380,25 @@ async fn start_screen_share_monitor(
     sfu_url: String,
     token: String,
     app: tauri::AppHandle,
+    health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
-    screen_capture::start_share_monitor(hmonitor, sfu_url, token, app).await
+    let health_arc = std::sync::Arc::clone(&*health);
+    screen_capture::start_share_monitor(hmonitor, sfu_url, token, app, health_arc).await
 }
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn stop_desktop_capture() {
     desktop_capture::stop();
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_capture_health(
+    state: tauri::State<Arc<CaptureHealthState>>,
+) -> Option<CaptureHealthSnapshot> {
+    let snap = state.snapshot();
+    if !snap.capture_active { None } else { Some(snap) }
 }
 
 fn main() {
@@ -395,6 +416,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(server)
+        .manage(Arc::new(CaptureHealthState::new()))
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_control_url,
@@ -425,6 +447,8 @@ fn main() {
             stop_desktop_capture,
             #[cfg(target_os = "windows")]
             start_screen_share_monitor,
+            #[cfg(target_os = "windows")]
+            get_capture_health,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected

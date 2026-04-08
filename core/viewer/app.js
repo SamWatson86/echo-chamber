@@ -274,3 +274,17 @@ if (openJamButton) openJamButton.addEventListener("click", function() { openJamP
 
 // Start Who's Online polling on page load (only while not connected)
 startOnlineUsersPolling();
+
+// Admin login UI and auto-restore — must run after the modal/badge/panel
+// HTML at the end of <body> has been parsed. app.js is loaded mid-body, so
+// at this point the trailing admin scaffolding may not exist yet. Defer to
+// DOMContentLoaded if we're still parsing, otherwise run inline.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", function () {
+    setupAdminLoginUi();
+    bootAdminFromStorage();
+  });
+} else {
+  setupAdminLoginUi();
+  bootAdminFromStorage();
+}

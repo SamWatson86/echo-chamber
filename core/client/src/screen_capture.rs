@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture_pipeline::CapturePublisher;
+use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
 
 // ── Types ──
 
@@ -195,6 +196,7 @@ pub async fn start_share(
     sfu_url: String,
     token: String,
     app: AppHandle,
+    health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     stop_share();
 
@@ -210,7 +212,7 @@ pub async fn start_share(
     let app2 = app.clone();
     let r2 = running.clone();
     tokio::spawn(async move {
-        if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2).await {
+        if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2, health).await {
             eprintln!("[screen-capture] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
@@ -444,6 +446,7 @@ async fn share_loop(
     token: &str,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
+    health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
     let mut publisher = CapturePublisher::connect_and_publish(
@@ -463,6 +466,7 @@ async fn share_loop(
 
     eprintln!("[screen-capture] starting WGC capture");
     let _ = app.emit("screen-capture-started", target_pid);
+    health.set_active(true, CaptureMode::Wgc, EncoderType::Nvenc, 60);
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
@@ -558,7 +562,7 @@ async fn share_loop(
                 unsafe {
                     let (ptr, pitch, out_w, out_h) = converter.convert(
                         context, frame_texture,
-                        0, 0, w, h,
+                        0, 0, w, h, None,
                     ).map_err(|e| format!("convert: {e}"))?;
 
                     // Copy from mapped staging to owned buffer
@@ -647,12 +651,15 @@ async fn share_loop(
             let avg_yuv_ms = if fc > 0 { yuv_total_us as f64 / fc as f64 / 1000.0 } else { 0.0 };
             eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
                 width, height, fps, fc, drop_count, avg_yuv_ms);
-            publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", width, height, 30);
+            if let Some(emit_fps) = publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", width, height, 30) {
+                health.record_capture_fps(emit_fps);
+            }
         }
     }
 
     running.store(false, Ordering::SeqCst);
     eprintln!("[screen-capture] shutting down, {} frames captured", publisher.frame_count());
+    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())
 }
@@ -669,6 +676,7 @@ pub async fn start_share_monitor(
     sfu_url: String,
     token: String,
     app: AppHandle,
+    health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     stop_share();
 
@@ -684,7 +692,7 @@ pub async fn start_share_monitor(
     let app2 = app.clone();
     let r2 = running.clone();
     tokio::spawn(async move {
-        if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2).await {
+        if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2, health).await {
             eprintln!("[screen-capture-monitor] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
@@ -703,6 +711,7 @@ async fn share_loop_monitor(
     token: &str,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
+    health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
     let mut publisher = CapturePublisher::connect_and_publish(
@@ -712,6 +721,7 @@ async fn share_loop_monitor(
     eprintln!("[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}", hmonitor);
     // No PID for monitor capture — system-wide audio not per-process
     let _ = app.emit("screen-capture-started", 0u32);
+    health.set_active(true, CaptureMode::Wgc, EncoderType::Nvenc, 60);
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
@@ -801,7 +811,7 @@ async fn share_loop_monitor(
                 unsafe {
                     let (ptr, pitch, out_w, out_h) = converter.convert(
                         context, frame_texture,
-                        0, 0, w, h,
+                        0, 0, w, h, None,
                     ).map_err(|e| format!("convert: {e}"))?;
 
                     let row_bytes = (out_w * 4) as usize;
@@ -887,12 +897,15 @@ async fn share_loop_monitor(
             let avg_yuv_ms = if fc > 0 { yuv_total_us as f64 / fc as f64 / 1000.0 } else { 0.0 };
             eprintln!("[wgc-monitor-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
                 width, height, fps, fc, drop_count, avg_yuv_ms);
-            publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc-monitor", width, height, 30);
+            if let Some(emit_fps) = publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc-monitor", width, height, 30) {
+                health.record_capture_fps(emit_fps);
+            }
         }
     }
 
     running.store(false, Ordering::SeqCst);
     eprintln!("[screen-capture-monitor] shutting down, {} frames captured", publisher.frame_count());
+    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())
 }

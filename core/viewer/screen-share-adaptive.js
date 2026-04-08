@@ -10,6 +10,7 @@ function startInboundScreenStatsMonitor() {
       const LK = getLiveKitClient();
       // Extract ICE candidate-pair info once per poll cycle (from subscriber PeerConnection)
       var _iceType = "";
+      var _iceLocalType = null, _iceRemoteType = null;
       try {
         const subPc = room.engine?.pcManager?.subscriber?.pc;
         if (subPc) {
@@ -26,6 +27,11 @@ function startInboundScreenStatsMonitor() {
               var rType = rc?.candidateType || "?";
               var rtt = r.currentRoundTripTime ? Math.round(r.currentRoundTripTime * 1000) : "?";
               _iceType = `ice=${lType}->${rType} rtt=${rtt}ms`;
+              _iceLocalType = lType !== "?" ? lType : null;
+              _iceRemoteType = rType !== "?" ? rType : null;
+              // rtt collected in _iceType debug string above; not POSTed yet —
+              // remove the dead intermediate variable. Add back end-to-end if
+              // we want it on the dashboard later.
             }
           });
         }
@@ -533,13 +539,74 @@ function startInboundScreenStatsMonitor() {
 
               var layerInfo = qualityChanged ? " [LAYER->" + dt.currentQuality + "]" : "";
               // Store latest report for persistent stats logging
-              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost };
+              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost, ice_local_type: _iceLocalType, ice_remote_type: _iceRemoteType };
               debugLog(`Inbound ${sourceLabel} ${participant.identity}: ${fps}fps ${w}x${h} ${kbps}kbps codec=${codec} decoder=${decoder} jitter=${jitter}ms lost=${pktLost} dropped=${dropped}/${decoded} (${Math.round(dropRatio*100)}%/tick) nack=${nacks} pli=${plis} avgFps=${Math.round(avgFps)} layer=${dt.currentQuality}${layerInfo}${_iceType ? " " + _iceType : ""}`);
             }
           });
         }
       });
     } catch {}
+
+    // ── POST per-receiver inbound stats to control plane ─────────────────
+    // Runs on EVERY viewer (publisher or not) so we can compare what each
+    // receiver sees from each publisher. Auth: LiveKit room JWT (any logged-in
+    // viewer). Server merges into client_stats map keyed by JWT subject.
+    // Critical for diagnosing per-receiver mysteries — added 2026-04-08.
+    try {
+      if (room && currentAccessToken) {
+        var inboundArr2 = [];
+        _inboundDropTracker.forEach(function(dt, key) {
+          if (!dt._lastReport) return;
+          var parts = key.split("-");
+          var source = parts[parts.length - 1];
+          var fromId = parts.slice(0, parts.length - 1).join("-");
+          var avgF = dt.fpsHistory.length > 0
+            ? dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length : 0;
+          inboundArr2.push({
+            from: fromId, source: source,
+            fps: dt._lastReport.fps, width: dt._lastReport.w, height: dt._lastReport.h,
+            bitrate_kbps: dt._lastReport.kbps, jitter_ms: dt._lastReport.jitter,
+            lost: dt._lastReport.lost, dropped: dt._lastReport.dropped,
+            decoded: dt._lastReport.decoded, nack: dt._lastReport.nack,
+            pli: dt._lastReport.pli, avg_fps: Math.round(avgF),
+            layer: dt.currentQuality, codec: dt._lastReport.codec || null,
+            ice_local_type: dt._lastReport.ice_local_type || null,
+            ice_remote_type: dt._lastReport.ice_remote_type || null,
+          });
+        });
+
+        // Capture health from Tauri client (null when running in browser viewer
+        // or when no capture is active — both are fine, server schema is optional).
+        var captureHealth = null;
+        try {
+          if (typeof tauriInvoke === "function") {
+            captureHealth = await tauriInvoke("get_capture_health");
+          }
+        } catch (e) { /* IPC unavailable, e.g. browser viewer */ }
+
+        // Fire the POST whenever we have ANYTHING to report — either receive-side
+        // inbound stats (other publishers exist) OR local capture health (we are
+        // a Tauri publisher). Without this OR, a publisher alone in the room
+        // would never report their own capture telemetry. Discovered live
+        // 2026-04-08 during Phase 2 smoke test.
+        if (inboundArr2.length > 0 || captureHealth) {
+          fetch(apiUrl("/api/client-stats-report"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + currentAccessToken,
+            },
+            body: JSON.stringify({
+              identity: room?.localParticipant?.identity || "",
+              name: room?.localParticipant?.name || "",
+              room: currentRoomName || "",
+              inbound: inboundArr2,
+              capture_health: captureHealth,
+            }),
+          }).catch(function() {});
+        }
+      }
+    } catch (e) {}
   }, 3000);
 }
 

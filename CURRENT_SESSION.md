@@ -1,8 +1,146 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-07 (very late — after live multi-friend stream debugging session)
-**Current Version**: **v0.6.2 SHIPPED ✅** + several follow-on fixes from friend testing session
-**Status**: Live testing exposed multiple regressions and one stubborn per-receiver mystery. All capture-side fixes are committed; per-receiver path investigation is BLOCKED on instrumentation and deferred to next session.
+**Last Updated**: 2026-04-08 (continuation — Capture Health Monitor SHIPPED, Sam visually confirmed)
+**Current Version**: **v0.6.2 SHIPPED ✅** + per-receiver instrumentation + capture pipeline health monitor + admin login from Tauri viewer — all committed locally on `feat/per-receiver-instrumentation` (NOT pushed)
+**Status**: The diagnostic blackout from prior sessions is OVER. Per-receiver getStats() pipeline + capture-side telemetry are both live and visible in a working admin panel inside the Tauri client. When friends rejoin, we'll see side-by-side per-receiver data AND each publisher's local capture health within seconds.
+
+---
+
+## ✅ CAPTURE PIPELINE HEALTH MONITOR — SHIPPED 2026-04-08 (SECOND HALF OF SESSION)
+
+The instrumentation pipeline from earlier this session has been extended with a full capture-side health monitor: every publisher's local capture pipeline emits real-time telemetry (DXGI reinits, consecutive timeouts, capture FPS, encoder type, shader errors) that flows from the Tauri client → IPC → viewer reporter → server merge → admin dashboard with a colored chip and banner UI inside the same Tauri viewer.
+
+**Visually confirmed working** with Sam in the room: floating bottom-right panel shows per-participant rows with live capture-health chips. Sam's row showed `● Green DXGI-DD NVENC` with `fps 143/60  reinits 0/5m  skip 0.0%  consec_to 0`. SAM-PC (pure subscriber) correctly shows `● None —`.
+
+### What's in this milestone
+
+**Spec:** `docs/superpowers/specs/2026-04-08-capture-health-monitor-design.md`
+**Plan:** `docs/superpowers/plans/2026-04-08-capture-health-monitor.md`
+**Branch:** `feat/per-receiver-instrumentation` (local only — see push gate below)
+
+**Phase 0 — Admin login from Tauri viewer (5 commits)**
+- 🛡 Admin button on the existing viewer login screen → password modal → JWT in `state.js` `adminToken` global, persisted to `localStorage["echo_admin_token"]`
+- Auto-restore on page load via `restoreAdminFromStorage` (probes `/admin/api/dashboard` to validate)
+- Admin badge `🛡 ADMIN | Panel | Sign out` appears in the header once signed in
+- Click handler uses **document-level event delegation** so it survives connect/disconnect DOM rebuilds (initial direct addEventListener was a real bug — caught during Sam's manual test)
+- Side panel polls `/admin/api/dashboard` every 3s when open, hidden on close, toggleable from the badge
+
+**Phase 1 — Capture pipeline telemetry collector (7 commits)**
+- New module `core/client/src/capture_health.rs` (303 lines) — `CaptureHealthState` with atomic counters + 5-min rolling event windows for reinits / shader errors / max consecutive timeouts
+- Pure-function `classify()` returns `(HealthLevel, Vec<String> reasons)` from a snapshot. Thresholds: Yellow at 1 reinit / 5 consec timeouts / fps <80% target / skip rate ≥2%; Red at 3 reinits / 10 consec timeouts / fps <50% / skip rate ≥10% / OpenH264 fallback / any shader error
+- 13 unit tests covering nominal + each threshold + multi-signal max-level — all passing
+- Tauri IPC `get_capture_health()` returns `Option<CaptureHealthSnapshot>` (None when capture inactive) — registered in `invoke_handler`, state managed via `Arc<CaptureHealthState>` in `tauri::Builder.manage()`
+- DXGI Desktop Duplication path (`desktop_capture.rs`) wired with 10 hook sites: set_active(true/false), record_reinit x2, record_consecutive_timeout x2, reset_consecutive_timeouts x3, record_capture_fps x1
+- WGC path (`screen_capture.rs`) wired with 6 hook sites for both `share_loop` and `share_loop_monitor` (no reinit hooks because WGC has no retry loop today — DXGI exercises that signal)
+- gpu_converter shader error hook on the `Map` staging error path (DXGI path only — WGC handler struct doesn't carry health state, deferred as v1 limitation)
+
+**Phase 2 — Server data plumbing + viewer reporter + admin panel UI (5 commits incl. 2 hotfixes)**
+- New `CaptureHealth` struct on the server in `admin.rs` mirroring `CaptureHealthSnapshot`. New `capture_health: Option<CaptureHealth>` field on `ClientStats`. `client_stats_report` handler extends merge logic to handle the new field
+- Viewer reporter in `screen-share-adaptive.js` extended to call `tauriInvoke("get_capture_health")` and include the result in the existing `/api/client-stats-report` POST (already added last night for per-receiver inbound stats)
+- **Hotfix #1**: relaxed the POST gate from `_inboundDropTracker.size > 0` to `inboundArr.length > 0 || captureHealth` so publishers alone in a room (no remote video tracks) still report their capture health
+- **Hotfix #2**: `startInboundScreenStatsMonitor()` is now also called unconditionally on room connect from `connect.js` (previously only fired when audio-routing detected a remote tile, which left publisher-alone clients with no reporter)
+- New `core/viewer/admin-panel.js` (Phase 0 minimal version then Phase 2 chip+banner version): polls `/admin/api/dashboard` every 3s, renders per-room per-participant chips with `chip-green` / `chip-yellow` / `chip-red` / `chip-none` classes plus per-participant detail row (fps, reinits, skip rate, consec timeouts)
+- Top banner triggered on Yellow→Red or Green→Red transitions per-identity, with synthesized Web Audio chime (square wave 880→660 Hz, 280ms, gain 0.08), 60s mute button, and per-identity prev-level tracking so the chime fires once per transition
+- **Hotfix #3 (UX)**: Floating bottom-right panel (360x65vh) instead of full-height right rail — was covering Sam's screen-share controls in v1
+- **Hotfix #4 (UX)**: Badge label and "Panel" button both toggle the panel show/hide — auto-restore from localStorage no longer auto-opens the panel, only an explicit click does
+
+**Files changed across this milestone:**
+- New: `core/client/src/capture_health.rs`, `core/viewer/admin-panel.js`
+- Modified Rust: `core/client/Cargo.toml` (parking_lot), `core/client/src/main.rs` (mod, state, IPC, command), `core/client/src/desktop_capture.rs` (10 hooks), `core/client/src/screen_capture.rs` (6 hooks), `core/client/src/gpu_converter.rs` (shader error hook), `core/control/src/admin.rs` (CaptureHealth struct + ClientStats field + merge)
+- Modified JS/CSS/HTML: `core/viewer/auth.js` (admin helpers + delegation + badge toggle), `core/viewer/index.html` (modal + badge slot + panel + admin-panel.js script tag), `core/viewer/style.css` (admin login + floating panel + chips + banner), `core/viewer/screen-share-adaptive.js` (capture_health POST + gate fix), `core/viewer/connect.js` (start monitor on room connect), `core/viewer/app.js` (defer admin init to DOMContentLoaded)
+
+### How to use it (any future session)
+
+1. Click 🛡 Admin on viewer login screen → type `EchoCore-8a8e3854` (from `core/control/.env`) → click Sign in
+2. Badge appears in header. Click "Panel" or the 🛡 ADMIN label to open the floating side panel
+3. Panel polls every 3s, shows server version, per-room participant rows, chips, fps, reinits, skip rate, consec timeouts, and any classifier reasons
+4. RED transitions trigger top banner + chime once per transition; "Mute 60s" button suppresses repeats
+
+### Tuning needed
+
+Thresholds in `core/client/src/capture_health.rs` (top-of-file constants) are first-pass guesses. Phase 3 of the plan calls for tuning against real-session data after a week of use. The `target_fps` is currently hardcoded to 60 in `set_active()` calls — we may want to plumb the real publish opt later.
+
+### Push gate
+
+**Branch is local only.** Per HARD RULE 7 (never push without Sam's explicit confirmation), no `git push` has been done. To push the entire instrumentation + health-monitor work as one PR:
+```bash
+cd "F:/Codex AI/The Echo Chamber"
+git push -u origin feat/per-receiver-instrumentation
+gh pr create --title "feat: per-receiver instrumentation + capture pipeline health monitor" --body "..."
+```
+
+---
+
+## 🆕 2026-04-08 SESSION SUMMARY (FIRST HALF — per-receiver instrumentation, still relevant)
+
+### What got built (committed locally on `feat/per-receiver-instrumentation`, branch NOT pushed)
+
+1. **LiveKit Prometheus metrics** on `:6789` — `core/sfu/livekit.yaml` now has `prometheus_port: 6789`. Per-DownTrack `livekit_jitter_us`, `livekit_forward_latency`, etc. Restart of livekit.yaml is gitignored — change is server-local only.
+2. **`POST /api/client-stats-report` endpoint** in `core/control/src/admin.rs` (route registered in `main.rs`). Auth via existing `ensure_livekit` (any logged-in viewer's room JWT, no admin needed — this is what unblocks David/Decker stats reporting). Merges into existing `client_stats` map keyed by JWT subject.
+3. **`SubscriptionStats` struct** alongside `ClientStats`. Fields: `from`, `source`, `fps`, `width`, `height`, `bitrate_kbps`, `jitter_ms`, `lost`, `dropped`, `decoded`, `nack`, `pli`, `avg_fps`, `layer`, `codec`, `ice_local_type`, `ice_remote_type`. Also new `ClientStats.inbound: Option<Vec<SubscriptionStats>>`.
+4. **`#[serde(default)]` on ClientStats container** — partial payloads (no `updated_at`, no publisher fields) now deserialize cleanly. Without this the endpoint returned 422 for every viewer POST and we lost ~15 minutes diagnosing it.
+5. **`core/viewer/screen-share-adaptive.js`** — inbound stats poller now also captures ICE candidate-pair types (`lType`, `rType`, `rtt`) and stores them on `dt._lastReport`. After each 3s poll, EVERY connected viewer (publisher or pure subscriber) POSTs its `inbound[]` array to `/api/client-stats-report` with its LiveKit JWT.
+6. **Existing dashboard JSON now exposes per-receiver data**: `GET /admin/api/dashboard` returns each participant's `stats.inbound[]` automatically because `admin_dashboard` already pulls `client_stats.get(&p.identity)`.
+
+### Smoke test results (2026-04-08 @ ~22:42)
+
+Sam (main, publisher) + SAM-PC (LAN test rig) + TestBot (Edge probe in Chrome DevTools MCP, joined via WAN domain):
+
+| Receiver | From | FPS | Resolution | Bitrate | Lost | NACK | PLI | Jitter | ICE pair | Codec |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **TestBot** | sam-7475$screen | **61** | 1920×1080 | 5898 kbps | 0 | 0 | 0 | 2ms | srflx→host | H264 |
+| **SAM-PC** | sam-7475$screen | **60** | 1920×1080 | 6253 kbps | 0 | 0 | 0 | 2ms | srflx→host | H264 |
+
+**Both receivers report perfect 60fps with zero loss, zero NACK, zero PLI** on a clean test (Sam alone publishing, no kick-restart cycles in flight). This is what "working" looks like in the new dashboard. When David/Decker numbers come in tomorrow, any anomaly will be a real signal — not a measurement bug.
+
+This also strongly suggests the previous session's "4fps for David, 7fps for Decker" numbers were either (a) the unreliable viewer FPS counter lying, or (b) real chaos from 6+ kick-restart cycles disrupting in-flight WebRTC connections. Tomorrow's clean test will tell us which.
+
+### How to use it tomorrow
+
+1. **Get friends in** the room first, with NO restart cycles after they join.
+2. Sam shares his screen (or whoever's testing).
+3. Wait 30 seconds for two stats poll cycles.
+4. Pull data:
+   ```bash
+   TOKEN=$(curl -sk -X POST https://127.0.0.1:9443/v1/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"password":"EchoCore-8a8e3854"}' | python -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
+   curl -sk https://127.0.0.1:9443/admin/api/dashboard -H "Authorization: Bearer $TOKEN" | python -m json.tool
+   ```
+5. Look at each participant's `stats.inbound[]` for their view of `sam-7475$screen`. Compare side-by-side:
+   - Different `fps` values → real per-receiver problem
+   - Different `ice_local_type` (e.g. David is on `relay`, Decker on `srflx`) → ICE / TURN routing issue
+   - High `nack` or `pli` on one but not the other → packet loss specific to that receiver's path
+   - High `jitter_ms` on one → that receiver's network is buffering
+   - All similar → the viewer FPS counter we were chasing was lying all along
+6. Also pull Prometheus for SFU-side per-DownTrack outbound counters:
+   ```bash
+   curl -s http://127.0.0.1:6789/metrics | grep -E "livekit_(forward|jitter|packet_loss)" | head -50
+   ```
+
+### What is NOT done (deferred)
+
+- **`feat/per-receiver-instrumentation` branch is local only** — NOT pushed to GitHub. Sam to confirm before pushing. Worktree binary is the running server.
+- **Sam-as-publisher's outbound stats are still gated on admin login** — the existing `/admin/api/stats` POST requires `adminToken`, which Sam's Tauri client doesn't have. If we want publisher-side outbound numbers (encoder fps, BWE, qualityLimitationReason) tomorrow, either log in as admin in the Tauri client (button exists in viewer UI) or relax that endpoint to also accept room JWTs. Tomorrow problem.
+- **No dashboard UI for the new inbound array** — the data flows through `/admin/api/dashboard` JSON but the admin web UI doesn't render it. For tomorrow, just `curl + python -m json.tool` is enough. If we want a panel later, it's `core/admin/` HTML.
+- **Friends did not test tonight** — they had to leave after the LiveKit + control plane restart cycles. Smoke test was Sam + SAM-PC + Edge probe only.
+
+### Files changed this session
+- `core/sfu/livekit.yaml` (server-local, gitignored) — added `prometheus_port: 6789`
+- `core/control/src/admin.rs` (committed) — `SubscriptionStats`, `ClientStats.inbound`, `client_stats_report` handler, `#[serde(default)]`
+- `core/control/src/main.rs` (committed) — route registration
+- `core/viewer/screen-share-adaptive.js` (committed) — ICE capture + POST loop
+
+### Footguns hit this session (don't repeat)
+- **Don't `cp` worktree files into main repo if you've already edited the main repo files** — overwrites your own edits silently. Either edit one place consistently, or build from the same place you edit. (Lost ~10 minutes to this.)
+- **Don't trust "Edit succeeded" without grepping** — `Edit` tool always returns success even when a later `cp` clobbers the change. Always grep before assuming the edit landed.
+- **`Json<T>` extractor errors return 422 not 401** — the auth helper is called inside the handler, AFTER the body extractor. Missing required fields hit 422 long before auth runs, so a 422 doesn't mean "wrong token" — it means "schema mismatch."
+- **`Json<ClientStats>` needs `#[serde(default)]` for partial payloads** — `derive(Default)` alone doesn't make Serde use defaults for missing fields. Container-level `#[serde(default)]` does.
+- **Each control-plane restart kicks every LiveKit client** — even with the SFU running unchanged. Try to batch all changes into a single restart. Tonight burned 4 restarts where 2 would have sufficed.
+
+---
+
+## ⚠️ ORIGINAL READ-FIRST FROM 2026-04-07 (still partly relevant)
 
 ---
 

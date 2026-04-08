@@ -400,6 +400,7 @@ async fn main() {
         .route("/admin/api/dashboard", get(admin_dashboard))
         .route("/admin/api/sessions", get(admin_sessions))
         .route("/admin/api/stats", post(admin_report_stats))
+        .route("/api/client-stats-report", post(client_stats_report))
         .route("/admin/api/metrics", get(admin_metrics))
         .route("/admin/api/bugs", get(admin_bug_reports))
         .route("/admin/api/metrics/dashboard", get(admin_dashboard_metrics))

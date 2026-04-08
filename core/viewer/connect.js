@@ -539,6 +539,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       const detail = describeDisconnectReason(reason, LK);
       setStatus(`Disconnected: ${detail}`, true);
       logEvent("room-disconnect", detail);
+      // Stop the inbound stats poller so its 3s interval doesn't keep firing
+      // against a stale token after disconnect. The participants-grid teardown
+      // also calls this, but only when the user actually navigates away —
+      // a plain disconnect (network drop, server kick) needs an explicit stop.
+      if (typeof stopInboundScreenStatsMonitor === "function") {
+        stopInboundScreenStatsMonitor();
+      }
     });
   }
   if (LK.RoomEvent?.SignalReconnecting) {
@@ -1402,6 +1409,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   setStatus(`Connected to ${roomId}`);
   logEvent("room-join", roomId + " as " + identity);
   if (typeof startBannerPolling === "function") startBannerPolling();
+  // Start the inbound stats monitor unconditionally on room connect so the
+  // capture-health POST loop fires for publishers alone in the room (not just
+  // when a remote video tile triggers it from audio-routing.js). The monitor
+  // is idempotent — startInboundScreenStatsMonitor() returns immediately if
+  // already running, so this is safe even if audio-routing also starts it.
+  if (typeof startInboundScreenStatsMonitor === "function") {
+    startInboundScreenStatsMonitor();
+  }
 
   // Load own avatar from device-keyed storage and broadcast to room
   {

@@ -15,6 +15,7 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 base64 = "0.22"
+parking_lot = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 livekit = { version = "0.7", features = ["native-tls"] }
