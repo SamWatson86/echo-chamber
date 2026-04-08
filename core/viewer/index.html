@@ -58,6 +58,8 @@
           <div class="portal-connect-row">
             <button id="connect" class="portal-connect-btn">Connect</button>
             <button id="disconnect" disabled>Disconnect</button>
+            <!-- Phase 0: Admin login from viewer (Tauri daily-driver UX) -->
+            <button type="button" id="adminLoginBtn" class="admin-login-btn" title="Sign in as admin">🛡 Admin</button>
           </div>
         </div>
 
@@ -451,5 +453,33 @@
     <script src="capture-picker.js?v=0.6.0.1775587436"></script>
     <script src="jam.js?v=0.6.0.1775587436"></script>
     <script src="changelog.js?v=0.6.0.1775587436"></script>
+
+    <!-- Admin login modal (hidden by default; toggled by adminLoginBtn) -->
+    <div id="adminLoginModal" class="modal-overlay" hidden>
+      <div class="modal">
+        <h2>Sign in as admin</h2>
+        <p>Admin sees the dashboard, capture health, and per-receiver stats inside the viewer.</p>
+        <input type="password" id="adminLoginPassword" placeholder="Admin password" autocomplete="current-password" />
+        <div id="adminLoginError" class="modal-error" hidden></div>
+        <div class="modal-actions">
+          <button type="button" id="adminLoginCancel">Cancel</button>
+          <button type="button" id="adminLoginSubmit" class="primary">Sign in</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Admin badge slot (rendered into header once token is present) -->
+    <div id="adminBadgeSlot"></div>
+
+    <!-- Admin side panel slot (Phase 2 fills it; Phase 0 just creates the container) -->
+    <div id="adminPanel" class="admin-panel" hidden>
+      <div class="admin-panel-header">
+        <h2>🛡 Admin</h2>
+        <button type="button" id="adminPanelClose" aria-label="Close admin panel">×</button>
+      </div>
+      <div id="adminPanelBody" class="admin-panel-body">
+        <pre id="adminPanelDump">Loading…</pre>
+      </div>
+    </div>
   </body>
 </html>
