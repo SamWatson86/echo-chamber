@@ -330,8 +330,10 @@ async fn start_screen_share(
     sfu_url: String,
     token: String,
     app: tauri::AppHandle,
+    health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
-    screen_capture::start_share(source_id, sfu_url, token, app).await
+    let health_arc = std::sync::Arc::clone(&*health);
+    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
 }
 
 #[cfg(target_os = "windows")]
@@ -378,8 +380,10 @@ async fn start_screen_share_monitor(
     sfu_url: String,
     token: String,
     app: tauri::AppHandle,
+    health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
-    screen_capture::start_share_monitor(hmonitor, sfu_url, token, app).await
+    let health_arc = std::sync::Arc::clone(&*health);
+    screen_capture::start_share_monitor(hmonitor, sfu_url, token, app, health_arc).await
 }
 
 #[cfg(target_os = "windows")]
