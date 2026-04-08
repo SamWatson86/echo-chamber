@@ -1,8 +1,63 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-08 (post-session — 3 PRs merged, CI NVENC enabled, GPU flicker bug logged)
-**Current Version**: **v0.6.2 SHIPPED ✅**. Merged to main: per-receiver instrumentation (#133), capture pipeline health monitor (#133), admin login from Tauri viewer (#133), DXGI INVALID_CALL fix + target_fps plumbing + encoder fallback detection (#134), NVENC in CI release builds (#135).
-**Status**: Three major diagnostic and quality improvements shipped this session. Next v0.6.3 release will ship an installer that actually has hardware encode, which is the upstream fix for the "~9fps friends" mystery.
+**Last Updated**: 2026-04-08 (v0.6.4 SHIPPED; heartbeat fix PR #143 awaiting Sam validation)
+**Current Version**: **v0.6.4 SHIPPED ✅** (auto-update live at the domain updater endpoint).
+**Status**: v0.6.3 + v0.6.4 both in production. Friends auto-update to NVENC hardware encode (v0.6.3) + WGC classifier false-alarm fix (v0.6.4). ONE UNMERGED PR awaiting Sam validation: **#143 heartbeat frame duplication** — fixes the underlying "static WGC window stream stops" bug discovered during live testing. Sam's local binary has been restored to clean v0.6.4 (no experimental code on his daily driver).
+
+---
+
+## ⚠️ AWAITING SAM VALIDATION — PR #143
+
+**Bug the PR fixes:** Sam observed during v0.6.4 live friend testing that when David shared a specific browser window (WGC path), his stream stopped entirely unless he moved his mouse. This is WGC working as designed (event-driven, only fires on repaints) but terrible UX — static content produces zero wire frames. PR #140 / v0.6.4 only silenced the false RED capture-health alerts, not the underlying wire-silent problem.
+
+**PR #143 approach:** A dedicated heartbeat thread in `CapturePublisher` wakes every 33 ms. If `push_frame_strided` hasn't been called in that long, it re-pushes the stored last BGRA frame. NVENC dedupes repeated identical frames into tiny skip-frame markers, so the wire rate stays at 30 fps regardless of content change rate. DXGI DD is unaffected because its polling cadence is always faster than heartbeat.
+
+**Why it wasn't merged by Claude:** written during an autonomous hour while Sam was away. Compiles clean, logic is well-reasoned, but NOT live-tested against the real regression scenarios. Sam must validate before merging. The PR body has a 4-point checklist.
+
+**Validation checklist (copy to local build + run before merging):**
+1. Entire-screen share (DXGI DD) still works normally — no frame rate regression, no visual artifacts
+2. Specific-window share (WGC) of a static browser page produces a continuously flowing wire stream to other viewers
+3. Client log shows periodic `[heartbeat] N duplicate frames pushed in last 10s` when sharing static content
+4. Client log shows zero or near-zero heartbeat dup pushes when capture source is actively moving
+
+**To validate:** check out `fix/heartbeat-frame-duplication` branch, `cargo build -p echo-core-client --release` from `core/`, copy binary to `%LocalAppData%\Echo Chamber\echo-core-client.exe`, relaunch, share a browser window, check the log at `%LocalAppData%\Echo Chamber\client-stdout.log` or wherever. If all 4 checks pass, merge #143, cut v0.6.5 following the release-checklist rule (bump 3 version files + changelog entry + tag push).
+
+---
+
+## 🔴 HIGH PRIORITY BACKLOG: Browser Audio Extraction
+
+During the same live session, Sam flagged: "we are also unable to extract audio from browsers which is a problem." Browser processes (Chrome/Edge/Firefox) produce audio through sibling helper processes, not the main PID that the capture picker identifies, so WASAPI per-process loopback returns silence. Full notes at `~/.claude/projects/F--Codex-AI-The-Echo-Chamber/memory/project_browser_audio_extraction.md`. This is a real friend-blocker (YouTube/Twitch sharing without audio is unusable). Needs a brainstorming session before any code changes — not a one-liner.
+
+---
+
+## ✅ SHIPPED 2026-04-08
+
+- **v0.6.3 (#133+#134+#135)**: per-receiver instrumentation, capture pipeline health monitor, admin login from Tauri viewer, DXGI INVALID_CALL fix (Win+P recovery), target_fps plumbing, encoder fallback detection, **NVENC in CI release builds** (the biggest fix — friends' installers now ship with hardware encode).
+- **v0.6.4 (#140+#141+#142)**: WGC classifier exception (fps threshold only applies to DXGI DD mode; WGC is content-driven so low fps on a static window is normal, not degraded). Silences the false Red alerts Sam was getting during live testing. macOS build also fixed (PR #139 gating on `capture_health::*`).
+
+**Currently running on Sam's PC:**
+- Tauri client: v0.6.4 (clean build from main, post-restore)
+- Server version: 0.6.4 (control plane, SFU, TURN all up)
+- Admin dashboard updater endpoint serves v0.6.4 for auto-update to friends
+
+---
+
+## 🔴 GPU DRIVER FLICKER BUG — P1 BACKLOG (unchanged from earlier in session)
+
+Still unresolved. 2nd documented occurrence. Full notes at `~/.claude/projects/F--Codex-AI-The-Echo-Chamber/memory/bug_gpu_driver_flicker_recurring.md`. Non-reboot recovery path research is the next step when Sam has bandwidth.
+
+---
+
+## 🗂 Other backlog items (low priority)
+- Share-start/stop chimes (not personal intro/outro music) — `project_share_chimes.md`
+- capture_health cold-start false positive (10s grace after set_active true)
+- Classifier hysteresis (require 2+ Red cycles before firing banner)
+- v0.6.5 heartbeat frame duplication (PR #143, awaiting validation)
+- GPU flicker non-reboot recovery path
+
+---
+
+## Original session summary below (pre-v0.6.4)
 
 ---
 
