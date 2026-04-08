@@ -573,6 +573,15 @@ function startInboundScreenStatsMonitor() {
           });
         });
         if (inboundArr2.length > 0) {
+          // Capture health from Tauri client (null when running in browser viewer
+          // or when no capture is active — both are fine, server schema is optional).
+          var captureHealth = null;
+          try {
+            if (typeof tauriInvoke === "function") {
+              captureHealth = await tauriInvoke("get_capture_health");
+            }
+          } catch (e) { /* IPC unavailable, e.g. browser viewer */ }
+
           fetch(apiUrl("/api/client-stats-report"), {
             method: "POST",
             headers: {
@@ -584,6 +593,7 @@ function startInboundScreenStatsMonitor() {
               name: room?.localParticipant?.name || "",
               room: currentRoomName || "",
               inbound: inboundArr2,
+              capture_health: captureHealth,
             }),
           }).catch(function() {});
         }
