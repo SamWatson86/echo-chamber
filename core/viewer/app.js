@@ -274,3 +274,7 @@ if (openJamButton) openJamButton.addEventListener("click", function() { openJamP
 
 // Start Who's Online polling on page load (only while not connected)
 startOnlineUsersPolling();
+
+// Admin login UI and auto-restore
+setupAdminLoginUi();
+bootAdminFromStorage();

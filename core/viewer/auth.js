@@ -176,3 +176,83 @@ async function restoreAdminFromStorage(baseUrl) {
   try { localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY); } catch (e) {}
   return false;
 }
+
+// ── Admin login UI wireup ────────────────────────────────────────────
+function setupAdminLoginUi() {
+  const btn = document.getElementById("adminLoginBtn");
+  const modal = document.getElementById("adminLoginModal");
+  const pwInput = document.getElementById("adminLoginPassword");
+  const errBox = document.getElementById("adminLoginError");
+  const cancelBtn = document.getElementById("adminLoginCancel");
+  const submitBtn = document.getElementById("adminLoginSubmit");
+  if (!btn || !modal || !pwInput || !submitBtn || !cancelBtn) return;
+
+  btn.addEventListener("click", () => {
+    pwInput.value = "";
+    if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
+    modal.hidden = false;
+    setTimeout(() => pwInput.focus(), 0);
+  });
+
+  cancelBtn.addEventListener("click", () => { modal.hidden = true; });
+
+  pwInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitBtn.click();
+    if (e.key === "Escape") modal.hidden = true;
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    const baseUrl = (typeof getControlUrl === "function")
+      ? getControlUrl()
+      : (controlUrlInput && controlUrlInput.value.trim());
+    if (!baseUrl) {
+      if (errBox) { errBox.hidden = false; errBox.textContent = "Set a server URL first."; }
+      return;
+    }
+    try {
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Signing in…";
+      await adminLogin(baseUrl, pwInput.value);
+      modal.hidden = true;
+      renderAdminBadge();
+      // Phase 2 will start the admin panel polling here.
+      if (typeof startAdminPanel === "function") startAdminPanel();
+    } catch (e) {
+      if (errBox) { errBox.hidden = false; errBox.textContent = String(e.message || e); }
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Sign in";
+    }
+  });
+}
+
+function renderAdminBadge() {
+  const slot = document.getElementById("adminBadgeSlot");
+  if (!slot) return;
+  if (!adminToken) { slot.innerHTML = ""; return; }
+  slot.innerHTML = `
+    <div class="admin-badge" id="adminBadgeBox">
+      <span>🛡 ADMIN</span>
+      <button type="button" id="adminLogoutBtn" title="Sign out of admin">Sign out</button>
+    </div>
+  `;
+  const out = document.getElementById("adminLogoutBtn");
+  if (out) out.addEventListener("click", () => {
+    adminLogout();
+    renderAdminBadge();
+    if (typeof stopAdminPanel === "function") stopAdminPanel();
+  });
+}
+
+// Auto-restore on load
+async function bootAdminFromStorage() {
+  const baseUrl = (typeof getControlUrl === "function")
+    ? getControlUrl()
+    : (controlUrlInput && controlUrlInput.value.trim());
+  if (!baseUrl) return;
+  const ok = await restoreAdminFromStorage(baseUrl);
+  if (ok) {
+    renderAdminBadge();
+    if (typeof startAdminPanel === "function") startAdminPanel();
+  }
+}
