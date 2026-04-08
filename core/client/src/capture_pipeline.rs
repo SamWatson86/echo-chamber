@@ -39,6 +39,13 @@ const TARGET_ENCODE_FPS: f64 = 240.0;
 const MIN_FRAME_INTERVAL: std::time::Duration =
     std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS) as u64);
 
+/// Wire-level publish framerate cap. The capture loop runs at native display
+/// refresh rate (often 144+ Hz) but NVENC's frame_drop=1 throttles the wire
+/// output to this rate. This is the "target" the capture-health classifier
+/// compares current capture FPS against — if capture drops far below this
+/// number something upstream is starving the pipeline.
+pub const PUBLISH_TARGET_FPS: u32 = 30;
+
 /// Shared publisher that connects to the LiveKit SFU, creates a NativeVideoSource,
 /// publishes a Camera track, and provides helpers to push BGRA frames and emit stats.
 pub struct CapturePublisher {
@@ -111,7 +118,7 @@ impl CapturePublisher {
                 // receivers see 10fps after pacing kicks in. 30fps gives
                 // headroom for all parties and is plenty for screen content.
                 // Spencer's recommendation, validated 2026-04-07 with 3 sharers.
-                max_framerate: 30.0,
+                max_framerate: PUBLISH_TARGET_FPS as f64,
             }),
             ..Default::default()
         };
@@ -194,7 +201,7 @@ impl CapturePublisher {
                 // receivers see 10fps after pacing kicks in. 30fps gives
                 // headroom for all parties and is plenty for screen content.
                 // Spencer's recommendation, validated 2026-04-07 with 3 sharers.
-                max_framerate: 30.0,
+                max_framerate: PUBLISH_TARGET_FPS as f64,
             }),
             ..Default::default()
         };

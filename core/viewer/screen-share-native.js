@@ -566,6 +566,20 @@ async function startScreenShareManual() {
             if (rid === "f" || rid === "single") {
               highLayerFps = fps;
               highLayerLimit = limit;
+              // Push the actual encoder libwebrtc selected back into the
+              // Tauri client's CaptureHealthState. This is the canonical
+              // source — Rust default-assumes NVENC at set_active() time
+              // but only WebRTC's getStats() knows which encoder was
+              // actually picked. If it was OpenH264 (software fallback)
+              // the classifier will turn the chip Red.
+              if (codec && codec !== "unknown" && typeof tauriInvoke === "function") {
+                try {
+                  if (window._lastReportedEncoder !== codec) {
+                    window._lastReportedEncoder = codec;
+                    tauriInvoke("report_encoder_implementation", { encoder: codec }).catch(function(){});
+                  }
+                } catch (e) { /* IPC unavailable, ignore */ }
+              }
             }
           }
         });

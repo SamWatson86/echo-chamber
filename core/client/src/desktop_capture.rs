@@ -700,7 +700,12 @@ fn capture_loop_blocking(
         &rt, sfu_url, token, enc_w, enc_h, "desktop-capture",
     )?;
 
-    health.set_active(true, CaptureMode::DxgiDd, EncoderType::Nvenc, 60);
+    health.set_active(
+        true,
+        CaptureMode::DxgiDd,
+        EncoderType::Nvenc,
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+    );
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
     let mut gpu_converter: Option<GpuConverter> = None;
@@ -835,15 +840,27 @@ fn capture_loop_blocking(
                         }
                     }
                     continue;
-                } else if code == 0x887A0026 {
-                    // DXGI_ERROR_ACCESS_LOST — desktop switch, secure desktop
-                    // (UAC), display mode change. Recoverable by reinit, but
-                    // the FIRST reinit attempt often fails with E_ACCESSDENIED
-                    // because we're still in the secure-desktop transition.
-                    // Retry with backoff over ~5 seconds before giving up.
+                } else if code == 0x887A0026 || code == 0x887A0001 {
+                    // 0x887A0026 = DXGI_ERROR_ACCESS_LOST — desktop switch, secure
+                    //              desktop (UAC), display mode change.
+                    // 0x887A0001 = DXGI_ERROR_INVALID_CALL — duplication interface
+                    //              in a state where the next call is invalid. We
+                    //              hit this on Win+P display switches that DON'T
+                    //              fully fire ACCESS_LOST first. Same recovery
+                    //              path: drop the broken interface and reinit.
+                    //
+                    // Both errors recover via reinit, but the FIRST reinit attempt
+                    // often fails with E_ACCESSDENIED because we're still mid
+                    // secure-desktop / mode transition. Retry with backoff over
+                    // ~5 seconds before giving up. (Discovered the INVALID_CALL
+                    // case live during 2026-04-08 capture-health validation —
+                    // every Win+P display switch was killing the stream silently
+                    // because INVALID_CALL fell through to the "break after 10
+                    // generic errors" branch below.)
                     eprintln!(
-                        "[desktop-capture] access lost (desktop switch/UAC/mode change) \
-                         — reinitializing DXGI Desktop Duplication"
+                        "[desktop-capture] capture interface invalidated (code 0x{:08X}, \
+                         desktop switch/UAC/mode change) — reinitializing",
+                        code
                     );
                     drop(duplication);
                     match reinit_with_backoff(&create_duplication, "access-lost") {
