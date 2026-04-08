@@ -10,7 +10,7 @@ function startInboundScreenStatsMonitor() {
       const LK = getLiveKitClient();
       // Extract ICE candidate-pair info once per poll cycle (from subscriber PeerConnection)
       var _iceType = "";
-      var _iceLocalType = null, _iceRemoteType = null, _iceRttMs = null;
+      var _iceLocalType = null, _iceRemoteType = null;
       try {
         const subPc = room.engine?.pcManager?.subscriber?.pc;
         if (subPc) {
@@ -29,7 +29,9 @@ function startInboundScreenStatsMonitor() {
               _iceType = `ice=${lType}->${rType} rtt=${rtt}ms`;
               _iceLocalType = lType !== "?" ? lType : null;
               _iceRemoteType = rType !== "?" ? rType : null;
-              _iceRttMs = typeof rtt === "number" ? rtt : null;
+              // rtt collected in _iceType debug string above; not POSTed yet —
+              // remove the dead intermediate variable. Add back end-to-end if
+              // we want it on the dashboard later.
             }
           });
         }
@@ -537,7 +539,7 @@ function startInboundScreenStatsMonitor() {
 
               var layerInfo = qualityChanged ? " [LAYER->" + dt.currentQuality + "]" : "";
               // Store latest report for persistent stats logging
-              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost, ice_local_type: _iceLocalType, ice_remote_type: _iceRemoteType, rtt_ms: _iceRttMs };
+              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost, ice_local_type: _iceLocalType, ice_remote_type: _iceRemoteType };
               debugLog(`Inbound ${sourceLabel} ${participant.identity}: ${fps}fps ${w}x${h} ${kbps}kbps codec=${codec} decoder=${decoder} jitter=${jitter}ms lost=${pktLost} dropped=${dropped}/${decoded} (${Math.round(dropRatio*100)}%/tick) nack=${nacks} pli=${plis} avgFps=${Math.round(avgFps)} layer=${dt.currentQuality}${layerInfo}${_iceType ? " " + _iceType : ""}`);
             }
           });
