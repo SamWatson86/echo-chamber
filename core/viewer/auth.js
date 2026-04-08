@@ -178,61 +178,102 @@ async function restoreAdminFromStorage(baseUrl) {
 }
 
 // ── Admin login UI wireup ────────────────────────────────────────────
+// Use document-level event delegation rather than direct addEventListener,
+// because the connect/disconnect flow can tear down and rebuild the connect
+// form area, invalidating direct element references and silently breaking
+// the click handler. Delegation survives DOM rebuilds.
+let _adminLoginUiWired = false;
 function setupAdminLoginUi() {
-  const btn = document.getElementById("adminLoginBtn");
+  if (_adminLoginUiWired) return; // delegation only needs to attach once
+  _adminLoginUiWired = true;
+
+  document.addEventListener("click", function (e) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target) return;
+
+    // Open the modal when the Admin button (or any descendant) is clicked
+    const openBtn = target.closest && target.closest("#adminLoginBtn");
+    if (openBtn) {
+      const modal = document.getElementById("adminLoginModal");
+      const pwInput = document.getElementById("adminLoginPassword");
+      const errBox = document.getElementById("adminLoginError");
+      if (!modal || !pwInput) return;
+      pwInput.value = "";
+      if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
+      modal.hidden = false;
+      setTimeout(function () { pwInput.focus(); }, 0);
+      return;
+    }
+
+    // Cancel button
+    if (target.closest && target.closest("#adminLoginCancel")) {
+      const modal = document.getElementById("adminLoginModal");
+      if (modal) modal.hidden = true;
+      return;
+    }
+
+    // Submit button — perform the actual login
+    const submitBtnHit = target.closest && target.closest("#adminLoginSubmit");
+    if (submitBtnHit) {
+      _adminLoginSubmit();
+      return;
+    }
+  });
+
+  // Enter / Escape keyboard shortcuts inside the password input.
+  document.addEventListener("keydown", function (e) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target || target.id !== "adminLoginPassword") return;
+    if (e.key === "Enter") { _adminLoginSubmit(); }
+    if (e.key === "Escape") {
+      const modal = document.getElementById("adminLoginModal");
+      if (modal) modal.hidden = true;
+    }
+  });
+}
+
+async function _adminLoginSubmit() {
   const modal = document.getElementById("adminLoginModal");
   const pwInput = document.getElementById("adminLoginPassword");
   const errBox = document.getElementById("adminLoginError");
-  const cancelBtn = document.getElementById("adminLoginCancel");
   const submitBtn = document.getElementById("adminLoginSubmit");
-  if (!btn || !modal || !pwInput || !submitBtn || !cancelBtn) return;
+  if (!modal || !pwInput || !submitBtn) return;
 
-  btn.addEventListener("click", () => {
-    pwInput.value = "";
-    if (errBox) { errBox.hidden = true; errBox.textContent = ""; }
-    modal.hidden = false;
-    setTimeout(() => pwInput.focus(), 0);
-  });
-
-  cancelBtn.addEventListener("click", () => { modal.hidden = true; });
-
-  pwInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submitBtn.click();
-    if (e.key === "Escape") modal.hidden = true;
-  });
-
-  submitBtn.addEventListener("click", async () => {
-    const baseUrl = (typeof getControlUrl === "function")
-      ? getControlUrl()
-      : (controlUrlInput && controlUrlInput.value.trim());
-    if (!baseUrl) {
-      if (errBox) { errBox.hidden = false; errBox.textContent = "Set a server URL first."; }
-      return;
-    }
-    try {
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Signing in…";
-      await adminLogin(baseUrl, pwInput.value);
-      modal.hidden = true;
-      renderAdminBadge();
-      // Phase 2 will start the admin panel polling here.
-      if (typeof startAdminPanel === "function") startAdminPanel();
-    } catch (e) {
-      if (errBox) { errBox.hidden = false; errBox.textContent = String(e.message || e); }
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.textContent = "Sign in";
-    }
-  });
+  const baseUrl = (typeof getControlUrl === "function")
+    ? getControlUrl()
+    : (controlUrlInput && controlUrlInput.value.trim());
+  if (!baseUrl) {
+    if (errBox) { errBox.hidden = false; errBox.textContent = "Set a server URL first."; }
+    return;
+  }
+  try {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Signing in…";
+    await adminLogin(baseUrl, pwInput.value);
+    modal.hidden = true;
+    renderAdminBadge();
+    // Auto-open the panel on first explicit login (not on auto-restore).
+    if (typeof startAdminPanel === "function") startAdminPanel();
+  } catch (e) {
+    if (errBox) { errBox.hidden = false; errBox.textContent = String(e.message || e); }
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Sign in";
+  }
 }
 
 function renderAdminBadge() {
   const slot = document.getElementById("adminBadgeSlot");
   if (!slot) return;
   if (!adminToken) { slot.innerHTML = ""; return; }
+  // Badge has THREE clickable parts:
+  //  - The 🛡 ADMIN label → toggles the admin panel show/hide
+  //  - "Panel" button → explicit toggle (in case clicking the label feels wrong)
+  //  - "Sign out" button → clears the admin token
   slot.innerHTML = `
     <div class="admin-badge" id="adminBadgeBox">
-      <span>🛡 ADMIN</span>
+      <span class="admin-badge-label" id="adminBadgeToggle" title="Click to toggle admin panel">🛡 ADMIN</span>
+      <button type="button" id="adminPanelToggleBtn" title="Show/hide admin panel">Panel</button>
       <button type="button" id="adminLogoutBtn" title="Sign out of admin">Sign out</button>
     </div>
   `;
@@ -242,9 +283,24 @@ function renderAdminBadge() {
     renderAdminBadge();
     if (typeof stopAdminPanel === "function") stopAdminPanel();
   });
+  const toggleHandler = () => {
+    const panel = document.getElementById("adminPanel");
+    if (!panel) return;
+    if (panel.hidden) {
+      if (typeof startAdminPanel === "function") startAdminPanel();
+    } else {
+      if (typeof stopAdminPanel === "function") stopAdminPanel();
+    }
+  };
+  const toggleLabel = document.getElementById("adminBadgeToggle");
+  if (toggleLabel) toggleLabel.addEventListener("click", toggleHandler);
+  const toggleBtn = document.getElementById("adminPanelToggleBtn");
+  if (toggleBtn) toggleBtn.addEventListener("click", toggleHandler);
 }
 
-// Auto-restore on load
+// Auto-restore on load — restores the badge but does NOT auto-open the panel.
+// Sam asked for explicit control: panel only opens when you click the badge or
+// the Panel toggle. Avoids the "panel covers screen-share controls" surprise.
 async function bootAdminFromStorage() {
   const baseUrl = (typeof getControlUrl === "function")
     ? getControlUrl()
@@ -253,6 +309,6 @@ async function bootAdminFromStorage() {
   const ok = await restoreAdminFromStorage(baseUrl);
   if (ok) {
     renderAdminBadge();
-    if (typeof startAdminPanel === "function") startAdminPanel();
+    // Intentionally do NOT auto-open the panel on restore.
   }
 }
