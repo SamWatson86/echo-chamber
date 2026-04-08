@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-08c",
+    title: "Works on AMD/Intel GPUs again (v0.6.5)",
+    notes: [
+      "Critical fix: v0.6.3 and v0.6.4 had a hard dependency on nvcuda.dll which only exists on machines with NVIDIA drivers. Friends with AMD or Intel GPUs (like Jeff) couldn't even launch the app — it would error with 'The code execution cannot proceed because nvcuda.dll was not found' before any code ran. v0.6.5 makes the NVIDIA hardware encoder a delay-loaded optional dependency: NVIDIA users still get hardware encode + decode automatically, AMD/Intel users fall back to software encoding cleanly without crashing.",
+      "Same pattern OBS, Discord, and most production video apps use for optional GPU codec libraries.",
+      "If you were stuck on v0.6.2 because of the brick on v0.6.3+, you can update normally now. If you manually downgraded to v0.6.2 to escape the brick, the auto-updater will offer v0.6.5 next time you launch."
+    ]
+  },
+  {
     version: "2026-04-08b",
     title: "Fewer False Alarms (v0.6.4)",
     notes: [
