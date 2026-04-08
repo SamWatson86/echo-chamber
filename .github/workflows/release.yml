@@ -1,10 +1,24 @@
 name: Release
 
-# Only runs when you push a version tag: git tag v0.3.1 && git push --tags
+# Triggered by:
+#   - pushing a version tag: `git tag v0.3.1 && git push --tags`
+#   - manual workflow_dispatch for dry-run validation (no GitHub release
+#     published; just builds the installer to confirm CUDA/NVENC compile
+#     succeeds on the runner)
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — build the installer but do not publish a GitHub release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +42,30 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install CUDA Toolkit (for NVENC hardware encoder)
+        # GitHub's windows-latest runner does NOT have CUDA by default.
+        # webrtc-sys-local/build.rs gates NVENC on cuda.h being present,
+        # so without this step the installer would ship with OpenH264
+        # software fallback (9fps cap, unusable for screen sharing).
+        # Jimver/cuda-toolkit installs CUDA with caching — subsequent
+        # runs are fast. We only need the "nvcc" + dev package so the
+        # builder can find cuda.h and cuda.lib.
+        uses: Jimver/cuda-toolkit@v0.2.21
+        id: cuda-toolkit
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "visual_studio_integration"]'
+          use-github-cache: 'true'
+
+      - name: Verify CUDA install
+        shell: bash
+        run: |
+          echo "CUDA_HOME=$CUDA_HOME"
+          echo "CUDA_PATH=$CUDA_PATH"
+          ls -la "$CUDA_PATH/include/cuda.h" || echo "WARN: cuda.h not at expected path"
+          ls -la "$CUDA_PATH/lib/x64/cuda.lib" || echo "WARN: cuda.lib not at expected path"
+
       - name: Cache cargo registry & build
         uses: actions/cache@v4
         with:
@@ -35,8 +73,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('core/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-cuda126-${{ hashFiles('core/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-cuda126-
             ${{ runner.os }}-cargo-
 
       - name: Install Tauri CLI
@@ -49,6 +88,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CI: 'true'
+          # Explicit CUDA_HOME for build.rs — the action sets CUDA_PATH but
+          # build.rs looks for CUDA_HOME first (with CUDA_PATH fallback via
+          # the hardcoded default). Pass it through explicitly.
+          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: cargo tauri build --bundles nsis
 
       - name: Identify bundle files
@@ -86,6 +129,7 @@ jobs:
           echo "$NOTES" > release-notes.txt
 
       - name: Create GitHub Release
+        if: github.event_name == 'push' || github.event.inputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -98,6 +142,8 @@ jobs:
 
   build-macos:
     name: Build macOS DMG
+    # Only runs on real tag-triggered releases, not dry-run workflow_dispatch.
+    if: github.event_name == 'push'
     runs-on: macos-latest
     permissions:
       contents: write
@@ -176,6 +222,8 @@ jobs:
 
   publish-manifest:
     name: Publish Update Manifest
+    # Only on real tag-triggered releases, not dry-run workflow_dispatch.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     needs: [build-windows, build-macos]
     permissions:

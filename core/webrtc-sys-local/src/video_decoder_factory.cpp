@@ -35,7 +35,12 @@
 #include "livekit/android.h"
 #endif
 
-#if defined(USE_NVIDIA_VIDEO_CODEC)
+// USE_NVIDIA_VIDEO_DECODER is set by build.rs only when nvcuvid.lib is
+// present on the build machine (Sam's local dev, not GitHub Actions CI
+// unless we vendor it). The encoder path uses USE_NVIDIA_VIDEO_CODEC and
+// compiles independently — builds without nvcuvid still get hardware
+// encoding via NVENC. See core/webrtc-sys-local/build.rs comments.
+#if defined(USE_NVIDIA_VIDEO_DECODER)
 #include "nvidia/nvidia_decoder_factory.h"
 #endif
 
@@ -50,7 +55,7 @@ VideoDecoderFactory::VideoDecoderFactory() {
   factories_.push_back(CreateAndroidVideoDecoderFactory());
 #endif
 
-#if defined(USE_NVIDIA_VIDEO_CODEC)
+#if defined(USE_NVIDIA_VIDEO_DECODER)
   if (webrtc::NvidiaVideoDecoderFactory::IsSupported()) {
     factories_.push_back(std::make_unique<webrtc::NvidiaVideoDecoderFactory>());
   }
