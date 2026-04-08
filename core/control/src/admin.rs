@@ -62,6 +62,8 @@ pub(crate) struct ClientStats {
     /// receivers so we can stop hunt-and-pecking encoder/SFU config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) inbound: Option<Vec<SubscriptionStats>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capture_health: Option<CaptureHealth>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -100,6 +102,23 @@ pub(crate) struct SubscriptionStats {
     pub(crate) ice_local_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ice_remote_type: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct CaptureHealth {
+    pub(crate) level: String,                       // "Green" | "Yellow" | "Red"
+    pub(crate) reasons: Vec<String>,
+    pub(crate) capture_active: bool,
+    pub(crate) capture_mode: String,
+    pub(crate) encoder_type: String,
+    pub(crate) current_fps: u32,
+    pub(crate) target_fps: u32,
+    pub(crate) reinit_count_5m: u32,
+    pub(crate) consecutive_timeouts: u32,
+    pub(crate) consecutive_timeouts_max_5m: u32,
+    pub(crate) encoder_skip_rate_pct: f32,
+    pub(crate) shader_errors_5m: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -554,6 +573,9 @@ pub(crate) async fn client_stats_report(
             }
             if payload.inbound.is_some() {
                 existing.inbound = payload.inbound;
+            }
+            if payload.capture_health.is_some() {
+                existing.capture_health = payload.capture_health;
             }
             if payload.screen_fps.is_some() { existing.screen_fps = payload.screen_fps; }
             if payload.screen_width.is_some() { existing.screen_width = payload.screen_width; }
