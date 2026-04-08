@@ -1,6 +1,6 @@
 use base64::Engine as _;
 
-use crate::auth::ensure_admin;
+use crate::auth::{ensure_admin, ensure_livekit};
 use crate::config::*;
 use crate::rooms::SessionEvent;
 use crate::AppState;
@@ -21,6 +21,7 @@ use tracing::{info, warn};
 // ── Structs ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub(crate) struct ClientStats {
     pub(crate) identity: String,
     pub(crate) name: String,
@@ -52,6 +53,53 @@ pub(crate) struct ClientStats {
     pub(crate) camera_height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) camera_bitrate_kbps: Option<u32>,
+    /// Per-receiver subscription stats — what THIS client sees from each remote
+    /// publisher's tracks. Populated by viewer's adaptive stats poller (which
+    /// already calls getStats() on every inbound RTCRtpReceiver). Added
+    /// 2026-04-08 for the per-receiver mystery: Sam sees fine FPS, David sees
+    /// 4 fps from Sam, Decker sees 7 fps from Sam — we need to know which
+    /// inbound numbers (packetsLost, nack, pli, ICE candidate) differ between
+    /// receivers so we can stop hunt-and-pecking encoder/SFU config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) inbound: Option<Vec<SubscriptionStats>>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub(crate) struct SubscriptionStats {
+    /// Identity of the remote publisher this row describes (Sam, David, etc).
+    pub(crate) from: String,
+    /// "screen" or "camera"
+    pub(crate) source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bitrate_kbps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) jitter_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lost: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dropped: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) decoded: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) nack: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pli: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) avg_fps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) layer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ice_local_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ice_remote_type: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -465,6 +513,65 @@ pub(crate) async fn admin_report_stats(
     // Persist to disk
     append_stats_snapshot(&state.session_log_dir, &snapshot);
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/client-stats-report — Per-receiver stats from any viewer.
+///
+/// Auth: LiveKit room JWT (any logged-in viewer can post). Unlike
+/// `admin_report_stats` which only admins can call, this lets external friends
+/// (David, Decker) post their inbound subscription stats so we can compare what
+/// each receiver actually sees from each publisher.
+///
+/// Storage: merges into `client_stats` map keyed by identity. Preserves any
+/// publisher-side fields already present (so a single identity can carry both
+/// outbound encoder stats and inbound subscription stats).
+///
+/// Added 2026-04-08 to instrument the per-receiver mystery (Sam publishes ok,
+/// David sees 4fps, Decker sees 7fps — need to know which inbound numbers
+/// differ between receivers).
+pub(crate) async fn client_stats_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ClientStats>,
+) -> Result<StatusCode, StatusCode> {
+    let claims = ensure_livekit(&state, &headers)?;
+    // Trust the JWT subject as the identity, not what the client sent — prevents
+    // a client from posting stats under a different identity.
+    let identity = claims.sub;
+    let mut stats = state.client_stats.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ts();
+    match stats.get_mut(&identity) {
+        Some(existing) => {
+            // Merge: prefer incoming inbound array, name, room; keep publisher
+            // fields if the report doesn't include them.
+            existing.updated_at = now;
+            if !payload.name.is_empty() {
+                existing.name = payload.name;
+            }
+            if !payload.room.is_empty() {
+                existing.room = payload.room;
+            }
+            if payload.inbound.is_some() {
+                existing.inbound = payload.inbound;
+            }
+            if payload.screen_fps.is_some() { existing.screen_fps = payload.screen_fps; }
+            if payload.screen_width.is_some() { existing.screen_width = payload.screen_width; }
+            if payload.screen_height.is_some() { existing.screen_height = payload.screen_height; }
+            if payload.screen_bitrate_kbps.is_some() { existing.screen_bitrate_kbps = payload.screen_bitrate_kbps; }
+            if payload.bwe_kbps.is_some() { existing.bwe_kbps = payload.bwe_kbps; }
+            if payload.quality_limitation.is_some() { existing.quality_limitation = payload.quality_limitation; }
+            if payload.encoder.is_some() { existing.encoder = payload.encoder; }
+            if payload.ice_local_type.is_some() { existing.ice_local_type = payload.ice_local_type; }
+            if payload.ice_remote_type.is_some() { existing.ice_remote_type = payload.ice_remote_type; }
+        }
+        None => {
+            let mut entry = payload;
+            entry.identity = identity.clone();
+            entry.updated_at = now;
+            stats.insert(identity, entry);
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

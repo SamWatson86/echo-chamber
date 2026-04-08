@@ -10,6 +10,7 @@ function startInboundScreenStatsMonitor() {
       const LK = getLiveKitClient();
       // Extract ICE candidate-pair info once per poll cycle (from subscriber PeerConnection)
       var _iceType = "";
+      var _iceLocalType = null, _iceRemoteType = null, _iceRttMs = null;
       try {
         const subPc = room.engine?.pcManager?.subscriber?.pc;
         if (subPc) {
@@ -26,6 +27,9 @@ function startInboundScreenStatsMonitor() {
               var rType = rc?.candidateType || "?";
               var rtt = r.currentRoundTripTime ? Math.round(r.currentRoundTripTime * 1000) : "?";
               _iceType = `ice=${lType}->${rType} rtt=${rtt}ms`;
+              _iceLocalType = lType !== "?" ? lType : null;
+              _iceRemoteType = rType !== "?" ? rType : null;
+              _iceRttMs = typeof rtt === "number" ? rtt : null;
             }
           });
         }
@@ -533,13 +537,58 @@ function startInboundScreenStatsMonitor() {
 
               var layerInfo = qualityChanged ? " [LAYER->" + dt.currentQuality + "]" : "";
               // Store latest report for persistent stats logging
-              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost };
+              dt._lastReport = { fps: fps, w: w, h: h, kbps: kbps, jitter: jitter, lost: pktLost, dropped: dropped, decoded: decoded, nack: nacks, pli: plis, codec: codec !== "?" ? codec : null, _deltaLost: deltaLost, ice_local_type: _iceLocalType, ice_remote_type: _iceRemoteType, rtt_ms: _iceRttMs };
               debugLog(`Inbound ${sourceLabel} ${participant.identity}: ${fps}fps ${w}x${h} ${kbps}kbps codec=${codec} decoder=${decoder} jitter=${jitter}ms lost=${pktLost} dropped=${dropped}/${decoded} (${Math.round(dropRatio*100)}%/tick) nack=${nacks} pli=${plis} avgFps=${Math.round(avgFps)} layer=${dt.currentQuality}${layerInfo}${_iceType ? " " + _iceType : ""}`);
             }
           });
         }
       });
     } catch {}
+
+    // ── POST per-receiver inbound stats to control plane ─────────────────
+    // Runs on EVERY viewer (publisher or not) so we can compare what each
+    // receiver sees from each publisher. Auth: LiveKit room JWT (any logged-in
+    // viewer). Server merges into client_stats map keyed by JWT subject.
+    // Critical for diagnosing per-receiver mysteries — added 2026-04-08.
+    try {
+      if (room && currentAccessToken && _inboundDropTracker.size > 0) {
+        var inboundArr2 = [];
+        _inboundDropTracker.forEach(function(dt, key) {
+          if (!dt._lastReport) return;
+          var parts = key.split("-");
+          var source = parts[parts.length - 1];
+          var fromId = parts.slice(0, parts.length - 1).join("-");
+          var avgF = dt.fpsHistory.length > 0
+            ? dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length : 0;
+          inboundArr2.push({
+            from: fromId, source: source,
+            fps: dt._lastReport.fps, width: dt._lastReport.w, height: dt._lastReport.h,
+            bitrate_kbps: dt._lastReport.kbps, jitter_ms: dt._lastReport.jitter,
+            lost: dt._lastReport.lost, dropped: dt._lastReport.dropped,
+            decoded: dt._lastReport.decoded, nack: dt._lastReport.nack,
+            pli: dt._lastReport.pli, avg_fps: Math.round(avgF),
+            layer: dt.currentQuality, codec: dt._lastReport.codec || null,
+            ice_local_type: dt._lastReport.ice_local_type || null,
+            ice_remote_type: dt._lastReport.ice_remote_type || null,
+          });
+        });
+        if (inboundArr2.length > 0) {
+          fetch(apiUrl("/api/client-stats-report"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + currentAccessToken,
+            },
+            body: JSON.stringify({
+              identity: room?.localParticipant?.identity || "",
+              name: room?.localParticipant?.name || "",
+              room: currentRoomName || "",
+              inbound: inboundArr2,
+            }),
+          }).catch(function() {});
+        }
+      }
+    } catch (e) {}
   }, 3000);
 }
 
