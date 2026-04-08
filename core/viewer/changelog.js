@@ -8,6 +8,20 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-08",
+    title: "Hardware Encoding for Everyone (v0.6.3)",
+    notes: [
+      "Hardware NVENC encoding in the installer — the biggest one. Every friend who installs via auto-updater now gets real NVIDIA NVENC hardware encoding instead of OpenH264 software fallback. OpenH264 was capped at ~9 fps which is why screen shares have been miserable up to now. Fixed at the CI level so it just works going forward.",
+      "Hardware NVDEC decoding too — as a bonus, the new CI build also includes NVDEC, so hardware H.264 decoding of everyone else's streams is enabled.",
+      "Capture pipeline health monitor — Sam now has an admin panel inside the client showing each participant's capture health as a colored chip (Green / Yellow / Red) with live fps, reinit count, consecutive-timeout count, encoder type, and capture mode. Yellow→Red transitions pop a top banner + alert chime. Lets us catch capture degradation before it becomes a visible problem.",
+      "Admin login from inside the viewer — new 🛡 Admin button on the connect screen so Sam can become admin without opening a separate browser tab. Token persists across reloads. Panel toggles from the badge so it doesn't cover your share controls.",
+      "Per-receiver stats — every client now reports what each receiver actually sees from each publisher (fps, packet loss, NACK, PLI, jitter, ICE candidate type). Lets us diagnose 'why does David see it differently than Decker' mysteries with real numbers instead of guessing.",
+      "Win+P no longer kills your screen share — DXGI_ERROR_INVALID_CALL on display mode change was silently breaking the capture loop. Now treated the same as access-lost: drop the interface, reinit, keep going.",
+      "Fewer false alarms on the health chip — target fps is now the real wire rate (30), not the hardcoded 60 placeholder.",
+      "Encoder fallback automatically flagged — if libwebrtc ever falls back to OpenH264 at runtime, the chip turns Red immediately so we know before the quality disaster happens."
+    ]
+  },
+  {
     version: "2026-04-07b",
     title: "No More Stuck Sessions",
     notes: [
