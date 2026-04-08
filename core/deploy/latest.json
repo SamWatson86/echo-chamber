@@ -1,11 +1,11 @@
 {
-  "version": "0.6.2",
-  "notes": "Echo Chamber v0.6.2 — HDR color fix, NVENC text quality, full-duplex SFU proxy stability, 2.5 Mbps bitrate floor, DXGI capture self-recovery, aspect ratio + grid layout fixes",
-  "pub_date": "2026-04-07T23:19:51Z",
+  "version": "0.6.3",
+  "notes": "Echo Chamber v0.6.3 \u2014 hardware NVENC encoding in the installer (finally!), capture pipeline health monitor, admin login inside the client, per-receiver stats, DXGI Win+P recovery fix, encoder fallback detection. See the What's New popup for details.",
+  "pub_date": "2026-04-08T19:30:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEdVcWRRL3BDT0xTVEtJSmlDcHVRNVo1RVovejVyOXIwRE9xWmFxaklNczE5Mks5aE54Wk5WMjNrY0tRNTVIU3BNa0dkZ29VNDRwQkF6SkVPMzQ2d2cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NjAzNTEwCWZpbGU6RWNobyBDaGFtYmVyXzAuNi4yX3g2NC1zZXR1cC5leGUKZFM5OXgzS0Z6cllUZy9RbVJnMkg3bnRxQmpVZHJvN2pjemdTMTdndUlTOGJrL2x6d09rQUhMZXM5cWxIL2ROR1NqN3RnMWhobXRQdGIrUkNqdk5YREE9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.2/Echo.Chamber_0.6.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEFJTVljUDgwcVJGamYrcDhZeFRRdWl4aEtyR2FOUHpBMU9GeHlROXlyZXh4emJxaW5sMkhtQkRrdE1PLzZpZ29UMVppR29adUYxd0dDb0tLR1VFT2dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1Njc3NTQ1CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4zX3g2NC1zZXR1cC5leGUKUTVPZGxoVFFSSjZ3Q2tqOXcxOUVNaUo4bjlzSlBQZi9GZkd3ZWpKN2FxUmdCWURxZ05FeW9XdU5rVlpySEJzY1N5WG0xQ2lkZFJYQk1OVW1MeWNYQmc9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.3/Echo.Chamber_0.6.3_x64-setup.exe"
     },
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEVJOFFvemdXNld2eWttZk5tWnNWWnQ1cy9aVnFYL0JOY1RMM3JmSFFJOE5OUVpjOGtseU44NGowYzd3VnV3WUxTNHBuS2VWb3N3RHdlS2E0NnlFcVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NjAzOTUzCWZpbGU6RWNobyBDaGFtYmVyLmFwcC50YXIuZ3oKWW95dVJpUU5xd2VGK1dnb3I4VFZyZE82MGNCM1R2dHNDVW1nNm9mbDNPZTkveER5VzNuaTk0MllGUXFRTlo3dzFPc09tUmxRRGd0SmFlblVMcXFIQVE9PQo=",
