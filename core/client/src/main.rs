@@ -422,10 +422,16 @@ fn main() {
 
     let server = load_config();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(server)
-        .manage(Arc::new(CaptureHealthState::new()))
+        .manage(server);
+
+    // capture_health module is Windows-only (DXGI + WGC capture paths).
+    // Gate the state management so macOS builds compile.
+    #[cfg(target_os = "windows")]
+    let builder = builder.manage(Arc::new(CaptureHealthState::new()));
+
+    builder
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_control_url,
