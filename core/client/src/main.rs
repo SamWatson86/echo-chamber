@@ -28,8 +28,12 @@ use audio_output_stub as audio_output;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
+
+#[cfg(target_os = "windows")]
+use crate::capture_health::{CaptureHealthSnapshot, CaptureHealthState};
 
 const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 
@@ -382,6 +386,15 @@ fn stop_desktop_capture() {
     desktop_capture::stop();
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_capture_health(
+    state: tauri::State<Arc<CaptureHealthState>>,
+) -> Option<CaptureHealthSnapshot> {
+    let snap = state.snapshot();
+    if !snap.capture_active { None } else { Some(snap) }
+}
+
 fn main() {
     // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
     #[cfg(target_os = "windows")]
@@ -397,6 +410,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(server)
+        .manage(Arc::new(CaptureHealthState::new()))
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_control_url,
@@ -427,6 +441,8 @@ fn main() {
             stop_desktop_capture,
             #[cfg(target_os = "windows")]
             start_screen_share_monitor,
+            #[cfg(target_os = "windows")]
+            get_capture_health,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected
