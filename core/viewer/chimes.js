@@ -127,6 +127,40 @@ function playScreenShareChime(volume) {
   } catch {}
 }
 
+// Mirror of playScreenShareChime for STOP-share events. Same G major triad
+// notes but in DESCENDING order so the listener can intuitively distinguish
+// "share started" (rising) from "share stopped" (falling). No shimmer tail —
+// keeps the stop chime shorter and less attention-grabbing than the start.
+// Added 2026-04-08 to fix the bug where Sam's PERSONAL outro music was
+// playing every time he stopped sharing (because $screen companion
+// disconnect was firing playChimeForParticipant exit). The fix is in
+// connect.js (skip personal chime on $screen identities) + this dedicated
+// universal stop chime for the actual share-stop event.
+function playStopShareChime(volume) {
+  try {
+    var vol = (volume != null ? volume : 1);
+    if (roomAudioMuted) vol = 0;
+    if (vol <= 0) return;
+    const ctx = getChimeCtx();
+    const now = ctx.currentTime;
+    // Same G major triad notes, descending: D6 → B5 → G5
+    var notes = [1174.66, 987.77, 783.99];
+    notes.forEach(function(freq, i) {
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      var onset = i * 0.07; // slightly faster than start chime — 70ms between notes
+      gain.gain.setValueAtTime(0.001, now + onset);
+      gain.gain.linearRampToValueAtTime(0.12 * vol, now + onset + 0.02); // quieter than start (0.12 vs 0.16)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + onset + 0.28);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + onset);
+      osc.stop(now + onset + 0.32);
+    });
+  } catch {}
+}
+
 async function fetchChimeBuffer(identityBase, kind) {
   const cacheKey = identityBase + "-" + kind;
   const cached = chimeBufferCache.get(cacheKey);
