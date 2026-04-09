@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-09",
+    title: "Actually works on AMD/Intel GPUs (v0.6.6)",
+    notes: [
+      "v0.6.5 was supposed to fix the AMD/Intel brick but it didn't actually work — the delay-load linker flag was emitted from the wrong build script (a library crate) and cargo silently ignored it. The shipped binary had nvcuda.dll as a normal import resolved at process startup, exactly like v0.6.4, and Jeff's machine still wouldn't launch.",
+      "v0.6.6 puts the linker flag in the right place (the binary crate's build.rs). Verified via dumpbin that nvcuda.dll is now in the DELAY IMPORTS section instead of the normal IMPORTS section. AMD/Intel machines launch cleanly and fall back to OpenH264. NVIDIA users keep hardware NVENC/NVDEC unchanged.",
+      "Sorry about the v0.6.5 false alarm. The lesson: always verify the shipped binary's actual imports with dumpbin before claiming a fix works."
+    ]
+  },
+  {
     version: "2026-04-08c",
     title: "Works on AMD/Intel GPUs again (v0.6.5)",
     notes: [
