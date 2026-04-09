@@ -8,6 +8,17 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-09b",
+    title: "Stability + Smart Defaults (v0.6.7)",
+    notes: [
+      "AMD/Intel users: capture rate now capped at 20fps to prevent the CPU crash Jeff experienced during a 54-minute 4-publisher stress test. Software encoding at 60+ fps was pinning the CPU at ~90%. 20fps is smooth for screen content and sustainable indefinitely.",
+      "Capture health false-alarm fixes: 10-second grace period after starting a share (no more Red flash on startup), and the banner requires 2 consecutive Red cycles before firing (no more flapping alarms).",
+      "Correct encoder detection: AMD/Intel machines now show 'OpenH264' on the capture health chip instead of incorrectly claiming NVENC. The admin can see at a glance who has hardware vs software encoding.",
+      "GPU flicker recovery script: if Sam's display driver gets wedged again, there's now a PowerShell script at tools/gpu-flicker-recovery.ps1 that tries non-reboot recovery before falling back to 'reboot required'.",
+      "Screen share opt-in fixed: other people's screen shares no longer auto-appear in your grid before you click 'Start Watching'. Also fixes the grid layout stacking horizontally instead of 2x2."
+    ]
+  },
+  {
     version: "2026-04-09",
     title: "Actually works on AMD/Intel GPUs (v0.6.6)",
     notes: [
