@@ -53,11 +53,24 @@ function isUnwatchedScreenShare(publication, participant) {
   var isScreen = source === LK.Track.Source.ScreenShare ||
                  source === LK.Track.Source.ScreenShareAudio;
   if (!isScreen) return false;
+  // Resolve $screen companion identity to the parent identity.
+  // hiddenScreens stores PARENT identities (set in connect.js TrackPublished
+  // handler after stripping "$screen" suffix). But this function is called
+  // with the RAW participant from the LiveKit event, which for companion
+  // publishers is "sam-7475$screen". Without this resolution the identities
+  // never match and every screen share leaks past the opt-in gate, creating
+  // tiles the viewer didn't ask for. Discovered 2026-04-09 during
+  // 4-publisher stress test — all streams appeared in the grid immediately
+  // even though opt-in is supposed to hide them until "Start Watching."
+  var identity = participant.identity;
+  if (identity.endsWith('$screen')) {
+    identity = identity.slice(0, -'$screen'.length);
+  }
   // Local user always watches their own screen
   if (room && room.localParticipant &&
-      participant.identity === room.localParticipant.identity) return false;
+      identity === room.localParticipant.identity) return false;
   // If identity is in hiddenScreens, it's unwatched
-  return hiddenScreens.has(participant.identity);
+  return hiddenScreens.has(identity);
 }
 
 function clearScreenTracksForIdentity(identity, keepTrackSid) {
