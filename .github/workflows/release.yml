@@ -142,8 +142,14 @@ jobs:
 
   build-macos:
     name: Build macOS DMG
-    # Only runs on real tag-triggered releases, not dry-run workflow_dispatch.
-    if: github.event_name == 'push'
+    # DISABLED 2026-04-09: Sam and all his users are Windows-only. macOS
+    # builds were taking 20+ minutes per release for an artifact nobody
+    # uses, AND blocking the publish-manifest job downstream when they
+    # failed (e.g. v0.6.3 release shipped late because of a macOS-only
+    # capture_health gating bug). Job kept in the file for reference but
+    # gated `if: false` so it never runs. Re-enable only if Sam explicitly
+    # asks. Per global rule in ~/.claude/CLAUDE.md.
+    if: false
     runs-on: macos-latest
     permissions:
       contents: write
@@ -223,9 +229,10 @@ jobs:
   publish-manifest:
     name: Publish Update Manifest
     # Only on real tag-triggered releases, not dry-run workflow_dispatch.
+    # No longer needs build-macos since macOS is disabled — Windows-only.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    needs: [build-windows, build-macos]
+    needs: [build-windows]
     permissions:
       contents: write
 
@@ -246,7 +253,10 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ github.ref_name }}"
           WIN_SIG="${{ needs.build-windows.outputs.win_sig }}"
-          MAC_SIG="${{ needs.build-macos.outputs.sig }}"
+          # macOS build is disabled (Windows-only project) — empty MAC_SIG
+          # makes the latest.json generator fall through to the windows-only
+          # branch below.
+          MAC_SIG=""
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           WIN_URL="https://github.com/SamWatson86/echo-chamber/releases/download/${TAG}/Echo.Chamber_${VERSION}_x64-setup.exe"

@@ -1,11 +1,11 @@
 {
-  "version": "0.6.2",
-  "notes": "EMERGENCY ROLLBACK to v0.6.2 \u2014 v0.6.3 and v0.6.4 have a hard nvcuda.dll link dependency that bricks AMD/Intel GPU machines on launch. Will be fixed in v0.6.5 with delay-load. AMD/Intel users currently on v0.6.3+ must manually reinstall v0.6.2 from GitHub releases.",
-  "pub_date": "2026-04-08T22:30:00Z",
+  "version": "0.6.5",
+  "notes": "Echo Chamber v0.6.5 \u2014 fixes the AMD/Intel brick from v0.6.3-v0.6.4. nvcuda.dll is now delay-loaded so the binary launches on machines without NVIDIA drivers and falls back to OpenH264 cleanly. NVIDIA users still get hardware NVENC/NVDEC encoding unchanged. AMD/Intel friends who manually downgraded to v0.6.2 will auto-update to v0.6.5 on next launch.",
+  "pub_date": "2026-04-09T00:30:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEdVcWRRL3BDT0xTVEtJSmlDcHVRNVo1RVovejVyOXIwRE9xWmFxaklNczE5Mks5aE54Wk5WMjNrY0tRNTVIU3BNa0dkZ29VNDRwQkF6SkVPMzQ2d2cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1NjAzNTEwCWZpbGU6RWNobyBDaGFtYmVyXzAuNi4yX3g2NC1zZXR1cC5leGUKZFM5OXgzS0Z6cllUZy9RbVJnMkg3bnRxQmpVZHJvN2pjemdTMTdndUlTOGJrL2x6d09rQUhMZXM5cWxIL2ROR1NqN3RnMWhobXRQdGIrUkNqdk5YREE9PQo=",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.2/Echo.Chamber_0.6.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMENoUUpXV0VoUGE4b05kTHdwTUpSVUdUTjI2WUNIQjd5eGR6SU9TaFA3ZFRzZmQrTkpBbU01Sis0eFplTkFyNW1KSTgwNG9IcmVIdFlhOW9Zcy8waVFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1Njk0MDg0CWZpbGU6RWNobyBDaGFtYmVyXzAuNi41X3g2NC1zZXR1cC5leGUKSVdQTk8xZG9LTmFtVHBEdVRkM2dqVk1qemQvUFQzdkFTNG1xS3J0S1Q0QUIvckgxakRHSUJFVklHYnJkU0xMQ2p6Vlc2cXZPV25lNWVPaW5JUW5EQkE9PQo=",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.5/Echo.Chamber_0.6.5_x64-setup.exe"
     },
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjME8xL0hXdkExVDQ3enhQWVRIaHBCVjQ4eGlCd0d6a3dGTVh4bSttMkZNNW5wS1dnVUlwc1g2WTFmNzgwejZoVXA5Y242c1dUNFlMRURjalRYS01vWkFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc1Njg2MTI5CWZpbGU6RWNobyBDaGFtYmVyLmFwcC50YXIuZ3oKWlB6ZzVWckhCdTJqd21QZ2hROVhhdkZ2cmRlRDhjZ2FvOCsyVStqK1hoTk0zT3REeDVGaVZabFJGQzZxM0dZNzQ2TENUMU1YOS9LT0dnd29HdGZaQnc9PQo=",
