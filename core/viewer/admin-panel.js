@@ -50,6 +50,14 @@ async function pollAdminPanel() {
 // transition rather than every poll, with a 60s manual mute window.
 const _adminPrevHealthLevel = new Map();
 const _adminMutedUntil = new Map();
+// Hysteresis: track consecutive Red poll cycles per identity. Banner only
+// fires after the level has been Red for HYSTERESIS_RED_TICKS cycles in a
+// row, preventing single-tick oscillation around the threshold from
+// re-firing the alert. Discovered 2026-04-08 during live friend testing
+// when David's flapping fps fired the banner repeatedly even though his
+// stream was actually fine for most of the window.
+const _adminConsecutiveRed = new Map();
+const HYSTERESIS_RED_TICKS = 2; // require 2 consecutive Red polls (~6s) before alerting
 
 function renderAdminPanel(data) {
   const body = document.getElementById("adminPanelBody");
@@ -89,10 +97,25 @@ function renderAdminPanel(data) {
       }
       html += `</div>`;
 
-      // Banner / chime trigger on Yellow→Red or Green→Red transition
+      // Hysteresis: track consecutive Red ticks per identity. Banner only
+      // fires when (a) the level has been Red for HYSTERESIS_RED_TICKS cycles
+      // in a row AND (b) we just crossed the threshold this tick (so the
+      // banner fires once per sustained Red episode, not every tick).
       if (ch) {
         const prev = _adminPrevHealthLevel.get(p.identity) || "Green";
-        if (ch.level === "Red" && prev !== "Red") {
+        let redStreak = _adminConsecutiveRed.get(p.identity) || 0;
+        if (ch.level === "Red") {
+          redStreak += 1;
+        } else {
+          redStreak = 0;
+        }
+        _adminConsecutiveRed.set(p.identity, redStreak);
+
+        // Fire the banner exactly once: when the streak crosses the
+        // hysteresis threshold for the first time this episode. The
+        // (redStreak === HYSTERESIS_RED_TICKS) check guarantees once-per-
+        // episode firing — subsequent ticks at Red have streak > threshold.
+        if (redStreak === HYSTERESIS_RED_TICKS) {
           const muteUntil = _adminMutedUntil.get(p.identity) || 0;
           if (now > muteUntil) {
             bannerLines.push(`${p.name || p.identity}: ${(ch.reasons || []).slice(0,2).join("; ")}`);
