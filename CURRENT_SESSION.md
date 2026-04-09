@@ -1,8 +1,90 @@
 # Echo Chamber - Current Session Handover
 
-**Last Updated**: 2026-04-08 (v0.6.4 SHIPPED; heartbeat fix PR #143 awaiting Sam validation)
-**Current Version**: **v0.6.4 SHIPPED ✅** (auto-update live at the domain updater endpoint).
-**Status**: v0.6.3 + v0.6.4 both in production. Friends auto-update to NVENC hardware encode (v0.6.3) + WGC classifier false-alarm fix (v0.6.4). ONE UNMERGED PR awaiting Sam validation: **#143 heartbeat frame duplication** — fixes the underlying "static WGC window stream stops" bug discovered during live testing. Sam's local binary has been restored to clean v0.6.4 (no experimental code on his daily driver).
+**Last Updated**: 2026-04-09 (v0.6.6 shipped after v0.6.5 false-ship; first 4-friend session; Jeff crash post-mortem; share chime bug fixed)
+**Current Version**: **v0.6.6 SHIPPED ✅** (GitHub release only — latest.json still points at v0.6.5 until next session updates it)
+**Status**: v0.6.6 has working delay-load nvcuda.dll (verified via dumpbin — nvcuda in DELAY IMPORTS section). AMD/Intel friends can install and run. First real 4-publisher test ran for ~54 min before Jeff's AMD machine crashed under software-encoder load; post-mortem written. Share chime bug fixed live via force-reload (PR #147). Substantial v0.6.7 backlog queued.
+
+---
+
+## ⚠️ READ FIRST — CRITICAL DEFERRED TASK
+
+**`core/deploy/latest.json` still points at v0.6.5 (broken).** We deliberately held it there so Brad/David wouldn't get an auto-update prompt mid-session. The moment you confirm nobody is in the middle of a session, **update it to v0.6.6**:
+
+```bash
+cd "F:/Codex AI/The Echo Chamber"
+gh release download v0.6.6 --pattern "*.sig" --dir . --clobber
+# Then manually edit core/deploy/latest.json: bump version to 0.6.6, update URL, paste sig
+# PR + merge + verify https://echo.fellowshipoftheboatrace.party:9443/api/update/latest.json serves 0.6.6
+```
+
+Until this happens, any new AMD friend who auto-updates will get bricked on v0.6.5. Jeff already has v0.6.6 via manual install.
+
+---
+
+## 🆕 2026-04-09 SESSION SUMMARY
+
+### Releases shipped this session (in order)
+
+1. **v0.6.4** (earlier in session): WGC classifier false-alarm fix (PR #141) — classifier now skips fps check in WGC mode
+2. **v0.6.5** (emergency): intended to fix the AMD/Intel nvcuda.dll brick from v0.6.3-v0.6.4. **FALSE SHIP** — `/DELAYLOAD:nvcuda.dll` was emitted from `webrtc-sys-local/build.rs` (a library crate), but cargo silently drops `rustc-link-arg` from library crates. The v0.6.5 binary had nvcuda in the normal IMPORTS section, identical to v0.6.4, still bricked Jeff. Discovered when Jeff reported the same error after auto-updating.
+3. **v0.6.6** (real fix, PR #150): moved the linker flags to `core/client/build.rs` (the bin crate) where cargo actually propagates them. Verified with `dumpbin -imports` showing `nvcuda.dll` in the **"Section contains the following delay load imports"** section. Published to GitHub release, signed, live.
+
+### Hard lesson learned
+
+Before claiming any "delay-load" or "linker flag" fix works, **verify the shipped binary with `dumpbin -imports`**. The `cargo:warning=` messages in the build log are NOT proof the flag was actually applied. The cargo doc explicitly says `rustc-link-arg` from library crates is dropped. This cost us 25+ minutes of CI + Jeff being bricked longer than necessary. Added to the v0.6.6 commit message as a permanent reminder.
+
+### Global rule added
+
+`~/.claude/CLAUDE.md` now has a **"NEVER build macOS targets without Sam explicitly asking"** rule. Sam + all friends are Windows-only. macOS builds were burning 20+ min per release + blocking publish-manifest on failure. The `build-macos` job in `release.yml` is now gated `if: false` and `publish-manifest` no longer depends on it. `MAC_SIG=""` is hardcoded so the latest.json generator falls through to the windows-only manifest path.
+
+### First successful 4-friend session
+
+Brad, David, Sam, Jeff all in the room simultaneously. All on CI-built v0.6.x binaries. Brad + David + Sam on NVIDIA (hardware NVENC), Jeff on AMD 7600 XT (OpenH264 software fallback — v0.6.6 delay-load let him launch).
+
+Stats mid-session (before crash):
+- Brad/David/Sam: Green WGC/NVENC, 60fps, ~6 Mbps, near-zero packet loss
+- Jeff: Chip showed Green NVENC (detection bug — actually OpenH264), wire output 24-48 fps at ~3.2 Mbps, **28,435 NACKs + 2,447 lost packets on his outbound** (massive retransmit storm, invisible to his own chip because the classifier has no outbound network signals)
+- ICE paths: all direct UDP (srflx↔host or prflx↔host), zero TURN relay usage
+
+After ~54 minutes, Jeff's client crashed. Full post-mortem at `~/.claude/projects/F--Codex-AI-The-Echo-Chamber/memory/bug_jeff_crash_4publisher_stress_test.md`.
+
+### Share chime bug fixed live
+
+Sam noticed during the session: when David started screen sharing, David's PERSONAL intro music played instead of a universal share chime. Root cause: `$screen` companion publishers fire `ParticipantConnected`, which called `playChimeForParticipant` which falls back to the parent identity's personal chime. PR #147 fixed it (pure viewer JS, no rebuild), merged live, force-reload kicked all 5 participants, everyone reconnected to the updated JS, confirmed working.
+
+Three components of the fix:
+1. New `playStopShareChime()` in `chimes.js` (descending G major arpeggio, mirror of the existing ascending `playScreenShareChime`)
+2. Guard personal enter chime in `ParticipantConnected` handler when identity endsWith('$screen')
+3. Guard personal exit chime in `ParticipantDisconnected` handler + fire `playStopShareChime()` from `TrackUnpublished`
+
+### The v0.6.7 backlog (now substantial)
+
+The next release bundle should include ALL of these:
+
+1. **PR #143 — heartbeat frame duplication for static WGC content** (unmerged, awaiting Sam validation). Without this, sharing a static browser window produces 1-5 fps wire output because WGC is event-driven. Heartbeat thread re-pushes the last frame every 33ms, NVENC dedupes, wire rate stays at target.
+
+2. **PR #148 — cold-start grace + classifier hysteresis + GPU flicker recovery script** (unmerged). Cold-start grace suppresses fps Red for 10s after capture activates. Hysteresis requires 2 consecutive Red cycles before firing the banner (stops oscillation spam). Flicker recovery script is a PowerShell one-shot that tries pnputil + disable/enable before falling back to reboot.
+
+3. **Encoder detection bug fix** (the big one from Jeff's session). At client startup, `LoadLibraryW(w!("nvcuda.dll"))` — if it fails, set a global `HAS_NVCUDA=false`. In `CaptureHealthState::set_active()`, read that global and default to `EncoderType::OpenH264` instead of `EncoderType::Nvenc`. This would have immediately flagged Jeff's chip as Red (since the existing rule auto-Reds on OpenH264 fallback).
+
+4. **Outbound NACK + packet loss rate as capture_health signals**. Pull them from the publisher's own outbound stats (already collected in `screen-share-native.js` for `/admin/api/stats`). Add `outbound_packets_lost_rate`, `outbound_nack_rate_per_sec` to `CaptureHealthSnapshot`. Classify: Yellow at 10 NACKs/sec, Red at 50 NACKs/sec. Apply hysteresis from #148.
+
+5. **OpenH264 capture rate cap**. If `EncoderType::OpenH264` is active, throttle the capture loop to ~20 fps in software (instead of the native display refresh rate). Prevents the CPU cascade that likely caused Jeff's crash — software H264 at 20 fps is survivable on mid-range CPUs, at 60+ fps it's a sink.
+
+6. **Browser audio extraction** (spec already written at `docs/superpowers/specs/2026-04-08-browser-audio-extraction-design.md`). Approach B: audio session enumeration via IAudioSessionManager2. Fixes the "friends can't share YouTube/Twitch audio" bug. Ready for `writing-plans` next session.
+
+### Ready-to-merge but NOT YET MERGED
+
+- **PR #143** (heartbeat) — needs Sam's live validation first. Branch: `fix/heartbeat-frame-duplication`
+- **PR #148** (cold-start + hysteresis + flicker script) — mixed JS (hysteresis, can merge now) + Rust (cold-start, needs v0.6.7). Branch: `fix/capture-health-false-positives`
+
+### Ongoing backlog items (unchanged)
+
+- **GPU driver flicker recovery path** — PowerShell script is in #148 and will ship when that PR merges
+- **Tauri signing key local recovery** — find it in password manager so future emergencies can skip the 20+ min CI cycle
+- **v0.6.5 graveyard** — document that v0.6.5 is a known-broken release, maybe mark it "pre-release" or delete it from the GitHub releases page to avoid future confusion
+
+---
 
 ---
 
