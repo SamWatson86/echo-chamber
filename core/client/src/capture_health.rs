@@ -182,7 +182,20 @@ impl CaptureHealthState {
     pub fn set_active(&self, active: bool, mode: CaptureMode, encoder: EncoderType, target: u32) {
         let was_active = self.capture_active.swap(active, Ordering::Relaxed);
         *self.capture_mode.write() = mode;
-        *self.encoder_type.write() = encoder;
+        // Use the caller's encoder hint, but OVERRIDE to OpenH264 if we
+        // know at startup that nvcuda.dll is missing (AMD/Intel machine).
+        // The caller passes EncoderType::Nvenc as a hopeful default, but
+        // HAS_NVCUDA is the ground truth from the LoadLibrary probe in
+        // main.rs. Without this override, Jeff's AMD chip shows "NVENC"
+        // on the admin dashboard even though he's actually on OpenH264.
+        let actual_encoder = if !crate::capture_pipeline::HAS_NVCUDA.load(Ordering::Relaxed)
+            && encoder == EncoderType::Nvenc
+        {
+            EncoderType::OpenH264
+        } else {
+            encoder
+        };
+        *self.encoder_type.write() = actual_encoder;
         self.target_fps.store(target, Ordering::Relaxed);
         if active {
             // Stamp the cold-start timestamp on inactive→active transition
