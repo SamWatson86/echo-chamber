@@ -482,6 +482,12 @@ fn main() {
                         );
                         match lib {
                             Ok(h) => {
+                                // nvcuda.dll loaded — NVIDIA driver is present.
+                                // Set the global flag so capture_pipeline uses the
+                                // hardware (240fps) frame interval instead of the
+                                // software (20fps) cap. Also used by capture_health
+                                // to default EncoderType correctly for the chip.
+                                crate::capture_pipeline::HAS_NVCUDA.store(true, std::sync::atomic::Ordering::Relaxed);
                                 let cu_init = windows::Win32::System::LibraryLoader::GetProcAddress(
                                     h, windows::core::s!("cuInit"),
                                 );
@@ -493,7 +499,9 @@ fn main() {
                                     eprintln!("[init] CUDA cuInit not found in nvcuda.dll");
                                 }
                             }
-                            Err(e) => eprintln!("[init] nvcuda.dll load failed: {e}"),
+                            Err(e) => {
+                                eprintln!("[init] nvcuda.dll load failed: {e} — software OpenH264 fallback, capture capped at 20fps");
+                            }
                         }
                     }
                     livekit::ensure_runtime_initialized();

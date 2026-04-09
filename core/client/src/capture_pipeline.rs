@@ -31,13 +31,31 @@ pub struct CaptureStats {
 
 // ── CapturePublisher ──
 
-/// Hard cap for the capture push rate. Set to 240fps so 144Hz/165Hz/240Hz
-/// monitors push their full native rate without being throttled. NVENC is
-/// initialized at the same rate via VideoEncoding.max_framerate so its
-/// bitrate-per-frame budget matches reality.
-const TARGET_ENCODE_FPS: f64 = 240.0;
-const MIN_FRAME_INTERVAL: std::time::Duration =
-    std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS) as u64);
+/// Hard cap for the capture push rate when NVENC hardware encode is active.
+/// Set to 240fps so 144Hz/165Hz/240Hz monitors push their full native rate
+/// without being throttled. NVENC is initialized at the same rate via
+/// VideoEncoding.max_framerate so its bitrate-per-frame budget matches reality.
+const TARGET_ENCODE_FPS_HARDWARE: f64 = 240.0;
+const MIN_FRAME_INTERVAL_HARDWARE: std::time::Duration =
+    std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_HARDWARE) as u64);
+
+/// Soft cap for the capture push rate when OpenH264 software encode is active.
+/// Software H264 at 1080p at 60+ fps pins the CPU at ~90-100% and caused
+/// Jeff's v0.6.6 crash after ~54 min of sustained load (28K NACKs, CPU
+/// cascade into encoder deadline misses). 20 fps is ~30% CPU at 1080p —
+/// sustainable indefinitely, still watchable for screen content (text,
+/// browsing, video playback where the source is already 24-30 fps).
+/// The WGC/DXGI capture loops still run at native refresh for responsive
+/// frame delivery; this cap just drops excess frames before conversion.
+const TARGET_ENCODE_FPS_SOFTWARE: f64 = 20.0;
+const MIN_FRAME_INTERVAL_SOFTWARE: std::time::Duration =
+    std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_SOFTWARE) as u64);
+
+/// Global flag: true if nvcuda.dll loaded successfully at client startup.
+/// When false, the capture pipeline uses MIN_FRAME_INTERVAL_SOFTWARE to
+/// prevent CPU saturation under OpenH264 software encode. Set once in
+/// main.rs's startup probe and never changes after that.
+pub static HAS_NVCUDA: AtomicBool = AtomicBool::new(false);
 
 /// Wire-level publish framerate cap. The capture loop runs at native display
 /// refresh rate (often 144+ Hz) but NVENC's frame_drop=1 throttles the wire
@@ -234,15 +252,20 @@ impl CapturePublisher {
 
     /// Convert a BGRA frame with explicit stride to I420 and push to the video source.
     pub fn push_frame_strided(&mut self, bgra: &[u8], stride: u32, width: u32, height: u32) {
-        // Frame rate limiter — drop frames if we'd exceed TARGET_ENCODE_FPS.
-        // NVENC is initialized at 60fps; pushing 143fps from a high-refresh
-        // monitor causes pacer overflow and visual corruption (smearing).
-        // Dropping frames in software is the cleanest fix because NVENC
-        // rejects runtime fps reconfiguration and the rate control math
-        // assumes the configured framerate.
+        // Frame rate limiter — choose the interval based on whether we have
+        // hardware (NVENC) or software (OpenH264) encoding. NVENC can handle
+        // 240fps input because it's a dedicated ASIC. OpenH264 runs on CPU
+        // and pins ~90-100% at 60+ fps 1080p — which crashed Jeff's AMD
+        // machine after ~54 min of sustained load. Cap software encode at
+        // 20fps to keep CPU at a sustainable ~30%.
+        let min_interval = if HAS_NVCUDA.load(Ordering::Relaxed) {
+            MIN_FRAME_INTERVAL_HARDWARE
+        } else {
+            MIN_FRAME_INTERVAL_SOFTWARE
+        };
         let now = Instant::now();
         if let Some(last) = self.last_pushed {
-            if now.duration_since(last) < MIN_FRAME_INTERVAL {
+            if now.duration_since(last) < min_interval {
                 return; // drop this frame
             }
         }
