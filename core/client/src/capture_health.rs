@@ -31,6 +31,12 @@ const RED_FPS_FRACTION: f32 = 0.50;
 const YELLOW_SKIP_RATE_PCT: f32 = 2.0;
 const RED_SKIP_RATE_PCT: f32 = 10.0;
 
+/// Cold-start grace period: suppress fps-based checks for this long after
+/// capture becomes active. Capture rate is 0 fps until the first frame
+/// arrives (which can take 1-2 seconds for WGC handshake), so without this
+/// the classifier briefly flashes Red on every fresh capture session.
+const COLD_START_GRACE: Duration = Duration::from_secs(10);
+
 // ── Public types ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +83,11 @@ pub struct CaptureHealthSnapshot {
     pub consecutive_timeouts_max_5m: u32,
     pub encoder_skip_rate_pct: f32,
     pub shader_errors_5m: u32,
+    /// Seconds since capture became active. Used by the classifier to
+    /// suppress fps-based checks during the cold-start grace window.
+    /// Zero when capture is inactive.
+    #[serde(default)]
+    pub seconds_since_capture_started: u64,
 }
 
 // ── State ───────────────────────────────────────────────────────────
@@ -91,6 +102,10 @@ pub struct CaptureHealthState {
     capture_active: AtomicBool,
     capture_mode: RwLock<CaptureMode>,
     encoder_type: RwLock<EncoderType>,
+    /// Set when capture transitions from inactive→active. Used by the
+    /// classifier to suppress fps-based checks during the COLD_START_GRACE
+    /// window so the brief pre-first-frame period doesn't trigger Red.
+    capture_started_at: Mutex<Option<Instant>>,
 
     // Rolling 5-min event windows
     reinit_events: Mutex<Vec<Instant>>,
@@ -110,6 +125,7 @@ impl CaptureHealthState {
             capture_active: AtomicBool::new(false),
             capture_mode: RwLock::new(CaptureMode::None),
             encoder_type: RwLock::new(EncoderType::None),
+            capture_started_at: Mutex::new(None),
             reinit_events: Mutex::new(Vec::new()),
             shader_error_events: Mutex::new(Vec::new()),
             timeout_max_events: Mutex::new(Vec::new()),
@@ -164,13 +180,23 @@ impl CaptureHealthState {
     }
 
     pub fn set_active(&self, active: bool, mode: CaptureMode, encoder: EncoderType, target: u32) {
-        self.capture_active.store(active, Ordering::Relaxed);
+        let was_active = self.capture_active.swap(active, Ordering::Relaxed);
         *self.capture_mode.write() = mode;
         *self.encoder_type.write() = encoder;
         self.target_fps.store(target, Ordering::Relaxed);
-        if !active {
+        if active {
+            // Stamp the cold-start timestamp on inactive→active transition
+            // so the classifier can suppress fps-based checks for the first
+            // COLD_START_GRACE seconds. The first capture frame can take
+            // 1-2 seconds to arrive (especially under WGC handshake), and
+            // before that fps == 0 which would trip the Red threshold.
+            if !was_active {
+                *self.capture_started_at.lock() = Some(Instant::now());
+            }
+        } else {
             self.last_capture_fps.store(0, Ordering::Relaxed);
             self.consecutive_timeouts.store(0, Ordering::Relaxed);
+            *self.capture_started_at.lock() = None;
         }
     }
 
@@ -250,6 +276,10 @@ impl CaptureHealthState {
             consecutive_timeouts_max_5m,
             encoder_skip_rate_pct,
             shader_errors_5m,
+            seconds_since_capture_started: {
+                let started = *self.capture_started_at.lock();
+                started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+            },
         };
         let (level, reasons) = classify(&snap);
         snap.level = level;
@@ -306,7 +336,15 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
     // DXGI Desktop Duplication is pollng-based so fps vs target is still
     // a meaningful signal there — compositor starvation under GPU load
     // drops the poll success rate visibly.
-    if snap.capture_mode == "DXGI-DD" && snap.target_fps > 0 {
+    // Cold-start grace: suppress fps checks for the first COLD_START_GRACE
+    // seconds after capture activates. The first capture frame can take 1-2
+    // seconds to arrive (especially on WGC handshake), and during that
+    // window current_fps == 0 which would trip the Red threshold and fire
+    // a spurious banner. Real degradations show up after the first frame
+    // as either consecutive_timeouts climbing or fps being well below
+    // target steady-state — both are caught by the OTHER signals.
+    let in_cold_start = snap.seconds_since_capture_started < COLD_START_GRACE.as_secs();
+    if !in_cold_start && snap.capture_mode == "DXGI-DD" && snap.target_fps > 0 {
         let frac = snap.current_fps as f32 / snap.target_fps as f32;
         if frac < RED_FPS_FRACTION {
             level = level.max(HealthLevel::Red);
@@ -365,6 +403,11 @@ mod tests {
             consecutive_timeouts_max_5m: 0,
             encoder_skip_rate_pct: 0.0,
             shader_errors_5m: 0,
+            // Past the 10s cold-start grace by default so existing tests
+            // exercise the steady-state classifier behavior. Tests that
+            // need to verify cold-start suppression set this to a small
+            // value explicitly.
+            seconds_since_capture_started: 60,
         }
     }
 
@@ -430,6 +473,42 @@ mod tests {
     fn fps_28_of_60_is_red() {
         let mut s = nominal();
         s.current_fps = 28;
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn cold_start_suppresses_fps_red() {
+        // First 10 seconds after capture activates: fps==0 should NOT trigger
+        // Red because the first frame may not have arrived yet.
+        let mut s = nominal();
+        s.current_fps = 0;
+        s.target_fps = 30;
+        s.seconds_since_capture_started = 3; // mid cold-start
+        let (lvl, reasons) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Green);
+        assert!(reasons.is_empty(), "cold-start fps suppression should produce no reasons, got {:?}", reasons);
+    }
+
+    #[test]
+    fn after_cold_start_fps_zero_is_red() {
+        // Past the cold-start window, fps==0 should trip Red as normal.
+        let mut s = nominal();
+        s.current_fps = 0;
+        s.target_fps = 30;
+        s.seconds_since_capture_started = 30; // well past cold-start
+        let (lvl, _) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+    }
+
+    #[test]
+    fn cold_start_does_not_suppress_other_red_signals() {
+        // Cold-start grace ONLY suppresses the fps check. OpenH264 fallback,
+        // shader errors, reinit storms, and timeouts must still fire.
+        let mut s = nominal();
+        s.current_fps = 0;
+        s.seconds_since_capture_started = 1;
+        s.encoder_type = "OpenH264".into();
         let (lvl, _) = classify(&s);
         assert_eq!(lvl, HealthLevel::Red);
     }
