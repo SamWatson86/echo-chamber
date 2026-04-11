@@ -12,17 +12,17 @@ use audio_capture_stub as audio_capture;
 mod screen_capture;
 
 #[cfg(target_os = "windows")]
-mod gpu_converter;
+mod audio_output;
+#[cfg(not(target_os = "windows"))]
+mod audio_output_stub;
+#[cfg(target_os = "windows")]
+mod capture_health;
 #[cfg(target_os = "windows")]
 mod capture_pipeline;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
-mod capture_health;
-#[cfg(target_os = "windows")]
-mod audio_output;
-#[cfg(not(target_os = "windows"))]
-mod audio_output_stub;
+mod gpu_converter;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
 
@@ -284,9 +284,8 @@ fn get_os_build_number() -> u32 {
         }
 
         unsafe {
-            let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(
-                windows::core::w!("ntdll.dll"),
-            );
+            let lib =
+                windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("ntdll.dll"));
             if let Ok(h) = lib {
                 let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
                     h,
@@ -296,8 +295,7 @@ fn get_os_build_number() -> u32 {
                     let func: extern "system" fn(*mut OsVersionInfoExW) -> i32 =
                         std::mem::transmute(rtl_get_version);
                     let mut info: OsVersionInfoExW = std::mem::zeroed();
-                    info.dw_os_version_info_size =
-                        std::mem::size_of::<OsVersionInfoExW>() as u32;
+                    info.dw_os_version_info_size = std::mem::size_of::<OsVersionInfoExW>() as u32;
                     func(&mut info);
                     eprintln!(
                         "[os] Windows {}.{} build {}",
@@ -338,8 +336,8 @@ async fn start_screen_share(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn stop_screen_share() {
-    screen_capture::stop_share();
+async fn stop_screen_share() -> Result<(), String> {
+    screen_capture::stop_share().await
 }
 
 #[cfg(target_os = "windows")]
@@ -388,8 +386,8 @@ async fn start_screen_share_monitor(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn stop_desktop_capture() {
-    desktop_capture::stop();
+async fn stop_desktop_capture() -> Result<(), String> {
+    desktop_capture::stop().await
 }
 
 #[cfg(target_os = "windows")]
@@ -398,15 +396,16 @@ fn get_capture_health(
     state: tauri::State<Arc<CaptureHealthState>>,
 ) -> Option<CaptureHealthSnapshot> {
     let snap = state.snapshot();
-    if !snap.capture_active { None } else { Some(snap) }
+    if !snap.capture_active {
+        None
+    } else {
+        Some(snap)
+    }
 }
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn report_encoder_implementation(
-    state: tauri::State<Arc<CaptureHealthState>>,
-    encoder: String,
-) {
+fn report_encoder_implementation(state: tauri::State<Arc<CaptureHealthState>>, encoder: String) {
     state.set_encoder_type_from_string(&encoder);
 }
 

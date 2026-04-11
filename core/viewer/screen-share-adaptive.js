@@ -37,6 +37,9 @@ function startInboundScreenStatsMonitor() {
         }
       } catch (e) { /* ignore ICE stats errors */ }
       room.remoteParticipants.forEach(async (participant) => {
+        const effectiveIdentity = isScreenIdentity(participant.identity)
+          ? getParentIdentity(participant.identity)
+          : participant.identity;
         const pubs = getParticipantPublications(participant);
         for (const pub of pubs) {
           // Monitor both screen shares and cameras (video only)
@@ -45,7 +48,7 @@ function startInboundScreenStatsMonitor() {
           if (pub?.kind !== LK?.Track?.Kind?.Video) continue;
           if (!pub.track || !pub.isSubscribed) continue;
           // Skip unwatched screen shares
-          if (pub.source === LK?.Track?.Source?.ScreenShare && hiddenScreens.has(participant.identity)) continue;
+          if (pub.source === LK?.Track?.Source?.ScreenShare && hiddenScreens.has(effectiveIdentity)) continue;
           // Get receiver stats from the track's mediaStreamTrack
           const mst = pub.track.mediaStreamTrack;
           if (!mst) continue;
@@ -64,7 +67,7 @@ function startInboundScreenStatsMonitor() {
               const h = report.frameHeight || 0;
               const now = Date.now();
               // Source-aware key so camera + screen for same participant are tracked independently
-              const key = participant.identity + "-" + sourceLabel;
+              const key = effectiveIdentity + "-" + sourceLabel;
               const prev = _inboundScreenLastBytes.get(key);
               let kbps = 0;
               if (prev) {

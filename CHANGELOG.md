@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.8
+
+- Fix native screen-share restart churn: stop commands now wait for the previous native capture task to exit before a new `$screen` publisher connects
+- Fix viewer native stop-listener cleanup so repeated restarts do not stack duplicate listeners
+- Fix remote screen-share watching after reconnect/reload by normalizing `$screen` companion identities consistently across late join, watch/unwatch, and adaptive stats paths
+- Fix `Start Watching` for remote screen shares so existing live shares attach correctly instead of staying hidden or unsubscribed
+- Fix the false "New Version Available" banner when running prerelease-style local builds
+- Win10 picker now blocks unsupported native `Windows` capture entries and directs users to `Screen`/`Game`
+- Native pipeline now includes the WGC heartbeat/static-frame duplication fix and keeps native publish pacing aligned to the 30fps target
+
 ## 0.4.1
 
 - Fix: "Update available" banner no longer shows after updating (version sync between Cargo.toml and tauri.conf.json)

@@ -12,12 +12,12 @@
 //!         → libwebrtc H264 encoder (MFT → NVENC)
 //!           → RTP → SFU
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
-use crate::capture_pipeline::CapturePublisher;
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
+use crate::capture_pipeline::CapturePublisher;
 
 // ── Types ──
 
@@ -35,7 +35,9 @@ pub struct CaptureSource {
 // ── Global State ──
 
 struct ShareHandle {
+    task_id: u64,
     running: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 fn global_state() -> &'static Mutex<Option<ShareHandle>> {
@@ -43,17 +45,31 @@ fn global_state() -> &'static Mutex<Option<ShareHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+fn next_task_id() -> u64 {
+    static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn clear_task_if_current(task_id: u64) {
+    let mut state = global_state().lock().unwrap();
+    if state.as_ref().map(|handle| handle.task_id) == Some(task_id) {
+        *state = None;
+    }
+}
+
 // ── Public API (called from Tauri IPC) ──
 
 /// List available capture sources (monitors + windows).
 pub fn list_sources() -> Vec<CaptureSource> {
     use windows::Win32::Foundation::{BOOL, LPARAM, RECT, TRUE};
-    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    };
+    use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
     };
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 
     let mut sources = Vec::new();
 
@@ -69,7 +85,11 @@ pub fn list_sources() -> Vec<CaptureSource> {
         info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
         if GetMonitorInfoW(hmonitor, &mut info as *mut _ as *mut _).as_bool() {
             let device = String::from_utf16_lossy(
-                &info.szDevice[..info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len())],
+                &info.szDevice[..info
+                    .szDevice
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(info.szDevice.len())],
             );
             let idx = monitors.iter().filter(|s| s.is_monitor).count() + 1;
             let title = format!("Monitor {} ({})", idx, device);
@@ -97,28 +117,61 @@ pub fn list_sources() -> Vec<CaptureSource> {
 
     // Known non-game executables for classification heuristic
     const NON_GAME_EXES: &[&str] = &[
-        "explorer.exe", "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
-        "opera.exe", "vivaldi.exe", "discord.exe", "slack.exe", "teams.exe",
-        "code.exe", "devenv.exe", "rider64.exe", "idea64.exe",
-        "notepad.exe", "notepad++.exe", "sublime_text.exe",
-        "spotify.exe", "wmplayer.exe", "vlc.exe",
-        "powershell.exe", "pwsh.exe", "cmd.exe", "windowsterminal.exe",
-        "taskmgr.exe", "mmc.exe", "regedit.exe", "control.exe",
-        "outlook.exe", "winword.exe", "excel.exe", "powerpnt.exe",
-        "onenote.exe", "thunderbird.exe",
-        "filezilla.exe", "putty.exe", "winscp.exe",
-        "obs64.exe", "obs.exe", "streamlabs.exe",
-        "echo-core-client.exe", "echo-core-control.exe",
-        "applicationframehost.exe", "systemsettings.exe",
-        "searchhost.exe", "shellexperiencehost.exe",
-        "textinputhost.exe", "lockapp.exe",
+        "explorer.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "vivaldi.exe",
+        "discord.exe",
+        "slack.exe",
+        "teams.exe",
+        "code.exe",
+        "devenv.exe",
+        "rider64.exe",
+        "idea64.exe",
+        "notepad.exe",
+        "notepad++.exe",
+        "sublime_text.exe",
+        "spotify.exe",
+        "wmplayer.exe",
+        "vlc.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "cmd.exe",
+        "windowsterminal.exe",
+        "taskmgr.exe",
+        "mmc.exe",
+        "regedit.exe",
+        "control.exe",
+        "outlook.exe",
+        "winword.exe",
+        "excel.exe",
+        "powerpnt.exe",
+        "onenote.exe",
+        "thunderbird.exe",
+        "filezilla.exe",
+        "putty.exe",
+        "winscp.exe",
+        "obs64.exe",
+        "obs.exe",
+        "streamlabs.exe",
+        "echo-core-client.exe",
+        "echo-core-control.exe",
+        "applicationframehost.exe",
+        "systemsettings.exe",
+        "searchhost.exe",
+        "shellexperiencehost.exe",
+        "textinputhost.exe",
+        "lockapp.exe",
     ];
 
     /// Get the executable name for a process ID.
     fn exe_name_for_pid(pid: u32) -> Option<String> {
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
         use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
@@ -148,7 +201,10 @@ pub fn list_sources() -> Vec<CaptureSource> {
 
                 // Filter: skip tool windows
                 let ex_style = unsafe {
-                    GetWindowLongW(windows::Win32::Foundation::HWND(hwnd as *mut _), GWL_EXSTYLE)
+                    GetWindowLongW(
+                        windows::Win32::Foundation::HWND(hwnd as *mut _),
+                        GWL_EXSTYLE,
+                    )
                 } as u32;
                 if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
                     continue;
@@ -179,7 +235,11 @@ pub fn list_sources() -> Vec<CaptureSource> {
                     id: hwnd as u64,
                     title,
                     is_monitor: false,
-                    source_type: if is_game { "game".to_string() } else { "window".to_string() },
+                    source_type: if is_game {
+                        "game".to_string()
+                    } else {
+                        "window".to_string()
+                    },
                     pid,
                 });
             }
@@ -198,40 +258,59 @@ pub async fn start_share(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop_share();
+    stop_share().await?;
 
     let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            running: running.clone(),
-        });
-    }
+    let task_id = next_task_id();
 
     let app2 = app.clone();
     let r2 = running.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2, health).await {
             eprintln!("[screen-capture] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
         let _ = app2.emit("screen-capture-stopped", ());
         eprintln!("[screen-capture] task exited");
-        let mut state = global_state().lock().unwrap();
-        *state = None;
+        clear_task_if_current(task_id);
     });
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(ShareHandle {
+            task_id,
+            running,
+            task,
+        });
+        if state
+            .as_ref()
+            .map(|handle| handle.task.is_finished())
+            .unwrap_or(false)
+        {
+            *state = None;
+        }
+    }
 
     Ok(())
 }
 
 /// Stop the current screen share.
-pub fn stop_share() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
+pub async fn stop_share() -> Result<(), String> {
+    let handle = {
+        let mut state = global_state().lock().unwrap();
+        state.take()
+    };
+
+    if let Some(handle) = handle {
         handle.running.store(false, Ordering::SeqCst);
         eprintln!("[screen-capture] stop requested");
+        handle
+            .task
+            .await
+            .map_err(|e| format!("screen capture task join failed: {e}"))?;
     }
+
+    Ok(())
 }
 
 // ── Thumbnail Generation ──
@@ -241,10 +320,9 @@ pub fn get_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
     use base64::Engine;
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
-        GetDIBits, GetDC, ReleaseDC, SelectObject, SetStretchBltMode,
-        StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-        HALFTONE, SRCCOPY,
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, SetStretchBltMode, StretchBlt, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, SRCCOPY,
     };
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
     use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -330,10 +408,9 @@ pub fn get_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
 
         SetStretchBltMode(thumb_dc, HALFTONE);
         StretchBlt(
-            thumb_dc, 0, 0, THUMB_W, THUMB_H,
-            src_dc, 0, 0, src_w, src_h,
-            SRCCOPY,
-        ).ok();
+            thumb_dc, 0, 0, THUMB_W, THUMB_H, src_dc, 0, 0, src_w, src_h, SRCCOPY,
+        )
+        .ok();
 
         // Read pixels from thumbnail
         let mut bmi = BITMAPINFO {
@@ -449,9 +526,8 @@ async fn share_loop(
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
-    let mut publisher = CapturePublisher::connect_and_publish(
-        sfu_url, token, 1920, 1080, "screen-capture",
-    ).await?;
+    let mut publisher =
+        CapturePublisher::connect_and_publish(sfu_url, token, 1920, 1080, "screen-capture").await?;
 
     // Resolve HWND -> PID for WASAPI audio auto-start
     let target_pid = unsafe {
@@ -479,12 +555,12 @@ async fn share_loop(
     let capture_running = running.clone();
 
     std::thread::spawn(move || {
+        use crate::gpu_converter::GpuConverter;
+        use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
         use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
         use windows_capture::settings::*;
         use windows_capture::window::Window;
-        use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
-        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-        use crate::gpu_converter::GpuConverter;
 
         const ENC_W: u32 = 1920;
         const ENC_H: u32 = 1080;
@@ -508,7 +584,8 @@ async fn share_loop(
             fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
                 let (tx, running) = ctx.flags;
                 Ok(Self {
-                    tx, running,
+                    tx,
+                    running,
                     wgc_frame_count: 0,
                     wgc_start: std::time::Instant::now(),
                     gpu: None,
@@ -532,31 +609,46 @@ async fn share_loop(
                 // Log WGC callback FPS every 60 frames
                 if self.wgc_frame_count % 60 == 0 {
                     let elapsed = self.wgc_start.elapsed().as_secs_f64();
-                    let fps = if elapsed > 0.0 { (self.wgc_frame_count as f64 / elapsed) as u32 } else { 0 };
-                    eprintln!("[wgc-callback] {}x{} @ {}fps ({} frames)", w, h, fps, self.wgc_frame_count);
+                    let fps = if elapsed > 0.0 {
+                        (self.wgc_frame_count as f64 / elapsed) as u32
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "[wgc-callback] {}x{} @ {}fps ({} frames)",
+                        w, h, fps, self.wgc_frame_count
+                    );
                 }
 
                 // Get the GPU texture directly (no CPU copy!)
                 // windows-capture uses windows v0.61, we use v0.58.
                 // Both are #[repr(transparent)] COM wrappers for the same interface.
                 // Safe to transmute the reference.
-                let frame_texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D = unsafe {
-                    std::mem::transmute(frame.as_raw_texture())
-                };
+                let frame_texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D =
+                    unsafe { std::mem::transmute(frame.as_raw_texture()) };
 
                 // Lazily initialize GPU pipeline on WGC's own device
                 if self.gpu.is_none() {
                     unsafe {
-                        let device: ID3D11Device = frame_texture.GetDevice()
+                        let device: ID3D11Device = frame_texture
+                            .GetDevice()
                             .map_err(|e| format!("GetDevice: {e}"))?;
-                        let context = device.GetImmediateContext()
+                        let context = device
+                            .GetImmediateContext()
                             .map_err(|e| format!("GetImmediateContext: {e}"))?;
                         let converter = GpuConverter::new(
-                            &device, w, h,
+                            &device,
+                            w,
+                            h,
                             DXGI_FORMAT_B8G8R8A8_UNORM,
-                            ENC_W, ENC_H,
-                        ).map_err(|e| format!("GpuConverter: {e}"))?;
-                        eprintln!("[wgc-gpu] pipeline initialized on WGC device: {}x{} -> {}x{}", w, h, ENC_W, ENC_H);
+                            ENC_W,
+                            ENC_H,
+                        )
+                        .map_err(|e| format!("GpuConverter: {e}"))?;
+                        eprintln!(
+                            "[wgc-gpu] pipeline initialized on WGC device: {}x{} -> {}x{}",
+                            w, h, ENC_W, ENC_H
+                        );
                         self.gpu = Some((device, context, converter));
                     }
                 }
@@ -565,10 +657,9 @@ async fn share_loop(
 
                 // GPU pipeline: CopyResource -> compute shader -> staging -> Map -> CPU buffer
                 unsafe {
-                    let (ptr, pitch, out_w, out_h) = converter.convert(
-                        context, frame_texture,
-                        0, 0, w, h, None,
-                    ).map_err(|e| format!("convert: {e}"))?;
+                    let (ptr, pitch, out_w, out_h) = converter
+                        .convert(context, frame_texture, 0, 0, w, h, None)
+                        .map_err(|e| format!("convert: {e}"))?;
 
                     // Copy from mapped staging to owned buffer
                     let row_bytes = (out_w * 4) as usize;
@@ -652,18 +743,33 @@ async fn share_loop(
 
         if fc % 30 == 0 {
             let elapsed = publisher.elapsed().as_secs_f64();
-            let fps = if elapsed > 0.0 { (fc as f64 / elapsed) as u32 } else { 0 };
-            let avg_yuv_ms = if fc > 0 { yuv_total_us as f64 / fc as f64 / 1000.0 } else { 0.0 };
-            eprintln!("[wgc-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
-                width, height, fps, fc, drop_count, avg_yuv_ms);
-            if let Some(emit_fps) = publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", width, height, 30) {
+            let fps = if elapsed > 0.0 {
+                (fc as f64 / elapsed) as u32
+            } else {
+                0
+            };
+            let avg_yuv_ms = if fc > 0 {
+                yuv_total_us as f64 / fc as f64 / 1000.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[wgc-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
+                width, height, fps, fc, drop_count, avg_yuv_ms
+            );
+            if let Some(emit_fps) =
+                publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", width, height, 30)
+            {
                 health.record_capture_fps(emit_fps);
             }
         }
     }
 
     running.store(false, Ordering::SeqCst);
-    eprintln!("[screen-capture] shutting down, {} frames captured", publisher.frame_count());
+    eprintln!(
+        "[screen-capture] shutting down, {} frames captured",
+        publisher.frame_count()
+    );
     health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())
@@ -683,29 +789,38 @@ pub async fn start_share_monitor(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop_share();
+    stop_share().await?;
 
     let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            running: running.clone(),
-        });
-    }
+    let task_id = next_task_id();
 
     let app2 = app.clone();
     let r2 = running.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2, health).await {
             eprintln!("[screen-capture-monitor] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
         let _ = app2.emit("screen-capture-stopped", ());
         eprintln!("[screen-capture-monitor] task exited");
-        let mut state = global_state().lock().unwrap();
-        *state = None;
+        clear_task_if_current(task_id);
     });
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(ShareHandle {
+            task_id,
+            running,
+            task,
+        });
+        if state
+            .as_ref()
+            .map(|handle| handle.task.is_finished())
+            .unwrap_or(false)
+        {
+            *state = None;
+        }
+    }
 
     Ok(())
 }
@@ -719,11 +834,14 @@ async fn share_loop_monitor(
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
-    let mut publisher = CapturePublisher::connect_and_publish(
-        sfu_url, token, 1920, 1080, "screen-capture-monitor",
-    ).await?;
+    let mut publisher =
+        CapturePublisher::connect_and_publish(sfu_url, token, 1920, 1080, "screen-capture-monitor")
+            .await?;
 
-    eprintln!("[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}", hmonitor);
+    eprintln!(
+        "[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}",
+        hmonitor
+    );
     // No PID for monitor capture — system-wide audio not per-process
     let _ = app.emit("screen-capture-started", 0u32);
     health.set_active(
@@ -737,12 +855,12 @@ async fn share_loop_monitor(
     let capture_running = running.clone();
 
     std::thread::spawn(move || {
-        use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
-        use windows_capture::settings::*;
-        use windows_capture::monitor::Monitor;
+        use crate::gpu_converter::GpuConverter;
         use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
         use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
-        use crate::gpu_converter::GpuConverter;
+        use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
+        use windows_capture::monitor::Monitor;
+        use windows_capture::settings::*;
 
         const ENC_W: u32 = 1920;
         const ENC_H: u32 = 1080;
@@ -765,7 +883,8 @@ async fn share_loop_monitor(
             fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
                 let (tx, running) = ctx.flags;
                 Ok(Self {
-                    tx, running,
+                    tx,
+                    running,
                     wgc_frame_count: 0,
                     wgc_start: std::time::Instant::now(),
                     gpu: None,
@@ -788,30 +907,45 @@ async fn share_loop_monitor(
 
                 if self.wgc_frame_count % 60 == 0 {
                     let elapsed = self.wgc_start.elapsed().as_secs_f64();
-                    let fps = if elapsed > 0.0 { (self.wgc_frame_count as f64 / elapsed) as u32 } else { 0 };
-                    eprintln!("[wgc-monitor-callback] {}x{} @ {}fps ({} frames)", w, h, fps, self.wgc_frame_count);
+                    let fps = if elapsed > 0.0 {
+                        (self.wgc_frame_count as f64 / elapsed) as u32
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "[wgc-monitor-callback] {}x{} @ {}fps ({} frames)",
+                        w, h, fps, self.wgc_frame_count
+                    );
                 }
 
-                let frame_texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D = unsafe {
-                    std::mem::transmute(frame.as_raw_texture())
-                };
+                let frame_texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D =
+                    unsafe { std::mem::transmute(frame.as_raw_texture()) };
 
                 if self.gpu.is_none() {
                     unsafe {
-                        let device: ID3D11Device = frame_texture.GetDevice()
+                        let device: ID3D11Device = frame_texture
+                            .GetDevice()
                             .map_err(|e| format!("GetDevice: {e}"))?;
-                        let context = device.GetImmediateContext()
+                        let context = device
+                            .GetImmediateContext()
                             .map_err(|e| format!("GetImmediateContext: {e}"))?;
                         // Capture in HDR scRGB float — avoids forcing Windows to do
                         // HDR->SDR mode conversion (which causes monitor flicker on
                         // HDR displays). Our GpuConverter detects this format and
                         // applies linear->sRGB gamma correction in the shader.
                         let converter = GpuConverter::new(
-                            &device, w, h,
+                            &device,
+                            w,
+                            h,
                             DXGI_FORMAT_R16G16B16A16_FLOAT,
-                            ENC_W, ENC_H,
-                        ).map_err(|e| format!("GpuConverter: {e}"))?;
-                        eprintln!("[wgc-monitor-gpu] pipeline initialized: {}x{} HDR -> {}x{} SDR", w, h, ENC_W, ENC_H);
+                            ENC_W,
+                            ENC_H,
+                        )
+                        .map_err(|e| format!("GpuConverter: {e}"))?;
+                        eprintln!(
+                            "[wgc-monitor-gpu] pipeline initialized: {}x{} HDR -> {}x{} SDR",
+                            w, h, ENC_W, ENC_H
+                        );
                         self.gpu = Some((device, context, converter));
                     }
                 }
@@ -819,10 +953,9 @@ async fn share_loop_monitor(
                 let (_, context, converter) = self.gpu.as_ref().unwrap();
 
                 unsafe {
-                    let (ptr, pitch, out_w, out_h) = converter.convert(
-                        context, frame_texture,
-                        0, 0, w, h, None,
-                    ).map_err(|e| format!("convert: {e}"))?;
+                    let (ptr, pitch, out_w, out_h) = converter
+                        .convert(context, frame_texture, 0, 0, w, h, None)
+                        .map_err(|e| format!("convert: {e}"))?;
 
                     let row_bytes = (out_w * 4) as usize;
                     let mut bgra = vec![0u8; (out_w * out_h * 4) as usize];
@@ -858,7 +991,7 @@ async fn share_loop_monitor(
         // our shader eliminates the mode-switch flicker entirely.
         let settings = Settings::new(
             monitor,
-            CursorCaptureSettings::Default,  // cursor INCLUDED — this is the win
+            CursorCaptureSettings::Default, // cursor INCLUDED — this is the win
             DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
@@ -867,7 +1000,10 @@ async fn share_loop_monitor(
             (frame_tx, capture_running),
         );
 
-        eprintln!("[screen-capture-monitor] WGC starting for HMONITOR {}", hmonitor);
+        eprintln!(
+            "[screen-capture-monitor] WGC starting for HMONITOR {}",
+            hmonitor
+        );
         match Handler::start_free_threaded(settings) {
             Ok(ctrl) => {
                 let _ = ctrl.wait();
@@ -903,18 +1039,38 @@ async fn share_loop_monitor(
 
         if fc % 30 == 0 {
             let elapsed = publisher.elapsed().as_secs_f64();
-            let fps = if elapsed > 0.0 { (fc as f64 / elapsed) as u32 } else { 0 };
-            let avg_yuv_ms = if fc > 0 { yuv_total_us as f64 / fc as f64 / 1000.0 } else { 0.0 };
-            eprintln!("[wgc-monitor-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
-                width, height, fps, fc, drop_count, avg_yuv_ms);
-            if let Some(emit_fps) = publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc-monitor", width, height, 30) {
+            let fps = if elapsed > 0.0 {
+                (fc as f64 / elapsed) as u32
+            } else {
+                0
+            };
+            let avg_yuv_ms = if fc > 0 {
+                yuv_total_us as f64 / fc as f64 / 1000.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[wgc-monitor-publish] {}x{} @ {}fps ({} frames, {} skipped, yuv={:.1}ms)",
+                width, height, fps, fc, drop_count, avg_yuv_ms
+            );
+            if let Some(emit_fps) = publisher.maybe_emit_stats(
+                app,
+                "screen-capture-stats",
+                "wgc-monitor",
+                width,
+                height,
+                30,
+            ) {
                 health.record_capture_fps(emit_fps);
             }
         }
     }
 
     running.store(false, Ordering::SeqCst);
-    eprintln!("[screen-capture-monitor] shutting down, {} frames captured", publisher.frame_count());
+    eprintln!(
+        "[screen-capture-monitor] shutting down, {} frames captured",
+        publisher.frame_count()
+    );
     health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())

@@ -5,6 +5,7 @@
 var _capturePickerResolve = null;
 var _capturePickerReject = null;
 var _selectedSource = null;
+var _capturePickerSupport = null;
 
 /**
  * Show the capture source picker modal.
@@ -102,6 +103,9 @@ async function _loadSources() {
     if (!body) return;
 
     try {
+        if (!_capturePickerSupport) {
+            _capturePickerSupport = await _detectCaptureSupport();
+        }
         var sources = await tauriInvoke('list_screen_sources');
         if (!sources || sources.length === 0) {
             body.innerHTML = '<div class="capture-source-empty">No capture sources found</div>';
@@ -112,6 +116,11 @@ async function _loadSources() {
         var monitors = sources.filter(function(s) { return s.source_type === 'monitor'; });
         var games = sources.filter(function(s) { return s.source_type === 'game'; });
         var windows = sources.filter(function(s) { return s.source_type === 'window'; });
+        var unsupportedWindows = [];
+        if (!_capturePickerSupport.windowCaptureSupported) {
+            unsupportedWindows = windows;
+            windows = [];
+        }
 
         var html = '';
 
@@ -124,11 +133,20 @@ async function _loadSources() {
         if (windows.length > 0) {
             html += _renderSection('Windows', null, windows);
         }
+        if (unsupportedWindows.length > 0) {
+            html += _renderSection('Windows', 'Requires Win11 24H2+', unsupportedWindows, true);
+        }
 
         body.innerHTML = html;
 
         // Bind click handlers
         body.querySelectorAll('.capture-source-card').forEach(function(card) {
+            if (card.dataset.unsupported === '1') {
+                card.onclick = function() {
+                    showToast('Window capture on this PC requires Windows 11 24H2+. Use a Screen or Game source instead.', 6000);
+                };
+                return;
+            }
             card.onclick = function() {
                 body.querySelectorAll('.capture-source-card').forEach(function(c) {
                     c.classList.remove('selected');
@@ -159,7 +177,26 @@ async function _loadSources() {
     }
 }
 
-function _renderSection(title, badge, sources) {
+async function _detectCaptureSupport() {
+    var support = {
+        osBuild: null,
+        windowCaptureSupported: true,
+    };
+    if (!window.__ECHO_NATIVE__ || typeof tauriInvoke !== 'function') {
+        return support;
+    }
+    try {
+        var osBuild = await tauriInvoke('get_os_build_number');
+        support.osBuild = osBuild;
+        support.windowCaptureSupported = osBuild >= 26100;
+    } catch (err) {
+        // Older binaries may not expose build detection yet. Leave the picker permissive
+        // and let the start path produce the fallback/error instead.
+    }
+    return support;
+}
+
+function _renderSection(title, badge, sources, disabled) {
     var badgeHtml = badge ? ' <span class="badge">' + badge + '</span>' : '';
     var html = '<div class="capture-picker-section">' +
         '<div class="capture-picker-section-title">' + title + badgeHtml + '</div>' +
@@ -167,10 +204,11 @@ function _renderSection(title, badge, sources) {
 
     for (var i = 0; i < sources.length; i++) {
         var s = sources[i];
-        html += '<div class="capture-source-card" data-id="' + s.id +
+        html += '<div class="capture-source-card' + (disabled ? ' disabled' : '') + '" data-id="' + s.id +
             '" data-title="' + _escHtml(s.title) +
             '" data-type="' + s.source_type +
-            '" data-pid="' + (s.pid || 0) + '">' +
+            '" data-pid="' + (s.pid || 0) +
+            '" data-unsupported="' + (disabled ? '1' : '0') + '">' +
             '<div class="capture-source-thumb" id="thumb-container-' + s.id + '">' +
                 '<div class="shimmer" id="thumb-' + s.id + '"></div>' +
             '</div>' +

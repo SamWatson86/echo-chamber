@@ -4,6 +4,63 @@
    and per-process audio capture via WASAPI.
    ========================================================= */
 
+function _stopNativeCaptureStopListeners() {
+  if (_nativeCaptureStopUnlisten) {
+    try { _nativeCaptureStopUnlisten(); } catch (e) {}
+    _nativeCaptureStopUnlisten = null;
+  }
+}
+
+async function _finalizeNativeCaptureStop(stopMessage) {
+  var wasActive = !!(window._echoNativeCaptureActive || window._echoNativeCaptureMode || screenEnabled);
+  window._echoNativeCaptureActive = false;
+  window._echoNativeCaptureMode = null;
+  screenEnabled = false;
+  _stopNativeCaptureStopListeners();
+  _stopQualityWarnListener();
+  await stopNativeAudioCapture();
+  renderPublishButtons();
+  if (stopMessage && wasActive) showToast(stopMessage, 3000);
+}
+
+async function _startNativeCaptureStopListeners() {
+  _stopNativeCaptureStopListeners();
+  if (typeof tauriListen !== 'function') return;
+
+  var stopEvents = {
+    'screen-capture-stopped': 'Screen capture ended',
+    'desktop-capture-stopped': 'Desktop capture ended',
+  };
+  var unlisteners = [];
+
+  try {
+    for (var eventName in stopEvents) {
+      if (!Object.prototype.hasOwnProperty.call(stopEvents, eventName)) continue;
+      var unlisten = await tauriListen(eventName, function(name) {
+        return function() {
+          debugLog('[' + name + '] stopped by Rust');
+          _finalizeNativeCaptureStop(stopEvents[name]).catch(function(err) {
+            debugLog('[screen-share] native stop cleanup failed: ' + (err.message || err));
+          });
+        };
+      }(eventName));
+      unlisteners.push(unlisten);
+    }
+  } catch (err) {
+    unlisteners.forEach(function(unlisten) {
+      try { unlisten(); } catch (e) {}
+    });
+    throw err;
+  }
+
+  _nativeCaptureStopUnlisten = function() {
+    unlisteners.forEach(function(unlisten) {
+      try { unlisten(); } catch (e) {}
+    });
+    unlisteners.length = 0;
+  };
+}
+
 async function startScreenShareManual() {
   const LK = getLiveKitClient();
 
@@ -52,6 +109,12 @@ async function startScreenShareManual() {
       debugLog('[os] build detection unavailable (older client), assuming WGC supported');
     }
     var wgcSupported = osBuild >= 26100;
+
+    try {
+      await _startNativeCaptureStopListeners();
+    } catch (listenErr) {
+      debugLog('[screen-share] native stop listener registration failed: ' + (listenErr.message || listenErr));
+    }
 
     // Step 3: start capture
     try {
@@ -155,22 +218,8 @@ async function startScreenShareManual() {
         debugLog('[audio] skipped — type=' + source.sourceType + ' pid=' + (source.pid || 'none'));
       }
 
-      // Listen for Rust-side auto-stop (e.g. game exited, timeouts)
-      if (typeof tauriListen === 'function') {
-        tauriListen('desktop-capture-stopped', function() {
-          debugLog('[desktop-dd] stopped by Rust');
-          window._echoNativeCaptureActive = false;
-          window._echoNativeCaptureMode = null;
-          screenEnabled = false;
-          _stopQualityWarnListener();
-          renderPublishButtons();
-          showToast('Desktop capture ended', 3000);
-        }).catch(function() {});
-        // NOTE: WASAPI audio auto-start is handled by the immediate startNativeAudioCapture()
-        // call above using the picker's PID. No event-based listeners needed — they would
-        // double-start and kill the first capture.
-      }
     } catch (err) {
+      var fallbackStarted = false;
       showToast('Capture failed: ' + (err.message || err), 8000);
       // If game capture failed, try WGC fallback (only on 24H2+)
       if (source.sourceType === 'game' && screenToken && wgcSupported) {
@@ -184,11 +233,13 @@ async function startScreenShareManual() {
           screenEnabled = true;
           window._echoNativeCaptureActive = true;
           renderPublishButtons();
+          fallbackStarted = true;
           showToast('Using standard capture (game hook unavailable)', 5000);
         } catch (e2) {
           showToast('Fallback capture also failed: ' + (e2.message || e2), 8000);
         }
       }
+      if (!fallbackStarted) _stopNativeCaptureStopListeners();
     }
     return;
   }
@@ -885,22 +936,17 @@ async function startScreenShareManual() {
 
 async function stopScreenShareManual() {
   // ── Native capture stop path ──
-  if (window._echoNativeCaptureActive) {
+  if (window._echoNativeCaptureActive || window._echoNativeCaptureMode) {
+    var stopCommand = window._echoNativeCaptureMode === 'desktop-dd'
+      ? 'stop_desktop_capture'
+      : 'stop_screen_share';
+    _stopNativeCaptureStopListeners();
     try {
-      if (window._echoNativeCaptureMode === 'desktop-dd') {
-        await tauriInvoke('stop_desktop_capture');
-      } else {
-        await tauriInvoke('stop_screen_share');
-      }
+      await tauriInvoke(stopCommand);
     } catch (e) {
       console.error('[screen-share] native stop error:', e);
     }
-    window._echoNativeCaptureActive = false;
-    window._echoNativeCaptureMode = null;
-    screenEnabled = false;
-    _stopQualityWarnListener();
-    await stopNativeAudioCapture();
-    renderPublishButtons();
+    await _finalizeNativeCaptureStop(null);
     return; // Don't fall through to browser path
   }
 

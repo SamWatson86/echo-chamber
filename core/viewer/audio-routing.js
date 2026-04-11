@@ -408,6 +408,9 @@ function handleTrackSubscribed(track, publication, participant) {
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
     if (existingTile && existingTile.isConnected) {
       const existingVideo = existingTile.querySelector("video");
+      if (!hiddenScreens.has(identity)) {
+        existingTile.style.display = "";
+      }
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = hiddenScreens.has(identity) ? "Start Watching" : "Stop Watching";
