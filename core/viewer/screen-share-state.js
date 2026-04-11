@@ -40,6 +40,7 @@ var _nativeAudioDest = null;        // MediaStreamDestination
 var _nativeAudioTrack = null;       // Published LiveKit track
 var _nativeAudioUnlisten = null;    // Tauri event unlisten function
 var _nativeAudioActive = false;
+var _nativeCaptureStopUnlisten = null; // Tauri stop-event unlisten function
 
 // NOTE: The following state variables are declared in state.js (loaded earlier):
 //   _latestScreenStats, _cameraReducedForScreenShare, _bwLimitedCount,

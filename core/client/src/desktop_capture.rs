@@ -14,7 +14,7 @@
 //!               → libwebrtc H264 encoder (NVENC on RTX 4090)
 //!                 → RTP → SFU
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
@@ -23,38 +23,35 @@ use tauri::Emitter;
 use windows::core::{Interface, PCSTR};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-    D3D11_USAGE_DEFAULT, D3D11_CPU_ACCESS_READ,
-    ID3D11Device, ID3D11Texture2D,
-};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_FRAME_INFO,
-    DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, GetWindowThreadProcessId,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, SetWindowPos,
-    SetLayeredWindowAttributes,
-    WNDCLASSEXW, WS_POPUP, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE, HWND_TOPMOST,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    LWA_ALPHA,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, GetWindowThreadProcessId,
+    RegisterClassExW, SetLayeredWindowAttributes, SetWindowPos, HWND_TOPMOST, LWA_ALPHA,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+};
 
-use crate::capture_pipeline::CapturePublisher;
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
+use crate::capture_pipeline::CapturePublisher;
 
 // ── GPU HDR→SDR Conversion Pipeline (shared module) ──
 
@@ -63,12 +60,26 @@ use crate::gpu_converter::GpuConverter;
 // ── Global State ──
 
 struct DesktopShareHandle {
+    task_id: u64,
     running: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 fn global_state() -> &'static Mutex<Option<DesktopShareHandle>> {
     static STATE: OnceLock<Mutex<Option<DesktopShareHandle>>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn next_task_id() -> u64 {
+    static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn clear_task_if_current(task_id: u64) {
+    let mut state = global_state().lock().unwrap();
+    if state.as_ref().map(|handle| handle.task_id) == Some(task_id) {
+        *state = None;
+    }
 }
 
 // ── Public API ──
@@ -93,15 +104,22 @@ pub fn check_available() -> (bool, String) {
 
         if let Ok(desc) = output.GetDesc() {
             let name = String::from_utf16_lossy(
-                &desc.DeviceName[..desc.DeviceName.iter().position(|&c| c == 0).unwrap_or(desc.DeviceName.len())],
+                &desc.DeviceName[..desc
+                    .DeviceName
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(desc.DeviceName.len())],
             );
             let r = desc.DesktopCoordinates;
-            (true, format!(
-                "DXGI DD available: {} ({}x{})",
-                name,
-                r.right - r.left,
-                r.bottom - r.top,
-            ))
+            (
+                true,
+                format!(
+                    "DXGI DD available: {} ({}x{})",
+                    name,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                ),
+            )
         } else {
             (true, "DXGI DD available".into())
         }
@@ -121,16 +139,10 @@ pub async fn start(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop();
+    stop().await?;
 
     let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(DesktopShareHandle {
-            running: running.clone(),
-        });
-    }
+    let task_id = next_task_id();
 
     // Get game PID for audio capture
     let target_pid = unsafe {
@@ -142,35 +154,73 @@ pub async fn start(
 
     let _ = app.emit("desktop-capture-started", target_pid);
 
+    let app_for_capture = app.clone();
     let r2 = running.clone();
     let health_clone = Arc::clone(&health);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         // Run DXGI capture on a blocking thread — it uses COM and blocking waits
         let result = tokio::task::spawn_blocking(move || {
-            capture_loop_blocking(&sfu_url, &token, &app, &r2, hwnd, fullscreen, health_clone)
+            capture_loop_blocking(
+                &sfu_url,
+                &token,
+                &app_for_capture,
+                &r2,
+                hwnd,
+                fullscreen,
+                health_clone,
+            )
         })
-        .await
-        .map_err(|e| format!("spawn_blocking: {e}"))?;
+        .await;
 
-        if let Err(e) = result {
+        if let Err(e) = match result {
+            Ok(inner) => inner,
+            Err(e) => Err(format!("spawn_blocking: {e}")),
+        } {
             eprintln!("[desktop-capture] error: {e}");
+            let _ = app.emit("desktop-capture-error", e);
         }
 
-        let mut state = global_state().lock().unwrap();
-        *state = None;
-        Ok::<(), String>(())
+        let _ = app.emit("desktop-capture-stopped", ());
+        eprintln!("[desktop-capture] task exited");
+        clear_task_if_current(task_id);
     });
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(DesktopShareHandle {
+            task_id,
+            running,
+            task,
+        });
+        if state
+            .as_ref()
+            .map(|handle| handle.task.is_finished())
+            .unwrap_or(false)
+        {
+            *state = None;
+        }
+    }
 
     Ok(())
 }
 
 /// Stop the current desktop capture.
-pub fn stop() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
+pub async fn stop() -> Result<(), String> {
+    let handle = {
+        let mut state = global_state().lock().unwrap();
+        state.take()
+    };
+
+    if let Some(handle) = handle {
         handle.running.store(false, Ordering::SeqCst);
         eprintln!("[desktop-capture] stop requested");
+        handle
+            .task
+            .await
+            .map_err(|e| format!("desktop capture task join failed: {e}"))?;
     }
+
+    Ok(())
 }
 
 /// Returns true if a desktop capture is currently running.
@@ -205,7 +255,10 @@ fn find_output_for_window(
     };
     unsafe {
         if !GetMonitorInfoW(monitor, &mut mi).as_bool() {
-            return Err(format!("GetMonitorInfoW failed (is_monitor={}, handle={})", is_monitor, hwnd_or_hmonitor));
+            return Err(format!(
+                "GetMonitorInfoW failed (is_monitor={}, handle={})",
+                is_monitor, hwnd_or_hmonitor
+            ));
         }
     }
     let mon_w = (mi.rcMonitor.right - mi.rcMonitor.left) as u32;
@@ -291,7 +344,9 @@ static ANTI_MPO_CLASS_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 unsafe extern "system" fn anti_mpo_wndproc(
-    hwnd: HWND, msg: u32, wparam: windows::Win32::Foundation::WPARAM,
+    hwnd: HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -301,9 +356,8 @@ unsafe extern "system" fn anti_mpo_wndproc(
 /// Returns the HWND which must be destroyed when capture stops.
 unsafe fn create_anti_mpo_window(monitor_rect: &RECT) -> Option<HWND> {
     // Register window class once
-    let hinstance = windows::Win32::Foundation::HINSTANCE(
-        GetModuleHandleW(None).unwrap_or_default().0
-    );
+    let hinstance =
+        windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None).unwrap_or_default().0);
     if !ANTI_MPO_CLASS_REGISTERED.swap(true, Ordering::SeqCst) {
         let class_name = windows::core::w!("EchoAntiMPO");
         let wc = WNDCLASSEXW {
@@ -317,8 +371,8 @@ unsafe fn create_anti_mpo_window(monitor_rect: &RECT) -> Option<HWND> {
     }
 
     let class_name = windows::core::w!("EchoAntiMPO");
-    let ex_style = WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED
-        | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    let ex_style =
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
     // Place the 1x1 window at the top-left of the monitor containing the game
     let hwnd = CreateWindowExW(
@@ -345,8 +399,12 @@ unsafe fn create_anti_mpo_window(monitor_rect: &RECT) -> Option<HWND> {
         let _ = SetLayeredWindowAttributes(hwnd, None, 0, LWA_ALPHA);
         // Ensure topmost + visible
         let _ = SetWindowPos(
-            hwnd, HWND_TOPMOST,
-            0, 0, 0, 0,
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
         eprintln!("[anti-mpo] overlay window created — DWM forced to Composed Flip");
@@ -360,8 +418,12 @@ unsafe fn create_anti_mpo_window(monitor_rect: &RECT) -> Option<HWND> {
 /// Reassert topmost status — games can temporarily promote themselves above other windows.
 unsafe fn refresh_anti_mpo_window(hwnd: HWND) {
     let _ = SetWindowPos(
-        hwnd, HWND_TOPMOST,
-        0, 0, 0, 0,
+        hwnd,
+        HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
     );
 }
@@ -605,7 +667,8 @@ fn capture_loop_blocking(
     };
 
     // 2. Create D3D11 device on the same adapter
-    let adapter_base: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter.cast()
+    let adapter_base: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
+        .cast()
         .map_err(|e| format!("cast IDXGIAdapter: {e}"))?;
     let mut device: Option<ID3D11Device> = None;
     unsafe {
@@ -623,8 +686,8 @@ fn capture_loop_blocking(
         .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
     }
     let device = device.ok_or("D3D11CreateDevice returned null")?;
-    let context = unsafe { device.GetImmediateContext() }
-        .map_err(|e| format!("GetImmediateContext: {e}"))?;
+    let context =
+        unsafe { device.GetImmediateContext() }.map_err(|e| format!("GetImmediateContext: {e}"))?;
 
     // 3. Create output duplication — as a closure so we can reinit on
     // recoverable stalls (5+ seconds of AcquireNextFrame timeouts from
@@ -697,7 +760,12 @@ fn capture_loop_blocking(
     // 4. Connect to LiveKit and publish track via shared pipeline
     let rt = tokio::runtime::Handle::current();
     let mut publisher = CapturePublisher::connect_and_publish_blocking(
-        &rt, sfu_url, token, enc_w, enc_h, "desktop-capture",
+        &rt,
+        sfu_url,
+        token,
+        enc_w,
+        enc_h,
+        "desktop-capture",
     )?;
 
     health.set_active(
@@ -798,14 +866,12 @@ fn capture_loop_blocking(
 
     // 7. Frame loop
     while running.load(Ordering::SeqCst) {
-
         // Acquire next frame from compositor (blocks up to 100ms)
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource: Option<IDXGIResource> = None;
 
-        let acquire_result = unsafe {
-            duplication.AcquireNextFrame(100, &mut frame_info, &mut resource)
-        };
+        let acquire_result =
+            unsafe { duplication.AcquireNextFrame(100, &mut frame_info, &mut resource) };
 
         match acquire_result {
             Err(e) => {
@@ -898,14 +964,18 @@ fn capture_loop_blocking(
 
         // Skip frames with no visual update
         if frame_info.LastPresentTime == 0 {
-            unsafe { duplication.ReleaseFrame().ok(); }
+            unsafe {
+                duplication.ReleaseFrame().ok();
+            }
             continue;
         }
 
         let resource = match resource {
             Some(r) => r,
             None => {
-                unsafe { duplication.ReleaseFrame().ok(); }
+                unsafe {
+                    duplication.ReleaseFrame().ok();
+                }
                 continue;
             }
         };
@@ -915,14 +985,18 @@ fn capture_loop_blocking(
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[desktop-capture] cast texture: {e}");
-                unsafe { duplication.ReleaseFrame().ok(); }
+                unsafe {
+                    duplication.ReleaseFrame().ok();
+                }
                 continue;
             }
         };
 
         // Get actual frame dimensions
         let mut frame_desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { frame_texture.GetDesc(&mut frame_desc); }
+        unsafe {
+            frame_texture.GetDesc(&mut frame_desc);
+        }
         let frame_w = frame_desc.Width;
         let frame_h = frame_desc.Height;
 
@@ -939,7 +1013,9 @@ fn capture_loop_blocking(
         };
 
         if out_w == 0 || out_h == 0 {
-            unsafe { duplication.ReleaseFrame().ok(); }
+            unsafe {
+                duplication.ReleaseFrame().ok();
+            }
             continue;
         }
 
@@ -949,13 +1025,18 @@ fn capture_loop_blocking(
             staging = create_staging_texture_fmt(&device, frame_w, frame_h, frame_fmt).ok();
             staging_w = frame_w;
             staging_h = frame_h;
-            eprintln!("[desktop-capture] staging: {frame_w}x{frame_h} fmt={}", frame_fmt.0);
+            eprintln!(
+                "[desktop-capture] staging: {frame_w}x{frame_h} fmt={}",
+                frame_fmt.0
+            );
         }
 
         let staging_tex = match &staging {
             Some(s) => s,
             None => {
-                unsafe { duplication.ReleaseFrame().ok(); }
+                unsafe {
+                    duplication.ReleaseFrame().ok();
+                }
                 continue;
             }
         };
@@ -963,14 +1044,17 @@ fn capture_loop_blocking(
         let is_hdr = frame_fmt == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
         // Initialize GPU converter on first HDR frame (or when dimensions change)
-        if is_hdr && (gpu_converter.is_none()
-            || gpu_converter.as_ref().map(|c| c.src_w) != Some(frame_w)
-            || gpu_converter.as_ref().map(|c| c.src_h) != Some(frame_h))
+        if is_hdr
+            && (gpu_converter.is_none()
+                || gpu_converter.as_ref().map(|c| c.src_w) != Some(frame_w)
+                || gpu_converter.as_ref().map(|c| c.src_h) != Some(frame_h))
         {
             match GpuConverter::new(&device, frame_w, frame_h, frame_fmt, enc_w, enc_h) {
                 Ok(c) => {
-                    eprintln!("[desktop-capture] GPU converter ready: {}x{} HDR → {}x{} SDR",
-                        frame_w, frame_h, enc_w, enc_h);
+                    eprintln!(
+                        "[desktop-capture] GPU converter ready: {}x{} HDR → {}x{} SDR",
+                        frame_w, frame_h, enc_w, enc_h
+                    );
                     gpu_converter = Some(c);
                 }
                 Err(e) => {
@@ -998,7 +1082,15 @@ fn capture_loop_blocking(
             // === GPU PATH: HDR->SDR + downscale via compute shader ===
             if is_hdr && gpu_converter.is_some() {
                 let converter = gpu_converter.as_ref().unwrap();
-                match converter.convert(&context, &frame_texture, crop_x, crop_y, crop_w, crop_h, Some(&*health)) {
+                match converter.convert(
+                    &context,
+                    &frame_texture,
+                    crop_x,
+                    crop_y,
+                    crop_w,
+                    crop_h,
+                    Some(&*health),
+                ) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
                         // GPU path is intentionally zero-copy — the mapped GPU
@@ -1011,16 +1103,16 @@ fn capture_loop_blocking(
                         // for HDR/GPU captures will land in v0.6.3 via a
                         // proper in-shader composite pass on the GPU side.
                         // CPU fallback path below DOES composite cursor.
-                        let bgra_data = std::slice::from_raw_parts(
-                            bgra_ptr,
-                            (stride * h) as usize,
-                        );
+                        let bgra_data = std::slice::from_raw_parts(bgra_ptr, (stride * h) as usize);
                         publisher.push_frame_strided(bgra_data, stride, w, h);
                         converter.unmap(&context);
                     }
                     Err(e) => {
                         duplication.ReleaseFrame().ok();
-                        eprintln!("[desktop-capture] GPU convert error (frame {}): {e}", publisher.frame_count());
+                        eprintln!(
+                            "[desktop-capture] GPU convert error (frame {}): {e}",
+                            publisher.frame_count()
+                        );
                         // Disable GPU path, fall back to CPU next frame
                         gpu_converter = None;
                         continue;
@@ -1032,22 +1124,32 @@ fn capture_loop_blocking(
                     staging = create_staging_texture_fmt(&device, frame_w, frame_h, frame_fmt).ok();
                     staging_w = frame_w;
                     staging_h = frame_h;
-                    eprintln!("[desktop-capture] CPU staging: {frame_w}x{frame_h} fmt={}", frame_fmt.0);
+                    eprintln!(
+                        "[desktop-capture] CPU staging: {frame_w}x{frame_h} fmt={}",
+                        frame_fmt.0
+                    );
                 }
                 let staging_tex = match &staging {
                     Some(s) => s,
-                    None => { duplication.ReleaseFrame().ok(); continue; }
+                    None => {
+                        duplication.ReleaseFrame().ok();
+                        continue;
+                    }
                 };
                 context.CopyResource(staging_tex, &frame_texture);
                 duplication.ReleaseFrame().ok();
 
                 let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                if context.Map(staging_tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).is_err() {
+                if context
+                    .Map(staging_tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .is_err()
+                {
                     continue;
                 }
                 let src_stride = mapped.RowPitch;
                 let src_data = std::slice::from_raw_parts(
-                    mapped.pData as *const u8, (src_stride * frame_h) as usize,
+                    mapped.pData as *const u8,
+                    (src_stride * frame_h) as usize,
                 );
 
                 if is_hdr {
@@ -1061,7 +1163,8 @@ fn capture_loop_blocking(
                     let sh = crop_h as usize;
                     for dy in 0..eh {
                         let sy_idx = (dy * sh / eh).min(sh - 1);
-                        let src_row = src_ptr.add((crop_y as usize + sy_idx) * src_row_stride + crop_x as usize * 8);
+                        let src_row = src_ptr
+                            .add((crop_y as usize + sy_idx) * src_row_stride + crop_x as usize * 8);
                         let dst_row = dst_ptr.add(dy * dst_stride as usize);
                         let src16 = src_row as *const u16;
                         for dx in 0..ew {
@@ -1084,7 +1187,8 @@ fn capture_loop_blocking(
                     let sh = crop_h as usize;
                     for dy in 0..eh {
                         let sy_idx = (dy * sh / eh).min(sh - 1);
-                        let sr = (crop_y as usize + sy_idx) * src_stride as usize + crop_x as usize * 4;
+                        let sr =
+                            (crop_y as usize + sy_idx) * src_stride as usize + crop_x as usize * 4;
                         let dr = dy * dst_stride as usize;
                         for dx in 0..ew {
                             let sx_idx = (dx * sw / ew).min(sw - 1);
@@ -1094,7 +1198,8 @@ fn capture_loop_blocking(
                     }
                 } else {
                     for y in 0..enc_h as usize {
-                        let src_off = (crop_y as usize + y) * src_stride as usize + crop_x as usize * 4;
+                        let src_off =
+                            (crop_y as usize + y) * src_stride as usize + crop_x as usize * 4;
                         let dst_off = y * dst_stride as usize;
                         let row_bytes = (enc_w * 4) as usize;
                         scale_buf[dst_off..dst_off + row_bytes]
@@ -1112,14 +1217,21 @@ fn capture_loop_blocking(
         // Games can temporarily promote themselves above our overlay.
         if frame_count % 60 == 0 {
             if let Some(h) = anti_mpo_hwnd {
-                unsafe { refresh_anti_mpo_window(h); }
+                unsafe {
+                    refresh_anti_mpo_window(h);
+                }
             }
         }
 
         // Stats every 60 frames
         if frame_count % 60 == 0 {
             if let Some(fps) = publisher.maybe_emit_stats(
-                app, "desktop-capture-stats", "dxgi-dd", enc_w, enc_h, 60,
+                app,
+                "desktop-capture-stats",
+                "dxgi-dd",
+                enc_w,
+                enc_h,
+                60,
             ) {
                 eprintln!("[desktop-capture] {enc_w}x{enc_h} @ {fps}fps ({frame_count} frames)");
                 health.record_capture_fps(fps);
@@ -1130,11 +1242,16 @@ fn capture_loop_blocking(
     health.set_active(false, CaptureMode::None, EncoderType::None, 0);
 
     running.store(false, Ordering::SeqCst);
-    eprintln!("[desktop-capture] shutting down, {} frames captured", publisher.frame_count());
+    eprintln!(
+        "[desktop-capture] shutting down, {} frames captured",
+        publisher.frame_count()
+    );
 
     // Destroy anti-MPO overlay -- restore normal DWM flip behavior
     if let Some(h) = anti_mpo_hwnd {
-        unsafe { let _ = DestroyWindow(h); }
+        unsafe {
+            let _ = DestroyWindow(h);
+        }
         eprintln!("[anti-mpo] overlay window destroyed");
     }
 
@@ -1165,8 +1282,8 @@ unsafe fn fast_f16_to_u8(h: u16) -> u8 {
     // value = (1 + mantissa/1024) * 2^(exp-15)
     let mantissa = (h & 0x3FF) as u32;
     let frac = 1024 + mantissa; // 1.mantissa in fixed point (11 bits, [1024..2047])
-    // Shift to get value * 255: frac * 255 >> (25 - exp)
-    // exp=14 → shift=11, exp=13 → shift=12, etc.
+                                // Shift to get value * 255: frac * 255 >> (25 - exp)
+                                // exp=14 → shift=11, exp=13 → shift=12, etc.
     let shift = 25u32.saturating_sub(exp as u32);
     if shift >= 32 {
         return 0;

@@ -155,15 +155,64 @@ function startUpdateCheckPolling() {
   setTimeout(checkForUpdateNotification, 10000);
   _updateCheckTimer = setInterval(checkForUpdateNotification, 5 * 60 * 1000);
 }
-function isNewerVersion(latest, current) {
-  var a = latest.split(".").map(Number);
-  var b = current.split(".").map(Number);
-  for (var i = 0; i < Math.max(a.length, b.length); i++) {
-    var x = a[i] || 0, y = b[i] || 0;
-    if (x > y) return true;
-    if (x < y) return false;
+function parseVersionIdentifier(value) {
+  if (/^\d+$/.test(value)) return { numeric: true, value: parseInt(value, 10) };
+  return { numeric: false, value: String(value || "").toLowerCase() };
+}
+
+function parseVersionTag(version) {
+  var normalized = String(version || "").trim();
+  var match = normalized.match(/^v?([0-9]+(?:\.[0-9]+)*)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) {
+    return { core: [0], prerelease: [] };
   }
-  return false;
+  return {
+    core: match[1].split(".").map(function(part) {
+      return parseInt(part, 10) || 0;
+    }),
+    prerelease: match[2]
+      ? match[2].split(".").map(parseVersionIdentifier)
+      : [],
+  };
+}
+
+function compareVersionTags(left, right) {
+  var a = parseVersionTag(left);
+  var b = parseVersionTag(right);
+  var coreLen = Math.max(a.core.length, b.core.length);
+  for (var i = 0; i < coreLen; i++) {
+    var x = a.core[i] || 0;
+    var y = b.core[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+
+  var aPre = a.prerelease;
+  var bPre = b.prerelease;
+  if (aPre.length === 0 && bPre.length === 0) return 0;
+  if (aPre.length === 0) return 1;
+  if (bPre.length === 0) return -1;
+
+  var preLen = Math.max(aPre.length, bPre.length);
+  for (var j = 0; j < preLen; j++) {
+    var aId = aPre[j];
+    var bId = bPre[j];
+    if (!aId) return -1;
+    if (!bId) return 1;
+    if (aId.numeric && bId.numeric) {
+      if (aId.value > bId.value) return 1;
+      if (aId.value < bId.value) return -1;
+      continue;
+    }
+    if (aId.numeric !== bId.numeric) return aId.numeric ? -1 : 1;
+    if (aId.value > bId.value) return 1;
+    if (aId.value < bId.value) return -1;
+  }
+  return 0;
+}
+
+function isNewerVersion(latest, current) {
+  return compareVersionTags(latest, current) > 0;
 }
 async function checkForUpdateNotification() {
   if (_updateDismissed) return;

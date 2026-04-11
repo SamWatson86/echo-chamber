@@ -6,8 +6,8 @@
 //! DXGI OutputDuplication, GPU shaders, anti-MPO) stays in its own module.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -32,12 +32,13 @@ pub struct CaptureStats {
 // ── CapturePublisher ──
 
 /// Hard cap for the capture push rate when NVENC hardware encode is active.
-/// Set to 240fps so 144Hz/165Hz/240Hz monitors push their full native rate
-/// without being throttled. NVENC is initialized at the same rate via
-/// VideoEncoding.max_framerate so its bitrate-per-frame budget matches reality.
-const TARGET_ENCODE_FPS_HARDWARE: f64 = 240.0;
-const MIN_FRAME_INTERVAL_HARDWARE: std::time::Duration =
-    std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_HARDWARE) as u64);
+/// This must match the intended wire publish cap for native screen share.
+/// The previous 240fps cap let WGC/DXGI push far above the 30fps publish target
+/// in real sessions, which drove Sam's local FPS hit while still reporting a
+/// nominal 30fps target in capture-health.
+const TARGET_ENCODE_FPS_HARDWARE: f64 = PUBLISH_TARGET_FPS as f64;
+const MIN_FRAME_INTERVAL_HARDWARE: Duration =
+    Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_HARDWARE) as u64);
 
 /// Soft cap for the capture push rate when OpenH264 software encode is active.
 /// Software H264 at 1080p at 60+ fps pins the CPU at ~90-100% and caused
@@ -48,8 +49,8 @@ const MIN_FRAME_INTERVAL_HARDWARE: std::time::Duration =
 /// The WGC/DXGI capture loops still run at native refresh for responsive
 /// frame delivery; this cap just drops excess frames before conversion.
 const TARGET_ENCODE_FPS_SOFTWARE: f64 = 20.0;
-const MIN_FRAME_INTERVAL_SOFTWARE: std::time::Duration =
-    std::time::Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_SOFTWARE) as u64);
+const MIN_FRAME_INTERVAL_SOFTWARE: Duration =
+    Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_SOFTWARE) as u64);
 
 /// Global flag: true if nvcuda.dll loaded successfully at client startup.
 /// When false, the capture pipeline uses MIN_FRAME_INTERVAL_SOFTWARE to
@@ -57,12 +58,49 @@ const MIN_FRAME_INTERVAL_SOFTWARE: std::time::Duration =
 /// main.rs's startup probe and never changes after that.
 pub static HAS_NVCUDA: AtomicBool = AtomicBool::new(false);
 
-/// Wire-level publish framerate cap. The capture loop runs at native display
-/// refresh rate (often 144+ Hz) but NVENC's frame_drop=1 throttles the wire
-/// output to this rate. This is the "target" the capture-health classifier
-/// compares current capture FPS against — if capture drops far below this
-/// number something upstream is starving the pipeline.
+/// Wire-level publish framerate cap for native screen share.
+/// Keep the capture-side pacing aligned with this number so native publishers
+/// don't push 100+ fps into WebRTC while the rest of the stack thinks the
+/// target is 30fps.
 pub const PUBLISH_TARGET_FPS: u32 = 30;
+
+/// Heartbeat interval for WGC/static-content frame duplication.
+/// If the real capture path has not pushed a new frame in this long, re-push
+/// the most recent BGRA frame so the wire stream stays alive at ~30fps.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Shared heartbeat state.
+///
+/// WGC window capture is event-driven: `on_frame_arrived` only fires when the
+/// captured window repaints. Some windows can go effectively wire-silent when
+/// their redraw pattern changes even though the user still expects a live
+/// stream. The heartbeat thread re-pushes the most recent BGRA frame whenever
+/// the real capture path has been idle for longer than HEARTBEAT_INTERVAL.
+struct HeartbeatState {
+    last_frame: Option<LastFrameBuffer>,
+    last_real_push: Instant,
+}
+
+struct LastFrameBuffer {
+    bgra: Vec<u8>,
+    stride: u32,
+    width: u32,
+    height: u32,
+}
+
+struct HeartbeatHandle {
+    running: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for HeartbeatHandle {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 /// Shared publisher that connects to the LiveKit SFU, creates a NativeVideoSource,
 /// publishes a Camera track, and provides helpers to push BGRA frames and emit stats.
@@ -72,6 +110,8 @@ pub struct CapturePublisher {
     start_time: Instant,
     frame_count: u64,
     last_pushed: Option<Instant>,
+    heartbeat_state: Arc<Mutex<HeartbeatState>>,
+    heartbeat_handle: Option<HeartbeatHandle>,
 }
 
 impl CapturePublisher {
@@ -147,14 +187,28 @@ impl CapturePublisher {
             .map_err(|e| format!("publish failed: {}", e))?;
 
         eprintln!("[{}] track published, waiting for negotiation...", log_prefix);
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let start_time = Instant::now();
+        let heartbeat_state = Arc::new(Mutex::new(HeartbeatState {
+            last_frame: None,
+            last_real_push: start_time,
+        }));
+        let heartbeat_handle = Self::spawn_heartbeat(
+            heartbeat_state.clone(),
+            source.clone(),
+            start_time,
+            log_prefix,
+        );
 
         Ok(Self {
             room,
             source,
-            start_time: Instant::now(),
+            start_time,
             frame_count: 0,
             last_pushed: None,
+            heartbeat_state,
+            heartbeat_handle: Some(heartbeat_handle),
         })
     }
 
@@ -231,15 +285,114 @@ impl CapturePublisher {
         .map_err(|e| format!("publish failed: {}", e))?;
 
         eprintln!("[{}] track published, waiting for negotiation...", log_prefix);
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(Duration::from_secs(3));
+
+        let start_time = Instant::now();
+        let heartbeat_state = Arc::new(Mutex::new(HeartbeatState {
+            last_frame: None,
+            last_real_push: start_time,
+        }));
+        let heartbeat_handle = Self::spawn_heartbeat(
+            heartbeat_state.clone(),
+            source.clone(),
+            start_time,
+            log_prefix,
+        );
 
         Ok(Self {
             room,
             source,
-            start_time: Instant::now(),
+            start_time,
             frame_count: 0,
             last_pushed: None,
+            heartbeat_state,
+            heartbeat_handle: Some(heartbeat_handle),
         })
+    }
+
+    fn spawn_heartbeat(
+        state: Arc<Mutex<HeartbeatState>>,
+        source: NativeVideoSource,
+        start_time: Instant,
+        log_prefix: &str,
+    ) -> HeartbeatHandle {
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let log_prefix = log_prefix.to_string();
+        let thread = std::thread::Builder::new()
+            .name(format!("heartbeat-{}", log_prefix))
+            .spawn(move || {
+                eprintln!("[{}] heartbeat watchdog started", log_prefix);
+                let mut heartbeat_pushes: u64 = 0;
+                let mut last_log = Instant::now();
+
+                while running_clone.load(Ordering::Relaxed) {
+                    std::thread::sleep(HEARTBEAT_INTERVAL);
+                    if !running_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let snapshot = {
+                        let state = match state.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        if state.last_real_push.elapsed() < HEARTBEAT_INTERVAL {
+                            None
+                        } else {
+                            state.last_frame.as_ref().map(|frame| LastFrameBuffer {
+                                bgra: frame.bgra.clone(),
+                                stride: frame.stride,
+                                width: frame.width,
+                                height: frame.height,
+                            })
+                        }
+                    };
+
+                    let Some(frame) = snapshot else { continue };
+
+                    let mut i420 = I420Buffer::new(frame.width, frame.height);
+                    let (sy, su, sv) = i420.strides();
+                    let (y, u, v) = i420.data_mut();
+                    yuv_helper::argb_to_i420(
+                        &frame.bgra,
+                        frame.stride,
+                        y,
+                        sy,
+                        u,
+                        su,
+                        v,
+                        sv,
+                        frame.width as i32,
+                        frame.height as i32,
+                    );
+
+                    let vf = VideoFrame {
+                        rotation: VideoRotation::VideoRotation0,
+                        buffer: i420,
+                        timestamp_us: start_time.elapsed().as_micros() as i64,
+                    };
+                    source.capture_frame(&vf);
+                    heartbeat_pushes += 1;
+
+                    if last_log.elapsed() >= Duration::from_secs(10) {
+                        eprintln!(
+                            "[{}] heartbeat: {} duplicate frames pushed in last 10s",
+                            log_prefix, heartbeat_pushes
+                        );
+                        heartbeat_pushes = 0;
+                        last_log = Instant::now();
+                    }
+                }
+
+                eprintln!("[{}] heartbeat watchdog stopped", log_prefix);
+            })
+            .expect("spawn heartbeat thread");
+
+        HeartbeatHandle {
+            running,
+            thread: Some(thread),
+        }
     }
 
     /// Convert a BGRA frame to I420 via libyuv and push it to the NativeVideoSource.
@@ -252,12 +405,8 @@ impl CapturePublisher {
 
     /// Convert a BGRA frame with explicit stride to I420 and push to the video source.
     pub fn push_frame_strided(&mut self, bgra: &[u8], stride: u32, width: u32, height: u32) {
-        // Frame rate limiter — choose the interval based on whether we have
-        // hardware (NVENC) or software (OpenH264) encoding. NVENC can handle
-        // 240fps input because it's a dedicated ASIC. OpenH264 runs on CPU
-        // and pins ~90-100% at 60+ fps 1080p — which crashed Jeff's AMD
-        // machine after ~54 min of sustained load. Cap software encode at
-        // 20fps to keep CPU at a sustainable ~30%.
+        // Pace native capture to the real publish target. Without this, WGC/DXGI
+        // can still push well above 30fps on NVENC systems and drag local FPS down.
         let min_interval = if HAS_NVCUDA.load(Ordering::Relaxed) {
             MIN_FRAME_INTERVAL_HARDWARE
         } else {
@@ -287,6 +436,16 @@ impl CapturePublisher {
         };
         self.source.capture_frame(&vf);
         self.frame_count += 1;
+
+        if let Ok(mut state) = self.heartbeat_state.lock() {
+            state.last_real_push = now;
+            state.last_frame = Some(LastFrameBuffer {
+                bgra: bgra.to_vec(),
+                stride,
+                width,
+                height,
+            });
+        }
     }
 
     /// Emit stats via Tauri event every `every_n` frames. Returns current FPS.
@@ -329,17 +488,29 @@ impl CapturePublisher {
     }
 
     /// Elapsed time since the publisher was created.
-    pub fn elapsed(&self) -> std::time::Duration {
+    pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
     }
 
     /// Close the SFU room connection.
     pub async fn shutdown(self) {
-        self.room.close().await.ok();
+        let Self {
+            room,
+            heartbeat_handle,
+            ..
+        } = self;
+        drop(heartbeat_handle);
+        room.close().await.ok();
     }
 
     /// Blocking variant of shutdown for use inside `spawn_blocking`.
     pub fn shutdown_blocking(self, rt: &tokio::runtime::Handle) {
-        rt.block_on(self.room.close()).ok();
+        let Self {
+            room,
+            heartbeat_handle,
+            ..
+        } = self;
+        drop(heartbeat_handle);
+        rt.block_on(room.close()).ok();
     }
 }

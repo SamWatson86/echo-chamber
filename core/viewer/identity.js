@@ -82,17 +82,24 @@ function buildIdentity(name) {
 }
 
 function getParticipantPublications(participant) {
+  function normalizePublications(pubs) {
+    if (!Array.isArray(pubs)) return [];
+    pubs.forEach(function(pub) {
+      patchScreenCompanionSource(pub, pub?.track, participant);
+    });
+    return pubs;
+  }
   if (!participant) return [];
   if (typeof participant.getTrackPublications === "function") {
-    return participant.getTrackPublications();
+    return normalizePublications(participant.getTrackPublications());
   }
   if (participant.trackPublications?.values) {
-    return Array.from(participant.trackPublications.values());
+    return normalizePublications(Array.from(participant.trackPublications.values()));
   }
   if (participant.tracks?.values) {
-    return Array.from(participant.tracks.values());
+    return normalizePublications(Array.from(participant.tracks.values()));
   }
-  return Array.from(participant.tracks || []);
+  return normalizePublications(Array.from(participant.tracks || []));
 }
 
 function wasRecentlyHandled(key, windowMs = 200) {

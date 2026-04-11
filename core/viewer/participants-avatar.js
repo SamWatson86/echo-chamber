@@ -27,6 +27,33 @@ function iconSvg(name) {
 
 // ── Participant card ──
 
+function getRemoteParticipantsForScreenIdentity(identity) {
+  var matches = [];
+  if (!identity || !room || !room.remoteParticipants) return matches;
+  var seen = new Set();
+
+  function addCandidate(candidateIdentity) {
+    if (!candidateIdentity || seen.has(candidateIdentity)) return;
+    var participant = null;
+    if (room.remoteParticipants.get) {
+      participant = room.remoteParticipants.get(candidateIdentity);
+    }
+    if (!participant) {
+      room.remoteParticipants.forEach(function(p) {
+        if (!participant && p.identity === candidateIdentity) participant = p;
+      });
+    }
+    if (participant && !seen.has(participant.identity)) {
+      seen.add(participant.identity);
+      matches.push(participant);
+    }
+  }
+
+  addCandidate(identity);
+  addCandidate(identity + "$screen");
+  return matches;
+}
+
 function ensureParticipantCard(participant, isLocal = false) {
   const key = participant.identity;
   // Hide ghost subscriber from UI
@@ -145,6 +172,10 @@ function ensureParticipantCard(participant, isLocal = false) {
       var identity = participant.identity;
       var pState = participantState.get(identity);
       var LK_wt = getLiveKitClient();
+      function getWatchSource(pub, remoteParticipant) {
+        patchScreenCompanionSource(pub, pub?.track, remoteParticipant);
+        return pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
+      }
 
       if (hiddenScreens.has(identity)) {
         // === START WATCHING: subscribe to screen share tracks ===
@@ -155,81 +186,66 @@ function ensureParticipantCard(participant, isLocal = false) {
         debugLog("[opt-in] user opted in to watch " + identity);
 
         // Find the remote participant and subscribe to their screen share tracks
-        var remote = null;
-        if (room && room.remoteParticipants) {
-          if (room.remoteParticipants.get) {
-            remote = room.remoteParticipants.get(identity);
-          }
-          if (!remote) {
-            room.remoteParticipants.forEach(function(p) {
-              if (p.identity === identity) remote = p;
-            });
-          }
-        }
-        if (remote) {
-          var pubs = getParticipantPublications(remote);
-          pubs.forEach(function(pub) {
-            var src = pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
-            if (src === LK_wt.Track.Source.ScreenShare || src === LK_wt.Track.Source.ScreenShareAudio) {
-              // Subscribe to the track on the SFU
-              if (pub.setSubscribed) pub.setSubscribed(true);
-              // Ensure publication is hooked (event listeners registered)
-              hookPublication(pub, remote);
-              // If the track is already available (SDK cached it), process immediately
-              if (pub.track && pub.isSubscribed) {
-                debugLog("[opt-in] track already available for " + src + " " + identity + " — processing immediately");
-                handleTrackSubscribed(pub.track, pub, remote);
-              } else {
-                debugLog("[opt-in] subscribed to " + src + " for " + identity + " — waiting for track (subscribed=" + (pub.isSubscribed ?? "?") + " hasTrack=" + !!pub.track + ")");
+        var remotes = getRemoteParticipantsForScreenIdentity(identity);
+        if (remotes.length > 0) {
+          remotes.forEach(function(remote) {
+            var pubs = getParticipantPublications(remote);
+            pubs.forEach(function(pub) {
+              var src = getWatchSource(pub, remote);
+              if (src === LK_wt.Track.Source.ScreenShare || src === LK_wt.Track.Source.ScreenShareAudio) {
+                // Subscribe to the track on the SFU
+                if (pub.setSubscribed) pub.setSubscribed(true);
+                // Ensure publication is hooked (event listeners registered)
+                hookPublication(pub, remote);
+                // If the track is already available (SDK cached it), process immediately
+                if (pub.track && pub.isSubscribed) {
+                  debugLog("[opt-in] track already available for " + src + " " + remote.identity + " → " + identity + " — processing immediately");
+                  handleTrackSubscribed(pub.track, pub, remote);
+                } else {
+                  debugLog("[opt-in] subscribed to " + src + " for " + remote.identity + " → " + identity + " — waiting for track (subscribed=" + (pub.isSubscribed ?? "?") + " hasTrack=" + !!pub.track + ")");
+                }
               }
-            }
+            });
           });
           // Fallback at 500ms: check if tracks arrived and process them
           setTimeout(function() {
-            var remoteFb = null;
-            if (room && room.remoteParticipants) {
-              if (room.remoteParticipants.get) remoteFb = room.remoteParticipants.get(identity);
-              if (!remoteFb) room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteFb = p; });
-            }
-            if (!remoteFb) return;
-            var fbPubs = getParticipantPublications(remoteFb);
-            fbPubs.forEach(function(pub) {
-              var src = pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
-              if (src === LK_wt.Track.Source.ScreenShare) {
-                if (pub.track && pub.isSubscribed && !screenTileByIdentity.has(identity)) {
-                  debugLog("[opt-in] fallback@500ms: processing screen track for " + identity);
-                  handleTrackSubscribed(pub.track, pub, remoteFb);
+            var remoteFbs = getRemoteParticipantsForScreenIdentity(identity);
+            if (remoteFbs.length === 0) return;
+            remoteFbs.forEach(function(remoteFb) {
+              var fbPubs = getParticipantPublications(remoteFb);
+              fbPubs.forEach(function(pub) {
+                var src = getWatchSource(pub, remoteFb);
+                if (src === LK_wt.Track.Source.ScreenShare) {
+                  if (pub.track && pub.isSubscribed && !screenTileByIdentity.has(identity)) {
+                    debugLog("[opt-in] fallback@500ms: processing screen track for " + remoteFb.identity + " → " + identity);
+                    handleTrackSubscribed(pub.track, pub, remoteFb);
+                  }
+                  if (!pub.isSubscribed && pub.setSubscribed) {
+                    debugLog("[opt-in] fallback@500ms: re-subscribing screen for " + remoteFb.identity + " → " + identity);
+                    pub.setSubscribed(true);
+                  }
                 }
-                // If still not subscribed, force re-subscribe
-                if (!pub.isSubscribed && pub.setSubscribed) {
-                  debugLog("[opt-in] fallback@500ms: re-subscribing screen for " + identity);
-                  pub.setSubscribed(true);
+                if (src === LK_wt.Track.Source.ScreenShareAudio) {
+                  var fbState = participantState.get(identity);
+                  if (pub.track && pub.isSubscribed && fbState && fbState.screenAudioEls.size === 0) {
+                    debugLog("[opt-in] fallback@500ms: processing screen audio for " + remoteFb.identity + " → " + identity);
+                    handleTrackSubscribed(pub.track, pub, remoteFb);
+                  }
+                  if (!pub.isSubscribed && pub.setSubscribed) {
+                    debugLog("[opt-in] fallback@500ms: re-subscribing screen audio for " + remoteFb.identity + " → " + identity);
+                    pub.setSubscribed(true);
+                  }
                 }
-              }
-              if (src === LK_wt.Track.Source.ScreenShareAudio) {
-                var fbState = participantState.get(identity);
-                if (pub.track && pub.isSubscribed && fbState && fbState.screenAudioEls.size === 0) {
-                  debugLog("[opt-in] fallback@500ms: processing screen audio for " + identity);
-                  handleTrackSubscribed(pub.track, pub, remoteFb);
-                }
-                if (!pub.isSubscribed && pub.setSubscribed) {
-                  debugLog("[opt-in] fallback@500ms: re-subscribing screen audio for " + identity);
-                  pub.setSubscribed(true);
-                }
-              }
+              });
             });
           }, 500);
           // Fallback at 1500ms: full reconcile to catch anything still missing
           setTimeout(function() {
-            var remoteFb2 = null;
-            if (room && room.remoteParticipants) {
-              if (room.remoteParticipants.get) remoteFb2 = room.remoteParticipants.get(identity);
-              if (!remoteFb2) room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteFb2 = p; });
-            }
-            if (remoteFb2) {
-              debugLog("[opt-in] fallback@1500ms: full reconcile for " + identity);
+            var remoteFb2s = getRemoteParticipantsForScreenIdentity(identity);
+            remoteFb2s.forEach(function(remoteFb2) {
+              debugLog("[opt-in] fallback@1500ms: full reconcile for " + remoteFb2.identity + " → " + identity);
               reconcileParticipantMedia(remoteFb2);
-            }
+            });
           }, 1500);
           // Schedule reconcile waves to ensure everything settles
           scheduleReconcileWaves("opt-in-watch");
@@ -254,26 +270,16 @@ function ensureParticipantCard(participant, isLocal = false) {
         debugLog("[opt-in] user stopped watching " + identity);
 
         // Find the remote participant and unsubscribe from their screen share tracks
-        var remote = null;
-        if (room && room.remoteParticipants) {
-          if (room.remoteParticipants.get) {
-            remote = room.remoteParticipants.get(identity);
-          }
-          if (!remote) {
-            room.remoteParticipants.forEach(function(p) {
-              if (p.identity === identity) remote = p;
-            });
-          }
-        }
-        if (remote) {
+        var remotes = getRemoteParticipantsForScreenIdentity(identity);
+        remotes.forEach(function(remote) {
           var pubs = getParticipantPublications(remote);
           pubs.forEach(function(pub) {
-            var src = pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
+            var src = getWatchSource(pub, remote);
             if (src === LK_wt.Track.Source.ScreenShare || src === LK_wt.Track.Source.ScreenShareAudio) {
               if (pub.setSubscribed) pub.setSubscribed(false);
             }
           });
-        }
+        });
         // Hide tile
         var tile = screenTileByIdentity.get(identity);
         if (tile) {

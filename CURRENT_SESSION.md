@@ -1,5 +1,24 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-04-10 Codex Handover Override
+
+This block supersedes the older v0.6.6 summary below it.
+
+**Last Updated**: 2026-04-10
+**Current Version**: **v0.6.7 SHIPPED**
+**Status**: Codex now follows the repo operating rules pinned in `AGENTS.md`. Work stays under `core/`. PR `#143` (`fix/heartbeat-frame-duplication`) must remain unmerged until Sam manually validates the installed client against the static browser-window freeze case.
+
+### Current Priorities
+- Browser audio extraction from browser-window shares
+- Outbound NACK and packet-loss signals in capture health
+- Tauri signing key recovery
+
+### Known Bugs
+- GPU driver flicker on Sam's RTX 4090 setup
+- Static WGC browser-window streams can freeze without the heartbeat fix
+- Browser audio remains silent for browser-window shares
+- Encoder detection still has edge-case lag
+
 **Last Updated**: 2026-04-09 (v0.6.6 shipped after v0.6.5 false-ship; first 4-friend session; Jeff crash post-mortem; share chime bug fixed)
 **Current Version**: **v0.6.6 SHIPPED ✅** (GitHub release only — latest.json still points at v0.6.5 until next session updates it)
 **Status**: v0.6.6 has working delay-load nvcuda.dll (verified via dumpbin — nvcuda in DELAY IMPORTS section). AMD/Intel friends can install and run. First real 4-publisher test ran for ~54 min before Jeff's AMD machine crashed under software-encoder load; post-mortem written. Share chime bug fixed live via force-reload (PR #147). Substantial v0.6.7 backlog queued.
@@ -906,3 +925,99 @@ This session ran very long and accumulated a lot of context. Key discipline note
 3. **Update this file at session end.** Non-negotiable.
 4. **Do not bisect NVENC.** Pattern-match OBS wholesale.
 5. **Do not test WGC monitor capture on Sam's daily driver.** Ever. See DO NOT TOUCH.
+
+---
+
+## 2026-04-11 flicker recurrence: idle/input-triggered compositor wedge
+
+This session reproduced a third class of display instability on Sam's main RTX 4090 box while live-testing screen share and viewer watch/unwatch flows.
+
+### Exact symptom pattern
+- Main PC was publishing a WGC window share; `SAM-PC` could see it.
+- After repeated watch/unwatch churn on the receiver side, Sam's main PC began flickering again.
+- Flicker appeared on Monitor 1, then later on Monitor 2.
+- The strongest trigger was **idle -> first input**: after stepping away briefly, the moment Sam touched the mouse or clicked a window, the monitors started flickering again.
+- A UAC secure-desktop transition also caused an immediate flicker pulse on both monitors.
+- Elevated recovery script did **not** clear it; full reboot was required again.
+
+### What this rules out
+- Receiver-side `Start Watching` / `Stop Watching` in `core/viewer/participants-avatar.js` does **not** call native capture start/stop. It only toggles LiveKit subscription and tile visibility.
+- So this specific repro does **not** fit the older broad theory that viewer watch churn was directly restarting native capture tasks.
+
+### What Windows showed
+- During reboot, Windows showed a shutdown blocker labeled something like `Media Capture`, and Sam had to click `restart anyway`.
+- System event log did **not** record a literal `Media Capture` process name. The only concrete shutdown-delay warnings at `2026-04-11 11:46:40 ET` were:
+  - `F:\Codex AI\The Echo Chamber\core\sfu\livekit-server.exe`
+  - `G:\Steam\bin\cef\cef.win64\steamwebhelper.exe`
+- This machine does have the built-in Windows system app `Microsoft.Windows.CapturePicker` (`C:\Windows\SystemApps\Microsoft.Windows.CapturePicker_cw5n1h2txyewy`), so the reboot UI label could have been Windows capture infrastructure rather than Echo itself.
+- CapabilityAccessManager entries confirm non-packaged graphics-capture access for:
+  - installed Echo client: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - packaged Echo desktop launcher
+  - multiple WebView2 builds
+
+### Current best diagnosis
+- Treat this as a **local Windows compositor / MPO / power-state / display-present path problem** on Sam's daily-driver machine.
+- Media/watch churn may poison the stack, but the visible failure is exposed by:
+  - idle-to-active transitions
+  - focus/input activity
+  - secure-desktop transitions
+- The `Media Capture` shutdown prompt is relevant because it suggests Windows still believed a capture session/broker was alive during reboot, but it is **not** yet proof that Echo alone was the blocker.
+
+### Operating rule from here
+- Do not continue churn/flicker stress testing on Sam's daily-driver PC.
+- Use `SAM-PC` as the primary watcher/secondary endpoint for live validation.
+- If this needs deeper root-cause work later, isolate with safer experiments first:
+  - disable hardware-accelerated viewer composition / safe viewer mode
+  - keep publish active without repeated watch churn
+  - inspect DxgKrnl / GPU watchdog data separately from room media logic
+
+### Post-reboot validation on the same machine
+- Full reboot cleared the poisoned flicker state.
+- After reboot, Echo was launched normally and Sam logged in with **no flicker while idle or on input** before sharing.
+- Native `Windows` share (WGC window capture) of the Codex app was validated successfully:
+  - `SAM-PC` could watch it
+  - David could watch it
+  - one clean stop/start cycle succeeded
+  - no flicker during active use
+  - no flicker after stepping away for ~2-3 minutes and resuming input
+- Native `Screens` share (desktop/DXGI path) was also validated successfully:
+  - `SAM-PC` could watch it
+  - David could watch it
+  - no flicker during active use
+  - no flicker after brief idle/resume
+- One follow-up UX note: after stopping a share, the screen-share tile took roughly **10 seconds** to disappear from the grid. That suggests stop/unpublish propagation lag still exists even though the machine remained stable.
+
+### Current confidence after reboot
+- Main PC is presently back in a **stable** state.
+- Both major publish paths on the main PC are working with both LAN (`SAM-PC`) and WAN (David) receivers.
+- The earlier display flicker now looks like a state-poisoning/churn problem rather than an always-on failure of normal publish/watch use.
+- Reverse-direction receive path also passed: after Sam stopped sharing, David published a full-screen share and Sam could watch it locally with no flicker.
+- Stop-behavior nuance now looks path-specific:
+  - `Screens` / desktop share cleared from the grid immediately on stop.
+  - Earlier `Windows` / WGC window share stop took roughly ~10 seconds to disappear.
+  - Treat that as a separate stop/unpublish propagation bug to investigate before release, but **not** a blocker for the main post-reboot stability result.
+
+### Release branch and packaging (v0.6.8)
+- Clean release worktree created at `F:\Codex AI\The Echo Chamber\.codex\worktrees\release-v0.6.8` on branch `codex/release-v0.6.8`.
+- Release set intentionally combines:
+  - native/client changes from the reconnect branch (`main.rs`, `screen_capture.rs`, `desktop_capture.rs`, `capture_pipeline.rs`)
+  - live-tested viewer fixes from the root checkout (`connect.js`, `identity.js`, `participants-avatar.js`, `screen-share-adaptive.js`, `screen-share-native.js`, `screen-share-state.js`, plus picker/update-banner support files)
+- Release metadata bumped to `0.6.8` in:
+  - `core/client/Cargo.toml`
+  - `core/client/tauri.conf.json`
+  - `core/control/Cargo.toml`
+- In-app changelog and GitHub `CHANGELOG.md` updated for `0.6.8`.
+- Local release script `core/deploy/build-release.ps1` updated to stay Windows-only and generate a Windows-only updater manifest.
+
+### Verification on the release branch
+- `node --check` passed for the touched viewer JS files.
+- `cargo check -p echo-core-client` passed in `core/`.
+- `cargo build -p echo-core-client --release` passed with:
+  - `LK_CUSTOM_WEBRTC=F:\Codex AI\The Echo Chamber\core\target\debug\build\scratch-2a0faabf5e80148f\out\livekit_webrtc\livekit\win-x64-release-webrtc-7af9351\win-x64-release`
+  - `RUSTFLAGS=-C target-feature=+crt-static`
+- Produced EXE: `core\target\release\echo-core-client.exe`
+- `dumpbin /imports` check confirmed `nvcuda.dll` is still in the **delay load imports** section of the shipped EXE.
+- Signed NSIS bundle built successfully:
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.8_x64-setup.exe`
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.8_x64-setup.exe.sig`
+  - `core\target\release\bundle\nsis\latest.json`

@@ -770,7 +770,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       const source = publication.source;
       // $screen merging: resolve companion to parent for cleanup
       // Identity suffix is the authoritative signal — no source check needed
-      var identity = participant.identity;
+      var publicationIdentity = participant.identity;
+      var identity = publicationIdentity;
       if (isScreenIdentity(identity)) {
         identity = getParentIdentity(identity);
       }
@@ -779,8 +780,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       // Helper: get remaining publications for this participant
       var remoteP = null;
       if (room && room.remoteParticipants) {
-        remoteP = room.remoteParticipants.get?.(identity);
-        if (!remoteP) room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteP = p; });
+        remoteP = room.remoteParticipants.get?.(publicationIdentity);
+        if (!remoteP) room.remoteParticipants.forEach(function(p) { if (p.identity === publicationIdentity) remoteP = p; });
       }
       var pubs = remoteP ? getParticipantPublications(remoteP) : [];
 
@@ -1336,13 +1337,23 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     attachParticipantTracks(participant);
     // Opt-in: detect existing screen shares and show "Start Watching" button
     var pubs = getParticipantPublications(participant);
+    pubs.forEach(function(pub) {
+      patchScreenCompanionSource(pub, pub?.track, participant);
+    });
     var hasScreen = pubs.some(function(pub) {
       return pub && pub.source === LK.Track.Source.ScreenShare;
     });
     if (hasScreen) {
+      var effectiveIdentity = isScreenIdentity(participant.identity)
+        ? getParentIdentity(participant.identity)
+        : participant.identity;
       // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
       // The "Stop Watching" button is available if they want to unsubscribe later.
-      var cardRef = participantCards.get(participant.identity);
+      hiddenScreens.delete(effectiveIdentity);
+      watchedScreens.add(effectiveIdentity);
+      resubscribeParticipantTracks(participant);
+      reconcileParticipantMedia(participant);
+      var cardRef = participantCards.get(effectiveIdentity);
       if (cardRef && cardRef.watchToggleBtn) {
         cardRef.watchToggleBtn.style.display = "";
         cardRef.watchToggleBtn.textContent = "Stop Watching";
