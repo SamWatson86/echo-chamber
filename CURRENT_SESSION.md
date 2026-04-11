@@ -1021,3 +1021,16 @@ This session reproduced a third class of display instability on Sam's main RTX 4
   - `core\target\release\bundle\nsis\Echo Chamber_0.6.8_x64-setup.exe`
   - `core\target\release\bundle\nsis\Echo Chamber_0.6.8_x64-setup.exe.sig`
   - `core\target\release\bundle\nsis\latest.json`
+
+### v0.6.8 shipped
+- PR `#157` merged to `main`.
+- Tag `v0.6.8` pushed.
+- GitHub release workflow `Release #24287070238` completed successfully:
+  - Windows installer built and uploaded
+  - release `latest.json` published
+  - macOS job stayed disabled
+- Live server checkout updated with the committed viewer files plus the published `core/deploy/latest.json`.
+- `POST /admin/api/force-reload` succeeded and kicked `sam-pc-2513` from `main`.
+- Server verification after deploy:
+  - `/api/update/latest.json` now serves `version = 0.6.8`
+  - updater URL points at `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.8/Echo.Chamber_0.6.8_x64-setup.exe`
