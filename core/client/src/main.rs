@@ -50,6 +50,22 @@ struct AppInfo {
     server: String,
 }
 
+fn updater_enabled() -> bool {
+    let version = env!("CARGO_PKG_VERSION");
+    if version.contains('-') {
+        eprintln!(
+            "[updater] disabled for prerelease/test build v{}",
+            version
+        );
+        return false;
+    }
+    if std::env::var_os("ECHO_DISABLE_AUTO_UPDATER").is_some() {
+        eprintln!("[updater] disabled by ECHO_DISABLE_AUTO_UPDATER");
+        return false;
+    }
+    true
+}
+
 /// Load config.json from next to the executable.
 /// Falls back to defaults if missing or invalid.
 fn load_config() -> String {
@@ -139,6 +155,9 @@ fn get_control_url(server: tauri::State<'_, String>) -> String {
 
 #[tauri::command]
 async fn check_for_updates(app: tauri::AppHandle) -> Result<String, String> {
+    if !updater_enabled() {
+        return Ok("disabled".to_string());
+    }
     let updater = app.updater_builder().build().map_err(|e| e.to_string())?;
     match updater.check().await {
         Ok(Some(update)) => {
@@ -327,11 +346,19 @@ async fn start_screen_share(
     source_id: u64,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
+    screen_capture::start_share(
+        source_id,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    ).await
 }
 
 #[cfg(target_os = "windows")]
@@ -361,11 +388,20 @@ async fn start_desktop_capture(
     fullscreen: bool,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
+    desktop_capture::start(
+        hwnd,
+        fullscreen,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    ).await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically
@@ -525,46 +561,48 @@ fn main() {
             .build()?;
 
             // Check for updates in the background
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                // Small delay so the window is visible before any update dialog
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                let updater = match handle.updater_builder().build() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        eprintln!("[updater] build failed: {}", e);
-                        return;
-                    }
-                };
-                match updater.check().await {
-                    Ok(Some(update)) => {
-                        eprintln!(
-                            "[updater] update available: v{} -> v{}",
-                            env!("CARGO_PKG_VERSION"),
-                            update.version
-                        );
-                        match update
-                            .download_and_install(
-                                |ev, _| {
-                                    eprintln!("[updater] download progress: {:?}", ev);
-                                },
-                                || {
-                                    eprintln!("[updater] ready to install, app will restart...");
-                                },
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                eprintln!("[updater] install complete, restarting...");
-                                handle.restart();
-                            }
-                            Err(e) => eprintln!("[updater] install failed: {}", e),
+            if updater_enabled() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Small delay so the window is visible before any update dialog
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let updater = match handle.updater_builder().build() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            eprintln!("[updater] build failed: {}", e);
+                            return;
                         }
+                    };
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            eprintln!(
+                                "[updater] update available: v{} -> v{}",
+                                env!("CARGO_PKG_VERSION"),
+                                update.version
+                            );
+                            match update
+                                .download_and_install(
+                                    |ev, _| {
+                                        eprintln!("[updater] download progress: {:?}", ev);
+                                    },
+                                    || {
+                                        eprintln!("[updater] ready to install, app will restart...");
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    eprintln!("[updater] install complete, restarting...");
+                                    handle.restart();
+                                }
+                                Err(e) => eprintln!("[updater] install failed: {}", e),
+                            }
+                        }
+                        Ok(None) => eprintln!("[updater] up to date (v{})", env!("CARGO_PKG_VERSION")),
+                        Err(e) => eprintln!("[updater] check failed: {}", e),
                     }
-                    Ok(None) => eprintln!("[updater] up to date (v{})", env!("CARGO_PKG_VERSION")),
-                    Err(e) => eprintln!("[updater] check failed: {}", e),
-                }
-            });
+                });
+            }
 
             Ok(())
         })

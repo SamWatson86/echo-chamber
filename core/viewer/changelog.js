@@ -8,13 +8,22 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-12",
+    title: "High-Motion Native Game Shares (v0.6.9)",
+    notes: [
+      "Native game and app-window shares now use a dedicated high-motion publish profile instead of the conservative desktop limits. Heavy games have more bitrate and frame-rate headroom than ordinary desktop sharing.",
+      "Test desktop builds are now hardened so prerelease clients do not auto-update over the top of the live installed app."
+    ]
+  },
+  {
     version: "2026-04-11",
     title: "Reliable Screen Share Restarts (v0.6.8)",
     notes: [
       "Native screen sharing now shuts the previous capture task down cleanly before a new $screen publisher connects. Rapid stop/start no longer creates duplicate identities or reconnect churn.",
       "Watching remote screen shares is much more reliable after reconnects and reloads. Existing live shares attach correctly, Start Watching resolves the real $screen companion, and native stop listeners no longer stack across repeated restarts.",
       "The app no longer shows a false New Version Available banner on prerelease-style local builds, and Win10 machines now block unsupported native Windows capture choices instead of failing silently.",
-      "Static native window shares keep their stream alive with heartbeat frames, and native publish pacing is aligned to the intended 30fps wire target."
+      "Static native window shares keep their stream alive with heartbeat frames, and native publish pacing is aligned to the intended 30fps wire target.",
+      "Native game shares no longer inherit desktop-share limits. High-motion window/game capture now uses a dedicated 60fps profile with a higher bitrate ceiling, so heavy games have more headroom than ordinary desktop sharing."
     ]
   },
   {

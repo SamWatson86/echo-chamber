@@ -1034,3 +1034,121 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Server verification after deploy:
   - `/api/update/latest.json` now serves `version = 0.6.8`
   - updater URL points at `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.8/Echo.Chamber_0.6.8_x64-setup.exe`
+
+### Native game-share publish profile hardening (2026-04-11 20:41 ET)
+- New task branch/worktree created from the shipped `v0.6.8` baseline:
+  - branch: `codex/native-game-publish-profile`
+  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\native-game-publish-profile`
+- Trigger for this work: live `Crimson Desert` testing showed the native game/window share path only delivering roughly `16-18 fps` to `SAM-PC` at about `2.45 Mbps`, which is too low for a high-motion title.
+- Root cause found in the native Rust publisher path:
+  - `CapturePublisher` was hard-wired to the desktop-share profile for all native shares
+  - game/window shares were incorrectly capped at `4 Mbps` and `30 fps`
+  - desktop heartbeats were also being applied to game/window shares even though they are a poor fit for high-motion content
+- Fix implemented:
+  - added `PublishProfile::{Desktop, Game}` in `core/client/src/capture_pipeline.rs`
+  - desktop shares keep the conservative profile: `30 fps`, `4 Mbps max`, `2.5 Mbps min`, heartbeat enabled
+  - native game/window shares now use a high-motion profile: `60 fps`, `8 Mbps max`, `3 Mbps min`, heartbeat disabled
+  - `screen_capture.rs` and `desktop_capture.rs` now pass the publish profile through to the native publisher and to capture-health targets
+  - `main.rs` Tauri commands now accept an optional `publishProfile` argument and default older viewers to `Desktop`
+  - `screen-share-native.js` now sends `publishProfile: 'game'` for native `game` sources and `publishProfile: 'desktop'` for monitor/window/desktop paths
+  - `core/viewer/changelog.js` updated with the user-facing note
+- Validation completed on this branch:
+  - `node --check core/viewer/screen-share-native.js`
+  - `node --check core/viewer/changelog.js`
+  - `cargo check -p echo-core-client`
+  - `cargo test -p echo-core-client capture_pipeline::tests -- --nocapture`
+  - `cargo build -p echo-core-client --release`
+- Runtime status:
+  - build-verified only
+  - not yet side-loaded into the installed client
+  - no live before/after `Crimson Desert` receiver comparison yet
+- Release impact for this branch is `both`:
+  - desktop binary required for the new native publish profile
+  - server-served viewer update required for the new `publishProfile` wiring and changelog note
+
+### Post-midnight crash isolation for the experimental client (2026-04-12 00:30 ET)
+- The experimental high-motion client build that had been side-loaded into the installed path was restored off the live machine after it caused sign-in crashes.
+- Windows crash records proved the failure was real and stable:
+  - `Application Error 1000`
+  - `BEX64 / 0xc0000409`
+  - faulting application/module: `echo-core-client.exe`
+  - repeated offset: `0x0000000001e7d27d`
+  - crash path: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Important isolation result:
+  - the exact same bad binary runs successfully when copied to an isolated probe path
+  - it signed in successfully as both:
+    - `crashprobe\echo-core-client-probe.exe`
+    - `crashprobe\echo-core-client.exe`
+  - that means the failure is not “this build cannot sign in” in general
+  - the failure is specific to the installed-path identity/workflow
+- Strongest current suspect is the updater/startup path, not the native game-share publish-profile logic itself.
+- Safety hardening added on this branch:
+  - client version bumped to `0.6.8-test.2`
+  - auto-updater is now disabled automatically for prerelease/test builds
+  - manual `check_for_updates` also returns `disabled` on prerelease/test builds
+- Operational rule from here:
+  - never side-load experimental builds over the live installed release path with the same release version again
+  - risky client tests must use prerelease versioning and updater-disabled behavior
+
+### v0.6.9 release-candidate prep (2026-04-12 01:35 ET)
+- Created a clean release-candidate branch/worktree from the shipped `v0.6.8` manifest baseline:
+  - branch: `codex/release-v0.6.9-rc`
+  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\release-v0.6.9-rc`
+- Cherry-picked the two validated native-game-share commits from the experimental branch:
+  - `449f4a9` — native game/window shares use a high-motion publish profile
+  - `62ce553` — prerelease desktop builds disable the auto-updater and manual update check
+- Normalized the release-candidate version to `0.6.9-rc.1` in the desktop and control manifests:
+  - `core/client/Cargo.toml`
+  - `core/client/tauri.conf.json`
+  - `core/control/Cargo.toml`
+- Added a clean top-level changelog entry for the native game-share improvement so the next release is no longer mixed into the `v0.6.8` notes.
+- Release impact for this branch remains `both`:
+  - desktop binary required for the native publish-profile change
+  - server-served viewer update required for the `publishProfile` viewer wiring and changelog entry
+- Verification on the clean RC worktree:
+  - `node --check core/viewer/screen-share-native.js`
+  - `node --check core/viewer/changelog.js`
+  - `cargo check -p echo-core-client`
+  - `cargo test -p echo-core-client capture_pipeline::tests -- --nocapture`
+  - `cargo build -p echo-core-client --release`
+- Clean-worktree build note:
+  - the first raw `cargo check` failed because this new worktree did not have a complete local WebRTC include payload on its own
+  - rerunning with `LK_CUSTOM_WEBRTC` pointed at the known-good local prebuilt payload under `F:\Codex AI\The Echo Chamber\core\target\release\build\scratch-df3657cc50cd1baa\out\livekit_webrtc\livekit\win-x64-release-webrtc-7af9351\win-x64-release` fixed that immediately
+  - this was a local build-environment issue, not a code regression in the RC branch
+- Additional generated files changed during RC prep:
+  - `core/Cargo.lock`
+  - `core/client/gen/schemas/desktop-schema.json`
+  - `core/client/gen/schemas/windows-schema.json`
+
+### v0.6.9 final release-branch prep (2026-04-12 01:42 ET)
+- Promoted the RC work onto the final release task branch:
+  - branch: `codex/release-v0.6.9`
+- Dropped the prerelease suffix and normalized the release version to `0.6.9` in:
+  - `core/client/Cargo.toml`
+  - `core/client/tauri.conf.json`
+  - `core/control/Cargo.toml`
+  - `core/Cargo.lock`
+- Installed-path smoke test completed against the real app location:
+  - live install backed up to `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\installed-path-rc-smoke\echo-core-client.v0.6.8-backup.exe`
+  - `0.6.9-rc.1` was copied to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - the old instant installed-path crash did **not** reproduce
+  - the app stayed alive from the real installed path and was brought forward for taskbar pinning
+- Release posture now:
+  - code is being treated as the final `0.6.9` branch, not a local-only RC
+  - next steps are final Windows artifact build, branch push, and PR creation
+- Final `0.6.9` verification/build results:
+  - `node --check core/viewer/screen-share-native.js`
+  - `node --check core/viewer/changelog.js`
+  - `cargo check -p echo-core-client`
+  - `cargo build -p echo-core-client --release`
+  - `powershell -ExecutionPolicy Bypass -File core/deploy/build-release.ps1`
+- Local release artifacts generated successfully:
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.9_x64-setup.exe`
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.9_x64-setup.exe.sig`
+  - `core\target\release\bundle\nsis\latest.json`
+- Release-build environment note:
+  - copied the existing signing key from `F:\Codex AI\The Echo Chamber\core\client\.tauri-keys` into this clean worktree so the NSIS installer and updater signature could be produced
+  - reused the known-good local WebRTC payload via `LK_CUSTOM_WEBRTC` during the final build
+- Installed app updated to the final release executable for live use:
+  - copied `core\target\release\echo-core-client.exe` to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - relaunched the installed app successfully from the real live path
