@@ -1089,3 +1089,33 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Operational rule from here:
   - never side-load experimental builds over the live installed release path with the same release version again
   - risky client tests must use prerelease versioning and updater-disabled behavior
+
+### v0.6.9 release-candidate prep (2026-04-12 01:35 ET)
+- Created a clean release-candidate branch/worktree from the shipped `v0.6.8` manifest baseline:
+  - branch: `codex/release-v0.6.9-rc`
+  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\release-v0.6.9-rc`
+- Cherry-picked the two validated native-game-share commits from the experimental branch:
+  - `449f4a9` — native game/window shares use a high-motion publish profile
+  - `62ce553` — prerelease desktop builds disable the auto-updater and manual update check
+- Normalized the release-candidate version to `0.6.9-rc.1` in the desktop and control manifests:
+  - `core/client/Cargo.toml`
+  - `core/client/tauri.conf.json`
+  - `core/control/Cargo.toml`
+- Added a clean top-level changelog entry for the native game-share improvement so the next release is no longer mixed into the `v0.6.8` notes.
+- Release impact for this branch remains `both`:
+  - desktop binary required for the native publish-profile change
+  - server-served viewer update required for the `publishProfile` viewer wiring and changelog entry
+- Verification on the clean RC worktree:
+  - `node --check core/viewer/screen-share-native.js`
+  - `node --check core/viewer/changelog.js`
+  - `cargo check -p echo-core-client`
+  - `cargo test -p echo-core-client capture_pipeline::tests -- --nocapture`
+  - `cargo build -p echo-core-client --release`
+- Clean-worktree build note:
+  - the first raw `cargo check` failed because this new worktree did not have a complete local WebRTC include payload on its own
+  - rerunning with `LK_CUSTOM_WEBRTC` pointed at the known-good local prebuilt payload under `F:\Codex AI\The Echo Chamber\core\target\release\build\scratch-df3657cc50cd1baa\out\livekit_webrtc\livekit\win-x64-release-webrtc-7af9351\win-x64-release` fixed that immediately
+  - this was a local build-environment issue, not a code regression in the RC branch
+- Additional generated files changed during RC prep:
+  - `core/Cargo.lock`
+  - `core/client/gen/schemas/desktop-schema.json`
+  - `core/client/gen/schemas/windows-schema.json`

@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-12",
+    title: "High-Motion Native Game Shares (v0.6.9)",
+    notes: [
+      "Native game and app-window shares now use a dedicated high-motion publish profile instead of the conservative desktop limits. Heavy games have more bitrate and frame-rate headroom than ordinary desktop sharing.",
+      "This release also hardens prerelease desktop builds so test clients do not try to auto-update over the top of the live installed app."
+    ]
+  },
+  {
     version: "2026-04-11",
     title: "Reliable Screen Share Restarts (v0.6.8)",
     notes: [
