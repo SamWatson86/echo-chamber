@@ -15,3 +15,5 @@ resolver = "2"
 livekit = { path = "livekit-local" }
 libwebrtc = { path = "libwebrtc-local" }
 webrtc-sys = { path = "webrtc-sys-local" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.10.0" }
+webview2-com-macros = { path = "vendor/webview2-com-macros-0.8.1" }

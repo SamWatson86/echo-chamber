@@ -1152,3 +1152,72 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Installed app updated to the final release executable for live use:
   - copied `core\target\release\echo-core-client.exe` to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
   - relaunched the installed app successfully from the real live path
+
+### Installed-path reboot/connect crash root cause and hotfix branch (2026-04-12 19:00 ET)
+- Created a clean hotfix worktree from the real live release tip:
+  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\fix-v069-installed-crash-live`
+  - branch: `codex/fix-v069-installed-crash-live`
+- Collected real crash evidence from:
+  - Windows Event Viewer `Application Error`
+  - `C:\Users\Sam\AppData\Local\CrashDumps\echo-core-client.exe.*.dmp`
+  - WER archive entries under `C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_echo-core-client_*`
+- Installed WinDbg locally via `winget` to stop guessing and inspect the minidumps directly.
+- Root-cause finding from WinDbg:
+  - the crash is **not** specific to `v0.6.9`
+  - `v0.6.8` and `v0.6.9` both hit the same fail-fast bucket after reboot/connect
+  - failure hash matches across both versions
+  - stack shape is the same on both builds:
+    - `std::panicking::panic_with_hook`
+    - `core::panicking::panic_cannot_unwind`
+    - `webview2_com_sys::...ICoreWebView2FocusChangedEventHandler...Invoke`
+    - `EmbeddedBrowserWebView!...FireWebResourceRequestedEvent`
+    - `tao::platform_impl::platform::event_loop::lose_active_focus`
+  - practical meaning: a Rust panic is escaping a Windows WebView2 COM focus callback, which forces a fatal abort on Windows
+- Hotfix strategy implemented:
+  - vendored `tauri-runtime-wry 2.10.0` into `core/vendor/tauri-runtime-wry-2.10.0`
+  - patched workspace `core/Cargo.toml` with `[patch.crates-io] tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.10.0" }`
+  - hardened the Windows focus/fullscreen WebView2 callbacks in `core/vendor/tauri-runtime-wry-2.10.0/src/lib.rs`:
+    - recover poisoned `std::sync::Mutex` state with `into_inner()` instead of `unwrap()` panics
+    - wrap non-critical WebView2 COM callbacks in `catch_unwind`
+    - swallow/log those callback panics instead of aborting the process
+    - also removed the same poison-sensitive `focused_webview.lock().unwrap()` in `WindowEventWrapper::Focused`
+- Verification:
+  - `cargo tree -p echo-core-client -i tauri-runtime-wry` now resolves to the vendored `tauri-runtime-wry v2.10.0`
+  - `cargo check -p echo-core-client` passed with `LK_CUSTOM_WEBRTC=F:\Codex AI\The Echo Chamber\core\target\debug\build\scratch-2a0faabf5e80148f\out\livekit_webrtc\livekit\win-x64-release-webrtc-7af9351\win-x64-release`
+  - `cargo build -p echo-core-client --release` passed with the same `LK_CUSTOM_WEBRTC`
+- Runtime status:
+  - first safe probe connect succeeded in-session
+  - first post-reboot repro on the initial hotfix still crashed, but the fault offset changed from `0x1e7d0dd` / `0x1e749ad` to `0x1e7e8bd`
+  - that proved the first patch changed the failure mode but did not eliminate the panic path
+
+### Focus-callback hotfix round two: `webview2-com` proc-macro containment (2026-04-12 19:35 ET)
+- Used the fresh post-reboot full dump:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\crashdumps\echo-core-client.exe.35604.dmp`
+- WinDbg on the new dump showed the crash was still a `panic_cannot_unwind` through:
+  - `webview2_com_sys::...ICoreWebView2FocusChangedEventHandler_Vtbl::new::Invoke`
+  - `EmbeddedBrowserWebView!...FireWebResourceRequestedEvent`
+  - `tao::platform_impl::platform::event_loop::lose_active_focus`
+- Key new finding:
+  - the runtime-side callback wrappers were not sufficient because `webview2-com-macros` still generated `Invoke` thunks that called Rust closures directly with zero `catch_unwind`
+  - any panic inside those WebView2 COM event closures still crossed the FFI boundary and hard-aborted the process
+- Implemented second-stage hotfix:
+  - vendored `webview2-com-macros 0.8.1` into `core/vendor/webview2-com-macros-0.8.1`
+  - patched workspace `core/Cargo.toml` with:
+    - `webview2-com-macros = { path = "vendor/webview2-com-macros-0.8.1" }`
+  - modified the generated `event_callback` macro so all COM event-handler `Invoke` thunks now:
+    - wrap the Rust closure in `std::panic::catch_unwind(AssertUnwindSafe(...))`
+    - swallow/log the panic
+    - return `Ok(())` instead of letting the panic unwind across COM
+- Verification:
+  - `cargo tree -p echo-core-client -i webview2-com-macros` resolves to the vendored proc-macro crate
+  - `cargo check -p echo-core-client` passed
+  - `cargo build -p echo-core-client --release` passed
+- Runtime proof:
+  - rebuilt the safe probe at:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\focus-callback-hotfix-probe\echo-core-client.exe`
+  - launched that rebuilt probe in the same post-reboot session
+  - user connected successfully
+  - this cleared the actual crash gate that was hitting both Sam and Brad after reboot
+- Follow-up note:
+  - sharing the Codex desktop app from the hotfix probe showed poor performance, while sharing a browser window was fine
+  - that is being treated as a separate source/capture performance issue, not part of the reboot/connect crash hotfix
