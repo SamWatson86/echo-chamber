@@ -1065,3 +1065,27 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Release impact for this branch is `both`:
   - desktop binary required for the new native publish profile
   - server-served viewer update required for the new `publishProfile` wiring and changelog note
+
+### Post-midnight crash isolation for the experimental client (2026-04-12 00:30 ET)
+- The experimental high-motion client build that had been side-loaded into the installed path was restored off the live machine after it caused sign-in crashes.
+- Windows crash records proved the failure was real and stable:
+  - `Application Error 1000`
+  - `BEX64 / 0xc0000409`
+  - faulting application/module: `echo-core-client.exe`
+  - repeated offset: `0x0000000001e7d27d`
+  - crash path: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Important isolation result:
+  - the exact same bad binary runs successfully when copied to an isolated probe path
+  - it signed in successfully as both:
+    - `crashprobe\echo-core-client-probe.exe`
+    - `crashprobe\echo-core-client.exe`
+  - that means the failure is not “this build cannot sign in” in general
+  - the failure is specific to the installed-path identity/workflow
+- Strongest current suspect is the updater/startup path, not the native game-share publish-profile logic itself.
+- Safety hardening added on this branch:
+  - client version bumped to `0.6.8-test.2`
+  - auto-updater is now disabled automatically for prerelease/test builds
+  - manual `check_for_updates` also returns `disabled` on prerelease/test builds
+- Operational rule from here:
+  - never side-load experimental builds over the live installed release path with the same release version again
+  - risky client tests must use prerelease versioning and updater-disabled behavior
