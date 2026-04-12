@@ -327,11 +327,19 @@ async fn start_screen_share(
     source_id: u64,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
+    screen_capture::start_share(
+        source_id,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    ).await
 }
 
 #[cfg(target_os = "windows")]
@@ -361,11 +369,20 @@ async fn start_desktop_capture(
     fullscreen: bool,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
+    desktop_capture::start(
+        hwnd,
+        fullscreen,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    ).await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically

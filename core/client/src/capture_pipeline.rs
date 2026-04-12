@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use livekit::prelude::*;
@@ -30,15 +30,6 @@ pub struct CaptureStats {
 }
 
 // ── CapturePublisher ──
-
-/// Hard cap for the capture push rate when NVENC hardware encode is active.
-/// This must match the intended wire publish cap for native screen share.
-/// The previous 240fps cap let WGC/DXGI push far above the 30fps publish target
-/// in real sessions, which drove Sam's local FPS hit while still reporting a
-/// nominal 30fps target in capture-health.
-const TARGET_ENCODE_FPS_HARDWARE: f64 = PUBLISH_TARGET_FPS as f64;
-const MIN_FRAME_INTERVAL_HARDWARE: Duration =
-    Duration::from_nanos((1_000_000_000.0 / TARGET_ENCODE_FPS_HARDWARE) as u64);
 
 /// Soft cap for the capture push rate when OpenH264 software encode is active.
 /// Software H264 at 1080p at 60+ fps pins the CPU at ~90-100% and caused
@@ -63,6 +54,7 @@ pub static HAS_NVCUDA: AtomicBool = AtomicBool::new(false);
 /// don't push 100+ fps into WebRTC while the rest of the stack thinks the
 /// target is 30fps.
 pub const PUBLISH_TARGET_FPS: u32 = 30;
+pub const GAME_PUBLISH_TARGET_FPS: u32 = 60;
 
 /// Heartbeat interval for WGC/static-content frame duplication.
 /// If the real capture path has not pushed a new frame in this long, re-push
@@ -102,6 +94,53 @@ impl Drop for HeartbeatHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PublishProfile {
+    Desktop,
+    Game,
+}
+
+impl Default for PublishProfile {
+    fn default() -> Self {
+        Self::Desktop
+    }
+}
+
+impl PublishProfile {
+    pub fn target_fps(self) -> u32 {
+        match self {
+            Self::Desktop => PUBLISH_TARGET_FPS,
+            Self::Game => GAME_PUBLISH_TARGET_FPS,
+        }
+    }
+
+    fn max_bitrate(self) -> u64 {
+        match self {
+            Self::Desktop => 4_000_000,
+            Self::Game => 8_000_000,
+        }
+    }
+
+    fn min_bitrate(self) -> u64 {
+        match self {
+            Self::Desktop => 2_500_000,
+            Self::Game => 3_000_000,
+        }
+    }
+
+    fn hardware_min_frame_interval(self) -> Duration {
+        Duration::from_nanos((1_000_000_000.0 / self.target_fps() as f64) as u64)
+    }
+
+    fn heartbeat_interval(self) -> Option<Duration> {
+        match self {
+            Self::Desktop => Some(HEARTBEAT_INTERVAL),
+            Self::Game => None,
+        }
+    }
+}
+
 /// Shared publisher that connects to the LiveKit SFU, creates a NativeVideoSource,
 /// publishes a Camera track, and provides helpers to push BGRA frames and emit stats.
 pub struct CapturePublisher {
@@ -110,6 +149,7 @@ pub struct CapturePublisher {
     start_time: Instant,
     frame_count: u64,
     last_pushed: Option<Instant>,
+    hardware_min_frame_interval: Duration,
     heartbeat_state: Arc<Mutex<HeartbeatState>>,
     heartbeat_handle: Option<HeartbeatHandle>,
 }
@@ -124,6 +164,7 @@ impl CapturePublisher {
         token: &str,
         enc_w: u32,
         enc_h: u32,
+        publish_profile: PublishProfile,
         log_prefix: &str,
     ) -> Result<Self, String> {
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
@@ -156,27 +197,9 @@ impl CapturePublisher {
             video_codec: VideoCodec::H264,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                // Capped at 4 Mbps for multi-publisher rooms. Validated 2026-04-07
-                // with 3 simultaneous 1080p shares and a residential-WAN viewer
-                // (David) who saw 0fps at 8Mbps. 4Mbps × 3 publishers = 12Mbps
-                // aggregate, comfortably under most residential downloads. Per-stream
-                // quality at 1080p30 H264 is still excellent for screen content.
-                // Twitch source quality reference: 6 Mbps at 1080p60 gameplay.
-                max_bitrate: 4_000_000,
-                // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
-                // to zero under packet loss / RTT spikes, so the stream stays
-                // visible instead of dropping to 0fps and slowly probing back up.
-                min_bitrate: 2_500_000,
-                // 60fps for safe stable testing with David (remote friend).
-                // The level=AUTOSELECT fix is still in h264_encoder_impl.cpp
-                // for later 144fps retest on SAM-PC — harmless at 60fps.
-                // Capped at 30fps for multi-publisher rooms. With 3 simultaneous
-                // 1920x1080 H264 publishers, the cumulative NVDEC decode load
-                // and SFU forwarding pressure makes 60fps unsustainable —
-                // receivers see 10fps after pacing kicks in. 30fps gives
-                // headroom for all parties and is plenty for screen content.
-                // Spencer's recommendation, validated 2026-04-07 with 3 sharers.
-                max_framerate: PUBLISH_TARGET_FPS as f64,
+                max_bitrate: publish_profile.max_bitrate(),
+                min_bitrate: publish_profile.min_bitrate(),
+                max_framerate: publish_profile.target_fps() as f64,
             }),
             ..Default::default()
         };
@@ -198,6 +221,7 @@ impl CapturePublisher {
             heartbeat_state.clone(),
             source.clone(),
             start_time,
+            publish_profile.heartbeat_interval(),
             log_prefix,
         );
 
@@ -207,8 +231,9 @@ impl CapturePublisher {
             start_time,
             frame_count: 0,
             last_pushed: None,
+            hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
             heartbeat_state,
-            heartbeat_handle: Some(heartbeat_handle),
+            heartbeat_handle,
         })
     }
 
@@ -222,6 +247,7 @@ impl CapturePublisher {
         token: &str,
         enc_w: u32,
         enc_h: u32,
+        publish_profile: PublishProfile,
         log_prefix: &str,
     ) -> Result<Self, String> {
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
@@ -253,27 +279,9 @@ impl CapturePublisher {
             video_codec: VideoCodec::H264,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                // Capped at 4 Mbps for multi-publisher rooms. Validated 2026-04-07
-                // with 3 simultaneous 1080p shares and a residential-WAN viewer
-                // (David) who saw 0fps at 8Mbps. 4Mbps × 3 publishers = 12Mbps
-                // aggregate, comfortably under most residential downloads. Per-stream
-                // quality at 1080p30 H264 is still excellent for screen content.
-                // Twitch source quality reference: 6 Mbps at 1080p60 gameplay.
-                max_bitrate: 4_000_000,
-                // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
-                // to zero under packet loss / RTT spikes, so the stream stays
-                // visible instead of dropping to 0fps and slowly probing back up.
-                min_bitrate: 2_500_000,
-                // 60fps for safe stable testing with David (remote friend).
-                // The level=AUTOSELECT fix is still in h264_encoder_impl.cpp
-                // for later 144fps retest on SAM-PC — harmless at 60fps.
-                // Capped at 30fps for multi-publisher rooms. With 3 simultaneous
-                // 1920x1080 H264 publishers, the cumulative NVDEC decode load
-                // and SFU forwarding pressure makes 60fps unsustainable —
-                // receivers see 10fps after pacing kicks in. 30fps gives
-                // headroom for all parties and is plenty for screen content.
-                // Spencer's recommendation, validated 2026-04-07 with 3 sharers.
-                max_framerate: PUBLISH_TARGET_FPS as f64,
+                max_bitrate: publish_profile.max_bitrate(),
+                min_bitrate: publish_profile.min_bitrate(),
+                max_framerate: publish_profile.target_fps() as f64,
             }),
             ..Default::default()
         };
@@ -296,6 +304,7 @@ impl CapturePublisher {
             heartbeat_state.clone(),
             source.clone(),
             start_time,
+            publish_profile.heartbeat_interval(),
             log_prefix,
         );
 
@@ -305,8 +314,9 @@ impl CapturePublisher {
             start_time,
             frame_count: 0,
             last_pushed: None,
+            hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
             heartbeat_state,
-            heartbeat_handle: Some(heartbeat_handle),
+            heartbeat_handle,
         })
     }
 
@@ -314,8 +324,12 @@ impl CapturePublisher {
         state: Arc<Mutex<HeartbeatState>>,
         source: NativeVideoSource,
         start_time: Instant,
+        heartbeat_interval: Option<Duration>,
         log_prefix: &str,
-    ) -> HeartbeatHandle {
+    ) -> Option<HeartbeatHandle> {
+        let Some(heartbeat_interval) = heartbeat_interval else {
+            return None;
+        };
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
         let log_prefix = log_prefix.to_string();
@@ -327,7 +341,7 @@ impl CapturePublisher {
                 let mut last_log = Instant::now();
 
                 while running_clone.load(Ordering::Relaxed) {
-                    std::thread::sleep(HEARTBEAT_INTERVAL);
+                    std::thread::sleep(heartbeat_interval);
                     if !running_clone.load(Ordering::Relaxed) {
                         break;
                     }
@@ -337,7 +351,7 @@ impl CapturePublisher {
                             Ok(guard) => guard,
                             Err(poisoned) => poisoned.into_inner(),
                         };
-                        if state.last_real_push.elapsed() < HEARTBEAT_INTERVAL {
+                        if state.last_real_push.elapsed() < heartbeat_interval {
                             None
                         } else {
                             state.last_frame.as_ref().map(|frame| LastFrameBuffer {
@@ -389,10 +403,10 @@ impl CapturePublisher {
             })
             .expect("spawn heartbeat thread");
 
-        HeartbeatHandle {
+        Some(HeartbeatHandle {
             running,
             thread: Some(thread),
-        }
+        })
     }
 
     /// Convert a BGRA frame to I420 via libyuv and push it to the NativeVideoSource.
@@ -408,7 +422,7 @@ impl CapturePublisher {
         // Pace native capture to the real publish target. Without this, WGC/DXGI
         // can still push well above 30fps on NVENC systems and drag local FPS down.
         let min_interval = if HAS_NVCUDA.load(Ordering::Relaxed) {
-            MIN_FRAME_INTERVAL_HARDWARE
+            self.hardware_min_frame_interval
         } else {
             MIN_FRAME_INTERVAL_SOFTWARE
         };
@@ -512,5 +526,26 @@ impl CapturePublisher {
         } = self;
         drop(heartbeat_handle);
         rt.block_on(room.close()).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_profile_stays_conservative() {
+        assert_eq!(PublishProfile::Desktop.target_fps(), PUBLISH_TARGET_FPS);
+        assert_eq!(PublishProfile::Desktop.max_bitrate(), 4_000_000);
+        assert_eq!(PublishProfile::Desktop.min_bitrate(), 2_500_000);
+        assert!(PublishProfile::Desktop.heartbeat_interval().is_some());
+    }
+
+    #[test]
+    fn game_profile_is_high_motion() {
+        assert_eq!(PublishProfile::Game.target_fps(), GAME_PUBLISH_TARGET_FPS);
+        assert_eq!(PublishProfile::Game.max_bitrate(), 8_000_000);
+        assert_eq!(PublishProfile::Game.min_bitrate(), 3_000_000);
+        assert!(PublishProfile::Game.heartbeat_interval().is_none());
     }
 }

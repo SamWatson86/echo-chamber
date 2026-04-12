@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
-use crate::capture_pipeline::CapturePublisher;
+use crate::capture_pipeline::{CapturePublisher, PublishProfile};
 
 // ── Types ──
 
@@ -255,6 +255,7 @@ pub async fn start_share(
     source_id: u64,
     sfu_url: String,
     token: String,
+    publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
@@ -266,7 +267,7 @@ pub async fn start_share(
     let app2 = app.clone();
     let r2 = running.clone();
     let task = tokio::spawn(async move {
-        if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2, health).await {
+        if let Err(e) = share_loop(source_id, &sfu_url, &token, publish_profile, &app2, &r2, health).await {
             eprintln!("[screen-capture] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
@@ -521,13 +522,20 @@ async fn share_loop(
     source_id: u64,
     sfu_url: &str,
     token: &str,
+    publish_profile: PublishProfile,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
-    let mut publisher =
-        CapturePublisher::connect_and_publish(sfu_url, token, 1920, 1080, "screen-capture").await?;
+    let mut publisher = CapturePublisher::connect_and_publish(
+        sfu_url,
+        token,
+        1920,
+        1080,
+        publish_profile,
+        "screen-capture",
+    ).await?;
 
     // Resolve HWND -> PID for WASAPI audio auto-start
     let target_pid = unsafe {
@@ -546,7 +554,7 @@ async fn share_loop(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+        publish_profile.target_fps(),
     );
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
@@ -834,9 +842,14 @@ async fn share_loop_monitor(
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
-    let mut publisher =
-        CapturePublisher::connect_and_publish(sfu_url, token, 1920, 1080, "screen-capture-monitor")
-            .await?;
+    let mut publisher = CapturePublisher::connect_and_publish(
+        sfu_url,
+        token,
+        1920,
+        1080,
+        PublishProfile::Desktop,
+        "screen-capture-monitor",
+    ).await?;
 
     eprintln!(
         "[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}",
@@ -848,7 +861,7 @@ async fn share_loop_monitor(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+        PublishProfile::Desktop.target_fps(),
     );
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);

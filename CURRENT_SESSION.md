@@ -1034,3 +1034,34 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Server verification after deploy:
   - `/api/update/latest.json` now serves `version = 0.6.8`
   - updater URL points at `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.8/Echo.Chamber_0.6.8_x64-setup.exe`
+
+### Native game-share publish profile hardening (2026-04-11 20:41 ET)
+- New task branch/worktree created from the shipped `v0.6.8` baseline:
+  - branch: `codex/native-game-publish-profile`
+  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\native-game-publish-profile`
+- Trigger for this work: live `Crimson Desert` testing showed the native game/window share path only delivering roughly `16-18 fps` to `SAM-PC` at about `2.45 Mbps`, which is too low for a high-motion title.
+- Root cause found in the native Rust publisher path:
+  - `CapturePublisher` was hard-wired to the desktop-share profile for all native shares
+  - game/window shares were incorrectly capped at `4 Mbps` and `30 fps`
+  - desktop heartbeats were also being applied to game/window shares even though they are a poor fit for high-motion content
+- Fix implemented:
+  - added `PublishProfile::{Desktop, Game}` in `core/client/src/capture_pipeline.rs`
+  - desktop shares keep the conservative profile: `30 fps`, `4 Mbps max`, `2.5 Mbps min`, heartbeat enabled
+  - native game/window shares now use a high-motion profile: `60 fps`, `8 Mbps max`, `3 Mbps min`, heartbeat disabled
+  - `screen_capture.rs` and `desktop_capture.rs` now pass the publish profile through to the native publisher and to capture-health targets
+  - `main.rs` Tauri commands now accept an optional `publishProfile` argument and default older viewers to `Desktop`
+  - `screen-share-native.js` now sends `publishProfile: 'game'` for native `game` sources and `publishProfile: 'desktop'` for monitor/window/desktop paths
+  - `core/viewer/changelog.js` updated with the user-facing note
+- Validation completed on this branch:
+  - `node --check core/viewer/screen-share-native.js`
+  - `node --check core/viewer/changelog.js`
+  - `cargo check -p echo-core-client`
+  - `cargo test -p echo-core-client capture_pipeline::tests -- --nocapture`
+  - `cargo build -p echo-core-client --release`
+- Runtime status:
+  - build-verified only
+  - not yet side-loaded into the installed client
+  - no live before/after `Crimson Desert` receiver comparison yet
+- Release impact for this branch is `both`:
+  - desktop binary required for the new native publish profile
+  - server-served viewer update required for the new `publishProfile` wiring and changelog note

@@ -14,7 +14,8 @@ var ECHO_CHANGELOG = [
       "Native screen sharing now shuts the previous capture task down cleanly before a new $screen publisher connects. Rapid stop/start no longer creates duplicate identities or reconnect churn.",
       "Watching remote screen shares is much more reliable after reconnects and reloads. Existing live shares attach correctly, Start Watching resolves the real $screen companion, and native stop listeners no longer stack across repeated restarts.",
       "The app no longer shows a false New Version Available banner on prerelease-style local builds, and Win10 machines now block unsupported native Windows capture choices instead of failing silently.",
-      "Static native window shares keep their stream alive with heartbeat frames, and native publish pacing is aligned to the intended 30fps wire target."
+      "Static native window shares keep their stream alive with heartbeat frames, and native publish pacing is aligned to the intended 30fps wire target.",
+      "Native game shares no longer inherit desktop-share limits. High-motion window/game capture now uses a dedicated 60fps profile with a higher bitrate ceiling, so heavy games have more headroom than ordinary desktop sharing."
     ]
   },
   {

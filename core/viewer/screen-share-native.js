@@ -132,6 +132,7 @@ async function startScreenShareManual() {
               sourceId: source.id,
               sfuUrl: sfuUrl,
               token: screenToken,
+              publishProfile: 'game',
             });
             window._echoNativeCaptureMode = 'wgc';
             captureStarted = true;
@@ -153,6 +154,7 @@ async function startScreenShareManual() {
                 fullscreen: source.isMonitor || false,
                 sfuUrl: sfuUrl,
                 token: screenToken,
+                publishProfile: 'game',
               });
               window._echoNativeCaptureMode = 'desktop-dd';
               captureStarted = true;
@@ -181,6 +183,7 @@ async function startScreenShareManual() {
               fullscreen: true,
               sfuUrl: sfuUrl,
               token: screenToken,
+              publishProfile: 'desktop',
             });
             window._echoNativeCaptureMode = 'desktop-dd';
           } else {
@@ -191,6 +194,7 @@ async function startScreenShareManual() {
             sourceId: source.id,
             sfuUrl: sfuUrl,
             token: screenToken,
+            publishProfile: 'desktop',
           });
           window._echoNativeCaptureMode = 'wgc';
         } else {
