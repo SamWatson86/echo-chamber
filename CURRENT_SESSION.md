@@ -1119,3 +1119,36 @@ This session reproduced a third class of display instability on Sam's main RTX 4
   - `core/Cargo.lock`
   - `core/client/gen/schemas/desktop-schema.json`
   - `core/client/gen/schemas/windows-schema.json`
+
+### v0.6.9 final release-branch prep (2026-04-12 01:42 ET)
+- Promoted the RC work onto the final release task branch:
+  - branch: `codex/release-v0.6.9`
+- Dropped the prerelease suffix and normalized the release version to `0.6.9` in:
+  - `core/client/Cargo.toml`
+  - `core/client/tauri.conf.json`
+  - `core/control/Cargo.toml`
+  - `core/Cargo.lock`
+- Installed-path smoke test completed against the real app location:
+  - live install backed up to `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\installed-path-rc-smoke\echo-core-client.v0.6.8-backup.exe`
+  - `0.6.9-rc.1` was copied to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - the old instant installed-path crash did **not** reproduce
+  - the app stayed alive from the real installed path and was brought forward for taskbar pinning
+- Release posture now:
+  - code is being treated as the final `0.6.9` branch, not a local-only RC
+  - next steps are final Windows artifact build, branch push, and PR creation
+- Final `0.6.9` verification/build results:
+  - `node --check core/viewer/screen-share-native.js`
+  - `node --check core/viewer/changelog.js`
+  - `cargo check -p echo-core-client`
+  - `cargo build -p echo-core-client --release`
+  - `powershell -ExecutionPolicy Bypass -File core/deploy/build-release.ps1`
+- Local release artifacts generated successfully:
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.9_x64-setup.exe`
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.9_x64-setup.exe.sig`
+  - `core\target\release\bundle\nsis\latest.json`
+- Release-build environment note:
+  - copied the existing signing key from `F:\Codex AI\The Echo Chamber\core\client\.tauri-keys` into this clean worktree so the NSIS installer and updater signature could be produced
+  - reused the known-good local WebRTC payload via `LK_CUSTOM_WEBRTC` during the final build
+- Installed app updated to the final release executable for live use:
+  - copied `core\target\release\echo-core-client.exe` to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - relaunched the installed app successfully from the real live path

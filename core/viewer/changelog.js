@@ -12,7 +12,7 @@ var ECHO_CHANGELOG = [
     title: "High-Motion Native Game Shares (v0.6.9)",
     notes: [
       "Native game and app-window shares now use a dedicated high-motion publish profile instead of the conservative desktop limits. Heavy games have more bitrate and frame-rate headroom than ordinary desktop sharing.",
-      "This release also hardens prerelease desktop builds so test clients do not try to auto-update over the top of the live installed app."
+      "Test desktop builds are now hardened so prerelease clients do not auto-update over the top of the live installed app."
     ]
   },
   {

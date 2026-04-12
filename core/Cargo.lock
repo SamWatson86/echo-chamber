@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.6.9-rc.1"
+version = "0.6.9"
 dependencies = [
  "base64 0.22.1",
  "livekit",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-control"
-version = "0.6.9-rc.1"
+version = "0.6.9"
 dependencies = [
  "argon2",
  "axum",
