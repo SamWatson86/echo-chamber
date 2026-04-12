@@ -1221,3 +1221,37 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Follow-up note:
   - sharing the Codex desktop app from the hotfix probe showed poor performance, while sharing a browser window was fine
   - that is being treated as a separate source/capture performance issue, not part of the reboot/connect crash hotfix
+
+### `v0.6.10` patch release candidate prep (2026-04-12 20:05 ET)
+- Promoted the hotfix work onto a proper patch release branch:
+  - branch: `codex/release-v0.6.10`
+- Bumped the three required desktop release version files:
+  - `core/client/Cargo.toml` -> `0.6.10`
+  - `core/client/tauri.conf.json` -> `0.6.10`
+  - `core/control/Cargo.toml` -> `0.6.10`
+- Updated `core/viewer/changelog.js` with a new top entry:
+  - `Post-Reboot Connect Hotfix (v0.6.10)`
+  - this keeps the `v0.6.9` game-share headroom but makes the desktop runtime safe again after reboot
+- Verification gate rerun on the release branch:
+  - `node --check core/viewer/changelog.js`
+  - `node --check core/viewer/screen-share-native.js`
+  - `cargo check -p echo-core-client`
+  - `cargo build -p echo-core-client --release`
+- Windows release artifacts generated successfully:
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.10_x64-setup.exe`
+  - `core\target\release\bundle\nsis\Echo Chamber_0.6.10_x64-setup.exe.sig`
+  - `core\target\release\bundle\nsis\latest.json`
+- Packaging note:
+  - copied the existing signing key from `F:\Codex AI\The Echo Chamber\core\client\.tauri-keys` into this clean worktree locally to build/sign the installer
+  - the key copy is operational only and should not be committed
+- Installed-path smoke test:
+  - backed up the previous installed EXE to:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\installed-path-v0.6.10-smoke\echo-core-client.pre-v0.6.10.exe`
+  - copied the `0.6.10` release EXE to:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - relaunched the real installed app from that exact path
+  - user connected successfully on the installed build
+- Release impact:
+  - `both`
+  - desktop binary required for the WebView2 callback panic hotfix
+  - server-served viewer update required for the new changelog entry

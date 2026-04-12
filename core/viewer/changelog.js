@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-12b",
+    title: "Post-Reboot Connect Hotfix (v0.6.10)",
+    notes: [
+      "Fixed the nasty desktop crash that could hit right after a reboot when you clicked Connect. The failure was inside the Windows WebView2 callback path, not the room or screen-share logic, and the app now hardens that callback layer instead of aborting the whole process.",
+      "This release keeps the high-motion native game-share headroom from v0.6.9, but ships it on a safer desktop runtime after the reboot/connect crash was root-caused and patched."
+    ]
+  },
+  {
     version: "2026-04-12",
     title: "High-Motion Native Game Shares (v0.6.9)",
     notes: [
