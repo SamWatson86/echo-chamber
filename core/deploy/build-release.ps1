@@ -102,6 +102,13 @@ if ($setupExe -and $setupSig) {
     Write-Status "  Looked for: *_${version}_*-setup.exe" Yellow
 }
 
+$manifestPath = Join-Path $bundleDir "latest.json"
+$releaseFiles = @()
+if ($setupExe) { $releaseFiles += $setupExe.FullName }
+if ($setupSig) { $releaseFiles += $setupSig.FullName }
+if (Test-Path $manifestPath) { $releaseFiles += $manifestPath }
+$releaseFilesArg = ($releaseFiles | ForEach-Object { '"' + $_ + '"' }) -join ' '
+
 Write-Status ""
 Write-Status "=== RELEASE READY ===" Green
 Write-Status ""
@@ -114,4 +121,8 @@ Write-Status "     - The .exe.sig (signature for auto-updates)"
 Write-Status "     - latest.json (update manifest)"
 Write-Status ""
 Write-Status "Or use gh CLI:"
-Write-Status "  gh release create v$version --title 'Echo Chamber v$version' $bundleDir\*"
+Write-Status "  gh release create v$version --title 'Echo Chamber v$version' $releaseFilesArg"
+Write-Status ""
+Write-Status "After publishing the Windows release:" Yellow
+Write-Status "  Download latest.json from the GitHub Release and copy to core\deploy\" Yellow
+Write-Status "  Or run: gh release download v$version -p latest.json -D core\deploy\ --clobber" Yellow

@@ -1,14 +1,12 @@
 # Changelog
 
-## 0.6.8
+## 0.6.11
 
-- Fix native screen-share restart churn: stop commands now wait for the previous native capture task to exit before a new `$screen` publisher connects
-- Fix viewer native stop-listener cleanup so repeated restarts do not stack duplicate listeners
-- Fix remote screen-share watching after reconnect/reload by normalizing `$screen` companion identities consistently across late join, watch/unwatch, and adaptive stats paths
-- Fix `Start Watching` for remote screen shares so existing live shares attach correctly instead of staying hidden or unsubscribed
-- Fix the false "New Version Available" banner when running prerelease-style local builds
-- Win10 picker now blocks unsupported native `Windows` capture entries and directs users to `Screen`/`Game`
-- Native pipeline now includes the WGC heartbeat/static-frame duplication fix and keeps native publish pacing aligned to the 30fps target
+- Fix: Windows 10 native Entire Screen sharing now auto-falls back to software H264 on the native DXGI Desktop Duplication path when no encoder override is configured, eliminating the blank `0fps` viewer tile on Win10 publishers like `SAM-PC`
+- Fix: Native Win10 software H264 screen publishers now negotiate the browser-friendly H264 packetization path that actually renders for viewers instead of stalling on a dead hardware/adapter route
+- Fix: New remote screen shares auto-watch on first publish, so already-connected viewers no longer miss startup keyframes behind a manual watch prompt
+- Fix: Remote screen tiles prefer the SDK attach path for screen video, reducing blank first-attach edge cases on live screen shares
+- Maintenance: Windows release packaging is explicitly NSIS-only again; no macOS artifact or updater manifest baggage in the release path
 
 ## 0.4.1
 

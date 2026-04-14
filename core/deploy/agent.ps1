@@ -28,6 +28,23 @@ $stdoutLog = Join-Path $InstallDir "client-stdout.log"
 $stderrLog = Join-Path $InstallDir "client-stderr.log"
 $agentLog = Join-Path $InstallDir "agent.log"
 $pidFile = Join-Path $InstallDir "client.pid"
+$clientTaskName = "EchoChamberClient"
+
+function Get-InstalledClientPath {
+    $candidates = @()
+    if ($env:LOCALAPPDATA) {
+        $candidates += (Join-Path $env:LOCALAPPDATA "Echo Chamber\echo-core-client.exe")
+    }
+    if ($env:USERPROFILE) {
+        $candidates += (Join-Path $env:USERPROFILE "AppData\Local\Echo Chamber\echo-core-client.exe")
+    }
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+    return $null
+}
 
 function Write-Log([string]$msg) {
     $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -46,7 +63,24 @@ function Get-ClientProcess {
             }
         }
     }
+
+    $proc = Get-Process -Name "echo-core-client" -ErrorAction SilentlyContinue |
+        Sort-Object StartTime -Descending |
+        Select-Object -First 1
+    if ($proc) {
+        return $proc
+    }
+
     return $null
+}
+
+function Get-ClientProcessPath($proc) {
+    if (-not $proc) { return $null }
+    try {
+        return $proc.Path
+    } catch {
+        return $null
+    }
 }
 
 function Stop-Client {
@@ -71,9 +105,45 @@ function Start-Client {
     if (Test-Path $stdoutLog) { "" | Set-Content $stdoutLog }
     if (Test-Path $stderrLog) { "" | Set-Content $stderrLog }
 
+    $clientTask = Get-ScheduledTask -TaskName $clientTaskName -ErrorAction SilentlyContinue
+    if ($clientTask) {
+        try {
+            Start-ScheduledTask -TaskName $clientTaskName
+            Start-Sleep -Seconds 2
+            $proc = Get-Process -Name "echo-core-client" -ErrorAction SilentlyContinue |
+                Sort-Object StartTime -Descending |
+                Select-Object -First 1
+            if ($proc) {
+                Set-Content -Path $pidFile -Value $proc.Id
+                Write-Log "Client started via scheduled task (PID $($proc.Id))."
+                return $true
+            }
+
+            Write-Log "Scheduled task launched but client process was not found."
+            return $false
+        } catch {
+            Write-Log "Scheduled task launch failed, falling back to direct start: $_"
+        }
+    }
+
     $proc = Start-Process -FilePath $exePath -WorkingDirectory $InstallDir -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
     Set-Content -Path $pidFile -Value $proc.Id
-    Write-Log "Client started (PID $($proc.Id))."
+    Write-Log "Client started directly (PID $($proc.Id))."
+    return $true
+}
+
+function Start-InstalledClient {
+    $installedPath = Get-InstalledClientPath
+    if (-not $installedPath) {
+        Write-Log "No installed client exe found under LocalAppData"
+        return $false
+    }
+
+    Stop-Client
+    $workingDir = Split-Path $installedPath -Parent
+    $proc = Start-Process -FilePath $installedPath -WorkingDirectory $workingDir -PassThru
+    Set-Content -Path $pidFile -Value $proc.Id
+    Write-Log "Installed client started directly (PID $($proc.Id)) from $installedPath."
     return $true
 }
 
@@ -128,11 +198,16 @@ while ($listener.IsListening) {
                 $proc = Get-ClientProcess
                 $running = $proc -ne $null
                 $hasExe = Test-Path $exePath
+                $installedPath = Get-InstalledClientPath
                 $body = @{
                     agent = "ok"
                     client_running = $running
                     client_pid = if ($running) { $proc.Id } else { $null }
+                    client_path = if ($running) { Get-ClientProcessPath $proc } else { $null }
                     has_exe = $hasExe
+                    sandbox_exe_path = $exePath
+                    installed_exe_path = $installedPath
+                    installed_exe_exists = [bool]$installedPath
                 } | ConvertTo-Json
                 Send-Response $context 200 $body
             }
@@ -199,6 +274,19 @@ while ($listener.IsListening) {
                     Send-Response $context 200 '{"status":"restarted"}'
                 } else {
                     Send-Response $context 500 '{"error":"no exe found"}'
+                }
+            }
+
+            "/launch-installed" {
+                if ($method -ne "POST") {
+                    Send-Response $context 405 '{"error":"POST required"}'
+                    continue
+                }
+                $ok = Start-InstalledClient
+                if ($ok) {
+                    Send-Response $context 200 '{"status":"installed-client-started"}'
+                } else {
+                    Send-Response $context 500 '{"error":"installed client not found"}'
                 }
             }
 

@@ -12,12 +12,13 @@
 //!         → libwebrtc H264 encoder (MFT → NVENC)
 //!           → RTP → SFU
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use livekit::track::TrackSource;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
-use crate::capture_pipeline::{CapturePublisher, PublishProfile};
+use crate::capture_pipeline::CapturePublisher;
 
 // ── Types ──
 
@@ -35,9 +36,7 @@ pub struct CaptureSource {
 // ── Global State ──
 
 struct ShareHandle {
-    task_id: u64,
     running: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<()>,
 }
 
 fn global_state() -> &'static Mutex<Option<ShareHandle>> {
@@ -45,15 +44,27 @@ fn global_state() -> &'static Mutex<Option<ShareHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
-fn next_task_id() -> u64 {
-    static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
-}
+#[cfg(target_os = "windows")]
+fn wgc_draw_border_setting(scope: &str) -> windows_capture::settings::DrawBorderSettings {
+    use windows_capture::graphics_capture_api::GraphicsCaptureApi;
+    use windows_capture::settings::DrawBorderSettings;
 
-fn clear_task_if_current(task_id: u64) {
-    let mut state = global_state().lock().unwrap();
-    if state.as_ref().map(|handle| handle.task_id) == Some(task_id) {
-        *state = None;
+    match GraphicsCaptureApi::is_border_settings_supported() {
+        Ok(true) => DrawBorderSettings::WithoutBorder,
+        Ok(false) => {
+            eprintln!(
+                "[{}] WGC border toggle unsupported on this Windows build; using default border settings",
+                scope
+            );
+            DrawBorderSettings::Default
+        }
+        Err(err) => {
+            eprintln!(
+                "[{}] failed to query WGC border support ({:?}); using default border settings",
+                scope, err
+            );
+            DrawBorderSettings::Default
+        }
     }
 }
 
@@ -255,63 +266,43 @@ pub async fn start_share(
     source_id: u64,
     sfu_url: String,
     token: String,
-    publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop_share().await?;
+    stop_share();
 
     let running = Arc::new(AtomicBool::new(true));
-    let task_id = next_task_id();
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(ShareHandle {
+            running: running.clone(),
+        });
+    }
 
     let app2 = app.clone();
     let r2 = running.clone();
-    let task = tokio::spawn(async move {
-        if let Err(e) = share_loop(source_id, &sfu_url, &token, publish_profile, &app2, &r2, health).await {
+    tokio::spawn(async move {
+        if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2, health).await {
             eprintln!("[screen-capture] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
         let _ = app2.emit("screen-capture-stopped", ());
         eprintln!("[screen-capture] task exited");
-        clear_task_if_current(task_id);
-    });
-
-    {
         let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            task_id,
-            running,
-            task,
-        });
-        if state
-            .as_ref()
-            .map(|handle| handle.task.is_finished())
-            .unwrap_or(false)
-        {
-            *state = None;
-        }
-    }
+        *state = None;
+    });
 
     Ok(())
 }
 
 /// Stop the current screen share.
-pub async fn stop_share() -> Result<(), String> {
-    let handle = {
-        let mut state = global_state().lock().unwrap();
-        state.take()
-    };
-
-    if let Some(handle) = handle {
+pub fn stop_share() {
+    let mut state = global_state().lock().unwrap();
+    if let Some(handle) = state.take() {
         handle.running.store(false, Ordering::SeqCst);
         eprintln!("[screen-capture] stop requested");
-        handle
-            .task
-            .await
-            .map_err(|e| format!("screen capture task join failed: {e}"))?;
     }
-
-    Ok(())
 }
 
 // ── Thumbnail Generation ──
@@ -522,7 +513,6 @@ async fn share_loop(
     source_id: u64,
     sfu_url: &str,
     token: &str,
-    publish_profile: PublishProfile,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     health: Arc<CaptureHealthState>,
@@ -533,9 +523,11 @@ async fn share_loop(
         token,
         1920,
         1080,
-        publish_profile,
         "screen-capture",
-    ).await?;
+        TrackSource::Camera,
+        false,
+    )
+    .await?;
 
     // Resolve HWND -> PID for WASAPI audio auto-start
     let target_pid = unsafe {
@@ -554,7 +546,7 @@ async fn share_loop(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        publish_profile.target_fps(),
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
     );
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
@@ -702,7 +694,7 @@ async fn share_loop(
         let settings = Settings::new(
             window,
             CursorCaptureSettings::Default,
-            DrawBorderSettings::WithoutBorder,
+            wgc_draw_border_setting("screen-capture"),
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
             DirtyRegionSettings::Default,
@@ -797,38 +789,29 @@ pub async fn start_share_monitor(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop_share().await?;
+    stop_share();
 
     let running = Arc::new(AtomicBool::new(true));
-    let task_id = next_task_id();
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(ShareHandle {
+            running: running.clone(),
+        });
+    }
 
     let app2 = app.clone();
     let r2 = running.clone();
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2, health).await {
             eprintln!("[screen-capture-monitor] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
         let _ = app2.emit("screen-capture-stopped", ());
         eprintln!("[screen-capture-monitor] task exited");
-        clear_task_if_current(task_id);
-    });
-
-    {
         let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            task_id,
-            running,
-            task,
-        });
-        if state
-            .as_ref()
-            .map(|handle| handle.task.is_finished())
-            .unwrap_or(false)
-        {
-            *state = None;
-        }
-    }
+        *state = None;
+    });
 
     Ok(())
 }
@@ -847,9 +830,11 @@ async fn share_loop_monitor(
         token,
         1920,
         1080,
-        PublishProfile::Desktop,
         "screen-capture-monitor",
-    ).await?;
+        TrackSource::Camera,
+        false,
+    )
+    .await?;
 
     eprintln!(
         "[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}",
@@ -861,7 +846,7 @@ async fn share_loop_monitor(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        PublishProfile::Desktop.target_fps(),
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
     );
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
@@ -1005,7 +990,7 @@ async fn share_loop_monitor(
         let settings = Settings::new(
             monitor,
             CursorCaptureSettings::Default, // cursor INCLUDED — this is the win
-            DrawBorderSettings::WithoutBorder,
+            wgc_draw_border_setting("screen-capture-monitor"),
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
             DirtyRegionSettings::Default,
