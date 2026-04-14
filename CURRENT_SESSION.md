@@ -2156,3 +2156,24 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - Release state:
   - functionally ready to publish after staging/commit on the clean release branch
   - still do not update repo `core/deploy/latest.json` until the GitHub release exists
+
+## 2026-04-13 v0.6.11 published
+- GitHub release published successfully:
+  - tag: `v0.6.11`
+  - URL: `https://github.com/SamWatson86/echo-chamber/releases/tag/v0.6.11`
+  - target branch at publish time:
+    - `codex/release-v0.6.11-short`
+    - commit `5f76ee3`
+- Published assets:
+  - `Echo Chamber_0.6.11_x64-setup.exe`
+  - `Echo Chamber_0.6.11_x64-setup.exe.sig`
+  - `latest.json`
+- Post-publish manifest sync completed:
+  - downloaded release `latest.json` into `core/deploy/latest.json`
+  - copied the published manifest into the live checkout deploy dir
+- Live updater verification:
+  - `https://echo.fellowshipoftheboatrace.party:9443/api/update/latest.json` now serves:
+    - `version=0.6.11`
+    - GitHub asset URL for `v0.6.11`
+- Release status:
+  - `0.6.11` is live for Windows desktop updater checks
