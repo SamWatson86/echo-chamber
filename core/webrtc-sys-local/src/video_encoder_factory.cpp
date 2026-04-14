@@ -16,7 +16,13 @@
 
 #include "livekit/video_encoder_factory.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <mutex>
+#include <sstream>
+#include <string>
 #include "api/environment/environment_factory.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
@@ -48,6 +54,64 @@
 
 namespace livekit_ffi {
 
+namespace {
+
+std::string FormatVideoFormat(const webrtc::SdpVideoFormat& format) {
+  std::ostringstream out;
+  out << format.name;
+  for (const auto& param : format.parameters) {
+    out << " " << param.first << "=" << param.second;
+  }
+  return out.str();
+}
+
+void AppendEncoderFactoryDebug(const std::string& line) {
+#if defined(WIN32)
+  static std::mutex debug_mutex;
+  std::lock_guard<std::mutex> lock(debug_mutex);
+  const char* local_appdata = std::getenv("LOCALAPPDATA");
+  if (!local_appdata || !*local_appdata) {
+    return;
+  }
+  std::ofstream out(
+      std::string(local_appdata) + "\\Echo Chamber\\encoder-factory-debug.log",
+      std::ios::app);
+  if (!out.is_open()) {
+    return;
+  }
+  out << line << std::endl;
+#else
+  (void)line;
+#endif
+}
+
+int H264PacketizationPreference(const webrtc::SdpVideoFormat& format) {
+  if (format.name != webrtc::kH264CodecName) {
+    return 0;
+  }
+
+  auto it = format.parameters.find("packetization-mode");
+  return (it != format.parameters.end() && it->second == "1") ? 0 : 1;
+}
+
+void AppendPreferredFormats(
+    std::vector<webrtc::SdpVideoFormat>* target,
+    std::vector<webrtc::SdpVideoFormat> formats) {
+  // Browser subscribers are happiest on packetization-mode=1, and our direct
+  // H26x path should prefer hardware/browser-friendly H264 variants before the
+  // raw OpenH264 mode=0 fallback formats.
+  std::stable_sort(
+      formats.begin(), formats.end(),
+      [](const webrtc::SdpVideoFormat& lhs,
+         const webrtc::SdpVideoFormat& rhs) {
+        return H264PacketizationPreference(lhs) <
+               H264PacketizationPreference(rhs);
+      });
+  target->insert(target->end(), formats.begin(), formats.end());
+}
+
+}  // namespace
+
 using Factory = webrtc::VideoEncoderFactoryTemplate<
     webrtc::LibvpxVp8EncoderTemplateAdapter,
 #if defined(WEBRTC_USE_H264)
@@ -57,6 +121,25 @@ using Factory = webrtc::VideoEncoderFactoryTemplate<
     webrtc::LibaomAv1EncoderTemplateAdapter,
 #endif
     webrtc::LibvpxVp9EncoderTemplateAdapter>;
+
+webrtc::SdpVideoFormat NormalizeSoftwareH264Format(
+    webrtc::SdpVideoFormat format) {
+  if (format.name == webrtc::kH264CodecName) {
+    // The working NVENC/VAAPI paths negotiate packetization-mode=1. Keep the
+    // software OpenH264 fallback on that same wire contract so subscribers do
+    // not get stuck on a mode=0-only stream after the direct H26x bypass.
+    format.parameters["packetization-mode"] = "1";
+  }
+  return format;
+}
+
+std::vector<webrtc::SdpVideoFormat> GetSoftwareSupportedFormats() {
+  auto formats = Factory().GetSupportedFormats();
+  for (auto& format : formats) {
+    format = NormalizeSoftwareH264Format(std::move(format));
+  }
+  return formats;
+}
 
 VideoEncoderFactory::InternalFactory::InternalFactory() {
 #ifdef __APPLE__
@@ -82,17 +165,21 @@ VideoEncoderFactory::InternalFactory::InternalFactory() {
 #if defined(USE_NVIDIA_VIDEO_CODEC)
   }
 #endif
+
+  std::ostringstream line;
+  line << "[encoder-factory] ctor hw_factories=" << factories_.size();
+  line << " force_software="
+       << (livekit_ffi::IsSoftwareEncoderForced() ? "1" : "0");
+  AppendEncoderFactoryDebug(line.str());
 }
 
 std::vector<webrtc::SdpVideoFormat>
 VideoEncoderFactory::InternalFactory::GetSupportedFormats() const {
-  std::vector<webrtc::SdpVideoFormat> formats = Factory().GetSupportedFormats();
-
+  std::vector<webrtc::SdpVideoFormat> formats;
   for (const auto& factory : factories_) {
-    auto supported_formats = factory->GetSupportedFormats();
-    formats.insert(formats.end(), supported_formats.begin(),
-                   supported_formats.end());
+    AppendPreferredFormats(&formats, factory->GetSupportedFormats());
   }
+  AppendPreferredFormats(&formats, GetSoftwareSupportedFormats());
   return formats;
 }
 
@@ -100,8 +187,18 @@ VideoEncoderFactory::CodecSupport
 VideoEncoderFactory::InternalFactory::QueryCodecSupport(
     const webrtc::SdpVideoFormat& format,
     std::optional<std::string> scalability_mode) const {
+  for (const auto& factory : factories_) {
+    auto codec_support =
+        factory->QueryCodecSupport(format, scalability_mode);
+    if (codec_support.is_supported) {
+      return codec_support;
+    }
+  }
+
+  auto software_format = NormalizeSoftwareH264Format(format);
   auto original_format =
-      webrtc::FuzzyMatchSdpVideoFormat(Factory().GetSupportedFormats(), format);
+      webrtc::FuzzyMatchSdpVideoFormat(GetSoftwareSupportedFormats(),
+                                       software_format);
   return original_format
              ? Factory().QueryCodecSupport(*original_format, scalability_mode)
              : webrtc::VideoEncoderFactory::CodecSupport{.is_supported = false};
@@ -116,19 +213,29 @@ VideoEncoderFactory::InternalFactory::Create(
     std::cout << " " << p.first << "=" << p.second;
   }
   std::cout << " (hw_factories=" << factories_.size() << ")" << std::endl;
+  AppendEncoderFactoryDebug(
+      "[encoder-factory] internal-create request=" + FormatVideoFormat(format) +
+      " hw_factories=" + std::to_string(factories_.size()));
 
   for (const auto& factory : factories_) {
     for (const auto& supported_format : factory->GetSupportedFormats()) {
       if (supported_format.IsSameCodec(format)) {
         std::cout << "[encoder-factory] HW factory matched! Delegating." << std::endl;
+        AppendEncoderFactoryDebug(
+            "[encoder-factory] hw-match request=" + FormatVideoFormat(format) +
+            " matched=" + FormatVideoFormat(supported_format));
         return factory->Create(env, format);
       }
     }
   }
 
   std::cout << "[encoder-factory] No HW match, falling back to SOFTWARE" << std::endl;
+  AppendEncoderFactoryDebug(
+      "[encoder-factory] no-hw-match request=" + FormatVideoFormat(format));
+  auto software_format = NormalizeSoftwareH264Format(format);
   auto original_format =
-      webrtc::FuzzyMatchSdpVideoFormat(Factory().GetSupportedFormats(), format);
+      webrtc::FuzzyMatchSdpVideoFormat(GetSoftwareSupportedFormats(),
+                                       software_format);
 
   if (original_format) {
     std::cout << "[encoder-factory] Software match: " << original_format->name;
@@ -136,10 +243,16 @@ VideoEncoderFactory::InternalFactory::Create(
       std::cout << " " << p.first << "=" << p.second;
     }
     std::cout << std::endl;
+    AppendEncoderFactoryDebug(
+        "[encoder-factory] software-match request=" + FormatVideoFormat(format) +
+        " normalized=" + FormatVideoFormat(software_format) +
+        " matched=" + FormatVideoFormat(*original_format));
     return Factory().Create(env, *original_format);
   }
 
   std::cout << "[encoder-factory] ERROR: No encoder found at all!" << std::endl;
+  AppendEncoderFactoryDebug(
+      "[encoder-factory] no-encoder request=" + FormatVideoFormat(format));
   return nullptr;
 }
 
@@ -162,7 +275,19 @@ std::unique_ptr<webrtc::VideoEncoder> VideoEncoderFactory::Create(
     const webrtc::Environment& env,
     const webrtc::SdpVideoFormat& format) {
   std::unique_ptr<webrtc::VideoEncoder> encoder;
-  if (format.IsCodecInList(internal_factory_->GetSupportedFormats())) {
+  const bool is_h26x =
+      format.name == "H264" || format.name == "H265" || format.name == "HEVC";
+
+  if (is_h26x) {
+    std::cout
+        << "[encoder-factory] bypassing SimulcastEncoderAdapter for H26x path"
+        << std::endl;
+    AppendEncoderFactoryDebug(
+        "[encoder-factory] direct-h26x request=" + FormatVideoFormat(format));
+    encoder = internal_factory_->Create(env, format);
+  } else if (format.IsCodecInList(internal_factory_->GetSupportedFormats())) {
+    AppendEncoderFactoryDebug(
+        "[encoder-factory] simulcast-adapter request=" + FormatVideoFormat(format));
     encoder = std::make_unique<webrtc::SimulcastEncoderAdapter>(
         env, internal_factory_.get(), nullptr, format);
   }

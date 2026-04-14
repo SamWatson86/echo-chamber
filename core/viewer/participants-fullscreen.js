@@ -246,7 +246,7 @@ function replaceScreenVideoElement(tile, track, publication) {
   if (oldVideo && overlay) {
     cleanupVideoDiagnostics(overlay);
   }
-  const newEl = createLockedVideoElement(track);
+  const newEl = createAttachedVideoElement(track);
   if (!newEl) return;
   configureVideoElement(newEl, true);
   if (oldVideo && oldVideo.parentElement) {

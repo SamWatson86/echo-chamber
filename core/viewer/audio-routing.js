@@ -404,6 +404,7 @@ function handleTrackSubscribed(track, publication, participant) {
       return;
     }
     const identity = effectiveParticipant.identity;
+    var _isRemoteScreen = room && room.localParticipant && effectiveParticipant.identity !== room.localParticipant.identity;
     const screenTrackSid = publication?.trackSid || track?.sid || null;
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
     if (existingTile && existingTile.isConnected) {
@@ -453,11 +454,10 @@ function handleTrackSubscribed(track, publication, participant) {
     }
     clearScreenTracksForIdentity(effectiveParticipant.identity, screenTrackSid);
     const label = `${participant.name || "Guest"} (Screen)`;
-    const element = createLockedVideoElement(track);
+    const element = createAttachedVideoElement(track);
     configureVideoElement(element, true);
     // Add playout delay buffer for remote screen shares to absorb WiFi jitter.
     // Trades ~150ms latency for smooth playback instead of stuttering.
-    var _isRemoteScreen = room && room.localParticipant && effectiveParticipant.identity !== room.localParticipant.identity;
     if (_isRemoteScreen && track?.mediaStreamTrack) {
       try {
         const pc = room?.engine?.pcManager?.subscriber?.pc;

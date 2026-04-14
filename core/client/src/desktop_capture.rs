@@ -14,7 +14,8 @@
 //!               → libwebrtc H264 encoder (NVENC on RTX 4090)
 //!                 → RTP → SFU
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use livekit::track::TrackSource;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
@@ -51,7 +52,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
-use crate::capture_pipeline::{CapturePublisher, PublishProfile};
+use crate::capture_pipeline::CapturePublisher;
+use crate::file_debug_log;
 
 // ── GPU HDR→SDR Conversion Pipeline (shared module) ──
 
@@ -60,9 +62,7 @@ use crate::gpu_converter::GpuConverter;
 // ── Global State ──
 
 struct DesktopShareHandle {
-    task_id: u64,
     running: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<()>,
 }
 
 fn global_state() -> &'static Mutex<Option<DesktopShareHandle>> {
@@ -70,16 +70,42 @@ fn global_state() -> &'static Mutex<Option<DesktopShareHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
-fn next_task_id() -> u64 {
-    static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-fn clear_task_if_current(task_id: u64) {
-    let mut state = global_state().lock().unwrap();
-    if state.as_ref().map(|handle| handle.task_id) == Some(task_id) {
-        *state = None;
+fn windows_build_number() -> u32 {
+    #[repr(C)]
+    struct OsVersionInfoExW {
+        dw_os_version_info_size: u32,
+        dw_major_version: u32,
+        dw_minor_version: u32,
+        dw_build_number: u32,
+        dw_platform_id: u32,
+        sz_csd_version: [u16; 128],
+        w_service_pack_major: u16,
+        w_service_pack_minor: u16,
+        w_suite_mask: u16,
+        w_product_type: u8,
+        w_reserved: u8,
     }
+
+    unsafe {
+        let lib =
+            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("ntdll.dll"));
+        if let Ok(h) = lib {
+            let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
+                h,
+                windows::core::s!("RtlGetVersion"),
+            );
+            if let Some(rtl_get_version) = proc {
+                let func: extern "system" fn(*mut OsVersionInfoExW) -> i32 =
+                    std::mem::transmute(rtl_get_version);
+                let mut info: OsVersionInfoExW = std::mem::zeroed();
+                info.dw_os_version_info_size = std::mem::size_of::<OsVersionInfoExW>() as u32;
+                func(&mut info);
+                return info.dw_build_number;
+            }
+        }
+    }
+
+    0
 }
 
 // ── Public API ──
@@ -136,14 +162,19 @@ pub async fn start(
     fullscreen: bool,
     sfu_url: String,
     token: String,
-    publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop().await?;
+    stop();
 
     let running = Arc::new(AtomicBool::new(true));
-    let task_id = next_task_id();
+
+    {
+        let mut state = global_state().lock().unwrap();
+        *state = Some(DesktopShareHandle {
+            running: running.clone(),
+        });
+    }
 
     // Get game PID for audio capture
     let target_pid = unsafe {
@@ -155,74 +186,36 @@ pub async fn start(
 
     let _ = app.emit("desktop-capture-started", target_pid);
 
-    let app_for_capture = app.clone();
     let r2 = running.clone();
     let health_clone = Arc::clone(&health);
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         // Run DXGI capture on a blocking thread — it uses COM and blocking waits
         let result = tokio::task::spawn_blocking(move || {
-            capture_loop_blocking(
-                &sfu_url,
-                &token,
-                publish_profile,
-                &app_for_capture,
-                &r2,
-                hwnd,
-                fullscreen,
-                health_clone,
-            )
+            capture_loop_blocking(&sfu_url, &token, &app, &r2, hwnd, fullscreen, health_clone)
         })
-        .await;
+        .await
+        .map_err(|e| format!("spawn_blocking: {e}"))?;
 
-        if let Err(e) = match result {
-            Ok(inner) => inner,
-            Err(e) => Err(format!("spawn_blocking: {e}")),
-        } {
+        if let Err(e) = result {
             eprintln!("[desktop-capture] error: {e}");
-            let _ = app.emit("desktop-capture-error", e);
+            file_debug_log::append(&format!("[desktop-capture] task error: {}", e));
         }
 
-        let _ = app.emit("desktop-capture-stopped", ());
-        eprintln!("[desktop-capture] task exited");
-        clear_task_if_current(task_id);
-    });
-
-    {
         let mut state = global_state().lock().unwrap();
-        *state = Some(DesktopShareHandle {
-            task_id,
-            running,
-            task,
-        });
-        if state
-            .as_ref()
-            .map(|handle| handle.task.is_finished())
-            .unwrap_or(false)
-        {
-            *state = None;
-        }
-    }
+        *state = None;
+        Ok::<(), String>(())
+    });
 
     Ok(())
 }
 
 /// Stop the current desktop capture.
-pub async fn stop() -> Result<(), String> {
-    let handle = {
-        let mut state = global_state().lock().unwrap();
-        state.take()
-    };
-
-    if let Some(handle) = handle {
+pub fn stop() {
+    let mut state = global_state().lock().unwrap();
+    if let Some(handle) = state.take() {
         handle.running.store(false, Ordering::SeqCst);
         eprintln!("[desktop-capture] stop requested");
-        handle
-            .task
-            .await
-            .map_err(|e| format!("desktop capture task join failed: {e}"))?;
     }
-
-    Ok(())
 }
 
 /// Returns true if a desktop capture is currently running.
@@ -631,7 +624,6 @@ fn composite_cursor(
 fn capture_loop_blocking(
     sfu_url: &str,
     token: &str,
-    publish_profile: PublishProfile,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     hwnd: u64,
@@ -639,6 +631,10 @@ fn capture_loop_blocking(
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     eprintln!("[desktop-capture] initializing DXGI Desktop Duplication...");
+    file_debug_log::append(&format!(
+        "[desktop-capture] start hwnd={} fullscreen={}",
+        hwnd, fullscreen
+    ));
 
     // 1. Find the monitor containing the game window
     let factory: IDXGIFactory1 =
@@ -699,28 +695,65 @@ fn capture_loop_blocking(
     // loop entirely on 50 consecutive timeouts, which crashed the share.
     // Try IDXGIOutput5::DuplicateOutput1 first — supports HDR formats and
     // captures DirectFlip content that DuplicateOutput misses (black frames).
+    let os_build = windows_build_number();
+    let use_duplicate_output1 = os_build >= 22000;
+    if !use_duplicate_output1 {
+        eprintln!(
+            "[desktop-capture] Windows build {} detected — forcing legacy DuplicateOutput",
+            os_build
+        );
+        file_debug_log::append(&format!(
+            "[desktop-capture] windows build {} forcing DuplicateOutput",
+            os_build
+        ));
+    }
+
     let create_duplication = || -> Result<IDXGIOutputDuplication, String> {
         unsafe {
             let output5: Result<windows::Win32::Graphics::Dxgi::IDXGIOutput5, _> = output1.cast();
-            if let Ok(out5) = output5 {
-                // Request both formats — prefer BGRA (SDR, no conversion needed),
-                // accept float16 (HDR) if SDR not available.
-                let formats = [
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT,
-                    windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM,
-                ];
-                match out5.DuplicateOutput1(&device, 0, &formats) {
-                    Ok(dup) => {
-                        eprintln!("[desktop-capture] using DuplicateOutput1 (HDR-capable)");
-                        return Ok(dup);
+            if use_duplicate_output1 {
+                if let Ok(out5) = output5 {
+                    // Request both formats — prefer BGRA (SDR, no conversion needed),
+                    // accept float16 (HDR) if SDR not available.
+                    let formats = [
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R10G10B10A2_UNORM,
+                    ];
+                    match out5.DuplicateOutput1(&device, 0, &formats) {
+                        Ok(dup) => {
+                            eprintln!("[desktop-capture] using DuplicateOutput1 (HDR-capable)");
+                            file_debug_log::append("[desktop-capture] using DuplicateOutput1");
+                            return Ok(dup);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[desktop-capture] DuplicateOutput1 failed: {e}, falling back"
+                            );
+                            file_debug_log::append(&format!(
+                                "[desktop-capture] DuplicateOutput1 failed: {}",
+                                e
+                            ));
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("[desktop-capture] DuplicateOutput1 failed: {e}, falling back");
-                    }
+                } else {
+                    eprintln!(
+                        "[desktop-capture] IDXGIOutput5 not available, using DuplicateOutput"
+                    );
+                    file_debug_log::append(
+                        "[desktop-capture] IDXGIOutput5 unavailable, using DuplicateOutput",
+                    );
                 }
+            } else if output5.is_ok() {
+                eprintln!("[desktop-capture] skipping DuplicateOutput1 on this Windows build");
+                file_debug_log::append(
+                    "[desktop-capture] skipping DuplicateOutput1 on this Windows build",
+                );
             } else {
                 eprintln!("[desktop-capture] IDXGIOutput5 not available, using DuplicateOutput");
+                file_debug_log::append(
+                    "[desktop-capture] IDXGIOutput5 unavailable, using DuplicateOutput",
+                );
             }
             output1
                 .DuplicateOutput(&device)
@@ -759,6 +792,10 @@ fn capture_loop_blocking(
         "[desktop-capture] capture: {}x{} → encode: {}x{} (fullscreen={}, crop={:?})",
         cap_w, cap_h, enc_w, enc_h, fullscreen, crop,
     );
+    file_debug_log::append(&format!(
+        "[desktop-capture] capture {}x{} encode {}x{} fullscreen={} crop={:?}",
+        cap_w, cap_h, enc_w, enc_h, fullscreen, crop
+    ));
 
     // 4. Connect to LiveKit and publish track via shared pipeline
     let rt = tokio::runtime::Handle::current();
@@ -768,15 +805,16 @@ fn capture_loop_blocking(
         token,
         enc_w,
         enc_h,
-        publish_profile,
         "desktop-capture",
+        TrackSource::Screenshare,
+        true,
     )?;
 
     health.set_active(
         true,
         CaptureMode::DxgiDd,
         EncoderType::Nvenc,
-        publish_profile.target_fps(),
+        crate::capture_pipeline::PUBLISH_TARGET_FPS,
     );
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
@@ -830,6 +868,7 @@ fn capture_loop_blocking(
     let _ = composite_cursor; // silence unused-fn warning
 
     eprintln!("[desktop-capture] starting frame loop");
+    file_debug_log::append("[desktop-capture] frame loop starting");
 
     // ── Capture-loop frame rate limiter ──────────────────────────────
     //
@@ -894,6 +933,9 @@ fn capture_loop_blocking(
                             "[desktop-capture] 50 consecutive timeouts (~5s stall) \
                              — reinitializing DXGI Desktop Duplication"
                         );
+                        file_debug_log::append(
+                            "[desktop-capture] 50 consecutive timeouts, reinitializing",
+                        );
                         // Drop the old duplication interface before creating a
                         // new one (the old one may be holding a locked frame
                         // we never released due to the error path).
@@ -932,6 +974,10 @@ fn capture_loop_blocking(
                          desktop switch/UAC/mode change) — reinitializing",
                         code
                     );
+                    file_debug_log::append(&format!(
+                        "[desktop-capture] capture interface invalidated code=0x{:08X}",
+                        code
+                    ));
                     drop(duplication);
                     match reinit_with_backoff(&create_duplication, "access-lost") {
                         Some(new_dup) => {
@@ -945,6 +991,10 @@ fn capture_loop_blocking(
                     }
                 } else {
                     eprintln!("[desktop-capture] AcquireNextFrame error: {e}");
+                    file_debug_log::append(&format!(
+                        "[desktop-capture] AcquireNextFrame error: {}",
+                        e
+                    ));
                     consecutive_timeouts += 1;
                     health.record_consecutive_timeout(consecutive_timeouts);
                     if consecutive_timeouts >= 10 {
@@ -1238,8 +1288,13 @@ fn capture_loop_blocking(
                 60,
             ) {
                 eprintln!("[desktop-capture] {enc_w}x{enc_h} @ {fps}fps ({frame_count} frames)");
+                file_debug_log::append(&format!(
+                    "[desktop-capture] stats {}x{} fps={} frames={}",
+                    enc_w, enc_h, fps, frame_count
+                ));
                 health.record_capture_fps(fps);
             }
+            publisher.log_sender_stats_blocking(&rt, "desktop-capture");
         }
     }
 
@@ -1250,6 +1305,10 @@ fn capture_loop_blocking(
         "[desktop-capture] shutting down, {} frames captured",
         publisher.frame_count()
     );
+    file_debug_log::append(&format!(
+        "[desktop-capture] shutting down frames={}",
+        publisher.frame_count()
+    ));
 
     // Destroy anti-MPO overlay -- restore normal DWM flip behavior
     if let Some(h) = anti_mpo_hwnd {

@@ -45,6 +45,25 @@ function logEvent(eventName, detail) {
   } catch (e) {}
 }
 
+function reportWatchDebug(message) {
+  try {
+    if (!message || !currentAccessToken || !room?.localParticipant?.identity) return;
+    fetch(apiUrl("/api/client-stats-report"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + currentAccessToken,
+      },
+      body: JSON.stringify({
+        identity: room.localParticipant.identity,
+        name: room.localParticipant.name || "",
+        room: currentRoomName || "",
+        watch_debug: message,
+      }),
+    }).catch(function() {});
+  } catch (e) {}
+}
+
 // ── General toast notification ──
 function showToast(message, durationMs) {
   var existing = document.querySelector(".jam-toast");

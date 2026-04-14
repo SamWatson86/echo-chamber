@@ -48,23 +48,33 @@ pub enum HealthLevel {
 
 impl HealthLevel {
     fn rank(self) -> u8 {
-        match self { HealthLevel::Green => 0, HealthLevel::Yellow => 1, HealthLevel::Red => 2 }
+        match self {
+            HealthLevel::Green => 0,
+            HealthLevel::Yellow => 1,
+            HealthLevel::Red => 2,
+        }
     }
     fn max(self, other: HealthLevel) -> HealthLevel {
-        if self.rank() >= other.rank() { self } else { other }
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CaptureMode {
-    #[default] None,
+    #[default]
+    None,
     Wgc,
     DxgiDd,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EncoderType {
-    #[default] None,
+    #[default]
+    None,
     Nvenc,
     OpenH264,
 }
@@ -74,8 +84,8 @@ pub struct CaptureHealthSnapshot {
     pub level: HealthLevel,
     pub reasons: Vec<String>,
     pub capture_active: bool,
-    pub capture_mode: String,        // "WGC" | "DXGI-DD" | "None"
-    pub encoder_type: String,        // "NVENC" | "OpenH264" | "None"
+    pub capture_mode: String, // "WGC" | "DXGI-DD" | "None"
+    pub encoder_type: String, // "NVENC" | "OpenH264" | "None"
     pub current_fps: u32,
     pub target_fps: u32,
     pub reinit_count_5m: u32,
@@ -156,7 +166,8 @@ impl CaptureHealthState {
         Self::prune_pairs(&mut e, now);
         e.push((now, current));
         let max = e.iter().map(|(_, n)| *n).max().unwrap_or(0);
-        self.consecutive_timeouts_max_5m.store(max, Ordering::Relaxed);
+        self.consecutive_timeouts_max_5m
+            .store(max, Ordering::Relaxed);
     }
 
     pub fn reset_consecutive_timeouts(&self) {
@@ -164,7 +175,8 @@ impl CaptureHealthState {
     }
 
     pub fn record_encoder_status(&self, skipped_total: u64, sent_total: u64) {
-        self.encoder_skipped_total.store(skipped_total, Ordering::Relaxed);
+        self.encoder_skipped_total
+            .store(skipped_total, Ordering::Relaxed);
         self.encoder_sent_total.store(sent_total, Ordering::Relaxed);
     }
 
@@ -221,22 +233,20 @@ impl CaptureHealthState {
     /// viewer correct us if WebRTC picked OpenH264 or anything else.
     pub fn set_encoder_type_from_string(&self, raw: &str) {
         let lower = raw.to_lowercase();
-        let new_type = if lower.contains("openh264")
-            || lower == "open h264"
-            || lower.contains("software")
-        {
-            EncoderType::OpenH264
-        } else if lower.contains("nvenc")
-            || lower.contains("nvidia")
-            || lower.contains("nvcodec")
-            || lower.contains("external")
-            || lower.contains("hardware")
-        {
-            EncoderType::Nvenc
-        } else {
-            // Unknown encoder string — leave whatever set_active put there.
-            return;
-        };
+        let new_type =
+            if lower.contains("openh264") || lower == "open h264" || lower.contains("software") {
+                EncoderType::OpenH264
+            } else if lower.contains("nvenc")
+                || lower.contains("nvidia")
+                || lower.contains("nvcodec")
+                || lower.contains("external")
+                || lower.contains("hardware")
+            {
+                EncoderType::Nvenc
+            } else {
+                // Unknown encoder string — leave whatever set_active put there.
+                return;
+            };
         *self.encoder_type.write() = new_type;
     }
 
@@ -263,7 +273,9 @@ impl CaptureHealthState {
         let total = skipped + sent;
         let encoder_skip_rate_pct = if total > 0 {
             (skipped as f32 / total as f32) * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let mode = self.capture_mode.read().clone();
         let encoder = self.encoder_type.read().clone();
@@ -315,7 +327,10 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
     // Reinits
     if snap.reinit_count_5m >= RED_REINITS_5M {
         level = level.max(HealthLevel::Red);
-        reasons.push(format!("{} reinits in 5min (>= {})", snap.reinit_count_5m, RED_REINITS_5M));
+        reasons.push(format!(
+            "{} reinits in 5min (>= {})",
+            snap.reinit_count_5m, RED_REINITS_5M
+        ));
     } else if snap.reinit_count_5m >= YELLOW_REINITS_5M {
         level = level.max(HealthLevel::Yellow);
         reasons.push(format!("{} reinit in 5min", snap.reinit_count_5m));
@@ -324,10 +339,16 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
     // Consecutive timeouts (current run)
     if snap.consecutive_timeouts >= RED_CONSECUTIVE_TIMEOUTS {
         level = level.max(HealthLevel::Red);
-        reasons.push(format!("{} consecutive capture timeouts", snap.consecutive_timeouts));
+        reasons.push(format!(
+            "{} consecutive capture timeouts",
+            snap.consecutive_timeouts
+        ));
     } else if snap.consecutive_timeouts >= YELLOW_CONSECUTIVE_TIMEOUTS {
         level = level.max(HealthLevel::Yellow);
-        reasons.push(format!("{} consecutive capture timeouts", snap.consecutive_timeouts));
+        reasons.push(format!(
+            "{} consecutive capture timeouts",
+            snap.consecutive_timeouts
+        ));
     }
 
     // FPS vs target — ONLY meaningful for polling capture modes (DXGI DD).
@@ -363,13 +384,18 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
             level = level.max(HealthLevel::Red);
             reasons.push(format!(
                 "capture fps {}/{} ({:.0}%, < {:.0}%)",
-                snap.current_fps, snap.target_fps, frac * 100.0, RED_FPS_FRACTION * 100.0
+                snap.current_fps,
+                snap.target_fps,
+                frac * 100.0,
+                RED_FPS_FRACTION * 100.0
             ));
         } else if frac < YELLOW_FPS_FRACTION {
             level = level.max(HealthLevel::Yellow);
             reasons.push(format!(
                 "capture fps {}/{} ({:.0}%)",
-                snap.current_fps, snap.target_fps, frac * 100.0
+                snap.current_fps,
+                snap.target_fps,
+                frac * 100.0
             ));
         }
     }
@@ -377,10 +403,16 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
     // Encoder skip rate
     if snap.encoder_skip_rate_pct >= RED_SKIP_RATE_PCT {
         level = level.max(HealthLevel::Red);
-        reasons.push(format!("encoder skip rate {:.1}%", snap.encoder_skip_rate_pct));
+        reasons.push(format!(
+            "encoder skip rate {:.1}%",
+            snap.encoder_skip_rate_pct
+        ));
     } else if snap.encoder_skip_rate_pct >= YELLOW_SKIP_RATE_PCT {
         level = level.max(HealthLevel::Yellow);
-        reasons.push(format!("encoder skip rate {:.1}%", snap.encoder_skip_rate_pct));
+        reasons.push(format!(
+            "encoder skip rate {:.1}%",
+            snap.encoder_skip_rate_pct
+        ));
     }
 
     // Encoder fallback to OpenH264 — automatic Red
@@ -500,7 +532,11 @@ mod tests {
         s.seconds_since_capture_started = 3; // mid cold-start
         let (lvl, reasons) = classify(&s);
         assert_eq!(lvl, HealthLevel::Green);
-        assert!(reasons.is_empty(), "cold-start fps suppression should produce no reasons, got {:?}", reasons);
+        assert!(
+            reasons.is_empty(),
+            "cold-start fps suppression should produce no reasons, got {:?}",
+            reasons
+        );
     }
 
     #[test]
@@ -537,7 +573,11 @@ mod tests {
         s.target_fps = 30;
         let (lvl, reasons) = classify(&s);
         assert_eq!(lvl, HealthLevel::Green);
-        assert!(reasons.is_empty(), "WGC low fps should not produce reasons, got {:?}", reasons);
+        assert!(
+            reasons.is_empty(),
+            "WGC low fps should not produce reasons, got {:?}",
+            reasons
+        );
     }
 
     #[test]
@@ -587,9 +627,9 @@ mod tests {
     #[test]
     fn multiple_signals_take_max_level_and_list_all_reasons() {
         let mut s = nominal();
-        s.reinit_count_5m = 1;             // yellow
-        s.consecutive_timeouts = 10;       // red
-        s.encoder_skip_rate_pct = 3.0;     // yellow
+        s.reinit_count_5m = 1; // yellow
+        s.consecutive_timeouts = 10; // red
+        s.encoder_skip_rate_pct = 3.0; // yellow
         let (lvl, reasons) = classify(&s);
         assert_eq!(lvl, HealthLevel::Red);
         assert!(reasons.len() >= 3);

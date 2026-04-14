@@ -64,6 +64,8 @@ pub(crate) struct ClientStats {
     pub(crate) inbound: Option<Vec<SubscriptionStats>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) capture_health: Option<CaptureHealth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) watch_debug: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -576,6 +578,9 @@ pub(crate) async fn client_stats_report(
             }
             if payload.capture_health.is_some() {
                 existing.capture_health = payload.capture_health;
+            }
+            if payload.watch_debug.is_some() {
+                existing.watch_debug = payload.watch_debug;
             }
             if payload.screen_fps.is_some() { existing.screen_fps = payload.screen_fps; }
             if payload.screen_width.is_some() { existing.screen_width = payload.screen_width; }

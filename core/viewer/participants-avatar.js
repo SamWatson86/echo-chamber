@@ -54,6 +54,117 @@ function getRemoteParticipantsForScreenIdentity(identity) {
   return matches;
 }
 
+function startWatchingScreenIdentity(identity, reason) {
+  if (!identity) return;
+
+  hiddenScreens.delete(identity);
+  watchedScreens.add(identity);
+
+  var cardRef = participantCards.get(identity);
+  if (cardRef && cardRef.watchToggleBtn) {
+    cardRef.watchToggleBtn.style.display = "";
+    cardRef.watchToggleBtn.textContent = "Stop Watching";
+    if (cardRef.ovWatchClone) {
+      cardRef.ovWatchClone.style.display = "";
+      cardRef.ovWatchClone.textContent = "Stop Watching";
+    }
+  }
+
+  var tile = screenTileByIdentity.get(identity);
+  if (tile) tile.style.display = "";
+
+  var pState = participantState.get(identity);
+  if (pState && pState.screenAudioEls) {
+    pState.screenAudioEls.forEach(function(el) {
+      el.muted = false;
+      var gn = pState.screenGainNodes?.get(el);
+      if (gn) gn.gain.gain.value = pState.screenVolume || 1;
+    });
+  }
+
+  function formatPubState(pub, remote) {
+    patchScreenCompanionSource(pub, pub?.track, remote);
+    var src = pub ? (pub.source || (pub.track ? pub.track.source : null) || "?") : "?";
+    var kind = pub?.kind || pub?.track?.kind || "?";
+    var mst = pub?.track?.mediaStreamTrack || null;
+    var recv = "?";
+    try {
+      var subPc = room?.engine?.pcManager?.subscriber?.pc;
+      if (mst && subPc?.getReceivers) {
+        recv = subPc.getReceivers().some(function(r) {
+          return r && r.track === mst;
+        }) ? "true" : "false";
+      }
+    } catch (_) {}
+    return remote.identity + ":" + src + ":" + kind +
+      ":sub=" + (pub?.isSubscribed ?? "?") +
+      ":track=" + (!!pub?.track) +
+      ":recv=" + recv +
+      ":mst=" + (mst ? (mst.readyState + "/" + (mst.muted ? "muted" : "live")) : "none");
+  }
+
+  function formatTileState() {
+    var tile = screenTileByIdentity.get(identity);
+    if (!tile) return "tile=none";
+    var video = tile.querySelector("video");
+    if (!video) {
+      return "tile=present:no-video" +
+        ":display=" + (tile.style.display || "auto") +
+        ":client=" + tile.clientWidth + "x" + tile.clientHeight;
+    }
+    return "tile=present" +
+      ":display=" + (tile.style.display || "auto") +
+      ":client=" + tile.clientWidth + "x" + tile.clientHeight +
+      ":video=" + video.videoWidth + "x" + video.videoHeight +
+      ":paused=" + video.paused +
+      ":rs=" + video.readyState;
+  }
+
+  function runStage(stageLabel) {
+    var remotes = getRemoteParticipantsForScreenIdentity(identity);
+    if (remotes.length === 0) {
+      debugLog("[opt-in] " + stageLabel + ": no remote screen participant yet for " + identity);
+      reportWatchDebug("identity=" + identity + " stage=" + stageLabel + " remotes=none hidden=" + hiddenScreens.has(identity) + " watched=" + watchedScreens.has(identity));
+      return;
+    }
+    var summaries = [];
+    remotes.forEach(function(remote) {
+      var pubs = getParticipantPublications(remote);
+      summaries.push(
+        pubs.length > 0
+          ? pubs.map(function(pub) { return formatPubState(pub, remote); }).join(",")
+          : (remote.identity + ":no-pubs")
+      );
+      debugLog("[opt-in] " + stageLabel + ": resubscribe/reconcile " + remote.identity + " -> " + identity);
+      if (typeof resubscribeParticipantTracks === "function") {
+        resubscribeParticipantTracks(remote);
+      } else {
+        pubs.forEach(function(pub) {
+          if (pub?.setSubscribed) pub.setSubscribed(true);
+          hookPublication(pub, remote);
+        });
+      }
+      if (typeof reconcileParticipantMedia === "function") {
+        reconcileParticipantMedia(remote);
+      }
+    });
+    reportWatchDebug(
+      "identity=" + identity +
+      " stage=" + stageLabel +
+      " hidden=" + hiddenScreens.has(identity) +
+      " watched=" + watchedScreens.has(identity) +
+      " " + formatTileState() +
+      " remotes=" + summaries.join(";")
+    );
+  }
+
+  debugLog("[opt-in] start watching " + identity + " reason=" + (reason || "manual"));
+  runStage("immediate");
+  setTimeout(function() { runStage("fallback@500ms"); }, 500);
+  setTimeout(function() { runStage("fallback@1500ms"); }, 1500);
+  scheduleReconcileWaves("opt-in-watch");
+}
+
 function ensureParticipantCard(participant, isLocal = false) {
   const key = participant.identity;
   // Hide ghost subscriber from UI
@@ -179,6 +290,8 @@ function ensureParticipantCard(participant, isLocal = false) {
 
       if (hiddenScreens.has(identity)) {
         // === START WATCHING: subscribe to screen share tracks ===
+        startWatchingScreenIdentity(identity, "manual-click");
+        return;
         hiddenScreens.delete(identity);
         watchedScreens.add(identity);
         watchToggleBtn.textContent = "Stop Watching";

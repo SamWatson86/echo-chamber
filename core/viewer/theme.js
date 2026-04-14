@@ -51,6 +51,11 @@ function buildVersionSection() {
     try {
       var cUrl = controlUrlInput ? controlUrlInput.value.trim() : "";
       var currentVer = versionLabel.textContent.replace(/^Version:\s*v?/, "").split(" ")[0];
+      if (typeof isLocalTestBuildVersion === "function" && isLocalTestBuildVersion(currentVer)) {
+        updateStatus.textContent = "Local test build — auto-update disabled.";
+        updateBtn.disabled = false;
+        return;
+      }
       var latestClient = "";
       if (cUrl) {
         var verResp = await fetch(cUrl + "/api/version");
@@ -65,7 +70,9 @@ function buildVersionSection() {
         if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
           try {
             var result = await tauriInvoke("check_for_updates");
-            if (result !== "up_to_date") {
+            if (result === "local_test_build") {
+              updateStatus.textContent = "Local test build — auto-update disabled.";
+            } else if (result !== "up_to_date") {
               updateStatus.textContent = "Installing v" + latestClient + "... app will restart.";
             }
           } catch (e2) { /* auto-update unavailable */ }
@@ -76,7 +83,11 @@ function buildVersionSection() {
         // Fallback for browser viewer or unknown version
         if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
           var result = await tauriInvoke("check_for_updates");
-          updateStatus.textContent = result === "up_to_date" ? "You're on the latest version!" : "Installing... app will restart.";
+          if (result === "local_test_build") {
+            updateStatus.textContent = "Local test build — auto-update disabled.";
+          } else {
+            updateStatus.textContent = result === "up_to_date" ? "You're on the latest version!" : "Installing... app will restart.";
+          }
         } else {
           updateStatus.textContent = "Version check not available in browser.";
         }

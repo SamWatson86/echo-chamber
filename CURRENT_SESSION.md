@@ -937,6 +937,7 @@ This session reproduced a third class of display instability on Sam's main RTX 4
 - After repeated watch/unwatch churn on the receiver side, Sam's main PC began flickering again.
 - Flicker appeared on Monitor 1, then later on Monitor 2.
 - The strongest trigger was **idle -> first input**: after stepping away briefly, the moment Sam touched the mouse or clicked a window, the monitors started flickering again.
+- New refinement: the most reliable trigger appears to be **monitor power-off -> wake**. Sam reported that the flicker shows up when Windows turns the monitors off after inactivity and he wakes them back up.
 - A UAC secure-desktop transition also caused an immediate flicker pulse on both monitors.
 - Elevated recovery script did **not** clear it; full reboot was required again.
 
@@ -954,11 +955,17 @@ This session reproduced a third class of display instability on Sam's main RTX 4
   - installed Echo client: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
   - packaged Echo desktop launcher
   - multiple WebView2 builds
+- `powercfg` on the active `Echo Gaming` plan shows `Turn off display after = 0x384` seconds on AC/DC, i.e. **900 seconds / 15 minutes**. That matches the monitor sleep timing Sam described.
+- Immediate host mitigation applied: `powercfg /change monitor-timeout-ac 0` on the active `Echo Gaming` plan, so AC display sleep is now disabled while this issue is being worked. System sleep and hibernate were already `Never`.
+- Additional system mitigation applied: `HKLM\SOFTWARE\Microsoft\Windows\Dwm\OverlayTestMode = 5` to disable MPO (Multiplane Overlay). Reboot required before judging whether this reduces the wake/flicker issue.
+- Additional host mitigation applied after reboot: blank screensaver configured at 5 minutes (`C:\Windows\System32\scrnsave.scr`) so the PC can stay awake for Echo while avoiding the risky monitor sleep/wake transition.
+- Important nuance: registry-only screensaver writes did not take effect live; the working fix was applying the same settings through `user32!SystemParametersInfo`, which now reports `ScreenSaverActive=1` and `ScreenSaverTimeout=300`.
 
 ### Current best diagnosis
 - Treat this as a **local Windows compositor / MPO / power-state / display-present path problem** on Sam's daily-driver machine.
 - Media/watch churn may poison the stack, but the visible failure is exposed by:
   - idle-to-active transitions
+  - monitor sleep/wake transitions
   - focus/input activity
   - secure-desktop transitions
 - The `Media Capture` shutdown prompt is relevant because it suggests Windows still believed a capture session/broker was alive during reboot, but it is **not** yet proof that Echo alone was the blocker.
@@ -1035,223 +1042,1117 @@ This session reproduced a third class of display instability on Sam's main RTX 4
   - `/api/update/latest.json` now serves `version = 0.6.8`
   - updater URL points at `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.8/Echo.Chamber_0.6.8_x64-setup.exe`
 
-### Native game-share publish profile hardening (2026-04-11 20:41 ET)
-- New task branch/worktree created from the shipped `v0.6.8` baseline:
-  - branch: `codex/native-game-publish-profile`
-  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\native-game-publish-profile`
-- Trigger for this work: live `Crimson Desert` testing showed the native game/window share path only delivering roughly `16-18 fps` to `SAM-PC` at about `2.45 Mbps`, which is too low for a high-motion title.
-- Root cause found in the native Rust publisher path:
-  - `CapturePublisher` was hard-wired to the desktop-share profile for all native shares
-  - game/window shares were incorrectly capped at `4 Mbps` and `30 fps`
-  - desktop heartbeats were also being applied to game/window shares even though they are a poor fit for high-motion content
-- Fix implemented:
-  - added `PublishProfile::{Desktop, Game}` in `core/client/src/capture_pipeline.rs`
-  - desktop shares keep the conservative profile: `30 fps`, `4 Mbps max`, `2.5 Mbps min`, heartbeat enabled
-  - native game/window shares now use a high-motion profile: `60 fps`, `8 Mbps max`, `3 Mbps min`, heartbeat disabled
-  - `screen_capture.rs` and `desktop_capture.rs` now pass the publish profile through to the native publisher and to capture-health targets
-  - `main.rs` Tauri commands now accept an optional `publishProfile` argument and default older viewers to `Desktop`
-  - `screen-share-native.js` now sends `publishProfile: 'game'` for native `game` sources and `publishProfile: 'desktop'` for monitor/window/desktop paths
-  - `core/viewer/changelog.js` updated with the user-facing note
-- Validation completed on this branch:
-  - `node --check core/viewer/screen-share-native.js`
-  - `node --check core/viewer/changelog.js`
-  - `cargo check -p echo-core-client`
-  - `cargo test -p echo-core-client capture_pipeline::tests -- --nocapture`
-  - `cargo build -p echo-core-client --release`
-- Runtime status:
-  - build-verified only
-  - not yet side-loaded into the installed client
-  - no live before/after `Crimson Desert` receiver comparison yet
-- Release impact for this branch is `both`:
-  - desktop binary required for the new native publish profile
-  - server-served viewer update required for the new `publishProfile` wiring and changelog note
+### Additional host power-plan correction
+- Re-verified the live `Echo Gaming` power plan after Sam reported the monitors still powering down while away.
+- Confirmed the normal desktop display timeout was already disabled:
+  - `Turn off display after (AC) = 0`
+  - `Sleep after (AC) = 0`
+  - `Hibernate after (AC) = 0`
+- Found the remaining culprit: hidden `Console lock display off timeout` was still set to `60s`.
+- Applied the fix directly:
+  - `VIDEOCONLOCK (AC) = 0`
+  - `VIDEOCONLOCK (DC) = 0`
+  - `VIDEOIDLE (DC) = 0`
+- Current expected behavior:
+  - blank screensaver still activates after `300s`
+  - Windows should no longer power the monitors down through either the normal desktop timeout or the locked/secure-desktop timeout path
 
-### Post-midnight crash isolation for the experimental client (2026-04-12 00:30 ET)
-- The experimental high-motion client build that had been side-loaded into the installed path was restored off the live machine after it caused sign-in crashes.
-- Windows crash records proved the failure was real and stable:
+### Desktop launcher normalization (2026-04-12 00:46 ET)
+- Cleaned the live Windows install back into an official `v0.6.8` state by re-running the shipped installer:
+  - `F:\Codex AI\The Echo Chamber\.codex\worktrees\release-v0.6.8\core\target\release\bundle\nsis\Echo Chamber_0.6.8_x64-setup.exe`
+- Confirmed the live installed client path is once again:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Important launcher root cause found:
+  - the Start Menu shortcut `Echo Chamber.lnk` was **not** pointing at the Tauri client
+  - it was pointing at an old Electron install under `C:\Users\Sam\AppData\Local\Programs\@echodesktop\Echo Chamber.exe`
+- Normalized the launcher surface:
+  - `Start Menu -> Echo Chamber.lnk` now points at `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - the legacy Electron shortcut was renamed to `Echo Chamber (Legacy Electron).lnk`
+  - the dev tray helper was renamed to `Echo Chamber Tray Tool (Dev).lnk`
+  - a matching taskbar pinned shortcut now exists at:
+    - `C:\Users\Sam\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Echo Chamber.lnk`
+  - that taskbar shortcut also points at `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Restarted Explorer and launched Echo through the corrected taskbar-pinned shortcut.
+- Verified the running process path after launch:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Moved experimental leftovers out of the live install folder into:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12`
+- Current live install folder is intentionally simple again:
+  - `echo-core-client.exe`
+  - `config.json`
+  - `uninstall.exe`
+  - `_lab-artifacts\...`
+
+### v0.6.9 ship (2026-04-12 02:20 ET)
+- Merged PR `#159` (`release: v0.6.9 native game-share headroom`) into `main`.
+- Tagged the merged `main` commit `886dc5e2d6c9e97e62828f4a72882cb2ec94b810` as `v0.6.9` and pushed the tag to GitHub.
+- GitHub release workflow `24299866115` completed successfully for the Windows path:
+  - release `Echo Chamber v0.6.9` published
+  - assets present:
+    - `Echo.Chamber_0.6.9_x64-setup.exe`
+    - `Echo.Chamber_0.6.9_x64-setup.exe.sig`
+    - `latest.json`
+  - macOS remained skipped/disabled and did not block release
+- Synced the published updater manifest into the live checkout:
+  - `core/deploy/latest.json` now serves `version = 0.6.9`
+  - updater URL points at `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.9/Echo.Chamber_0.6.9_x64-setup.exe`
+- Live server-served viewer update for this release was limited to:
+  - `core/viewer/changelog.js`
+  - `core/viewer/screen-share-native.js` was already effectively current for `publishProfile` wiring
+- Built the final `v0.6.9` desktop binary locally and copied it into the installed live path:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- This release's major user-facing change:
+  - native game/window shares now use a dedicated high-motion publish profile instead of inheriting the conservative desktop-share limits
+- Completed the final live server step after syncing the release artifacts:
+  - `POST /admin/api/force-reload` succeeded
+  - kicked `1` connected client (`sam-pc-2513`) from `main`
+  - returned viewer stamp `0.6.7.1775974919`
+- Post-reload verification:
+  - `https://127.0.0.1:9443/api/update/latest.json` serves `version = 0.6.9`
+  - updater URL points at `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.9/Echo.Chamber_0.6.9_x64-setup.exe`
+
+### Idle blackout watcher install (2026-04-12 14:45 ET)
+- Re-verified the blank screensaver configuration itself was correct:
+  - `SCRNSAVE.EXE = C:\Windows\System32\scrnsave.scr`
+  - `ScreenSaveActive = 1`
+  - `ScreenSaveTimeOut = 300`
+  - no screensaver policy override keys were present
+- Proved the built-in Windows auto-screensaver path was still broken in this session:
+  - applied settings through `user32!SystemParametersInfo`
+  - forced a short `15s` idle timeout test
+  - `scrnsave.scr` still did not auto-launch on its own
+- Investigated `powercfg /requests` under elevation:
+  - active media/session blockers included `msedge.exe`, `msedgewebview2.exe`, `USB Audio Device ... An audio stream is currently in use`, and `Legacy Kernel Caller`
+  - temporary `powercfg /requestsoverride` entries were added during diagnosis, then fully removed after the new fix was installed
+- Added a user-space fallback watcher under `tools/`:
+  - `tools/idle-blackout.ps1`
+  - `tools/install-idle-blackout.ps1`
+  - `tools/uninstall-idle-blackout.ps1`
+- The watcher uses `GetLastInputInfo` directly and launches `C:\Windows\System32\scrnsave.scr /s` after real input idle time, bypassing the unreliable built-in Windows auto-screensaver trigger.
+- Installed persistent startup entry:
+  - `C:\Users\Sam\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Echo Idle Blackout.vbs`
+- Started the watcher immediately in the current session with:
+  - idle threshold `300s`
+  - poll interval `5s`
+- Functional proof:
+  - a controlled zero-second test instance logged repeated `Launched blank screensaver` events, proving the fallback watcher can invoke the black screensaver correctly even though Windows would not auto-launch it on its own
+- Current expected behavior:
+  - after `5` minutes of no mouse/keyboard input, the custom watcher should black the displays by launching `scrnsave.scr`
+  - manual move/click should dismiss it normally
+- Follow-up correction after reboot:
+  - the first generated startup wrapper `Echo Idle Blackout.vbs` had malformed quote escaping and threw a Windows Script Host compilation error on login
+  - fixed `tools/install-idle-blackout.ps1` to emit a single properly quoted command string
+  - regenerated the startup file and verified it executes cleanly via `cscript.exe`
+- Smarter suppression pass:
+  - updated `tools/idle-blackout.ps1` so it does **not** trigger the blank screensaver while `Echo Chamber` is the active foreground window
+  - suppression requires a real visible non-minimized Echo window, so ordinary away-from-PC blackout behavior still applies when Echo is not the thing being actively watched
+  - restarted the watcher and reinstalled the startup entry after the change
+
+### v0.6.9 emergency rollback on Sam workstation (2026-04-12 14:55 ET)
+- After reboot, the installed live `v0.6.9` client started crashing on connect/sign-in instead of joining the room.
+- Event Viewer showed a stable repeatable crash signature for the installed binary at `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`:
   - `Application Error 1000`
-  - `BEX64 / 0xc0000409`
-  - faulting application/module: `echo-core-client.exe`
-  - repeated offset: `0x0000000001e7d27d`
-  - crash path: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
-- Important isolation result:
-  - the exact same bad binary runs successfully when copied to an isolated probe path
-  - it signed in successfully as both:
-    - `crashprobe\echo-core-client-probe.exe`
-    - `crashprobe\echo-core-client.exe`
-  - that means the failure is not “this build cannot sign in” in general
-  - the failure is specific to the installed-path identity/workflow
-- Strongest current suspect is the updater/startup path, not the native game-share publish-profile logic itself.
-- Safety hardening added on this branch:
-  - client version bumped to `0.6.8-test.2`
-  - auto-updater is now disabled automatically for prerelease/test builds
-  - manual `check_for_updates` also returns `disabled` on prerelease/test builds
-- Operational rule from here:
-  - never side-load experimental builds over the live installed release path with the same release version again
-  - risky client tests must use prerelease versioning and updater-disabled behavior
+  - `Windows Error Reporting 1001`
+  - `Event Name: BEX64`
+  - `Exception code: 0xc0000409`
+  - `Fault offset: 0x0000000001e7d0dd`
+  - `Version: 0.6.9.0`
+- Immediate recovery action:
+  - stopped using the installed `v0.6.9` binary on Sam's box
+  - restored the known-good local backup:
+    - source: `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\installed-path-rc-smoke\echo-core-client.v0.6.8-backup.exe`
+    - destination: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - saved the crashing installed `v0.6.9` EXE for forensics at:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\v0.6.9-crash-rollback\echo-core-client.v0.6.9-crashing.exe`
+- Rollout freeze:
+  - reverted the live updater manifest back to `v0.6.8` by replacing `core/deploy/latest.json` with the published `v0.6.8` manifest
+  - this prevents additional installs from pulling `v0.6.9` while the regression is unresolved
+- Crash forensics hardening:
+  - enabled Windows WER LocalDumps for `echo-core-client.exe`
+  - dump folder: `C:\Users\Sam\AppData\Local\Echo Chamber\crashdumps`
+  - dump type: full dump (`DumpType = 2`)
+  - dump count: `10`
 
-### v0.6.9 release-candidate prep (2026-04-12 01:35 ET)
-- Created a clean release-candidate branch/worktree from the shipped `v0.6.8` manifest baseline:
-  - branch: `codex/release-v0.6.9-rc`
-  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\release-v0.6.9-rc`
-- Cherry-picked the two validated native-game-share commits from the experimental branch:
-  - `449f4a9` — native game/window shares use a high-motion publish profile
-  - `62ce553` — prerelease desktop builds disable the auto-updater and manual update check
-- Normalized the release-candidate version to `0.6.9-rc.1` in the desktop and control manifests:
-  - `core/client/Cargo.toml`
-  - `core/client/tauri.conf.json`
-  - `core/control/Cargo.toml`
-- Added a clean top-level changelog entry for the native game-share improvement so the next release is no longer mixed into the `v0.6.8` notes.
-- Release impact for this branch remains `both`:
-  - desktop binary required for the native publish-profile change
-  - server-served viewer update required for the `publishProfile` viewer wiring and changelog entry
-- Verification on the clean RC worktree:
-  - `node --check core/viewer/screen-share-native.js`
-  - `node --check core/viewer/changelog.js`
-  - `cargo check -p echo-core-client`
-  - `cargo test -p echo-core-client capture_pipeline::tests -- --nocapture`
-  - `cargo build -p echo-core-client --release`
-- Clean-worktree build note:
-  - the first raw `cargo check` failed because this new worktree did not have a complete local WebRTC include payload on its own
-  - rerunning with `LK_CUSTOM_WEBRTC` pointed at the known-good local prebuilt payload under `F:\Codex AI\The Echo Chamber\core\target\release\build\scratch-df3657cc50cd1baa\out\livekit_webrtc\livekit\win-x64-release-webrtc-7af9351\win-x64-release` fixed that immediately
-  - this was a local build-environment issue, not a code regression in the RC branch
-- Additional generated files changed during RC prep:
-  - `core/Cargo.lock`
-  - `core/client/gen/schemas/desktop-schema.json`
-  - `core/client/gen/schemas/windows-schema.json`
+### Safe-path v0.6.9 probe result (2026-04-12 15:15 ET)
+- Launched the exact same `v0.6.9` release EXE from a non-installed safe probe path:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\v0.6.9-safe-probe\echo-core-client.exe`
+- Sam connected successfully from that probe build; no crash on join.
+- This proves the `v0.6.9` binary is not universally broken.
+- Current working theory:
+  - the crash is tied to installed-path/live-install state on Sam's workstation after the reboot/session churn
+  - not to the raw `v0.6.9` executable itself
+- Brad's missing game audio during this probe session was resolved by having Brad restart/rejoin and re-share.
+- That audio issue appears to have been stale room/share state, not a new regression in the probe client.
 
-### v0.6.9 final release-branch prep (2026-04-12 01:42 ET)
-- Promoted the RC work onto the final release task branch:
-  - branch: `codex/release-v0.6.9`
-- Dropped the prerelease suffix and normalized the release version to `0.6.9` in:
-  - `core/client/Cargo.toml`
-  - `core/client/tauri.conf.json`
-  - `core/control/Cargo.toml`
-  - `core/Cargo.lock`
-- Installed-path smoke test completed against the real app location:
-  - live install backed up to `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\installed-path-rc-smoke\echo-core-client.v0.6.8-backup.exe`
-  - `0.6.9-rc.1` was copied to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
-  - the old instant installed-path crash did **not** reproduce
-  - the app stayed alive from the real installed path and was brought forward for taskbar pinning
-- Release posture now:
-  - code is being treated as the final `0.6.9` branch, not a local-only RC
-  - next steps are final Windows artifact build, branch push, and PR creation
-- Final `0.6.9` verification/build results:
-  - `node --check core/viewer/screen-share-native.js`
-  - `node --check core/viewer/changelog.js`
-  - `cargo check -p echo-core-client`
-  - `cargo build -p echo-core-client --release`
-  - `powershell -ExecutionPolicy Bypass -File core/deploy/build-release.ps1`
-- Local release artifacts generated successfully:
-  - `core\target\release\bundle\nsis\Echo Chamber_0.6.9_x64-setup.exe`
-  - `core\target\release\bundle\nsis\Echo Chamber_0.6.9_x64-setup.exe.sig`
-  - `core\target\release\bundle\nsis\latest.json`
-- Release-build environment note:
-  - copied the existing signing key from `F:\Codex AI\The Echo Chamber\core\client\.tauri-keys` into this clean worktree so the NSIS installer and updater signature could be produced
-  - reused the known-good local WebRTC payload via `LK_CUSTOM_WEBRTC` during the final build
-- Installed app updated to the final release executable for live use:
-  - copied `core\target\release\echo-core-client.exe` to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
-  - relaunched the installed app successfully from the real live path
+### Installed-path v0.6.9 round-two repro (2026-04-12 15:25 ET)
+- Armed WER LocalDumps correctly for `echo-core-client.exe`:
+  - `DumpFolder = C:\Users\Sam\AppData\Local\Echo Chamber\crashdumps`
+  - `DumpType = 2`
+  - `DumpCount = 10`
+- Swapped the real installed path back to the exact published `v0.6.9` EXE:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Sam launched and connected successfully from the installed path on this second controlled repro.
+- Current interpretation:
+  - the earlier installed-path crashes were real, but they are not currently reproducible after the safe-path `0.6.9` run warmed shared state
+  - `v0.6.9` itself remains usable on Sam's machine
+- Operational nuance still in effect:
+  - the live updater manifest was previously frozen back to `v0.6.8` as a safety stop
+  - Sam's local installed client is now on `v0.6.9`, but global updater re-enablement should be a deliberate follow-up decision
 
-### Installed-path reboot/connect crash root cause and hotfix branch (2026-04-12 19:00 ET)
-- Created a clean hotfix worktree from the real live release tip:
-  - worktree: `F:\Codex AI\The Echo Chamber\.codex\worktrees\fix-v069-installed-crash-live`
-  - branch: `codex/fix-v069-installed-crash-live`
-- Collected real crash evidence from:
-  - Windows Event Viewer `Application Error`
-  - `C:\Users\Sam\AppData\Local\CrashDumps\echo-core-client.exe.*.dmp`
-  - WER archive entries under `C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_echo-core-client_*`
-- Installed WinDbg locally via `winget` to stop guessing and inspect the minidumps directly.
-- Root-cause finding from WinDbg:
-  - the crash is **not** specific to `v0.6.9`
-  - `v0.6.8` and `v0.6.9` both hit the same fail-fast bucket after reboot/connect
-  - failure hash matches across both versions
-  - stack shape is the same on both builds:
-    - `std::panicking::panic_with_hook`
-    - `core::panicking::panic_cannot_unwind`
-    - `webview2_com_sys::...ICoreWebView2FocusChangedEventHandler...Invoke`
-    - `EmbeddedBrowserWebView!...FireWebResourceRequestedEvent`
-    - `tao::platform_impl::platform::event_loop::lose_active_focus`
-  - practical meaning: a Rust panic is escaping a Windows WebView2 COM focus callback, which forces a fatal abort on Windows
-- Hotfix strategy implemented:
-  - vendored `tauri-runtime-wry 2.10.0` into `core/vendor/tauri-runtime-wry-2.10.0`
-  - patched workspace `core/Cargo.toml` with `[patch.crates-io] tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.10.0" }`
-  - hardened the Windows focus/fullscreen WebView2 callbacks in `core/vendor/tauri-runtime-wry-2.10.0/src/lib.rs`:
-    - recover poisoned `std::sync::Mutex` state with `into_inner()` instead of `unwrap()` panics
-    - wrap non-critical WebView2 COM callbacks in `catch_unwind`
-    - swallow/log those callback panics instead of aborting the process
-    - also removed the same poison-sensitive `focused_webview.lock().unwrap()` in `WindowEventWrapper::Focused`
-- Verification:
-  - `cargo tree -p echo-core-client -i tauri-runtime-wry` now resolves to the vendored `tauri-runtime-wry v2.10.0`
-  - `cargo check -p echo-core-client` passed with `LK_CUSTOM_WEBRTC=F:\Codex AI\The Echo Chamber\core\target\debug\build\scratch-2a0faabf5e80148f\out\livekit_webrtc\livekit\win-x64-release-webrtc-7af9351\win-x64-release`
-  - `cargo build -p echo-core-client --release` passed with the same `LK_CUSTOM_WEBRTC`
-- Runtime status:
-  - first safe probe connect succeeded in-session
-  - first post-reboot repro on the initial hotfix still crashed, but the fault offset changed from `0x1e7d0dd` / `0x1e749ad` to `0x1e7e8bd`
-  - that proved the first patch changed the failure mode but did not eliminate the panic path
+### v0.6.9 release withdrawal (2026-04-12 15:35 ET)
+- New field report: Brad rebooted and then hit the same connect-time crash pattern that Sam saw earlier.
+- Treated this as a release incident, not a local-machine-only curiosity.
+- Containment state confirmed:
+  - live updater manifest `core/deploy/latest.json` is still pinned to `v0.6.8`
+  - `v0.6.9` is no longer spreading through the normal updater path
+- GitHub release was explicitly marked withdrawn:
+  - title changed to `Echo Chamber v0.6.9 (withdrawn)`
+  - release flipped to `prerelease = true`
+  - release notes updated to warn users to stay on `v0.6.8` until a hotfix lands
+- Current policy after withdrawal:
+  - `v0.6.8` remains the globally supported release
+  - any `v0.6.9` use should be treated as controlled local testing only until the reboot/connect crash is root-caused
 
-### Focus-callback hotfix round two: `webview2-com` proc-macro containment (2026-04-12 19:35 ET)
-- Used the fresh post-reboot full dump:
-  - `C:\Users\Sam\AppData\Local\Echo Chamber\crashdumps\echo-core-client.exe.35604.dmp`
-- WinDbg on the new dump showed the crash was still a `panic_cannot_unwind` through:
-  - `webview2_com_sys::...ICoreWebView2FocusChangedEventHandler_Vtbl::new::Invoke`
-  - `EmbeddedBrowserWebView!...FireWebResourceRequestedEvent`
-  - `tao::platform_impl::platform::event_loop::lose_active_focus`
-- Key new finding:
-  - the runtime-side callback wrappers were not sufficient because `webview2-com-macros` still generated `Invoke` thunks that called Rust closures directly with zero `catch_unwind`
-  - any panic inside those WebView2 COM event closures still crossed the FFI boundary and hard-aborted the process
-- Implemented second-stage hotfix:
-  - vendored `webview2-com-macros 0.8.1` into `core/vendor/webview2-com-macros-0.8.1`
-  - patched workspace `core/Cargo.toml` with:
-    - `webview2-com-macros = { path = "vendor/webview2-com-macros-0.8.1" }`
-  - modified the generated `event_callback` macro so all COM event-handler `Invoke` thunks now:
-    - wrap the Rust closure in `std::panic::catch_unwind(AssertUnwindSafe(...))`
-    - swallow/log the panic
-    - return `Ok(())` instead of letting the panic unwind across COM
-- Verification:
-  - `cargo tree -p echo-core-client -i webview2-com-macros` resolves to the vendored proc-macro crate
-  - `cargo check -p echo-core-client` passed
-  - `cargo build -p echo-core-client --release` passed
-- Runtime proof:
-  - rebuilt the safe probe at:
-    - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\focus-callback-hotfix-probe\echo-core-client.exe`
-  - launched that rebuilt probe in the same post-reboot session
-  - user connected successfully
-  - this cleared the actual crash gate that was hitting both Sam and Brad after reboot
-- Follow-up note:
-  - sharing the Codex desktop app from the hotfix probe showed poor performance, while sharing a browser window was fine
-  - that is being treated as a separate source/capture performance issue, not part of the reboot/connect crash hotfix
-
-### `v0.6.10` patch release candidate prep (2026-04-12 20:05 ET)
-- Promoted the hotfix work onto a proper patch release branch:
+### v0.6.10 hotfix shipped (2026-04-12 20:10 ET)
+- Root cause of the reboot/connect crash was confirmed with WinDbg:
+  - Rust panic escaping a WebView2 COM callback after reboot
+  - hotfix landed by hardening both vendored `tauri-runtime-wry` and the `webview2-com-macros` callback thunk layer
+- Validation completed before ship:
+  - post-reboot hotfix probe connect succeeded on Sam's machine
+  - installed-path `0.6.10` connect succeeded from `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - live runtime check with David showed active screen-share delivery from Sam at roughly `47 fps` inbound on David with clean packet health
+- Release branch and merge:
   - branch: `codex/release-v0.6.10`
-- Bumped the three required desktop release version files:
-  - `core/client/Cargo.toml` -> `0.6.10`
-  - `core/client/tauri.conf.json` -> `0.6.10`
-  - `core/control/Cargo.toml` -> `0.6.10`
-- Updated `core/viewer/changelog.js` with a new top entry:
-  - `Post-Reboot Connect Hotfix (v0.6.10)`
-  - this keeps the `v0.6.9` game-share headroom but makes the desktop runtime safe again after reboot
-- Verification gate rerun on the release branch:
-  - `node --check core/viewer/changelog.js`
-  - `node --check core/viewer/screen-share-native.js`
-  - `cargo check -p echo-core-client`
-  - `cargo build -p echo-core-client --release`
-- Windows release artifacts generated successfully:
-  - `core\target\release\bundle\nsis\Echo Chamber_0.6.10_x64-setup.exe`
-  - `core\target\release\bundle\nsis\Echo Chamber_0.6.10_x64-setup.exe.sig`
-  - `core\target\release\bundle\nsis\latest.json`
-- Packaging note:
-  - copied the existing signing key from `F:\Codex AI\The Echo Chamber\core\client\.tauri-keys` into this clean worktree locally to build/sign the installer
-  - the key copy is operational only and should not be committed
-- Installed-path smoke test:
-  - backed up the previous installed EXE to:
-    - `C:\Users\Sam\AppData\Local\Echo Chamber\_lab-artifacts\2026-04-12\installed-path-v0.6.10-smoke\echo-core-client.pre-v0.6.10.exe`
-  - copied the `0.6.10` release EXE to:
-    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
-  - relaunched the real installed app from that exact path
-  - user connected successfully on the installed build
+  - PR: `#160`
+  - merged to `main` with admin override because branch policy blocked a normal merge path during the hotfix ship
+- GitHub release published:
+  - tag: `v0.6.10`
+  - title: `Echo Chamber v0.6.10`
+- Desktop release artifacts:
+  - `Echo.Chamber_0.6.10_x64-setup.exe`
+  - `Echo.Chamber_0.6.10_x64-setup.exe.sig`
+  - `latest.json`
+- Live rollout actions:
+  - updater manifest advanced from `0.6.8` to `0.6.10`
+  - server-served viewer changelog updated with the `v0.6.10` entry
+  - connected clients force-reloaded after the server-state update
 - Release impact:
   - `both`
-  - desktop binary required for the WebView2 callback panic hotfix
-  - server-served viewer update required for the new changelog entry
+  - desktop binary release for the post-reboot connect hotfix
+  - server-served viewer update for the changelog/live viewer assets
+
+### Idle blackout browser playback suppression (2026-04-12 20:32 ET)
+- The fallback blank-screen watcher in `tools/idle-blackout.ps1` was too narrow:
+  - it only suppressed blackout when `Echo Chamber` itself was the visible foreground window
+  - result: the blank screensaver could still trigger while Sam was actively watching browser media like Crunchyroll
+- Added media-session-aware suppression:
+  - loads the Windows Global System Media Transport Controls session manager through `System.Runtime.WindowsRuntime`
+  - queries active media sessions and matches them against visible browser/media-player windows
+  - continues to suppress when `Echo Chamber` is foreground, but now also suppresses when a visible media app window is actively playing media
+- Fixed a PowerShell bug in the first pass:
+  - the watcher initially logged `Media session detection unavailable: WinRT AsTask overload not found`
+  - root cause was a bad string literal around `IAsyncOperation\`1`
+  - corrected the filter, restarted the watcher, and confirmed the new watcher logs `Media session detection enabled`
+- Live watcher state after restart:
+  - startup entry still installed via `tools/install-idle-blackout.ps1`
+  - active hidden watcher process points at `tools/idle-blackout.ps1`
+  - current validation still needs a real idle pass while browser playback is actively in `Playing` state
+
+### SAM-PC deploy-agent startup hardening (2026-04-13 08:35 ET)
+- SAM-PC came back on the LAN after a real reboot, but the deploy agent on `192.168.5.149:8080` did not.
+- This broke the remote test pipeline even though the machine itself was alive and reachable.
+- Root symptom:
+  - app restart/deploy via agent worked before reboot
+  - after reboot, `ping/ARP` reached SAM-PC but `http://192.168.5.149:8080/health` stayed down
+- Hardening change in `core/deploy/setup-agent.ps1`:
+  - scheduled task now runs with both `AtStartup` and `AtLogOn` triggers
+  - task action now uses `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden`
+  - task settings now explicitly use `-MultipleInstances IgnoreNew`
+- Rationale:
+  - if the startup trigger is missed or races boot, the user logon trigger should still restore the agent
+  - this matches the real failure mode seen on SAM-PC after reboot
+- Current machine state:
+  - SAM-PC is on `0.6.10`
+  - remote app deploy/restart worked before the reboot
+  - after reboot, the agent itself needs to be reinstalled or restarted locally once before the pipeline is healthy again
+
+### SAM-PC client-launch pipeline root cause (2026-04-13 09:20 ET)
+- After the agent was restored, remotely launching the client on SAM-PC produced a WebView2 startup dialog:
+  - `Microsoft Edge can't read and write to its data directory`
+  - path pointed at `C:\Windows\System32\config\systemprofile\AppData\Local\com.echochamber.app\EBWebView`
+- Root cause:
+  - the deploy agent runs as `SYSTEM`
+  - it was launching `echo-core-client.exe` directly with `Start-Process`
+  - the Tauri/WebView2 shell therefore inherited the `SYSTEM` account and tried to use `systemprofile` for its browser data dir
+  - that is the wrong execution context for the actual desktop client UI
+- Pipeline fix in repo:
+  - `core/deploy/agent.ps1`
+    - now prefers launching the client through a dedicated scheduled task named `EchoChamberClient`
+    - falls back to direct `Start-Process` only if that task does not exist
+    - `Get-ClientProcess` also falls back to process-name lookup instead of only trusting the pid file
+  - `core/deploy/setup-agent.ps1`
+    - still installs the agent task as `SYSTEM`
+    - now also installs a second scheduled task `EchoChamberClient`
+    - that client task runs as the interactive logged-in user via `Interactive` logon type
+    - agent startup task remains `AtStartup + AtLogOn`
+- Validation:
+  - both modified PowerShell scripts parse successfully via `[scriptblock]::Create(...)`
+  - live SAM-PC still needs the one-time local task repair so the running machine matches the repo fix
+- Live repair result on SAM-PC:
+  - reinstalled the deploy agent scheduled task locally under the interactive `Sam` session instead of `SYSTEM`
+  - agent came back at `http://192.168.5.149:8080/health`
+  - remote launch now works again; client reported running with `client_pid = 18076`
+  - the previous WebView2 `systemprofile` data-directory popup did not recur after the repair
+
+### v0.6.10 reboot-crash validation status (2026-04-13 09:50 ET)
+- The critical bug remains the post-reboot desktop connect crash that previously hit both `v0.6.8` and `v0.6.9`.
+- Validation now cleanly splits from the separate screen-share viewer issue:
+  - this PC:
+    - rebooted after the hotfix work
+    - installed `0.6.10` at `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe` launched and connected successfully
+    - no fresh `Application Error` events for `echo-core-client.exe` were found in the local `Application` log during this pass
+    - no new crash dumps were written under `C:\Users\Sam\AppData\Local\Echo Chamber\crashdumps`; only the old pre-hotfix dump `echo-core-client.exe.35604.dmp` remained
+  - SAM-PC:
+    - was fully rebooted for the test (real OS reboot, not just app restart)
+    - after the login/account detour, Echo launched manually from `C:\EchoChamber\echo-core-client.exe`
+    - client connected successfully after reboot, which means the original `reboot -> launch -> connect` crash path did not reproduce there either
+- Current read:
+  - the `v0.6.10` WebView2 callback hotfix is materially validated on two machines for the reboot/connect crash class
+  - remaining SAM-PC problems are in remote screen-share view/attach state, not the reboot crash
+
+### SAM-PC remote screen-share attach investigation (2026-04-13 10:05 ET)
+- Reconfirmed the publish side is healthy:
+  - LiveKit `ListParticipants` for room `main` shows:
+    - `sam-pc-2513`
+    - `sam-pc-2513$screen`
+    - `sam-7475`
+  - the `$screen` companion is active with a live `1920x1080` H.264 video track
+  - control-plane dashboard simultaneously shows `sam-pc-2513` capture health as:
+    - `capture_active = true`
+    - `capture_mode = DXGI-DD`
+    - `encoder_type = NVENC`
+    - `current_fps = 21`
+    - `target_fps = 30`
+- That proves the failure is not Win10 native screen capture and not the reboot crash hotfix.
+- Viewer-side hardening applied in the server-served JS:
+  - `core/viewer/state.js`
+    - added `knownRemoteParticipants` cache plus helpers so `$screen` companions seen via events remain resolvable later by watch/unwatch logic
+  - `core/viewer/participants-avatar.js`
+    - `getRemoteParticipantsForScreenIdentity()` now resolves through the cache instead of relying only on `room.remoteParticipants`
+  - `core/viewer/connect.js`
+    - companion participants are remembered on track/publish/connect events and cleared on disconnect cleanup
+    - room switches now clear the cache explicitly
+  - `core/viewer/identity.js`
+    - `patchScreenCompanionSource()` now infers video for `$screen` companion publications even when LiveKit omits `kind`, instead of leaving them as raw `CAMERA`
+  - `core/viewer/audio-routing.js`
+    - `handleTrackSubscribed()` now force-normalizes subscribed `$screen` companion tracks to `ScreenShare` / `ScreenShareAudio` before routing
+    - this closes the remaining hole where an already-subscribed companion track could still be treated like a camera and never create a screen tile
+- Validation at code level:
+  - `node --check` passed for:
+    - `core/viewer/state.js`
+    - `core/viewer/participants-avatar.js`
+    - `core/viewer/connect.js`
+    - `core/viewer/identity.js`
+- Live rollout:
+  - forced client reload after the viewer patch
+  - latest viewer stamp after the final reload: `0.6.7.1776091257`
+- Pending runtime proof:
+  - both clients must reconnect on the fresh stamp
+  - SAM-PC must start full-screen share again
+  - then confirm whether this PC and SAM-PC can now see the stream
+## 2026-04-13 Viewer watch attach follow-up
+- Issue narrowed: clicking Start Watching flipped to Stop Watching, but no screen tile attached on either this PC or SAM-PC even though sam-pc-2513 was live in LiveKit as 1920x1080 H.264 and dashboard stats showed active DXGI-DD capture (21/30 fps, NVENC).
+- Root cause hypothesis: opt-in path and publication hook were still waiting on publication.isSubscribed === true before processing a track object that was already cached locally, leaving remote screen shares stuck in a subscribed-but-never-attached state.
+- Fix: updated core/viewer/participants-avatar.js and core/viewer/connect.js so watched screen-share publications with an existing pub.track are processed immediately, regardless of transient isSubscribed state, and added hook-side logging for existing-track attach.
+- Validation pending live retest after force-reload.
+- Added temporary viewer attach instrumentation in core/viewer/audio-routing.js, core/viewer/connect.js, and core/viewer/participants-avatar.js so remote screen-share attach failures surface as [attach-error] debug lines plus visible status/toast instead of silently aborting.
+- Added Start Watching self-diagnostics in core/viewer/participants-avatar.js: if no screen tile exists after 2.2s, the client now surfaces a toast/status with emotes, screenPubs, 	racks, and subscribed counts for that identity.
+- Extended Start Watching diagnostics to report whether a tile object exists and whether its video element has dimensions/frames (	ile, display, ideo, size, eady, paused, rames, lack) when a watched screen share still looks blank.
+- Extended watch diagnostics again to include underlying MediaStreamTrack state and subscriber receiver presence: mstMuted, mstReady, eceiver.
+## 2026-04-13 Viewer attach semantics fix
+- Latest diagnostic toast on this PC for `sam-pc-2513` was:
+  - `Watch failed for sam-pc-2513 remotes=2 screenPubs=1 tracks=1 subscribed=1 tile=true display=(default) video=true size=0x0 ready=0 paused=false frames=0 black=false mstMuted=true mstReady=live receiver=true`
+- Interpretation:
+  - watch state and tile creation were working
+  - LiveKit receiver existed
+  - underlying MediaStreamTrack was live but stayed muted forever
+  - the video element never got metadata or frames
+- Root cause hypothesis tightened:
+  - viewer code was creating many remote video elements via `new MediaStream([track.mediaStreamTrack])`
+  - that bypasses `track.attach(element)` bookkeeping that LiveKit expects for attached remote renders
+  - this exactly matches the observed state: subscribed receiver exists, but the SDK still treats the stream like it has no active render target, so no frames arrive
+- Fix applied:
+  - `core/viewer/participants.js`
+    - `createLockedVideoElement(track)` now uses `track.attach(element)` first, then falls back to manual `srcObject` only if needed
+    - added `detachMediaElement(element)` helper
+  - `core/viewer/participants-grid.js`
+    - screen tile removal and `clearMedia()` now detach attached media elements before DOM removal
+  - `core/viewer/participants-avatar.js`
+    - avatar video cleanup now detaches old media elements before replacing avatar contents
+  - `core/viewer/participants-fullscreen.js`
+    - screen video replacement now detaches the old attached element before inserting the new one
+- Validation:
+  - `node --check` passed for:
+    - `core/viewer/participants.js`
+    - `core/viewer/participants-grid.js`
+    - `core/viewer/participants-avatar.js`
+    - `core/viewer/participants-fullscreen.js`
+- Pending runtime proof:
+  - force-reload clients
+  - reconnect this PC and SAM-PC
+  - retest SAM-PC full-screen share and watch flow
+- Follow-up diagnostics added after the attach patch still produced the same no-frame toast.
+- Added receiver RTP stats to the watch-failed diagnostic in `core/viewer/participants-avatar.js` so the next repro reports:
+  - receiver bytes
+  - packets
+  - decoded frames
+  - keyframes
+  - fps
+  - codec
+- Purpose: distinguish `zero RTP arriving` from `RTP arriving but decode/render stalled`.
+## 2026-04-13 Version-state normalization
+- User correctly called out that the session had become incoherent: desktop clients were on official `0.6.10`, while the server-served viewer was still a locally patched lab build stamped `0.6.7.x`.
+- Action taken:
+  - backed up the current modified viewer files to `.codex/viewer-baseline-backup-20260413-131754`
+  - restored all `core/viewer/*` files that diverged from tag `v0.6.10`
+  - restored `core/control/Cargo.toml` to `v0.6.10`
+  - rebuilt `echo-core-control` in release mode
+  - restarted the control plane on the rebuilt binary
+  - forced a client reload through `/admin/api/force-reload`
+- Verified live state after normalization:
+  - `core/viewer/index.html` now stamps assets as `0.6.10.1776101108`
+  - `/admin/api/force-reload` now returns `viewer_stamp = 0.6.10.1776101103`
+  - this PC desktop binary remains official `0.6.10`
+  - `SAM-PC` desktop binary remains official `0.6.10`
+- Operational conclusion:
+  - further share/watch results should only be trusted after reconnecting both clients on this normalized `0.6.10` baseline
+  - any remaining `SAM-PC` full-screen failure after that is a real post-normalization bug, not version-state confusion
+## 2026-04-13 Avatar regression after control-plane restart
+- User reported that avatars had regressed into broken image icons while cards/names still rendered.
+- Root cause:
+  - I restarted the control plane from an inconsistent process state.
+  - A stale `echo-core-control.exe` instance was still holding `:9443`, so my first restart attempts never actually took over the port.
+  - That left the system serving a stale process state while I believed a corrected process was active.
+  - Separately, relative path resolution for chat/avatar storage depends on startup context; the intended live avatar store is `F:\Codex AI\The Echo Chamber\logs\avatars`.
+- Evidence:
+  - direct avatar route initially returned `404` for `/api/avatar/sam`
+  - `logs/avatars` contained the real avatar files
+  - once the stale control process was killed and the corrected one took over `:9443`, startup logs showed `loaded existing avatar: sam -> avatar-sam.gif`
+  - direct route then returned `HTTP=200 TYPE=image/gif`
+- Fix:
+  - killed the stale control-plane process that was still bound to `9443`
+  - restarted `echo-core-control.exe` cleanly
+  - verified startup log load of existing avatars/chimes from the real `logs/` tree
+  - forced a client reload after the corrected server was live
+
+## 2026-04-13 Launch hygiene and deploy-agent boundary
+- User correctly called out that live testing had become confusing because too many Echo binaries existed at once:
+  - installed app on this PC: `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - watchdog sandbox on `SAM-PC`: `C:\EchoChamber\echo-core-client.exe`
+  - multiple local probes / rollback artifacts
+- Operational conclusion:
+  - all future live retests must explicitly name the binary path on each machine
+  - stale Echo windows/processes must be closed before trusting a retest
+  - the `C:\EchoChamber` watchdog binary is a sandbox path, not the same thing as the normal installed app
+- Repo hardening:
+  - updated `core/deploy/agent.ps1` to understand the distinction between:
+    - sandbox binary under `C:\EchoChamber\echo-core-client.exe`
+    - normal installed app under `%LOCALAPPDATA%\Echo Chamber\echo-core-client.exe`
+  - added:
+    - `Get-InstalledClientPath`
+    - `client_path`, `sandbox_exe_path`, `installed_exe_path`, `installed_exe_exists` to `/health`
+    - new `POST /launch-installed` endpoint to launch the normal installed app explicitly
+  - updated `core/deploy/setup-agent.ps1` comments to reflect the explicit installed-vs-sandbox launch model
+- Verification:
+  - PowerShell parser passed for:
+    - `core/deploy/agent.ps1`
+    - `core/deploy/setup-agent.ps1`
+- Important live limitation:
+  - the currently running deploy agent on `SAM-PC` could not be self-updated remotely because remote disk access to `\\SAM-PC\c$` is denied and the existing HTTP agent does not support self-update
+  - so the new `/launch-installed` endpoint is in repo now, but not yet installed on `SAM-PC`
+
+## 2026-04-13 Handoff status
+- Start a fresh session. The current thread became too long and operationally noisy.
+- Reboot/connect crash status:
+  - treat this as fixed unless a new regression appears
+  - validated on this PC and `SAM-PC` after real reboot
+  - hotfix shipped as `v0.6.10`
+  - do not reopen this bug without a fresh reproducible crash
+- Current active bug:
+  - `SAM-PC` on Windows 10 can connect, but `Entire Screen` share stays blank for viewers
+  - this PC can successfully publish full-screen share to `SAM-PC`
+  - so the remaining issue is specific to `SAM-PC` as publisher, not the general viewer path
+- Clean baseline facts:
+  - server-served viewer files were restored to tagged `v0.6.10`
+  - avatars were repaired after killing a stale `echo-core-control.exe`
+  - this PC should use installed app `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - `SAM-PC` product tests should use installed app `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - do not trust `C:\EchoChamber\echo-core-client.exe` for product behavior; that is the watchdog sandbox path
+- Open technical hypothesis:
+  - native Win10 full-screen publish on `SAM-PC` appears broken
+- Operational rule for next session:
+  - explicitly close stale Echo windows and relaunch the intended binary on each machine before every retest
+
+## 2026-04-13 Win10 browser fallback rejection
+- We did verify one important narrowing fact:
+  - when `SAM-PC` used the browser/WebView share path for `Entire Screen`, this PC could see the stream
+  - that proves the viewer/watch side is not the blocker
+- User explicitly rejected that path as a product regression:
+  - the desktop client should keep using the custom/native picker
+  - Win10 full-screen sharing should stay on the native monitor-capture path, not Chromium `getDisplayMedia`
+  - the `DX****` path Sam was referring to is `DXGI Desktop Duplication`
+- Repo correction applied:
+  - removed the forced Win10 `monitor -> browser fallback` branch from `core/viewer/screen-share-native.js`
+  - `Entire Screen` on native desktop clients now routes back to the native `DXGI Desktop Duplication` monitor path
+  - updated `core/viewer/changelog.js` so the viewer no longer claims browser fallback is the intended Win10 fix
+- Current bug framing after that correction:
+  - browser fallback working was only a diagnostic datapoint
+  - the real remaining bug is native Win10 `DXGI Desktop Duplication` publish from `SAM-PC` if it still blanks for viewers
+
+## 2026-04-13 SAM-PC launch workaround
+- The live deploy agent on `SAM-PC` is still the old build and does not yet expose `/launch-installed`.
+- Operational workaround used during this session:
+  - temporarily replaced `C:\EchoChamber\echo-core-client.exe` on `SAM-PC` with a tiny launcher shim
+  - that shim starts the real installed app at `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - this is only to let the old HTTP agent restart the installed product binary remotely
+- Important boundary:
+  - this does **not** make the sandbox path a product binary again
+  - it is only a remote-launch bridge until the real agent update lands on `SAM-PC`
+
+## 2026-04-13 Persistent memory update
+- Added a hard persistent-memory rule under `C:\Users\Sam\.claude\projects\f--Codex-AI-The-Echo-Chamber\memory\`:
+  - never recommend Chromium/WebView `getDisplayMedia` as the fix for native desktop capture regressions in Echo Chamber
+  - browser capture may be used only as a diagnostic narrowing datapoint
+  - shipped behavior must stay on the native picker + native capture stack (`WGC` where supported, `DXGI Desktop Duplication` on Win10/older)
+
+## 2026-04-13 SAM-PC installed-app relaunch bridge hardened
+- Built a fresh release client locally with the current Win10 native capture changes still in place:
+  - `core/target/release/echo-core-client.exe`
+  - SHA-256: `028D295FB8A7D23C86C9A32CC6BCE377FFE4C696A375EA8512D9B1E14202C224`
+- Relaunched this PC cleanly on the installed app path:
+  - killed stale local `echo-core-client.exe`
+  - relaunched `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+- Updated `SAM-PC` installed app directly:
+  - copied the fresh release binary to `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - wrote `C:\Users\Sam\AppData\Local\Echo Chamber\config.json` with `{"server":"https://192.168.5.70:9443"}`
+- Hardened the temporary launcher shim at `C:\EchoChamber\echo-core-client.exe` so the old deploy agent can still manage the real installed app:
+  - shim now kills stale `echo-core-client.exe` processes on `SAM-PC`
+  - shim applies a staged update from `C:\EchoChamber\installed-update\echo-core-client.exe` into the installed app path with retry/backoff
+  - shim launches the real installed app detached so it no longer inherits and locks `C:\EchoChamber\client-stdout.log`
+- Verified live bridge behavior from `\\SAM-PC\EchoChamber\client-stdout.log`:
+  - `staged update applied to C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - `launching C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - `child pid 8816`
+- Important boundary:
+  - this is still only an operational bridge because the live `SAM-PC` deploy agent is old
+  - product behavior remains the installed app under `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - the old agent `/health` is still not trustworthy for the installed child because the shim exits after launch
+- Immediate next retest:
+  - connect both installed clients
+  - on `SAM-PC`, run native `Share -> Entire Screen`
+  - confirm whether this PC now receives non-blank video from the Win10 `DXGI Desktop Duplication` path
+
+## 2026-04-13 Persistent memory update: Claude owns app relaunches
+- Added a new hard persistent-memory rule under `C:\Users\Sam\.claude\projects\f--Codex-AI-The-Echo-Chamber\memory\`:
+  - Sam should never have to guess which Echo Chamber binary/version is open
+  - before meaningful retests, Claude should close stale Echo clients and relaunch the exact intended installed app on both this PC and `SAM-PC`
+  - the watchdog sandbox path may still be used as an operational bridge, but the installed app remains the real product binary
+
+## 2026-04-13 Win10 native publish status clarified
+- Instrumented the installed client on `SAM-PC` with a temporary file log at:
+  - `C:\Users\Sam\AppData\Local\Echo Chamber\capture-debug.log`
+- Critical finding from native Win10 `Entire Screen` retest:
+  - `SAM-PC` native `DXGI Desktop Duplication` capture is **not** failing anymore
+  - after restoring `config.json` to the domain URL, the native `$screen` publisher:
+    - starts DXGI DD
+    - connects to SFU successfully
+    - publishes the track successfully
+    - enters the frame loop at ~21 fps
+- Evidence from `capture-debug.log`:
+  - `connected as sam-pc-2513$screen`
+  - `track published`
+  - repeated `stats 1920x1080 fps=21`
+- The earlier LAN-IP config on `SAM-PC` was a real blocker for native publish:
+  - `https://192.168.5.70:9443` caused Rust/native `$screen` connect to fail TLS hostname validation
+  - fixed by restoring `SAM-PC` to `https://echo.fellowshipoftheboatrace.party:9443`
+- Live dashboard evidence after the fix:
+  - Jeff was receiving `SAM-PC`'s screen track while this PC was not
+  - that means the remaining issue is now selective viewer subscription/render behavior, not Win10 native publish
+- Code evidence for the current viewer behavior:
+  - `core/viewer/connect.js` currently treats newly published remote screen shares as opt-in and adds them to `hiddenScreens` at publish time
+  - the same file later auto-subscribes existing screen shares for late joiners
+- Practical conclusion:
+  - do **not** reopen the Win10 native `DXGI DD` publisher as the root bug without new evidence
+  - the active bug has shifted to viewer-side screen-share subscription / opt-in consistency across already-connected clients vs late joiners
+
+## 2026-04-13 Viewer-side screen watch parity patch
+- New viewer-only patch applied for the active bug where this PC showed a blank `0fps` tile after clicking `Start Watching` on an already-live `SAM-PC` screen share.
+- Root cause hypothesis for the patch:
+  - the manual `Start Watching` handler in `core/viewer/participants-avatar.js` was running its own bespoke subscribe flow
+  - late joiners used a different `resubscribeParticipantTracks(...)` + `reconcileParticipantMedia(...)` path that already worked
+  - the bug appeared to live in that split behavior, not in Win10 native publish
+- Repo changes made:
+  - added shared helper `startWatchingScreenIdentity(...)` in `core/viewer/participants-avatar.js`
+  - manual `Start Watching` now routes through that helper instead of the older custom resubscribe branch
+  - late-join auto-watch in `core/viewer/connect.js` now routes through the same helper so both paths stay aligned
+  - updated `core/viewer/changelog.js` with a new `2026-04-13b / Screen Watch Sync` entry
+- Verification after patch:
+  - `node --check` passed for:
+    - `core/viewer/participants-avatar.js`
+    - `core/viewer/connect.js`
+    - `core/viewer/changelog.js`
+  - forced live viewer reload through `POST /admin/api/force-reload`
+  - control plane returned `viewer_stamp = 0.6.10.1776113561`
+- Relaunch hygiene completed before retest:
+  - relaunched this PC on installed app `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - remotely restarted `SAM-PC` through the old agent bridge so it launched the installed app path again
+  - dashboard then showed connected clients on `viewer_version = 0.6.10.1776113576`
+- Live state right after relaunch:
+  - `SAM-PC` was again publishing native `DXGI-DD` with `capture_active = true`, `capture_mode = DXGI-DD`, `current_fps = 21`
+  - next live check is whether clicking `Start Watching` on this PC now produces actual inbound media instead of the old blank tile
+
+## 2026-04-13 Watch-debug escalation: receiver vs tile
+- Continued live testing after the watch-parity patch narrowed the failure further:
+  - this PC (`sam-7475`) did click into the `SAM-PC` share path
+  - dashboard `watch_debug` then reported:
+    - `identity=sam-pc-2513 stage=fallback@1500ms hidden=false watched=true remotes=sam-pc-2513:microphone:audio:sub=true:track=true;sam-pc-2513$screen:screen_share:video:sub=true:track=true`
+  - at the same time, `\\SAM-PC\Users\Sam\AppData\Local\Echo Chamber\capture-debug.log` still showed:
+    - native `DXGI-DD` capture alive at ~`21 fps`
+    - transport connected
+    - sender stats stuck at `bytes=0 packets=0 frames_sent=0 frames_encoded=0`
+- Practical conclusion from that pairing:
+  - the active bug is **not** screen-companion discovery anymore
+  - this PC can now find the right `sam-pc-2513$screen` publication and mark it subscribed
+  - the remaining break is later than `setSubscribed(true)` and earlier than real RTP demand reaching the `SAM-PC` publisher
+- New instrumentation patch applied in `core/viewer/participants-avatar.js`:
+  - extended `watch_debug` summaries to include whether the subscriber `RTCRtpReceiver` exists for the publication's `mediaStreamTrack`
+  - added current screen-tile DOM state to the same debug string:
+    - tile presence
+    - tile `display`
+    - tile client size
+    - video `videoWidth`/`videoHeight`
+    - paused state
+    - `readyState`
+- Verification / rollout:
+  - `node --check core/viewer/participants-avatar.js` passed
+  - forced another live viewer reload through `POST /admin/api/force-reload`
+  - control plane returned `viewer_stamp = 0.6.10.1776114696`
+  - relaunched this PC on installed app `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - remotely restarted `SAM-PC` again through the bridge to relaunch the installed app
+  - stamped a fresh remote marker into `capture-debug.log`:
+    - `==== receiver-tile-retest 2026-04-13 17:11:48 ====`
+- Current next retest:
+  - get `SAM-PC` back into `main`
+  - on `SAM-PC`, start native `Share -> Entire Screen`
+  - on this PC, click `Start Watching`
+  - read the new `watch_debug` value to determine:
+    - whether the subscriber PC has a real receiver for the `SAM-PC` screen track
+    - whether the screen tile/video element exists but is effectively dead (`0x0`, paused, no decoded frames, etc.)
+
+## 2026-04-13 Native Win10 DXGI publish narrowed further, then paused for live room safety
+- Additional live repros after the receiver/tile instrumentation established that the remaining failure is specific to the `SAM-PC` native Win10 `Entire Screen` publish path, not the general viewer/watch stack:
+  - this PC and Jeff both reached the same watch state for `sam-pc-2513$screen`
+  - dashboard `watch_debug` for both viewers showed:
+    - real receiver present (`recv=true`)
+    - real tile present in DOM
+    - video element still `video=0x0` / `readyState=0`
+    - remote media stream track still `live/muted`
+  - at the same time, `SAM-PC` could successfully watch Jeff's share with normal decoded video dimensions and ready state
+- Native publisher-side proof was added in `core/client/src/capture_pipeline.rs`:
+  - now logs `RoomEvent::LocalTrackPublished`
+  - now logs `RoomEvent::LocalTrackSubscribed`
+  - live `SAM-PC` log proved the SFU does create a real subscriber for the native `$screen` track
+  - despite that, the publisher stayed stuck at:
+    - `sender-stats bytes=0 packets=0 frames_sent=0 frames_encoded=0`
+- Practical conclusion from that evidence:
+  - the active bug is no longer companion discovery or viewer subscription
+  - the active bug is later than successful subscription and earlier than actual RTP emission from the Win10 native `DXGI Desktop Duplication` publisher
+- New scoped fix attempt was applied to the native client:
+  - `core/client/src/capture_pipeline.rs` now accepts caller-controlled `track_source` and `is_screencast`
+  - `core/client/src/desktop_capture.rs` (`DXGI DD`) now publishes as:
+    - `TrackSource::Screenshare`
+    - `is_screencast=true`
+  - `core/client/src/screen_capture.rs` (`WGC`) explicitly stays on:
+    - `TrackSource::Camera`
+    - `is_screencast=false`
+  - intent: change only the Win10 DXGI full-screen semantics without risking regressions in the working WGC paths
+- Build / deploy state for that fix attempt:
+  - `cargo check -p echo-core-client` passed
+  - `cargo build -p echo-core-client --release` passed
+  - updated `core/viewer/changelog.js` with `2026-04-13c / Win10 DXGI Screen Share Signal`
+  - relaunched this PC on installed app:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - staged and relaunched the same release binary to `SAM-PC` through the installed-app bridge
+  - both installed binaries verified identical:
+    - size `45,358,592`
+    - timestamp `2026-04-13 17:23:57`
+  - fresh remote log marker written:
+    - `==== dxgi-screencast-retest 2026-04-13 17:25:47 ====`
+- Operational pause ordered by Sam because multiple friends are actively using the room:
+  - stop disruptive retests for now
+  - **do not reboot the server again unless Sam explicitly says to**
+  - keep the current live room stable over further experimentation
+- Current live inference at pause time:
+  - Jeff and David appear to be sharing successfully on the current room/build
+  - the unresolved problem still appears isolated to older Windows 10 native `Entire Screen` / `DXGI DD` publishers such as `SAM-PC`
+  - the next resume point is to retest the fresh `DXGI screencast` patch only when the room is clear enough for another controlled repro
+
+## 2026-04-13 Manual watch re-subscribe patch after native DXGI sender recovery
+- Follow-up retests after the direct H26x encoder factory patch proved the native Win10 sender is no longer the zero-RTP bottleneck:
+  - `\\SAM-PC\Users\Sam\AppData\Local\Echo Chamber\capture-debug.log` showed continuous native `DXGI DD` publish with:
+    - `encoder=OpenH264`
+    - `frames_sent` / `frames_encoded` rising normally
+    - `bytes` and transport `bytes_sent` climbing into multi-megabyte range
+  - this shifted the remaining blank-share problem to the already-connected viewer hot-watch path on this PC
+- Fresh receive-side symptom at that point:
+  - manual `Start Watching` still produced a blank tile on this PC
+  - prior `watch_debug` had already shown the screen publication and track object were present
+  - the remaining suspicion became: hot watch was stuck on a weak `setSubscribed(true)` path that never forced a clean inbound subscription reset
+- New viewer-only patch applied:
+  - `core/viewer/participants-avatar.js`
+    - added `pulseScreenWatchSubscription(...)`
+    - manual `Start Watching` now does a one-shot screen-track unsubscribe/re-subscribe pulse on the immediate manual opt-in stage
+    - the pulse uses existing `markResubscribeIntent(...)` suppression so the screen tile is not torn down during the deliberate reset
+    - after the pulse, the existing `resubscribeParticipantTracks(...)` + `reconcileParticipantMedia(...)` path still settles the participant normally
+    - `watch_debug` now records whether the manual stage used `pulse=manual-reset`
+  - `core/viewer/changelog.js`
+    - added `2026-04-13e / Screen Watch Re-Subscribe`
+- Verification / rollout:
+  - `node --check core/viewer/participants-avatar.js` passed
+  - `node --check core/viewer/changelog.js` passed
+  - forced live viewer reload via `POST /admin/api/force-reload`
+    - returned `viewer_stamp = 0.6.10-local.1.1776124809`
+    - kicked stale `main` participants:
+      - `sam-7475`
+      - `sam-pc-2513`
+      - `sam-pc-2513$screen`
+  - relaunched this PC on the installed binary:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+    - verified running process path exactly matches installed app
+  - restarted `SAM-PC` through the bridge launcher again so it re-opened the installed binary
+  - confirmed fresh `SAM-PC` startup log:
+    - `[1776124817] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=false`
+  - wrote fresh remote marker:
+    - `==== manual-watch-resubscribe-retest 2026-04-13 20:00:40 ====`
+- Current exact next retest:
+  - connect this PC and `SAM-PC`
+  - on `SAM-PC`, start native `Share -> Entire Screen`
+  - on this PC, click `Start Watching` once
+  - leave it up about 10 seconds
+  - then determine whether the new manual re-subscribe pulse finally converts the blank tile into actual inbound video
+
+## 2026-04-13 SDK screen-tile attach patch after blank hot-watch persisted
+- The manual watch re-subscribe pulse did **not** fix the remaining blank tile on this PC.
+- Fresh evidence from the failed retest:
+  - `SAM-PC` sender log still showed healthy native publish on the same repro:
+    - `connected as sam-pc-2513$screen`
+    - `room-event local-track-published`
+    - `room-event local-track-subscribed`
+    - `encoder=OpenH264`
+    - `bytes`, `frames_sent`, and `frames_encoded` all rising normally
+  - admin dashboard for `sam-7475` showed:
+    - `watch_debug = identity=sam-pc-2513 stage=fallback@1500ms pulse=none hidden=false watched=true tile=present:display=auto:client=316x177:video=0x0:paused=false:rs=0 remotes=sam-pc-2513:microphone:audio:sub=true:track=true:recv=true:mst=live/live;sam-pc-2513$screen:screen_share:video:sub=true:track=true:recv=true:mst=live/muted`
+    - `inbound = null`
+  - practical meaning:
+    - this PC still got a receiver object and remote `MediaStreamTrack`
+    - but real inbound media never lit up on the tile
+- New viewer-side hypothesis and fix:
+  - the remote screen-tile code path was still creating video elements manually from:
+    - `new MediaStream([track.mediaStreamTrack])`
+  - the working recovery path elsewhere already used the SDK-managed:
+    - `track.attach()`
+  - that difference became the best remaining explanation for:
+    - receiver exists
+    - track exists
+    - tile exists
+    - no real inbound media on hot watch
+- New patch applied:
+  - `core/viewer/participants.js`
+    - added `createAttachedVideoElement(track)` helper
+    - prefers `track.attach()` and falls back to the older manual element path only if attach fails
+  - `core/viewer/audio-routing.js`
+    - remote screen-share tile creation now uses `createAttachedVideoElement(track)`
+    - existing screen-tile/same-track path now also re-requests a keyframe and ensures the inbound stats monitor is running
+  - `core/viewer/participants-fullscreen.js`
+    - `replaceScreenVideoElement(...)` now also uses `createAttachedVideoElement(track)`
+  - `core/viewer/changelog.js`
+    - added `2026-04-13f / SDK Screen Tile Attach`
+- Verification / rollout:
+  - `node --check` passed for:
+    - `core/viewer/participants.js`
+    - `core/viewer/audio-routing.js`
+    - `core/viewer/participants-fullscreen.js`
+  - forced live viewer reload again:
+    - `viewer_stamp = 0.6.10-local.1.1776125124`
+  - relaunched this PC on:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - restarted `SAM-PC` through the bridge again
+  - confirmed fresh remote startup:
+    - `[1776125130] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=false`
+- Current next retest after this patch:
+  - connect both clients
+  - on `SAM-PC`, start native `Share -> Entire Screen`
+  - on this PC, click `Start Watching`
+  - leave it 10 seconds
+  - determine whether the SDK-managed video attach path finally breaks the blank-tile hot-watch failure
+
+## 2026-04-13 Risk reduction rollback: remove dead-end viewer experiments before broader smoke
+- After the `2026-04-13e` and `2026-04-13f` viewer experiments both still produced `blank`, the regression risk was no longer justified.
+- Practical product decision:
+  - do **not** keep widening the live viewer path for one isolated Win10 failure without first protecting the known-good majority
+  - treat the latest two viewer experiments as dead ends and roll them back before broader validation
+- Viewer rollback applied:
+  - removed the manual `Start Watching` pulse-resubscribe experiment from `core/viewer/participants-avatar.js`
+  - removed the SDK-attach screen tile experiment from:
+    - `core/viewer/participants.js`
+    - `core/viewer/audio-routing.js`
+    - `core/viewer/participants-fullscreen.js`
+  - removed changelog entries:
+    - `2026-04-13e / Screen Watch Re-Subscribe`
+    - `2026-04-13f / SDK Screen Tile Attach`
+- Verification / rollout after rollback:
+  - `node --check` passed for:
+    - `core/viewer/participants-avatar.js`
+    - `core/viewer/participants.js`
+    - `core/viewer/audio-routing.js`
+    - `core/viewer/participants-fullscreen.js`
+    - `core/viewer/changelog.js`
+  - forced live viewer reload:
+    - `viewer_stamp = 0.6.10-local.1.1776125515`
+  - relaunched this PC on installed app:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - restarted `SAM-PC` through the bridge again
+  - confirmed fresh `SAM-PC` startup:
+    - `[1776125524] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=false`
+- Current risk posture after rollback:
+  - the last two viewer-side hot-watch experiments are no longer in the served build
+  - the main remaining cross-user-risk candidate is now the direct-H26x encoder factory change in:
+    - `core/webrtc-sys-local/src/video_encoder_factory.cpp`
+  - that change still has real value because it objectively converted `SAM-PC` from `0 bytes / 0 frames_encoded` into a genuinely sending native publisher
+- Best immediate next move:
+  - re-smoke a known-good sharing path before doing more Win10-specific surgery
+  - if the known-good path fails on the current build, revert the encoder-factory change too and keep the public baseline clean
+
+## 2026-04-13 Encoder-factory rollback after canary regression
+- Canary result after the viewer rollbacks:
+  - this PC -> `Share -> Entire Screen` -> `SAM-PC`
+  - result reported by Sam: `broken`
+- Product decision:
+  - treat the direct-H26x encoder-factory change as broad-risk, not safe-to-ship
+  - revert it immediately before doing any more Win10-specific experimentation
+- Reverted:
+  - `core/webrtc-sys-local/src/video_encoder_factory.cpp`
+    - removed the direct `internal_factory_->Create(...)` H26x path
+    - restored the previous `SimulcastEncoderAdapter` behavior
+- Build / deploy after rollback:
+  - `cargo build -p echo-core-client --release` passed
+  - redeployed the rebuilt client to this PC installed path:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - staged the same rebuilt EXE to:
+    - `\\SAM-PC\EchoChamber\installed-update\echo-core-client.exe`
+  - restarted `SAM-PC` through the bridge again
+  - verified fresh local process path:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+  - verified fresh remote startup:
+    - `[1776125737] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=false`
+- Risk posture after this rollback:
+  - broad-risk viewer experiments are gone
+  - broad-risk encoder-factory experiment is now gone too
+  - current build is back on the safer publish baseline
+- Current immediate next test:
+  - rerun the same canary:
+    - this PC shares `Entire Screen`
+    - `SAM-PC` watches it
+  - if that comes back working again, the baseline is re-established and the Win10 `SAM-PC` native full-screen failure can be treated as an isolated fringe path without shipping the risky regressions
+
+## 2026-04-13 Narrow encoder fix: software H264 fallback bypasses SimulcastEncoderAdapter
+- After the rollback canary still came back `broken`, the fresh evidence did **not** support another broad rollback-only conclusion:
+  - the remote `SAM-PC` log still showed the original Win10 native sender failure had returned on the rollback build:
+    - `encoder=SimulcastEncoderAdapter`
+    - `bytes=0`
+    - `frames_sent=0`
+    - `frames_encoded=0`
+  - that means the rollback definitely restored the old `SAM-PC` zero-RTP sender bug
+  - the earlier successful native sender repros on the direct-H26x experiment had specifically shown:
+    - `encoder=OpenH264`
+    - rising `bytes`
+    - rising `frames_sent`
+    - rising `frames_encoded`
+- New conclusion:
+  - the useful part of the old experiment was not "all H264 should bypass the adapter"
+  - the useful part was narrower:
+    - the **software H264 fallback** path can dead-stick when wrapped in `SimulcastEncoderAdapter`
+    - NVENC-backed H264 should stay on the existing path until explicitly disproven
+- Narrow patch applied:
+  - `core/webrtc-sys-local/include/livekit/video_encoder_factory.h`
+    - added `HasHardwareEncoderForFormat(...)`
+  - `core/webrtc-sys-local/src/video_encoder_factory.cpp`
+    - keep existing `SimulcastEncoderAdapter` behavior for the normal/hardware-backed paths
+    - **only** bypass the adapter when:
+      - codec is `H264`
+      - no hardware encoder factory matches the requested format
+    - in that case, create the software encoder directly through `InternalFactory::Create(...)`
+  - `core/viewer/changelog.js`
+    - added `2026-04-13h / Software H264 Screen-Share Fallback`
+- Verification / rollout:
+  - `cargo build -p echo-core-client --release` passed
+  - redeployed this PC installed client:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+    - size `45,360,128`
+    - timestamp `2026-04-13 20:24:43`
+  - staged the same rebuilt EXE to the `SAM-PC` bridge update path:
+    - `\\SAM-PC\EchoChamber\installed-update\echo-core-client.exe`
+  - restarted `SAM-PC` through the existing bridge shim (the live agent there is still the old one, so `/launch-installed` is still unavailable)
+  - verified the staged bridge applied the update into the real installed app path:
+    - `\\SAM-PC\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+    - size `45,360,128`
+    - timestamp `2026-04-13 20:24:43`
+  - verified fresh remote startup:
+    - `[1776126415] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=false`
+- Current risk posture:
+  - no server reboot
+  - no Chromium/WebView fallback
+  - no viewer hot-watch experiments reintroduced
+  - the new encoder change is materially narrower than the reverted all-H264 experiment
+- Current immediate next retest:
+  - connect this PC and `SAM-PC`
+  - on this PC, start `Share -> Entire Screen`
+  - confirm whether `SAM-PC` can now watch it successfully on the narrowed fix
+  - then retest:
+    - on `SAM-PC`, start `Share -> Entire Screen`
+    - on this PC, click `Start Watching`
+  - use those two back-to-back canaries to determine whether the narrow software-H264-only bypass preserved the good path while restoring the Win10 native sender
+
+## 2026-04-13 Canary clarification + restored full H26x bypass
+- Sam clarified the earlier `broken` canary that triggered the encoder rollback was most likely run in the wrong direction:
+  - the requested canary was:
+    - this PC publishes `Entire Screen`
+    - `SAM-PC` watches it
+  - later, the same canary was rerun correctly and came back:
+    - `works`
+- That clarification materially changes the risk assessment:
+  - the only concrete reason the broader direct-H26x publish fix was rolled back is no longer trustworthy
+  - meanwhile, every real `SAM-PC` Win10 native repro on the rollback build still showed:
+    - `encoder=SimulcastEncoderAdapter`
+    - `bytes=0`
+    - `frames_sent=0`
+    - `frames_encoded=0`
+  - so the rollback clearly reintroduced the original sender-side failure
+- Fresh evidence before restoring the broader fix:
+  - `SAM-PC` real repro with the narrowed build still failed the same way:
+    - remote log continued to show `encoder=SimulcastEncoderAdapter`
+    - sender counters stayed at zero despite healthy DXGI capture and a connected transport
+  - dashboard on both viewers still showed the same dead remote screen-track signature:
+    - subscribed
+    - receiver exists
+    - `MediaStreamTrack = live/muted`
+    - blank 0fps tile
+  - Jeff's entire-screen share worked on both this PC and `SAM-PC`, which is strong evidence the room/viewer side is still broadly healthy
+- Restored effective fix:
+  - `core/webrtc-sys-local/src/video_encoder_factory.cpp`
+    - restored the broader direct H26x path
+    - `H264`, `H265`, and `HEVC` now bypass `SimulcastEncoderAdapter` again and create directly through `InternalFactory::Create(...)`
+  - removed the now-unneeded narrow helper from:
+    - `core/webrtc-sys-local/include/livekit/video_encoder_factory.h`
+  - `core/viewer/changelog.js`
+    - added `2026-04-13i / H26x Screen-Share Encoder Path`
+- Verification / rollout:
+  - `cargo build -p echo-core-client --release` passed
+  - `node --check core/viewer/changelog.js` passed
+  - redeployed this PC installed client:
+    - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+    - size `45,360,128`
+    - timestamp `2026-04-13 20:34:37`
+  - staged the same rebuilt EXE to:
+    - `\\SAM-PC\EchoChamber\installed-update\echo-core-client.exe`
+  - restarted `SAM-PC` through the existing bridge again
+  - verified fresh remote installed EXE:
+    - `\\SAM-PC\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+    - size `45,360,128`
+    - timestamp `2026-04-13 20:34:37`
+  - verified fresh startups:
+    - local:
+      - `C:\Users\Sam\AppData\Local\Echo Chamber\echo-core-client.exe`
+    - remote:
+      - `[1776126886] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=false`
+- Current immediate next retest:
+  - connect this PC and `SAM-PC`
+  - on `SAM-PC`, start `Share -> Entire Screen`
+  - on this PC, click `Start Watching`
+  - leave it 10 seconds
+  - determine whether the restored H26x path puts `SAM-PC` back on a real outgoing sender instead of the zero-byte `SimulcastEncoderAdapter` stall
+
+## 2026-04-13 Sender restored again; watch path narrowed to SDK attach
+- Retest result after restoring the full H26x bypass:
+  - `SAM-PC` native `Entire Screen` still looked `blank` to viewers
+  - but the sender-side failure was now clearly gone again
+- Fresh `SAM-PC` sender evidence from `\\SAM-PC\Users\Sam\AppData\Local\Echo Chamber\capture-debug.log`:
+  - `encoder=OpenH264`
+  - `bytes`, `packets`, `frames_sent`, and `frames_encoded` all rising normally
+  - example:
+    - `bytes=178942 packets=373 frames_sent=64 frames_encoded=64`
+    - later rising to:
+      - `bytes=551182 packets=947 frames_sent=291 frames_encoded=291`
+- Fresh dashboard evidence at the same time:
+  - both this PC and Jeff still showed the same dead remote screen-track state for `SAM-PC`
+  - `watch_debug` on both viewers reported:
+    - `sam-pc-2513$screen:screen_share:video:sub=true:track=true:recv=true:mst=live/muted`
+    - tile present
+    - `video=0x0`
+    - `rs=0`
+  - practical meaning:
+    - `SAM-PC` is sending real RTP again
+    - the remaining break is back in the watch/tile attach path, not the sender
+- New narrow viewer patch:
+  - `core/viewer/participants.js`
+    - added `createAttachedVideoElement(track)`
+    - prefers SDK-managed `track.attach()` first
+    - falls back to the old locked-manual `MediaStream` path only if attach fails
+  - `core/viewer/audio-routing.js`
+    - new remote screen tile creation now uses `createAttachedVideoElement(track)`
+  - `core/viewer/participants-fullscreen.js`
+    - `replaceScreenVideoElement(...)` now also uses `createAttachedVideoElement(track)`
+  - `core/viewer/changelog.js`
+    - added `2026-04-13j / SDK Screen Tile Attach`
+- Verification / rollout:
+  - `node --check` passed for:
+    - `core/viewer/participants.js`
+    - `core/viewer/audio-routing.js`
+    - `core/viewer/participants-fullscreen.js`
+    - `core/viewer/changelog.js`
+  - relaunched this PC installed app:
+    - startup `[1776127086]`
+  - restarted `SAM-PC` through the bridge again:
+    - startup `[1776127085]`
+- Current immediate next retest:
+  - connect this PC and `SAM-PC`
+  - on `SAM-PC`, start `Share -> Entire Screen`
+  - on this PC, click `Start Watching`
+  - leave it 10 seconds
+  - determine whether the SDK-managed first-attach path finally converts the live-but-muted remote screen track into real rendered video
+
+## 2026-04-13 Win10 full-screen fix confirmed
+- Final successful repro:
+  - `SAM-PC` -> `Share -> Entire Screen`
+  - this PC reported: `visible`
+- The successful path is now confirmed to be the real product fix, not a stale manual override:
+  - `\\SAM-PC\Users\Sam\AppData\Local\Echo Chamber\config.json` only contains:
+    - `{"server":"https://echo.fellowshipoftheboatrace.party:9443"}`
+  - no explicit `force_software_encoder` flag remains in the installed config
+  - both installed clients were refreshed to the same rebuilt EXE:
+    - size `45,409,792`
+    - timestamp `2026-04-13 21:25:11`
+- Root cause that actually mattered:
+  - Rust-side Win10 auto-fallback was already setting:
+    - `force_software_encoder=true`
+    - `auto_force_software_encoder=true`
+  - but the native encoder factory was still registering hardware factories on `SAM-PC`
+  - that left Win10 in a split-brain state where the app thought software fallback was active while the C++ encoder side still walked the hardware path
+- Winning fix:
+  - `core/client/src/main.rs`
+    - keep `force_software_encoder` optional in config
+    - auto-force software H264 when Windows build `< 22000` and no explicit override is set
+    - log the exact startup decision:
+      - `force_software_encoder`
+      - `auto_force_software_encoder`
+      - `windows_build`
+  - `core/webrtc-sys-local/src/nvidia/cuda_context.cpp`
+    - teach native `IsSoftwareEncoderForced()` to read installed `config.json`
+    - also auto-force on Win10 builds `< 22000`
+  - `core/webrtc-sys-local/src/nvidia/nvidia_encoder_factory.cpp`
+    - skip NVENC factory registration when native `IsSoftwareEncoderForced()` is true
+  - `core/webrtc-sys-local/src/video_encoder_factory.cpp`
+    - keep the direct H26x path
+    - normalize software H264 to `packetization-mode=1`
+- Final proof from the successful build on `SAM-PC`:
+  - startup log:
+    - `[1776130126] [startup] echo-core-client boot server=https://echo.fellowshipoftheboatrace.party:9443 force_software_encoder=true auto_force_software_encoder=true windows_build=19045`
+  - native encoder-factory trace:
+    - `[encoder-factory] ctor hw_factories=0 force_software=1`
+    - `software-match ... packetization-mode=1 ... profile-level-id=42e01f`
+  - native capture/publish trace:
+    - `connected as sam-pc-2513$screen`
+    - `track published sid=TR_VSjzZeMAtKVaze source=Screenshare`
+    - `encoder=OpenH264`
+    - `frames_sent`, `frames_encoded`, and `bytes` all rising normally
+    - example:
+      - `bytes=213014 packets=411 frames_sent=89 frames_encoded=89 ... fps=17.0`
+      - later:
+        - `bytes=814215 packets=1244 frames_sent=457 frames_encoded=457 ... fps=17.0`
+- Practical product conclusion:
+  - Win10 native `Entire Screen` / `DXGI Desktop Duplication` should now auto-fall back to software H264 without requiring a manual config override
+  - this preserves the native picker/native capture direction and avoids the Chromium regression path Sam explicitly rejected
+  - expected tradeoff on Win10:
+    - visible and stable full-screen share
+    - OpenH264 software encode around `16-18 fps`
+    - lower peak performance than NVENC, but no more blank `0fps` dead air
+- Operational notes:
+  - no server reboot was needed for the fix
+  - the temporary `SAM-PC` bridge/shim is still only an operational launch path until the remote agent is modernized
+
+## 2026-04-13 v0.6.11 release prep completed
+- Release candidate version bump is in place across all required desktop release files:
+  - `core/client/Cargo.toml` -> `0.6.11`
+  - `core/client/tauri.conf.json` -> `0.6.11`
+  - `core/control/Cargo.toml` -> `0.6.11`
+- Windows-only release cleanup applied:
+  - `core/client/tauri.conf.json`
+    - bundle targets now `["nsis"]`
+  - `core/deploy/build-release.ps1`
+    - now builds with `cargo tauri build --bundles nsis`
+    - now generates a Windows-only `latest.json`
+    - now prints a safe exact-file `gh release create ...` command instead of the dangerous `bundleDir\*` wildcard (the bundle dir contains old installers)
+- Release notes updated in `CHANGELOG.md` with a new `0.6.11` entry covering:
+  - Win10 native `Entire Screen` auto software-H264 fallback
+  - software H264 packetization / render fix
+  - auto-watch / screen attach hardening
+  - Windows-only packaging cleanup
+- Build verification:
+  - `cargo build -p echo-core-client --release` passed on `0.6.11`
+  - `cargo build -p echo-core-control --release` passed on `0.6.11`
+  - local signed NSIS bundle built successfully via:
+    - `powershell -ExecutionPolicy Bypass -File core/deploy/build-release.ps1`
+- Fresh release artifacts produced locally:
+  - `core/target/release/bundle/nsis/Echo Chamber_0.6.11_x64-setup.exe`
+  - `core/target/release/bundle/nsis/Echo Chamber_0.6.11_x64-setup.exe.sig`
+  - `core/target/release/bundle/nsis/latest.json`
+- Generated updater manifest is Windows-only and points at:
+  - `https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.11/Echo.Chamber_0.6.11_x64-setup.exe`
+- Important deployment boundary:
+  - `core/deploy/latest.json` in the repo still points at public `0.6.10`
+  - do **not** replace the live repo manifest until the `v0.6.11` GitHub release exists and its `latest.json` has been uploaded/downloaded
+- Exact publish command prepared by the release script:
+  - `gh release create v0.6.11 --title 'Echo Chamber v0.6.11' "F:\Codex AI\The Echo Chamber\core\target\release\bundle\nsis\Echo Chamber_0.6.11_x64-setup.exe" "F:\Codex AI\The Echo Chamber\core\target\release\bundle\nsis\Echo Chamber_0.6.11_x64-setup.exe.sig" "F:\Codex AI\The Echo Chamber\core\target\release\bundle\nsis\latest.json"`
+- After publishing:
+  - download the release `latest.json`
+  - copy it to `core/deploy/latest.json`
+  - verify `https://echo.fellowshipoftheboatrace.party:9443/api/update/latest.json` serves `0.6.11`
+
+## 2026-04-13 final 0.6.11 release-candidate smoke green
+- Final live smoke on the exact `0.6.11` release-candidate build came back green:
+  - `SAM-PC` Win10 `Entire Screen` -> visible on this PC
+  - this PC `Entire Screen` -> visible on `SAM-PC`
+  - Jeff `Entire Screen` -> visible on both machines
+- User confirmation:
+  - `all three work!`
+- Clean release-branch packaging also passed from the short-path `main`-based worktree:
+  - branch: `codex/release-v0.6.11-short`
+  - worktree: `F:\EC-r611`
+  - reason for short path:
+    - the first clean worktree under `.codex\worktrees\release-v0.6.11` hit path-length trouble in libwebrtc scratch includes
+    - moving the clean branch to `F:\EC-r611` fixed packaging without changing source
+  - local signing key had to be copied into the clean worktree as untracked local release material:
+    - `core/client/.tauri-keys`
+    - do not commit it
+- Clean-branch artifact verification:
+  - `powershell -ExecutionPolicy Bypass -File F:\EC-r611\core\deploy\build-release.ps1` passed
+  - produced:
+    - `F:\EC-r611\core\target\release\bundle\nsis\Echo Chamber_0.6.11_x64-setup.exe`
+    - `F:\EC-r611\core\target\release\bundle\nsis\Echo Chamber_0.6.11_x64-setup.exe.sig`
+    - `F:\EC-r611\core\target\release\bundle\nsis\latest.json`
+  - manifest verification:
+    - `version=0.6.11`
+    - GitHub URL points at `v0.6.11`
+- Release state:
+  - functionally ready to publish after staging/commit on the clean release branch
+  - still do not update repo `core/deploy/latest.json` until the GitHub release exists

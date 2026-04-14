@@ -650,15 +650,16 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       }
     }
 
-    // Opt-in: if a remote screen share arrives but identity isn't in hiddenScreens yet
-    // (TrackSubscribed fired before TrackPublished race), add to hiddenScreens now
-    // But skip if user explicitly opted in via watchedScreens
+    // First-time remote screen shares should auto-watch so the viewer catches
+    // the startup keyframes. Only keep a screen hidden here if the user
+    // explicitly opted out earlier (identity already lives in hiddenScreens).
     var _subSource = getTrackSource(publication, track);
     var _subIsRemoteScreen = _effectiveParticipant && room && room.localParticipant &&
       _effectiveParticipant.identity !== room.localParticipant.identity &&
       (_subSource === LK.Track.Source.ScreenShare || _subSource === LK.Track.Source.ScreenShareAudio);
     if (_subIsRemoteScreen && !hiddenScreens.has(_effectiveParticipant.identity) && !watchedScreens.has(_effectiveParticipant.identity)) {
-      hiddenScreens.add(_effectiveParticipant.identity);
+      watchedScreens.add(_effectiveParticipant.identity);
+      debugLog("[opt-in] auto-watch on track subscribed " + _effectiveParticipant.identity);
     }
     handleTrackSubscribed(track, publication, _effectiveParticipant);
     scheduleReconcileWaves("track-subscribed");
@@ -710,24 +711,27 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         (pubSource === LK.Track.Source.ScreenShare || pubSource === LK.Track.Source.ScreenShareAudio);
 
       if (isRemoteScreen) {
-        // Opt-in: don't subscribe to remote screen shares by default
-        if (!hiddenScreens.has(_pubIdentity)) {
-          hiddenScreens.add(_pubIdentity);
-        }
         // Play screen share chime for video track only (not audio), and not during room switches
         if (!_isRoomSwitch && pubSource === LK.Track.Source.ScreenShare) {
           var ssState = participantState.get(_pubIdentity);
           var ssVol = (ssState && ssState.chimeVolume != null) ? ssState.chimeVolume : 0.5;
           playScreenShareChime(ssVol);
         }
-        var cardRef = participantCards.get(_pubIdentity);
-        if (cardRef && cardRef.watchToggleBtn) {
-          cardRef.watchToggleBtn.style.display = "";
-          cardRef.watchToggleBtn.textContent = "Start Watching";
-          if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
+        if (hiddenScreens.has(_pubIdentity)) {
+          var cardRef = participantCards.get(_pubIdentity);
+          if (cardRef && cardRef.watchToggleBtn) {
+            cardRef.watchToggleBtn.style.display = "";
+            cardRef.watchToggleBtn.textContent = "Start Watching";
+            if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
+          }
+          debugLog(`[opt-in] track published (screen, user-hidden) ${_pubIdentity} src=${pubSource}`);
+          // Still hook so we can subscribe later when user opts in
+          if (participant) hookPublication(publication, participant);
+          return;
         }
-        debugLog(`[opt-in] track published (screen, unwatched) ${_pubIdentity} src=${pubSource}`);
-        // Still hook so we can subscribe later when user opts in
+        watchedScreens.add(_pubIdentity);
+        debugLog(`[opt-in] track published (screen, auto-watch) ${_pubIdentity} src=${pubSource}`);
+        startWatchingScreenIdentity(_pubIdentity, "track-published");
         if (participant) hookPublication(publication, participant);
         return;
       }
@@ -1349,6 +1353,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         : participant.identity;
       // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
       // The "Stop Watching" button is available if they want to unsubscribe later.
+      startWatchingScreenIdentity(effectiveIdentity, "late-join");
+      return;
       hiddenScreens.delete(effectiveIdentity);
       watchedScreens.add(effectiveIdentity);
       resubscribeParticipantTracks(participant);

@@ -132,10 +132,7 @@ pub fn list_output_devices() -> Vec<OutputDevice> {
             // Get friendly name via raw COM calls (no Win32_UI_Shell_PropertiesSystem feature)
             let name = get_device_friendly_name_raw(&device).unwrap_or_else(|| id_str.clone());
 
-            devices.push(OutputDevice {
-                id: id_str,
-                name,
-            });
+            devices.push(OutputDevice { id: id_str, name });
         }
     }
 
@@ -153,13 +150,17 @@ fn get_device_friendly_name_raw(device: &IMMDevice) -> Option<String> {
 
         // OpenPropertyStore is at vtable slot 4 (IUnknown=3, Activate=3, OpenPropertyStore=4)
         let open_property_store: unsafe extern "system" fn(
-            *mut std::ffi::c_void, // this
-            i32,                   // STGM (STGM_READ = 0)
+            *mut std::ffi::c_void,      // this
+            i32,                        // STGM (STGM_READ = 0)
             *mut *mut std::ffi::c_void, // IPropertyStore**
         ) -> HRESULT = std::mem::transmute(*(vtable.add(4)));
 
         let mut prop_store: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hr = open_property_store(device_ptr as *mut _, 0 /* STGM_READ */, &mut prop_store);
+        let hr = open_property_store(
+            device_ptr as *mut _,
+            0, /* STGM_READ */
+            &mut prop_store,
+        );
         if hr.is_err() || prop_store.is_null() {
             return None;
         }
@@ -173,11 +174,7 @@ fn get_device_friendly_name_raw(device: &IMMDevice) -> Option<String> {
         ) -> HRESULT = std::mem::transmute(*(store_vtable.add(5)));
 
         let mut value = std::mem::zeroed::<PROPVARIANT>();
-        let hr = get_value(
-            prop_store,
-            &PKEY_DEVICE_FRIENDLYNAME,
-            &mut value,
-        );
+        let hr = get_value(prop_store, &PKEY_DEVICE_FRIENDLYNAME, &mut value);
 
         // Release IPropertyStore
         let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
@@ -274,10 +271,8 @@ fn set_default_endpoint(device_id: &str, role: ERole) -> std::result::Result<(),
 
         // CoCreateInstance for IPolicyConfig — since it's not a type known to
         // the windows crate, we create it as IUnknown and then QueryInterface.
-        let unknown: IUnknown =
-            CoCreateInstance(&CPOLICYCONFIG_CLSID, None, CLSCTX_ALL).map_err(|e| {
-                format!("CoCreateInstance(CPolicyConfigClient) failed: {}", e)
-            })?;
+        let unknown: IUnknown = CoCreateInstance(&CPOLICYCONFIG_CLSID, None, CLSCTX_ALL)
+            .map_err(|e| format!("CoCreateInstance(CPolicyConfigClient) failed: {}", e))?;
 
         // QueryInterface for IPolicyConfig
         let mut raw_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -308,10 +303,7 @@ fn set_default_endpoint(device_id: &str, role: ERole) -> std::result::Result<(),
         ) -> HRESULT = std::mem::transmute(*(vtable.add(13)));
 
         // Convert device_id to wide string
-        let wide: Vec<u16> = device_id
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
 
         let hr = set_default_endpoint_fn(raw_ptr, PCWSTR(wide.as_ptr()), role.0 as u32);
 
@@ -321,10 +313,7 @@ fn set_default_endpoint(device_id: &str, role: ERole) -> std::result::Result<(),
         release_fn(raw_ptr);
 
         if hr.is_err() {
-            return Err(format!(
-                "SetDefaultEndpoint failed: 0x{:08X}",
-                hr.0 as u32
-            ));
+            return Err(format!("SetDefaultEndpoint failed: 0x{:08X}", hr.0 as u32));
         }
 
         Ok(())

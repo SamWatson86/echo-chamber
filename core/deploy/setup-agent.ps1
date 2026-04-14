@@ -14,6 +14,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$clientTaskName = "EchoChamberClient"
+$exePath = Join-Path $InstallDir "echo-core-client.exe"
 
 Write-Host "Echo Chamber Deploy Agent Setup" -ForegroundColor Cyan
 Write-Host "================================" -ForegroundColor Cyan
@@ -47,7 +49,10 @@ if ($existing -match "Rule Name") {
     Write-Host "[OK] Firewall rule added (port $Port)" -ForegroundColor Green
 }
 
-# 4. Scheduled task
+# 4. Scheduled task for the deploy agent
+# The live agent should support both the sandbox binary under C:\EchoChamber
+# and the normal installed app under LocalAppData. The HTTP endpoints are used
+# by the dev PC to launch the correct path explicitly instead of guessing.
 $taskName = "EchoChamberDeployAgent"
 $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existingTask) {
@@ -55,15 +60,32 @@ if ($existingTask) {
     Write-Host "[OK] Removed old scheduled task" -ForegroundColor Yellow
 }
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentDst`" -Port $Port -InstallDir `"$InstallDir`""
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$agentDst`" -Port $Port -InstallDir `"$InstallDir`""
+$triggers = @(
+    New-ScheduledTaskTrigger -AtStartup
+    New-ScheduledTaskTrigger -AtLogOn
+)
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Echo Chamber deploy agent - receives builds from dev PC" | Out-Null
-Write-Host "[OK] Scheduled task installed (runs at startup as SYSTEM)" -ForegroundColor Green
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -Principal $principal -Description "Echo Chamber deploy agent - receives builds from dev PC" | Out-Null
+Write-Host "[OK] Scheduled task installed (runs at startup + logon as SYSTEM)" -ForegroundColor Green
 
-# 5. Start it now
+# 5. Scheduled task for the actual Echo client in the interactive user session
+$existingClientTask = Get-ScheduledTask -TaskName $clientTaskName -ErrorAction SilentlyContinue
+if ($existingClientTask) {
+    Unregister-ScheduledTask -TaskName $clientTaskName -Confirm:$false
+    Write-Host "[OK] Removed old client launch task" -ForegroundColor Yellow
+}
+
+$clientAction = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $InstallDir
+$clientSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+$clientPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+$clientTask = New-ScheduledTask -Action $clientAction -Principal $clientPrincipal -Settings $clientSettings
+Register-ScheduledTask -TaskName $clientTaskName -InputObject $clientTask -Description "Echo Chamber desktop client - launched on demand in the interactive user session" | Out-Null
+Write-Host "[OK] Client launch task installed for user $env:USERNAME" -ForegroundColor Green
+
+# 6. Start it now
 Start-ScheduledTask -TaskName $taskName
 Write-Host "[OK] Agent started!" -ForegroundColor Green
 

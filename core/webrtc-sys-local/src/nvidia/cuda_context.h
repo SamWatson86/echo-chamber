@@ -5,6 +5,8 @@
 
 namespace livekit_ffi {
 
+bool IsSoftwareEncoderForced();
+
 class CudaContext {
  public:
   CudaContext() = default;

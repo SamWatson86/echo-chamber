@@ -214,6 +214,19 @@ function compareVersionTags(left, right) {
 function isNewerVersion(latest, current) {
   return compareVersionTags(latest, current) > 0;
 }
+
+function isLocalTestBuildVersion(version) {
+  var prerelease = parseVersionTag(version).prerelease || [];
+  return prerelease.some(function(part) {
+    return !part.numeric && /^(local|dev|test|lab|dirty)$/.test(part.value);
+  });
+}
+
+function hideUpdateBanner() {
+  var banner = document.getElementById("update-banner");
+  if (banner) banner.remove();
+}
+
 async function checkForUpdateNotification() {
   if (_updateDismissed) return;
   try {
@@ -225,6 +238,10 @@ async function checkForUpdateNotification() {
       } catch (e) { /* ignore */ }
     }
     if (!currentVer) return; // browser viewer doesn't have a version to compare
+    if (isLocalTestBuildVersion(currentVer)) {
+      hideUpdateBanner();
+      return;
+    }
     var cUrl = controlUrlInput ? controlUrlInput.value.trim() : "";
     if (!cUrl) return;
     var resp = await fetch(cUrl + "/api/version");

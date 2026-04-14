@@ -8,6 +8,86 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-13l",
+    title: "Win10 Entire Screen Fix",
+    notes: [
+      "Windows 10 native Entire Screen sharing now auto-falls back to software H264 when no explicit encoder override is set. This fixes the blank `0fps` viewer tile on older Win10 full-screen publishers while keeping the native `DXGI Desktop Duplication` path.",
+      "The fallback is scoped to the Win10 native capture path. Newer Windows builds and working hardware-backed paths keep their existing encoder behavior, while Win10 trades peak frame rate for a stream that is actually visible."
+    ]
+  },
+  {
+    version: "2026-04-13k",
+    title: "Auto-Watch New Screen Shares",
+    notes: [
+      "New remote screen shares now auto-watch on first publish instead of waiting behind Start Watching by default. Explicit Stop Watching opt-outs still stick, but first-time viewers no longer miss the startup keyframes from software H264 screen senders.",
+      "This aligns already-connected viewers with the existing late-join behavior so remote screen shares start the same way whether you were already in the room or joined after the share began."
+    ]
+  },
+  {
+    version: "2026-04-13j",
+    title: "SDK Screen Tile Attach",
+    notes: [
+      "Remote screen tiles now prefer the SDK-managed `track.attach()` video path instead of hand-building a `MediaStream` for first attach. This specifically targets the case where a publisher is sending real RTP but already-connected viewers still get a blank `0fps` tile with a `live/muted` screen track.",
+      "The change is scoped to remote screen video elements. Camera and audio flows keep their existing behavior while the Win10 DXGI watch path is hardened."
+    ]
+  },
+  {
+    version: "2026-04-13i",
+    title: "H26x Screen-Share Encoder Path",
+    notes: [
+      "Native H26x screen-share publishing now bypasses the simulcast adapter path again. This restores the sender path that previously turned the Win10 DXGI publisher from zero-byte dead air into a real outgoing stream.",
+      "The rollback decision from earlier live testing was based on a canary that was later clarified to have used the wrong machine direction, so the effective native publish fix is back in while the known-good cross-machine canary is being rechecked explicitly."
+    ]
+  },
+  {
+    version: "2026-04-13h",
+    title: "Software H264 Screen-Share Fallback",
+    notes: [
+      "Native H264 screen-share publishers that fall back to software encoding no longer get forced through the simulcast adapter path. This targets the Win10 DXGI sender case that connected to the room but never emitted RTP.",
+      "NVENC-backed H264 publishing stays on the existing encoder path so known-good hardware screen-share flows keep their current behavior while the Win10 fallback case is isolated."
+    ]
+  },
+  {
+    version: "2026-04-13g",
+    title: "Publishing Stability Rollback",
+    notes: [
+      "A risky encoder-path experiment was rolled back after it regressed a previously working full-screen share path during live canary testing.",
+      "This build is back on the safer publish baseline while Win10-specific native screen-share failures continue to be isolated without widening the blast radius."
+    ]
+  },
+  {
+    version: "2026-04-13d",
+    title: "Local Build Update Guardrails",
+    notes: [
+      "Local prerelease desktop builds now stop advertising the public updater banner and stop auto-updating themselves over the top of an active test session.",
+      "This keeps private DXGI/Win10 test clients coherent while the live public updater manifest still points at the official v0.6.10 release."
+    ]
+  },
+  {
+    version: "2026-04-13c",
+    title: "Win10 DXGI Screen Share Signal",
+    notes: [
+      "Native Win10 DXGI full-screen sharing now publishes with actual screen-share semantics instead of the motion/game camera profile. This targets the subscribed-but-zero-RTP stall on older Windows publishers.",
+      "The working WGC capture paths stay on their existing behavior. This change is scoped to the DXGI Desktop Duplication monitor/full-screen path."
+    ]
+  },
+  {
+    version: "2026-04-13b",
+    title: "Screen Watch Sync",
+    notes: [
+      "Already-connected viewers now use the same screen-subscribe path as late joiners when they click Start Watching. Remote screen shares no longer rely on a separate opt-in branch that could leave a blank 0fps tile behind.",
+      "This specifically hardens the viewer-side watch flow for native Win10 full-screen publishers whose DXGI Desktop Duplication stream is already live in the room."
+    ]
+  },
+  {
+    version: "2026-04-13",
+    title: "Win10 Native Full-Screen Path",
+    notes: [
+      "Windows 10 full-screen shares stay on the native desktop-capture path again. The installed client no longer bounces Entire Screen through the browser/WebView picker.",
+      "Win10 window capture still stays blocked on unsupported WGC builds, but monitor capture remains the intended native DXGI Desktop Duplication path."
+    ]
+  },
+  {
     version: "2026-04-12b",
     title: "Post-Reboot Connect Hotfix (v0.6.10)",
     notes: [
