@@ -1,5 +1,26 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-04-15 Mac prerelease publishing decision
+
+**Last Updated**: 2026-04-15
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Proceeding with a standalone GitHub prerelease for Apple Silicon Mac users so Jeff can download a simple DMG without relying on expiring Actions artifacts.
+
+### Decision
+- Publish the updated Mac build as a **GitHub prerelease**, not as part of the live Windows release/update path.
+- Keep scope narrow:
+  - Apple Silicon only
+  - manual download/install
+  - audio/camera/join target
+  - macOS noise cancellation intentionally disabled
+- Do **not** rewire `latest.json` or the Windows release workflow as part of this step.
+
+### Reason
+- Sam wants a simple GitHub-hosted download for Jeff.
+- The successful standalone Actions artifact is enough to prove the branch builds on macOS.
+- A Mac-only prerelease avoids destabilizing the Windows updater path while still giving Mac testers a stable download URL.
+
 ## 2026-04-15 macOS worktree closure
 
 **Last Updated**: 2026-04-15
