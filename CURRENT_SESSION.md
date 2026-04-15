@@ -147,6 +147,58 @@
   - stay Windows-only
   - or reintroduce macOS artifacts and `darwin-aarch64` manifest entries behind an explicit release gate
 
+## 2026-04-15 macOS downloadable build artifact
+
+**Last Updated**: 2026-04-15
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Successful standalone macOS CI build completed. Downloadable artifact is available for Jeff to test.
+
+### What was done
+- Committed the macOS build/package + Mac mic mitigation work on:
+  - branch `codex/macos-build-enable`
+  - commit `908f1f4` (`Enable macOS build path and stabilize Mac mic flow`)
+- Pushed the branch to GitHub.
+- Dispatched the standalone macOS workflow:
+  - workflow: `.github/workflows/build-macos.yml`
+  - input: `upload_to_latest_release=false`
+
+### Successful build evidence
+- GitHub Actions run:
+  - run id: `24452518522`
+  - URL: `https://github.com/SamWatson86/echo-chamber/actions/runs/24452518522`
+- Result:
+  - `Build macOS DMG (Apple Silicon)` completed successfully
+  - total runtime: ~11m 20s
+- Artifact metadata:
+  - artifact id: `6449728613`
+  - artifact name: `echo-chamber-macos-dmg`
+  - artifact expiry: `2026-07-14T11:41:52Z`
+  - digest: `sha256:6d100045a88ec42cfeefa05f25f6d16e367be88581758bd27d2eecf4c85cbfc4`
+
+### Files produced by the successful run
+- `dmg/Echo Chamber_0.6.11_aarch64.dmg`
+- `macos/Echo Chamber.app.tar.gz`
+- `macos/Echo Chamber.app.tar.gz.sig`
+
+### Local artifact download verification
+- Downloaded the workflow artifact locally with `gh run download`.
+- Verified extracted files under:
+  - `F:\EC-macos-build\_artifacts\run-24452518522\`
+
+### Important release/path note
+- This was a **standalone branch build**, not a live Windows release-pipeline change.
+- `release.yml` remains intentionally Windows-only.
+- No GitHub release asset was uploaded in this run.
+- Jeff should test from the Actions artifact produced by run `24452518522`.
+
+### Practical test note for Jeff
+- The build is Apple Silicon (`aarch64`).
+- Because this is a standalone CI artifact and not a notarized public Mac release, Jeff may need to:
+  - download the artifact ZIP from the GitHub Actions run
+  - extract `Echo Chamber_0.6.11_aarch64.dmg`
+  - use macOS Open/Right-click Open flow if Gatekeeper warns about an unsigned app
+
 ### Changelog note
 - `core/viewer/changelog.js` was intentionally **not** updated.
   - This session changed build/package/workflow behavior only; no user-facing viewer/runtime behavior changed.
