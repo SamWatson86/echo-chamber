@@ -1,5 +1,46 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-04-15 macOS worktree closure
+
+**Last Updated**: 2026-04-15
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Closed for now with the Mac scope intentionally narrowed to audio/camera/join stability.
+
+### Closure decision
+- The practical goal was to get Jeff and Spencer back online on Apple Silicon Macs for **audio-first use**, not to finish full macOS feature parity.
+- That goal is satisfied well enough to stop this worktree:
+  - a current standalone Apple Silicon Mac build exists
+  - the Mac microphone dropout path was mitigated by disabling RNNoise/noise-cancel on macOS
+  - the older legacy Mac artifact used by Jeff/Spencer was identified and remains available if needed for fallback comparison
+- macOS screen sharing is **not** considered part of the acceptance bar for closing this track.
+
+### What is considered done
+- `build-macos.yml` can produce a downloadable Apple Silicon Mac artifact without touching the live Windows release path.
+- The updated Mac branch build completed successfully:
+  - run `24452518522`
+  - artifact `echo-chamber-macos-dmg`
+  - file `Echo Chamber_0.6.11_aarch64.dmg`
+- The Mac runtime audio regression reported by Jeff has a narrow viewer-side mitigation in place:
+  - macOS now stays on the stable direct mic publish path
+  - the optional RNNoise/noise-cancel track-swap path is disabled on macOS
+
+### What is intentionally deferred
+- macOS screen sharing
+- Apple notarization / polished public Mac distribution
+- re-enabling macOS in the main Windows release workflow
+- turning this branch into a PR against `main`
+
+### Why no PR was opened
+- This isolated branch was based from the shipped `v0.6.11` release baseline, not from the current `main` tip.
+- Relative to `main`, the branch carries too much unrelated drift for a clean reviewable PR right now.
+- If macOS work resumes later, the right move is a fresh worktree from the then-current baseline, cherry-picking only the still-relevant Mac-specific commits.
+
+### Reopen trigger
+- Only reopen this track if:
+  - Jeff/Spencer still cannot reliably join and talk on the updated Mac build, or
+  - macOS screen sharing becomes a real requirement again
+
 ## 2026-04-15 legacy Mac build restored for Jeff/Spencer testing
 
 **Last Updated**: 2026-04-15
