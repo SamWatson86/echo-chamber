@@ -1,5 +1,156 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-04-14 macOS runtime audio follow-up
+
+**Last Updated**: 2026-04-14
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Viewer-side mitigation shipped for a Mac microphone dropout path reported during live use.
+
+### User-reported failure mode
+- Jeff joined from a Mac.
+- His camera published successfully.
+- His microphone was audible at first, then audio stopped.
+- The failure shape is therefore **not** a full room/media join failure. Video kept flowing while only the mic path died.
+
+### Root-cause investigation
+- I inspected the current viewer mic path in:
+  - `core/viewer/media-controls.js`
+  - `core/viewer/rnnoise.js`
+  - `core/viewer/connect.js`
+- Current mic flow:
+  - `toggleMic()` first enables the normal LiveKit microphone track with `room.localParticipant.setMicrophoneEnabled(...)`
+  - if `noiseCancelEnabled` is on, it immediately calls `enableNoiseCancellation()`
+  - `enableNoiseCancellation()` builds an `AudioContext`, runs RNNoise, then swaps the published mic track with `sender.replaceTrack(processedTrack)`
+- **Inference based on the code path + symptom fit**:
+  - the base mic publish path clearly works, because Jeff was heard initially
+  - the later silence matches the optional RNNoise post-publish track replacement much better than permissions, enumeration, or room-join issues
+  - camera staying live at the same time reinforces that this is a mic-only post-processing path failure, not a broader session failure
+
+### Fix shipped in this worktree
+- `core/viewer/rnnoise.js`
+  - added a macOS platform detector
+  - hard-blocked RNNoise/noise-cancel enablement on macOS
+  - forced `noiseCancelEnabled` to initialize `false` on macOS so the direct mic path stays in place
+- `core/viewer/connect.js`
+  - disabled the Noise Cancellation settings button on macOS
+  - disabled the suppression-strength buttons on macOS
+  - added explicit UI copy explaining that the feature is temporarily unavailable on macOS because it can kill live mic audio after join
+- `core/viewer/changelog.js`
+  - added a user-facing entry because this changes runtime behavior for Mac users
+
+### Why this scope is safe
+- The normal microphone publish path is left untouched.
+- No Rust client capture code changed.
+- No Windows-specific desktop capture, audio output, or packaging path changed.
+- This is a **viewer-only** mitigation that removes the optional macOS noise-cancel layer from the live mic path.
+
+### Verification performed
+- `node --check core/viewer/rnnoise.js`
+- `node --check core/viewer/connect.js`
+- `node --check core/viewer/changelog.js`
+- Manual diff review confirms the change is scoped to:
+  - macOS RNNoise gating
+  - Settings UI state/copy
+  - changelog entry
+
+### Release impact
+- **Viewer/runtime only**
+- Windows behavior unchanged
+- macOS joins lose the optional Noise Cancellation toggle for now, but keep the stable direct microphone publish path
+
+### Next follow-up if needed
+- Get a fresh Mac canary after this viewer update.
+- If mic stability is restored, the next step is to harden RNNoise on macOS specifically instead of keeping it disabled there.
+- If audio still dies with RNNoise fully removed from the Mac path, the next suspect is deeper in the browser/WebKit/WebRTC sender pipeline and we should capture a debug log from the Mac session.
+
+## 2026-04-14 macOS build enablement worktree
+
+**Last Updated**: 2026-04-14
+**Baseline**: **v0.6.11 shipped**
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Root cause narrowed. Current blockers are in macOS packaging/CI workflow shape, not in the Windows-gated native capture Rust path that broke `v0.6.3`.
+
+### Worktree setup
+- Created a fresh isolated worktree from shipped source commit `29702b0` (`codex/release-v0.6.11-short`).
+- Verified the new worktree was clean before changes.
+- The local `v0.6.11` tag was not present in this clone, so the release branch was used as the baseline source of truth.
+
+### What failed before changing code
+- Local `cargo check -p echo-core-client --target aarch64-apple-darwin` on this Windows box did **not** reach Echo Chamber app code first.
+  - It failed in third-party build scripts (`objc2-exception-helper`) because this environment does not have a macOS C toolchain (`cc`) for Apple targets.
+  - Conclusion: that local cross-target failure is environment/toolchain-specific and is **not** valid evidence of a repo bug.
+- Local `cargo check -p echo-core-control --target aarch64-apple-darwin` failed for the same reason (`ring` build script requiring `cc` for Apple target objects), again before proving any Echo Chamber control-plane issue.
+
+### Evidence from real macOS CI history
+- Inspected failed release run `24153996654` (`v0.6.3`) with `gh run view --log-failed`.
+- Exact historical macOS compile failure:
+  - `client/src/main.rs`
+  - `error[E0433]: failed to resolve: use of undeclared type CaptureHealthState`
+  - root cause: `.manage(Arc::new(CaptureHealthState::new()))` was not gated behind `#[cfg(target_os = "windows")]`.
+- That specific Rust blocker is already fixed in shipped `v0.6.11`.
+  - Current `core/client/src/main.rs` gates the `capture_health` import and the `.manage(...)` call on Windows only.
+  - Current non-Windows stubs exist for:
+    - `core/client/src/audio_capture_stub.rs`
+    - `core/client/src/audio_output_stub.rs`
+
+### Current `v0.6.11` blockers / risk areas
+- `core/client/tauri.conf.json`
+  - hard-wires `bundle.targets` to `["nsis"]`
+  - that is correct for Windows, but it makes the default Tauri bundle target selection Windows-only unless macOS overrides it
+- `.github/workflows/release.yml`
+  - still disables `build-macos` with `if: false`
+  - still hardcodes `MAC_SIG=""` so `latest.json` generation falls through to the Windows-only manifest path
+  - conclusion: tagged releases currently skip macOS **by policy/workflow shape**, not because `v0.6.11` has a proven current Rust compile break
+- `.github/workflows/build-macos.yml`
+  - manual macOS build workflow still exists
+  - but before this session it auto-uploaded built artifacts to the latest GitHub release on success, which is unsafe for verification-only runs
+
+### Changes made in this worktree
+- Added `core/client/tauri.macos.conf.json`
+  - sets macOS bundle targets to `["app", "dmg"]`
+  - keeps the shipped Windows `nsis` default in `tauri.conf.json` untouched
+  - purpose: on a real Mac or macOS runner, plain `cargo tauri build` now gets macOS bundle targets via Tauri's platform-specific config merge instead of inheriting the Windows-only `nsis` target
+- Updated `.github/workflows/build-macos.yml`
+  - added `workflow_dispatch` boolean input `upload_to_latest_release` (default `false`)
+  - gated the release-upload steps on that input
+  - purpose: allow safe non-publishing macOS CI verification runs
+
+### Verification performed
+- `core/client/tauri.macos.conf.json`
+  - parsed successfully with PowerShell `ConvertFrom-Json`
+- Real GitHub macOS runner sanity probe:
+  - dispatched `build-macos.yml` against remote ref `v0.6.11`
+  - run id: `24425653970`
+  - canceled intentionally before artifact upload to avoid mutating GitHub releases during investigation
+  - the job did start cleanly on `macos-15-arm64` and reached the Tauri CLI install step before cancellation
+- No viewer or control-plane runtime behavior changed
+- No server reboot performed
+- No GitHub push performed
+
+### Current conclusion
+- The old repo-level macOS Rust compile break from `v0.6.3` is already fixed in `v0.6.11`.
+- The current minimum safe scope is:
+  - macOS-specific Tauri bundle target override
+  - safe standalone macOS CI build verification path
+- I intentionally did **not** re-enable macOS as a hard dependency in `release.yml` during this pass.
+  - Reason: doing that without a full successful non-publishing end-to-end macOS build would risk blocking future Windows tag releases again.
+
+### Release impact
+- **Client packaging / standalone CI only**
+- Windows release pipeline intentionally left unchanged in this session to avoid destabilizing the shipped Windows baseline
+
+### Remaining next step
+- Run the updated standalone `build-macos.yml` on a real macOS runner with `upload_to_latest_release=false`.
+- If that completes successfully end-to-end, the next safe follow-up is a separate PR/worktree to decide whether `release.yml` should:
+  - stay Windows-only
+  - or reintroduce macOS artifacts and `darwin-aarch64` manifest entries behind an explicit release gate
+
+### Changelog note
+- `core/viewer/changelog.js` was intentionally **not** updated.
+  - This session changed build/package/workflow behavior only; no user-facing viewer/runtime behavior changed.
+
 ## 2026-04-10 Codex Handover Override
 
 This block supersedes the older v0.6.6 summary below it.

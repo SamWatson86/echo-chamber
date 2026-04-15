@@ -4,9 +4,24 @@
 
 // Mobile device detection — variable declared in state.js, assigned here
 var _isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+var _isMacOSDevice = (function() {
+  try {
+    var uaPlatform = navigator.userAgentData && navigator.userAgentData.platform;
+    if (uaPlatform && /mac/i.test(uaPlatform)) return true;
+  } catch (e) {}
+  var platform = navigator.platform || "";
+  var ua = navigator.userAgent || "";
+  return /Mac/i.test(platform) || /Macintosh|Mac OS X/i.test(ua);
+})();
+
+function isNoiseCancellationBlockedForPlatform() {
+  return _isMacOSDevice && !_isMobileDevice;
+}
 
 // ── State vars that depend on echoGet (settings.js) ──
-let noiseCancelEnabled = echoGet("echo-noise-cancel") !== "false"; // Default ON (#59)
+// macOS keeps the direct mic publish path for now. The optional RNNoise
+// sender.replaceTrack() step can kill live mic audio after join.
+let noiseCancelEnabled = !isNoiseCancellationBlockedForPlatform() && echoGet("echo-noise-cancel") !== "false"; // Default ON (#59)
 let ncSuppressionLevel = parseInt(echoGet("echo-nc-level") || "1", 10); // 0=light, 1=medium, 2=strong
 
 // Detects SIMD support for optimal WASM variant
@@ -21,6 +36,10 @@ async function detectSimdSupport() {
 // Noise cancellation applies ONLY to the microphone track — never screen share audio
 // Skip on mobile — too CPU-heavy and .wasm fetch triggers Samsung download interceptor
 async function enableNoiseCancellation() {
+  if (isNoiseCancellationBlockedForPlatform()) {
+    debugLog("[noise-cancel] Skipped on macOS to preserve microphone stability");
+    return;
+  }
   if (_isMobileDevice) { debugLog("[noise-cancel] Skipped on mobile device"); return; }
   if (!room || !micEnabled) return;
   var LK = getLiveKitClient();
@@ -157,7 +176,10 @@ function disableNoiseCancellation() {
 function updateNoiseCancelUI() {
   var btn = document.getElementById("nc-toggle-btn");
   if (btn) {
-    btn.textContent = noiseCancelEnabled ? "ON" : "OFF";
-    btn.classList.toggle("is-on", noiseCancelEnabled);
+    var blocked = isNoiseCancellationBlockedForPlatform();
+    btn.textContent = !blocked && noiseCancelEnabled ? "ON" : "OFF";
+    btn.classList.toggle("is-on", !blocked && noiseCancelEnabled);
+    btn.disabled = blocked;
+    btn.title = blocked ? "Unavailable on macOS while microphone stability is being hardened" : "";
   }
 }

@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-04-14",
+    title: "Mac Mic Stability",
+    notes: [
+      "macOS joins now keep the direct microphone publish path instead of layering the optional RNNoise noise-cancel track swap on top. This targets the case where a Mac user could be heard briefly, then go silent while camera kept working.",
+      "Windows and the existing non-macOS noise-cancel flow stay as-is. On macOS the Noise Cancellation toggle is temporarily disabled so microphone audio stays on the stable baseline while that path is hardened."
+    ]
+  },
+  {
     version: "2026-04-13l",
     title: "Win10 Entire Screen Fix",
     notes: [

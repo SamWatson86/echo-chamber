@@ -1,7 +1,13 @@
 name: Build macOS
 
 on:
-  workflow_dispatch:  # Manual trigger from GitHub UI only (macOS runners cost 10x minutes)
+  workflow_dispatch:
+    inputs:
+      upload_to_latest_release:
+        description: Upload built macOS artifacts to the latest GitHub release
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,6 +80,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Get latest release tag
+        if: inputs.upload_to_latest_release
         id: latest
         shell: bash
         run: |
@@ -84,7 +91,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts to latest release
-        if: steps.latest.outputs.tag != ''
+        if: inputs.upload_to_latest_release && steps.latest.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.latest.outputs.tag }}
