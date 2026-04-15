@@ -1,5 +1,39 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-04-15 legacy Mac build restored for Jeff/Spencer testing
+
+**Last Updated**: 2026-04-15
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Identified the earlier Mac artifact the team was actually using before the later `v0.6.x` work.
+
+### What the legacy build is
+- The older Mac build Jeff/Spencer were using is **not** a `v0.6.x` desktop artifact.
+- The exact artifact is:
+  - workflow run: `22003249635`
+  - run title: `Fix macOS device enumeration and mic/camera permissions`
+  - commit: `63b58c666aab8accf8a62cb3877cbcbe3afc41ea`
+  - artifact id: `5506162212`
+  - artifact name: `echo-chamber-macos-dmg`
+- The DMG inside that artifact is:
+  - `Echo Chamber_0.3.0_aarch64.dmg`
+
+### Why this matters
+- This matches Sam's clarification that the old Mac testing track was specifically built for Jeff and Spencer on Apple Silicon.
+- If the goal is to restore the older behavior where audio worked but screen sharing did not, this `v0.3.0` Mac DMG is the correct legacy target, not the new `v0.6.11` experimental Mac branch artifact.
+
+### Availability
+- The GitHub Actions artifact is still live as of `2026-04-15`.
+- Artifact expiry from GitHub API:
+  - `2026-05-14T21:21:16Z`
+- Local verification:
+  - downloaded successfully with `gh run download`
+  - confirmed file: `Echo Chamber_0.3.0_aarch64.dmg`
+
+### Practical usage
+- Jeff can test from the legacy artifact page for run `22003249635`.
+- If a fresh rebuilt legacy artifact is needed later, do **not** dispatch the old workflow as-is without checking it first, because the older standalone macOS workflow uploaded DMGs directly to the latest GitHub release.
+
 ## 2026-04-14 macOS runtime audio follow-up
 
 **Last Updated**: 2026-04-14
