@@ -1,5 +1,44 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-04-15 Mac prerelease published
+
+**Last Updated**: 2026-04-15
+**Worktree**: `F:\EC-macos-build`
+**Branch**: `codex/macos-build-enable`
+**Status**: Mac-only prerelease published on GitHub for Jeff/Spencer manual download.
+
+### Published release
+- GitHub prerelease tag:
+  - `mac-audio-canary-0.6.11-1`
+- Release URL:
+  - `https://github.com/SamWatson86/echo-chamber/releases/tag/mac-audio-canary-0.6.11-1`
+- Release target commit:
+  - `348a50d4bc0c0ae95d33068ce813dc5e5c8344e8`
+
+### Build provenance
+- Built from standalone macOS workflow run:
+  - run id: `24462092503`
+  - workflow: `build-macos.yml`
+  - ref: `codex/macos-build-enable`
+- Run completed successfully before publishing the release assets.
+
+### Assets published
+- `Echo Chamber_0.6.11_aarch64.dmg`
+- `Echo Chamber.app.tar.gz`
+- `Echo Chamber.app.tar.gz.sig`
+
+### Intended usage
+- Mac users should manually download the DMG from this prerelease.
+- This is an **Apple Silicon** build.
+- This is an **audio/camera/join** canary.
+- macOS Noise Cancellation remains intentionally disabled to avoid the mic-dropout path.
+
+### Explicitly not changed
+- Windows release pipeline
+- `latest.json`
+- automatic macOS updater rollout
+- macOS screen-sharing acceptance scope
+
 ## 2026-04-15 Mac prerelease publishing decision
 
 **Last Updated**: 2026-04-15
