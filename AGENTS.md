@@ -15,6 +15,10 @@ Echo Chamber is a self-hosted real-time communication app. In this repo, active 
 - Prefer small, focused diffs over broad rewrites.
 - Keep release impact explicit: server-only vs desktop-binary vs both.
 - Avoid one-off patterns; prefer conventional, maintainable approaches.
+- Before creating a new bugfix branch or PR, check existing open PRs, issues,
+  branches, and `CURRENT_SESSION.md` for the same symptom or fix area. If
+  matching work exists, validate, rebase/port, close, or explicitly supersede
+  that work instead of opening a duplicate PR.
 
 ## Quality expectations
 - Any user-facing behavior change should include verification evidence.
