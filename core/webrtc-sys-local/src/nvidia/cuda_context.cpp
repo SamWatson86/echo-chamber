@@ -3,13 +3,19 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 
+#include <fstream>
+
 #if defined(WIN32)
 #include <windows.h>
 #else
 #include <dlfcn.h>
 #endif
 
+#include <cstdlib>
 #include <iostream>
+#include <iterator>
+#include <optional>
+#include <string>
 
 #if defined(WIN32)
 static const char CUDA_DYNAMIC_LIBRARY[] = "nvcuda.dll";
@@ -17,7 +23,184 @@ static const char CUDA_DYNAMIC_LIBRARY[] = "nvcuda.dll";
 static const char CUDA_DYNAMIC_LIBRARY[] = "libcuda.so.1";
 #endif
 
+static bool ReadForceSoftwareEncoderFlagFromConfig(
+    const std::string& config_path) {
+  std::ifstream in(config_path, std::ios::binary);
+  if (!in.is_open()) {
+    return false;
+  }
+
+  std::string contents((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+  const auto key_pos = contents.find("\"force_software_encoder\"");
+  if (key_pos == std::string::npos) {
+    return false;
+  }
+
+  const auto colon_pos = contents.find(':', key_pos);
+  if (colon_pos == std::string::npos) {
+    return false;
+  }
+
+  const auto true_pos = contents.find("true", colon_pos);
+  const auto false_pos = contents.find("false", colon_pos);
+  return true_pos != std::string::npos &&
+         (false_pos == std::string::npos || true_pos < false_pos);
+}
+
+static std::optional<bool> ReadForceSoftwareEncoderOverrideFromConfig(
+    const std::string& config_path) {
+  std::ifstream in(config_path, std::ios::binary);
+  if (!in.is_open()) {
+    return std::nullopt;
+  }
+
+  std::string contents((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+  const auto key_pos = contents.find("\"force_software_encoder\"");
+  if (key_pos == std::string::npos) {
+    return std::nullopt;
+  }
+
+  const auto colon_pos = contents.find(':', key_pos);
+  if (colon_pos == std::string::npos) {
+    return std::nullopt;
+  }
+
+  const auto true_pos = contents.find("true", colon_pos);
+  const auto false_pos = contents.find("false", colon_pos);
+  if (true_pos != std::string::npos &&
+      (false_pos == std::string::npos || true_pos < false_pos)) {
+    return true;
+  }
+  if (false_pos != std::string::npos &&
+      (true_pos == std::string::npos || false_pos < true_pos)) {
+    return false;
+  }
+
+  return std::nullopt;
+}
+
+static bool ReadForceSoftwareEncoderFlagFromInstalledConfig() {
+#if defined(WIN32)
+  char exe_path[MAX_PATH] = {0};
+  const DWORD len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+  if (len > 0 && len < MAX_PATH) {
+    std::string config_path(exe_path, len);
+    const auto slash_pos = config_path.find_last_of("\\/");
+    if (slash_pos != std::string::npos) {
+      config_path.resize(slash_pos + 1);
+      config_path += "config.json";
+      if (ReadForceSoftwareEncoderFlagFromConfig(config_path)) {
+        return true;
+      }
+    }
+  }
+
+  const char* local_appdata = std::getenv("LOCALAPPDATA");
+  if (local_appdata && *local_appdata) {
+    const std::string local_config =
+        std::string(local_appdata) + "\\Echo Chamber\\config.json";
+    if (ReadForceSoftwareEncoderFlagFromConfig(local_config)) {
+      return true;
+    }
+  }
+#endif
+
+  return false;
+}
+
+static std::optional<bool> ReadForceSoftwareEncoderOverrideFromInstalledConfig() {
+#if defined(WIN32)
+  char exe_path[MAX_PATH] = {0};
+  const DWORD len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+  if (len > 0 && len < MAX_PATH) {
+    std::string config_path(exe_path, len);
+    const auto slash_pos = config_path.find_last_of("\\/");
+    if (slash_pos != std::string::npos) {
+      config_path.resize(slash_pos + 1);
+      config_path += "config.json";
+      if (auto override_value =
+              ReadForceSoftwareEncoderOverrideFromConfig(config_path)) {
+        return override_value;
+      }
+    }
+  }
+
+  const char* local_appdata = std::getenv("LOCALAPPDATA");
+  if (local_appdata && *local_appdata) {
+    const std::string local_config =
+        std::string(local_appdata) + "\\Echo Chamber\\config.json";
+    if (auto override_value =
+            ReadForceSoftwareEncoderOverrideFromConfig(local_config)) {
+      return override_value;
+    }
+  }
+#endif
+
+  return std::nullopt;
+}
+
+static uint32_t DetectWindowsBuildNumber() {
+#if defined(WIN32)
+  typedef struct _OSVERSIONINFOEXW_FFI {
+    uint32_t dwOSVersionInfoSize;
+    uint32_t dwMajorVersion;
+    uint32_t dwMinorVersion;
+    uint32_t dwBuildNumber;
+    uint32_t dwPlatformId;
+    wchar_t szCSDVersion[128];
+    uint16_t wServicePackMajor;
+    uint16_t wServicePackMinor;
+    uint16_t wSuiteMask;
+    uint8_t wProductType;
+    uint8_t wReserved;
+  } OSVERSIONINFOEXW_FFI;
+
+  HMODULE ntdll = LoadLibraryW(L"ntdll.dll");
+  if (!ntdll) {
+    return 0;
+  }
+
+  using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOEXW_FFI*);
+  auto rtl_get_version =
+      reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+  if (!rtl_get_version) {
+    return 0;
+  }
+
+  OSVERSIONINFOEXW_FFI info = {};
+  info.dwOSVersionInfoSize = sizeof(info);
+  if (rtl_get_version(&info) != 0) {
+    return 0;
+  }
+  return info.dwBuildNumber;
+#else
+  return 0;
+#endif
+}
+
 namespace livekit_ffi {
+
+bool IsSoftwareEncoderForced() {
+  const char* raw = std::getenv("ECHO_FORCE_SOFTWARE_ENCODER");
+  if (raw && std::string(raw) == "1") {
+    return true;
+  }
+
+  if (auto override_value = ReadForceSoftwareEncoderOverrideFromInstalledConfig()) {
+    return *override_value;
+  }
+
+#if defined(WIN32)
+  const uint32_t build = DetectWindowsBuildNumber();
+  if (build > 0 && build < 22000) {
+    return true;
+  }
+#endif
+
+  return ReadForceSoftwareEncoderFlagFromInstalledConfig();
+}
 
 #define __CUCTX_CUDA_CALL(call, ret)                        \
   CUresult err__ = call;                                    \
@@ -99,10 +282,19 @@ CudaContext* CudaContext::GetInstance() {
 }
 
 bool CudaContext::IsAvailable() {
+  if (IsSoftwareEncoderForced()) {
+    RTC_LOG(LS_INFO) << "ECHO_FORCE_SOFTWARE_ENCODER=1 — treating CUDA as unavailable";
+    return false;
+  }
   return load_cuda_modules() && check_cuda_device();
 }
 
 bool CudaContext::Initialize() {
+  if (IsSoftwareEncoderForced()) {
+    RTC_LOG(LS_INFO) << "ECHO_FORCE_SOFTWARE_ENCODER=1 — skipping CUDA context initialization";
+    return false;
+  }
+
   // Initialize CUDA context
 
   bool success = load_cuda_modules();

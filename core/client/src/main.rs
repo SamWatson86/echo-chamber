@@ -22,6 +22,8 @@ mod capture_pipeline;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
+mod file_debug_log;
+#[cfg(target_os = "windows")]
 mod gpu_converter;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
@@ -40,6 +42,7 @@ const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 #[derive(Deserialize)]
 struct Config {
     server: Option<String>,
+    force_software_encoder: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -50,25 +53,64 @@ struct AppInfo {
     server: String,
 }
 
-fn updater_enabled() -> bool {
-    let version = env!("CARGO_PKG_VERSION");
-    if version.contains('-') {
-        eprintln!(
-            "[updater] disabled for prerelease/test build v{}",
-            version
-        );
+fn is_local_test_build_version(version: &str) -> bool {
+    let lower = version.trim().to_ascii_lowercase();
+    let Some((_, prerelease)) = lower.split_once('-') else {
         return false;
+    };
+    prerelease
+        .split('.')
+        .any(|part| matches!(part, "local" | "dev" | "test" | "lab" | "dirty"))
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_build_number() -> u32 {
+    // Use RtlGetVersion (ntdll) — GetVersionEx lies on Win8.1+
+    #[repr(C)]
+    struct OsVersionInfoExW {
+        dw_os_version_info_size: u32,
+        dw_major_version: u32,
+        dw_minor_version: u32,
+        dw_build_number: u32,
+        dw_platform_id: u32,
+        sz_csd_version: [u16; 128],
+        w_service_pack_major: u16,
+        w_service_pack_minor: u16,
+        w_suite_mask: u16,
+        w_product_type: u8,
+        w_reserved: u8,
     }
-    if std::env::var_os("ECHO_DISABLE_AUTO_UPDATER").is_some() {
-        eprintln!("[updater] disabled by ECHO_DISABLE_AUTO_UPDATER");
-        return false;
+
+    unsafe {
+        let lib =
+            windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("ntdll.dll"));
+        if let Ok(h) = lib {
+            let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
+                h,
+                windows::core::s!("RtlGetVersion"),
+            );
+            if let Some(rtl_get_version) = proc {
+                let func: extern "system" fn(*mut OsVersionInfoExW) -> i32 =
+                    std::mem::transmute(rtl_get_version);
+                let mut info: OsVersionInfoExW = std::mem::zeroed();
+                info.dw_os_version_info_size = std::mem::size_of::<OsVersionInfoExW>() as u32;
+                func(&mut info);
+                return info.dw_build_number;
+            }
+        }
     }
-    true
+
+    0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_windows_build_number() -> u32 {
+    0
 }
 
 /// Load config.json from next to the executable.
 /// Falls back to defaults if missing or invalid.
-fn load_config() -> String {
+fn load_config() -> Config {
     let config_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("config.json")))
@@ -78,11 +120,28 @@ fn load_config() -> String {
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
             let contents = contents.trim_start_matches('\u{FEFF}');
             if let Ok(cfg) = serde_json::from_str::<Config>(contents) {
-                if let Some(server) = cfg.server {
-                    let server = server.trim_end_matches('/').to_string();
-                    eprintln!("[config] server = {}", server);
-                    return server;
+                let server = cfg
+                    .server
+                    .as_deref()
+                    .unwrap_or(DEFAULT_SERVER)
+                    .trim_end_matches('/')
+                    .to_string();
+                eprintln!("[config] server = {}", server);
+                match cfg.force_software_encoder {
+                    Some(force_software_encoder) => {
+                        eprintln!(
+                            "[config] force_software_encoder = {}",
+                            force_software_encoder
+                        );
+                    }
+                    None => {
+                        eprintln!("[config] force_software_encoder = <auto>");
+                    }
                 }
+                return Config {
+                    server: Some(server),
+                    force_software_encoder: cfg.force_software_encoder,
+                };
             }
         }
     }
@@ -91,7 +150,10 @@ fn load_config() -> String {
         "[config] no config.json found, using default: {}",
         DEFAULT_SERVER
     );
-    DEFAULT_SERVER.to_string()
+    Config {
+        server: Some(DEFAULT_SERVER.to_string()),
+        force_software_encoder: None,
+    }
 }
 
 /// Clear webview cache when the app version changes (prevents stale content after update)
@@ -155,9 +217,15 @@ fn get_control_url(server: tauri::State<'_, String>) -> String {
 
 #[tauri::command]
 async fn check_for_updates(app: tauri::AppHandle) -> Result<String, String> {
-    if !updater_enabled() {
-        return Ok("disabled".to_string());
+    let current_version = env!("CARGO_PKG_VERSION");
+    if is_local_test_build_version(current_version) {
+        eprintln!(
+            "[updater] manual check skipped for local test build v{}",
+            current_version
+        );
+        return Ok("local_test_build".to_string());
     }
+
     let updater = app.updater_builder().build().map_err(|e| e.to_string())?;
     match updater.check().await {
         Ok(Some(update)) => {
@@ -284,52 +352,10 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 fn get_os_build_number() -> u32 {
+    let build = detect_windows_build_number();
     #[cfg(target_os = "windows")]
-    {
-        // Use RtlGetVersion (ntdll) — GetVersionEx lies on Win8.1+
-        #[repr(C)]
-        struct OsVersionInfoExW {
-            dw_os_version_info_size: u32,
-            dw_major_version: u32,
-            dw_minor_version: u32,
-            dw_build_number: u32,
-            dw_platform_id: u32,
-            sz_csd_version: [u16; 128],
-            w_service_pack_major: u16,
-            w_service_pack_minor: u16,
-            w_suite_mask: u16,
-            w_product_type: u8,
-            w_reserved: u8,
-        }
-
-        unsafe {
-            let lib =
-                windows::Win32::System::LibraryLoader::LoadLibraryW(windows::core::w!("ntdll.dll"));
-            if let Ok(h) = lib {
-                let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
-                    h,
-                    windows::core::s!("RtlGetVersion"),
-                );
-                if let Some(rtl_get_version) = proc {
-                    let func: extern "system" fn(*mut OsVersionInfoExW) -> i32 =
-                        std::mem::transmute(rtl_get_version);
-                    let mut info: OsVersionInfoExW = std::mem::zeroed();
-                    info.dw_os_version_info_size = std::mem::size_of::<OsVersionInfoExW>() as u32;
-                    func(&mut info);
-                    eprintln!(
-                        "[os] Windows {}.{} build {}",
-                        info.dw_major_version, info.dw_minor_version, info.dw_build_number
-                    );
-                    return info.dw_build_number;
-                }
-            }
-        }
-        0
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        0
-    }
+    eprintln!("[os] Windows build {}", build);
+    build
 }
 
 // ── Native Screen Capture IPC Commands ──
@@ -346,25 +372,17 @@ async fn start_screen_share(
     source_id: u64,
     sfu_url: String,
     token: String,
-    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    screen_capture::start_share(
-        source_id,
-        sfu_url,
-        token,
-        publish_profile.unwrap_or_default(),
-        app,
-        health_arc,
-    ).await
+    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
 }
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn stop_screen_share() -> Result<(), String> {
-    screen_capture::stop_share().await
+fn stop_screen_share() {
+    screen_capture::stop_share();
 }
 
 #[cfg(target_os = "windows")]
@@ -388,20 +406,11 @@ async fn start_desktop_capture(
     fullscreen: bool,
     sfu_url: String,
     token: String,
-    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    desktop_capture::start(
-        hwnd,
-        fullscreen,
-        sfu_url,
-        token,
-        publish_profile.unwrap_or_default(),
-        app,
-        health_arc,
-    ).await
+    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically
@@ -422,8 +431,8 @@ async fn start_screen_share_monitor(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn stop_desktop_capture() -> Result<(), String> {
-    desktop_capture::stop().await
+fn stop_desktop_capture() {
+    desktop_capture::stop();
 }
 
 #[cfg(target_os = "windows")]
@@ -455,7 +464,45 @@ fn main() {
         );
     }
 
-    let server = load_config();
+    let config = load_config();
+    let server = config
+        .server
+        .clone()
+        .unwrap_or_else(|| DEFAULT_SERVER.to_string());
+    #[cfg(target_os = "windows")]
+    let windows_build = detect_windows_build_number();
+    #[cfg(not(target_os = "windows"))]
+    let windows_build = 0u32;
+    let auto_force_software_encoder =
+        config.force_software_encoder.is_none() && windows_build > 0 && windows_build < 22000;
+    let force_software_encoder = config
+        .force_software_encoder
+        .unwrap_or(auto_force_software_encoder);
+
+    #[cfg(target_os = "windows")]
+    if auto_force_software_encoder {
+        eprintln!(
+            "[config] Windows build {} detected — forcing software H264 on Win10 native capture",
+            windows_build
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        file_debug_log::reset();
+        file_debug_log::append(&format!(
+            "[startup] echo-core-client boot server={} force_software_encoder={} auto_force_software_encoder={} windows_build={}",
+            server, force_software_encoder, auto_force_software_encoder, windows_build
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        if force_software_encoder {
+            std::env::set_var("ECHO_FORCE_SOFTWARE_ENCODER", "1");
+            eprintln!("[init] ECHO_FORCE_SOFTWARE_ENCODER=1");
+        }
+    }
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -510,32 +557,41 @@ fn main() {
             #[cfg(target_os = "windows")]
             {
                 std::thread::spawn(|| {
+                    let force_software =
+                        std::env::var("ECHO_FORCE_SOFTWARE_ENCODER").ok().as_deref() == Some("1");
+                    if force_software {
+                        eprintln!(
+                            "[init] force_software_encoder active — skipping CUDA probe and preferring OpenH264"
+                        );
+                    }
                     // Direct CUDA probe to diagnose NVENC availability
                     unsafe {
-                        let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(
-                            windows::core::w!("nvcuda.dll"),
-                        );
-                        match lib {
-                            Ok(h) => {
-                                // nvcuda.dll loaded — NVIDIA driver is present.
-                                // Set the global flag so capture_pipeline uses the
-                                // hardware (240fps) frame interval instead of the
-                                // software (20fps) cap. Also used by capture_health
-                                // to default EncoderType correctly for the chip.
-                                crate::capture_pipeline::HAS_NVCUDA.store(true, std::sync::atomic::Ordering::Relaxed);
-                                let cu_init = windows::Win32::System::LibraryLoader::GetProcAddress(
-                                    h, windows::core::s!("cuInit"),
-                                );
-                                if let Some(init_fn) = cu_init {
-                                    let init: extern "system" fn(u32) -> i32 = std::mem::transmute(init_fn);
-                                    let result = init(0);
-                                    eprintln!("[init] CUDA cuInit(0) = {} (0=success)", result);
-                                } else {
-                                    eprintln!("[init] CUDA cuInit not found in nvcuda.dll");
+                        if !force_software {
+                            let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(
+                                windows::core::w!("nvcuda.dll"),
+                            );
+                            match lib {
+                                Ok(h) => {
+                                    // nvcuda.dll loaded — NVIDIA driver is present.
+                                    // Set the global flag so capture_pipeline uses the
+                                    // hardware (240fps) frame interval instead of the
+                                    // software (20fps) cap. Also used by capture_health
+                                    // to default EncoderType correctly for the chip.
+                                    crate::capture_pipeline::HAS_NVCUDA.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    let cu_init = windows::Win32::System::LibraryLoader::GetProcAddress(
+                                        h, windows::core::s!("cuInit"),
+                                    );
+                                    if let Some(init_fn) = cu_init {
+                                        let init: extern "system" fn(u32) -> i32 = std::mem::transmute(init_fn);
+                                        let result = init(0);
+                                        eprintln!("[init] CUDA cuInit(0) = {} (0=success)", result);
+                                    } else {
+                                        eprintln!("[init] CUDA cuInit not found in nvcuda.dll");
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                eprintln!("[init] nvcuda.dll load failed: {e} — software OpenH264 fallback, capture capped at 20fps");
+                                Err(e) => {
+                                    eprintln!("[init] nvcuda.dll load failed: {e} — software OpenH264 fallback, capture capped at 20fps");
+                                }
                             }
                         }
                     }
@@ -561,48 +617,54 @@ fn main() {
             .build()?;
 
             // Check for updates in the background
-            if updater_enabled() {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    // Small delay so the window is visible before any update dialog
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let updater = match handle.updater_builder().build() {
-                        Ok(u) => u,
-                        Err(e) => {
-                            eprintln!("[updater] build failed: {}", e);
-                            return;
-                        }
-                    };
-                    match updater.check().await {
-                        Ok(Some(update)) => {
-                            eprintln!(
-                                "[updater] update available: v{} -> v{}",
-                                env!("CARGO_PKG_VERSION"),
-                                update.version
-                            );
-                            match update
-                                .download_and_install(
-                                    |ev, _| {
-                                        eprintln!("[updater] download progress: {:?}", ev);
-                                    },
-                                    || {
-                                        eprintln!("[updater] ready to install, app will restart...");
-                                    },
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    eprintln!("[updater] install complete, restarting...");
-                                    handle.restart();
-                                }
-                                Err(e) => eprintln!("[updater] install failed: {}", e),
-                            }
-                        }
-                        Ok(None) => eprintln!("[updater] up to date (v{})", env!("CARGO_PKG_VERSION")),
-                        Err(e) => eprintln!("[updater] check failed: {}", e),
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Small delay so the window is visible before any update dialog
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let current_version = env!("CARGO_PKG_VERSION");
+                if is_local_test_build_version(current_version) {
+                    eprintln!(
+                        "[updater] background check disabled for local test build v{}",
+                        current_version
+                    );
+                    return;
+                }
+                let updater = match handle.updater_builder().build() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        eprintln!("[updater] build failed: {}", e);
+                        return;
                     }
-                });
-            }
+                };
+                match updater.check().await {
+                    Ok(Some(update)) => {
+                        eprintln!(
+                            "[updater] update available: v{} -> v{}",
+                            env!("CARGO_PKG_VERSION"),
+                            update.version
+                        );
+                        match update
+                            .download_and_install(
+                                |ev, _| {
+                                    eprintln!("[updater] download progress: {:?}", ev);
+                                },
+                                || {
+                                    eprintln!("[updater] ready to install, app will restart...");
+                                },
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                eprintln!("[updater] install complete, restarting...");
+                                handle.restart();
+                            }
+                            Err(e) => eprintln!("[updater] install failed: {}", e),
+                        }
+                    }
+                    Ok(None) => eprintln!("[updater] up to date (v{})", env!("CARGO_PKG_VERSION")),
+                    Err(e) => eprintln!("[updater] check failed: {}", e),
+                }
+            });
 
             Ok(())
         })

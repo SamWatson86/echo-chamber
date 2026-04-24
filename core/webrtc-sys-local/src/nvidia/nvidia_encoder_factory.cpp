@@ -1,5 +1,6 @@
 #include "nvidia_encoder_factory.h"
 
+#include <cstdlib>
 #include <memory>
 
 #include "cuda_context.h"
@@ -51,6 +52,11 @@ NvidiaVideoEncoderFactory::NvidiaVideoEncoderFactory() {
 NvidiaVideoEncoderFactory::~NvidiaVideoEncoderFactory() {}
 
 bool NvidiaVideoEncoderFactory::IsSupported() {
+  if (livekit_ffi::IsSoftwareEncoderForced()) {
+    std::cout << "[NVENC-factory] force_software_encoder enabled — skipping NVENC registration" << std::endl;
+    return false;
+  }
+
   if (!livekit_ffi::CudaContext::IsAvailable()) {
     RTC_LOG(LS_WARNING) << "Cuda Context is not available.";
     return false;

@@ -110,6 +110,43 @@ function createLockedVideoElement(track) {
   return element;
 }
 
+function createAttachedVideoElement(track) {
+  if (!track) return null;
+  let element = null;
+  try {
+    element = track.attach();
+  } catch (err) {
+    debugLog(`track.attach() failed for ${track.sid || "unknown"}: ${err.message}`);
+  }
+  if (!element) {
+    element = document.createElement("video");
+    try {
+      track.attach(element);
+    } catch (err) {
+      debugLog(`track.attach(video) failed for ${track.sid || "unknown"}: ${err.message}`);
+    }
+  }
+  if (!element) {
+    return createLockedVideoElement(track);
+  }
+  element._lkTrack = track;
+  if (!element.srcObject && track.mediaStreamTrack) {
+    element.srcObject = new MediaStream([track.mediaStreamTrack]);
+  }
+  element.autoplay = true;
+  element.playsInline = true;
+  try {
+    element.defaultMuted = true;
+  } catch (_) {}
+  element.muted = true;
+  Object.defineProperty(element, 'muted', {
+    get: () => true,
+    set: () => {},
+    configurable: true
+  });
+  return element;
+}
+
 function configureVideoElement(element, muted = true) {
   if (!element) return;
   element.autoplay = true;

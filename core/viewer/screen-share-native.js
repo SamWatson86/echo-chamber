@@ -66,11 +66,27 @@ async function startScreenShareManual() {
 
   // ── Native client path: custom picker → Tauri IPC ──
   var isNativeClient = !!window.__ECHO_NATIVE__;
+  var source = null;
+  var osBuild = 99999;
+  var wgcSupported = true;
 
   if (isNativeClient) {
-    var source = await showCapturePicker();
+    source = await showCapturePicker();
     if (!source) return;
 
+    // Detect OS build number for WGC availability (24H2+ = build 26100+)
+    // If the IPC command doesn't exist (older client binary), assume WGC is supported
+    // and let it fail naturally in the fallback chain rather than skipping it.
+    try {
+      osBuild = await tauriInvoke('get_os_build_number');
+      debugLog('[os] Windows build: ' + osBuild);
+    } catch (e) {
+      debugLog('[os] build detection unavailable (older client), assuming WGC supported');
+    }
+    wgcSupported = osBuild >= 26100;
+  }
+
+  if (isNativeClient) {
     // Step 1: get control URL
     var controlUrl = _echoServerUrl;
     if (!controlUrl) { showToast('No server URL configured', 8000); return; }
@@ -97,18 +113,6 @@ async function startScreenShareManual() {
     }
 
     if (!screenToken) { showToast('No token received from server', 8000); return; }
-
-    // Detect OS build number for WGC availability (24H2+ = build 26100+)
-    // If the IPC command doesn't exist (older client binary), assume WGC is supported
-    // and let it fail naturally in the fallback chain rather than skipping it.
-    var osBuild = 99999;
-    try {
-      osBuild = await tauriInvoke('get_os_build_number');
-      debugLog('[os] Windows build: ' + osBuild);
-    } catch (e) {
-      debugLog('[os] build detection unavailable (older client), assuming WGC supported');
-    }
-    var wgcSupported = osBuild >= 26100;
 
     try {
       await _startNativeCaptureStopListeners();
