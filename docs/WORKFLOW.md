@@ -11,15 +11,21 @@
 2. Use pull requests for all changes.
 3. Required verification checks must pass before merge.
 4. Prefer small, focused PRs unless intentionally batching foundational work.
+5. Before starting a bugfix PR, check open PRs, issues, branches, and
+   `CURRENT_SESSION.md` for the same symptom or fix area. Reuse, update,
+   rebase/port, close, or explicitly supersede existing work instead of
+   opening duplicate PRs.
 
 ## Typical flow
 
 1. Branch from `main`.
-2. Implement change.
-3. Run quick verification locally.
-4. Push branch and open PR.
-5. Ensure CI checks pass.
-6. Merge.
+2. For bugfixes, confirm there is no matching open PR, issue, branch, or
+   deferred note in `CURRENT_SESSION.md`.
+3. Implement change.
+4. Run quick verification locally.
+5. Push branch and open PR.
+6. Ensure CI checks pass.
+7. Merge.
 
 ## PR description minimum
 
