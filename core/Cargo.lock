@@ -1307,6 +1307,8 @@ name = "echo-core-client"
 version = "0.6.11"
 dependencies = [
  "base64 0.22.1",
+ "futures-util",
+ "libwebrtc",
  "livekit",
  "parking_lot",
  "reqwest 0.12.28",

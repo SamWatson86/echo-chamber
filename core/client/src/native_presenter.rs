@@ -107,6 +107,21 @@ pub(crate) fn native_presenter_identity(viewer_identity: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeTrackSource {
+    ScreenShare,
+    Camera,
+    Other,
+}
+
+pub(crate) fn is_target_screen_track(
+    target_track_sid: &str,
+    publication_track_sid: &str,
+    source: NativeTrackSource,
+) -> bool {
+    source == NativeTrackSource::ScreenShare && target_track_sid == publication_track_sid
+}
+
 pub(crate) struct NativePresenterManager {
     generation: AtomicU64,
     status: Mutex<NativePresenterStatus>,
@@ -205,8 +220,31 @@ impl NativePresenterManager {
         request: NativePresenterStartRequest,
     ) -> Result<NativePresenterStatus, String> {
         self.validate_start_request(&request)?;
-        self.mark_starting(&request);
+        let generation = self.mark_starting(&request);
+        let manager = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = run_receive_probe(manager.clone(), generation, request).await {
+                if manager.generation() == generation {
+                    manager.set_fallback(&error);
+                }
+            }
+        });
         Ok(self.status())
+    }
+
+    pub(crate) fn record_native_frame_sample(&self, frames: u64, elapsed_secs: f64) {
+        let fps = if elapsed_secs > 0.0 {
+            Some(((frames as f64 / elapsed_secs) * 10.0).round() / 10.0)
+        } else {
+            None
+        };
+        let mut status = self.status.lock();
+        status.state = NativePresenterState::Receiving;
+        status.native_frames_received = frames;
+        status.native_receive_fps = fps;
+        status.native_presented_fps = None;
+        status.queue_depth = 0;
+        status.updated_at_ms = self.elapsed_ms();
     }
 
     fn set_fallback(&self, reason: &str) {
@@ -222,6 +260,86 @@ impl NativePresenterManager {
             .elapsed()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn run_receive_probe(
+    manager: Arc<NativePresenterManager>,
+    generation: u64,
+    request: NativePresenterStartRequest,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use libwebrtc::video_stream::native::{NativeVideoStream, NativeVideoStreamOptions};
+    use livekit::{prelude::*, Room, RoomEvent, RoomOptions};
+    use std::time::{Duration, Instant};
+
+    livekit::ensure_runtime_initialized();
+    let mut options = RoomOptions::default();
+    options.auto_subscribe = true;
+    options.adaptive_stream = false;
+    options.dynacast = false;
+    let (_room, mut events) = Room::connect(&request.sfu_url, &request.token, options)
+        .await
+        .map_err(|error| format!("native presenter connect failed: {error}"))?;
+
+    let startup_deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if manager.generation() != generation {
+            return Ok(());
+        }
+        if Instant::now() > startup_deadline {
+            return Err("target screen track was not subscribed within 8 seconds".to_string());
+        }
+        let event = match tokio::time::timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => return Err("native presenter room event stream closed".to_string()),
+            Err(_) => continue,
+        };
+        let RoomEvent::TrackSubscribed { track, publication, .. } = event else {
+            continue;
+        };
+        let source = match publication.source() {
+            TrackSource::Screenshare => NativeTrackSource::ScreenShare,
+            TrackSource::Camera => NativeTrackSource::Camera,
+            _ => NativeTrackSource::Other,
+        };
+        if !is_target_screen_track(&request.track_sid, &publication.sid().to_string(), source) {
+            continue;
+        }
+        let RemoteTrack::Video(video_track) = track else {
+            continue;
+        };
+        let mut stream = NativeVideoStream::with_options(
+            video_track.rtc_track(),
+            NativeVideoStreamOptions {
+                queue_size_frames: Some(1),
+            },
+        );
+        let started = Instant::now();
+        let mut frames = 0u64;
+        while manager.generation() == generation {
+            let frame = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
+            match frame {
+                Ok(Some(frame)) => {
+                    let _width = frame.buffer.width();
+                    let _height = frame.buffer.height();
+                    frames += 1;
+                    let elapsed = started.elapsed().as_secs_f64();
+                    if frames == 1 || frames % 30 == 0 {
+                        manager.record_native_frame_sample(frames, elapsed);
+                    }
+                }
+                Ok(None) => return Err("native video stream ended".to_string()),
+                Err(_) => {
+                    if started.elapsed() > Duration::from_secs(2) {
+                        manager.record_native_frame_sample(frames, started.elapsed().as_secs_f64());
+                    }
+                }
+            }
+        }
+        stream.close();
+        return Ok(());
     }
 }
 
@@ -324,5 +442,53 @@ mod tests {
             status.fallback_reason.as_deref(),
             Some("user disabled native presenter")
         );
+    }
+
+    #[test]
+    fn track_match_requires_target_sid_and_screen_source() {
+        assert!(is_target_screen_track(
+            "TR_screen",
+            "TR_screen",
+            NativeTrackSource::ScreenShare
+        ));
+        assert!(!is_target_screen_track(
+            "TR_screen",
+            "TR_camera",
+            NativeTrackSource::ScreenShare
+        ));
+        assert!(!is_target_screen_track(
+            "TR_screen",
+            "TR_screen",
+            NativeTrackSource::Camera
+        ));
+    }
+
+    #[test]
+    fn frame_sample_updates_receive_fps() {
+        let manager = NativePresenterManager::new();
+        let request = NativePresenterStartRequest {
+            mode: NativePresenterMode::On,
+            room: "main".to_string(),
+            sfu_url: "wss://echo.example.invalid".to_string(),
+            token: "token".to_string(),
+            viewer_identity: "Sam-1234".to_string(),
+            participant_identity: "Spencer-2222".to_string(),
+            track_sid: "TR_screen".to_string(),
+            tile: NativePresenterTileRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                scale_factor: 1.0,
+            },
+        };
+        manager.mark_starting(&request);
+
+        manager.record_native_frame_sample(120, 2.0);
+
+        let status = manager.status();
+        assert_eq!(status.state, NativePresenterState::Receiving);
+        assert_eq!(status.native_frames_received, 120);
+        assert_eq!(status.native_receive_fps, Some(60.0));
     }
 }
