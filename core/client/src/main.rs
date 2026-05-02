@@ -40,6 +40,10 @@ use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(target_os = "windows")]
 use crate::capture_health::{CaptureHealthSnapshot, CaptureHealthState};
+#[cfg(target_os = "windows")]
+use crate::native_presenter::{
+    NativePresenterManager, NativePresenterStartRequest, NativePresenterStatus,
+};
 
 const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 
@@ -295,6 +299,32 @@ fn move_echo_to_display(
     display_placement::move_window_to_display(&window, &display_id)
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_native_presenter(
+    presenter: tauri::State<'_, Arc<NativePresenterManager>>,
+    request: NativePresenterStartRequest,
+) -> Result<NativePresenterStatus, String> {
+    presenter.start_receive_probe(request).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_native_presenter(
+    presenter: tauri::State<'_, Arc<NativePresenterManager>>,
+    reason: Option<String>,
+) -> Result<NativePresenterStatus, String> {
+    Ok(presenter.stop(reason.as_deref().unwrap_or("stopped by viewer")))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_native_presenter_status(
+    presenter: tauri::State<'_, Arc<NativePresenterManager>>,
+) -> Result<NativePresenterStatus, String> {
+    Ok(presenter.status())
+}
+
 #[tauri::command]
 fn list_capturable_windows() -> Vec<audio_capture::WindowInfo> {
     audio_capture::list_capturable_windows()
@@ -546,6 +576,8 @@ fn main() {
     // Gate the state management so macOS builds compile.
     #[cfg(target_os = "windows")]
     let builder = builder.manage(Arc::new(CaptureHealthState::new()));
+    #[cfg(target_os = "windows")]
+    let builder = builder.manage(NativePresenterManager::new());
 
     builder
         .invoke_handler(tauri::generate_handler![
@@ -588,6 +620,12 @@ fn main() {
             get_echo_display_status,
             #[cfg(target_os = "windows")]
             move_echo_to_display,
+            #[cfg(target_os = "windows")]
+            start_native_presenter,
+            #[cfg(target_os = "windows")]
+            stop_native_presenter,
+            #[cfg(target_os = "windows")]
+            get_native_presenter_status,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected

@@ -200,6 +200,15 @@ impl NativePresenterManager {
         self.generation.load(Ordering::SeqCst)
     }
 
+    pub(crate) async fn start_receive_probe(
+        self: &Arc<Self>,
+        request: NativePresenterStartRequest,
+    ) -> Result<NativePresenterStatus, String> {
+        self.validate_start_request(&request)?;
+        self.mark_starting(&request);
+        Ok(self.status())
+    }
+
     fn set_fallback(&self, reason: &str) {
         let mut status = self.status.lock();
         status.state = NativePresenterState::Fallback;
@@ -277,6 +286,43 @@ mod tests {
         assert_eq!(
             manager.status().fallback_reason.as_deref(),
             Some("native presenter mode is off")
+        );
+    }
+
+    #[test]
+    fn start_validation_accepts_on_mode_with_complete_target() {
+        let manager = NativePresenterManager::new();
+        let request = NativePresenterStartRequest {
+            mode: NativePresenterMode::On,
+            room: "main".to_string(),
+            sfu_url: "wss://echo.example.invalid".to_string(),
+            token: "token".to_string(),
+            viewer_identity: "Sam-1234".to_string(),
+            participant_identity: "Spencer-2222".to_string(),
+            track_sid: "TR_screen".to_string(),
+            tile: NativePresenterTileRect {
+                x: 10,
+                y: 20,
+                width: 1920,
+                height: 1080,
+                scale_factor: 1.0,
+            },
+        };
+
+        assert!(manager.validate_start_request(&request).is_ok());
+    }
+
+    #[test]
+    fn stop_returns_webview2_status() {
+        let manager = NativePresenterManager::new();
+
+        let status = manager.stop("user disabled native presenter");
+
+        assert_eq!(status.state, NativePresenterState::Stopped);
+        assert_eq!(status.render_path, "webview2");
+        assert_eq!(
+            status.fallback_reason.as_deref(),
+            Some("user disabled native presenter")
         );
     }
 }
