@@ -83,6 +83,7 @@ function openImageLightbox(src) {
 function registerScreenTrack(trackSid, publication, tile, identity) {
   if (!trackSid || !tile) return;
   screenTrackMeta.set(trackSid, {
+    trackSid,
     publication,
     tile,
     lastFix: 0,
@@ -91,11 +92,21 @@ function registerScreenTrack(trackSid, publication, tile, identity) {
     identity: identity || "",
     createdAt: performance.now()
   });
+  if (typeof maybeStartNativePresenterForScreenTrack === "function") {
+    maybeStartNativePresenterForScreenTrack({ trackSid, publication, tile, identity }).catch(function(e) {
+      debugLog("[native-presenter] register start failed: " + (e && e.message ? e.message : e));
+    });
+  }
   if (ENABLE_SCREEN_WATCHDOG) startScreenWatchdog();
 }
 
 function unregisterScreenTrack(trackSid) {
   if (!trackSid) return;
+  if (typeof stopNativePresenterForTrack === "function") {
+    stopNativePresenterForTrack(trackSid).catch(function(e) {
+      debugLog("[native-presenter] unregister stop failed: " + (e && e.message ? e.message : e));
+    });
+  }
   screenTrackMeta.delete(trackSid);
   if (screenTrackMeta.size === 0 && screenWatchdogTimer) {
     clearInterval(screenWatchdogTimer);

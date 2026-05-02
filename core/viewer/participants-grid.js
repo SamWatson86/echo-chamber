@@ -163,6 +163,11 @@ function removeScreenTile(trackSid) {
 }
 
 function clearMedia() {
+  if (typeof stopAllNativePresenter === "function") {
+    stopAllNativePresenter("media cleared").catch(function(e) {
+      debugLog("[native-presenter] clearMedia stop failed: " + (e && e.message ? e.message : e));
+    });
+  }
   screenGridEl.innerHTML = "";
   screenTileBySid.clear();
   screenTileByIdentity.clear();

@@ -35,7 +35,7 @@ var _SETTINGS_KEYS = [
   "echo-core-remember-name", "echo-core-remember-pass",
   "echo-core-identity-suffix", "echo-core-device-id",
   "echo-avatar-device", "echo-volume-prefs",
-  "echo-performance-mode",
+  "echo-performance-mode", "echo-native-presenter-mode",
   "echo-preferred-display-id", "echo-auto-move-to-preferred-display"
 ];
 
