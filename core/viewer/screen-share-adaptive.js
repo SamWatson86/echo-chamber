@@ -607,13 +607,16 @@ function startInboundScreenStatsMonitor() {
         var displayStatus = typeof getEchoDisplayStatusSnapshot === "function"
           ? getEchoDisplayStatusSnapshot()
           : null;
+        var nativePresenter = typeof getNativePresenterStatusSnapshot === "function"
+          ? getNativePresenterStatusSnapshot()
+          : null;
 
         // Fire the POST whenever we have ANYTHING to report — either receive-side
         // inbound stats (other publishers exist) OR local capture health (we are
         // a Tauri publisher). Without this OR, a publisher alone in the room
         // would never report their own capture telemetry. Discovered live
         // 2026-04-08 during Phase 2 smoke test.
-        if (inboundArr2.length > 0 || captureHealth || displayStatus) {
+        if (inboundArr2.length > 0 || captureHealth || displayStatus || nativePresenter) {
           fetch(apiUrl("/api/client-stats-report"), {
             method: "POST",
             headers: {
@@ -627,6 +630,7 @@ function startInboundScreenStatsMonitor() {
               inbound: inboundArr2,
               capture_health: captureHealth,
               display_status: displayStatus,
+              native_presenter: nativePresenter,
             }),
           }).catch(function() {});
         }

@@ -67,6 +67,8 @@ pub(crate) struct ClientStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) display_status: Option<ClientDisplayStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_presenter: Option<NativePresenterReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) watch_debug: Option<String>,
 }
 
@@ -132,6 +134,24 @@ pub(crate) struct ClientDisplayStatus {
     pub(crate) window_width: u32,
     pub(crate) window_height: u32,
     pub(crate) scale_factor: Option<f64>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct NativePresenterReport {
+    pub(crate) state: String,
+    pub(crate) render_path: String,
+    pub(crate) target_identity: Option<String>,
+    pub(crate) target_track_sid: Option<String>,
+    pub(crate) native_receive_fps: Option<f64>,
+    pub(crate) native_presented_fps: Option<f64>,
+    pub(crate) native_frames_received: u64,
+    pub(crate) native_frames_dropped: u64,
+    pub(crate) queue_depth: u32,
+    pub(crate) fallback_reason: Option<String>,
+    pub(crate) tile_width: Option<u32>,
+    pub(crate) tile_height: Option<u32>,
+    pub(crate) updated_at_ms: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -579,6 +599,58 @@ pub(crate) async fn admin_report_stats(
 /// Added 2026-04-08 to instrument the per-receiver mystery (Sam publishes ok,
 /// David sees 4fps, Decker sees 7fps — need to know which inbound numbers
 /// differ between receivers).
+fn merge_client_stats(existing: &mut ClientStats, payload: ClientStats, now: u64) {
+    existing.updated_at = now;
+    if !payload.name.is_empty() {
+        existing.name = payload.name;
+    }
+    if !payload.room.is_empty() {
+        existing.room = payload.room;
+    }
+    if payload.inbound.is_some() {
+        existing.inbound = payload.inbound;
+    }
+    if payload.capture_health.is_some() {
+        existing.capture_health = payload.capture_health;
+    }
+    if payload.display_status.is_some() {
+        existing.display_status = payload.display_status;
+    }
+    if payload.native_presenter.is_some() {
+        existing.native_presenter = payload.native_presenter;
+    }
+    if payload.watch_debug.is_some() {
+        existing.watch_debug = payload.watch_debug;
+    }
+    if payload.screen_fps.is_some() {
+        existing.screen_fps = payload.screen_fps;
+    }
+    if payload.screen_width.is_some() {
+        existing.screen_width = payload.screen_width;
+    }
+    if payload.screen_height.is_some() {
+        existing.screen_height = payload.screen_height;
+    }
+    if payload.screen_bitrate_kbps.is_some() {
+        existing.screen_bitrate_kbps = payload.screen_bitrate_kbps;
+    }
+    if payload.bwe_kbps.is_some() {
+        existing.bwe_kbps = payload.bwe_kbps;
+    }
+    if payload.quality_limitation.is_some() {
+        existing.quality_limitation = payload.quality_limitation;
+    }
+    if payload.encoder.is_some() {
+        existing.encoder = payload.encoder;
+    }
+    if payload.ice_local_type.is_some() {
+        existing.ice_local_type = payload.ice_local_type;
+    }
+    if payload.ice_remote_type.is_some() {
+        existing.ice_remote_type = payload.ice_remote_type;
+    }
+}
+
 pub(crate) async fn client_stats_report(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -592,36 +664,7 @@ pub(crate) async fn client_stats_report(
     let now = now_ts();
     match stats.get_mut(&identity) {
         Some(existing) => {
-            // Merge: prefer incoming inbound array, name, room; keep publisher
-            // fields if the report doesn't include them.
-            existing.updated_at = now;
-            if !payload.name.is_empty() {
-                existing.name = payload.name;
-            }
-            if !payload.room.is_empty() {
-                existing.room = payload.room;
-            }
-            if payload.inbound.is_some() {
-                existing.inbound = payload.inbound;
-            }
-            if payload.capture_health.is_some() {
-                existing.capture_health = payload.capture_health;
-            }
-            if payload.display_status.is_some() {
-                existing.display_status = payload.display_status;
-            }
-            if payload.watch_debug.is_some() {
-                existing.watch_debug = payload.watch_debug;
-            }
-            if payload.screen_fps.is_some() { existing.screen_fps = payload.screen_fps; }
-            if payload.screen_width.is_some() { existing.screen_width = payload.screen_width; }
-            if payload.screen_height.is_some() { existing.screen_height = payload.screen_height; }
-            if payload.screen_bitrate_kbps.is_some() { existing.screen_bitrate_kbps = payload.screen_bitrate_kbps; }
-            if payload.bwe_kbps.is_some() { existing.bwe_kbps = payload.bwe_kbps; }
-            if payload.quality_limitation.is_some() { existing.quality_limitation = payload.quality_limitation; }
-            if payload.encoder.is_some() { existing.encoder = payload.encoder; }
-            if payload.ice_local_type.is_some() { existing.ice_local_type = payload.ice_local_type; }
-            if payload.ice_remote_type.is_some() { existing.ice_remote_type = payload.ice_remote_type; }
+            merge_client_stats(existing, payload, now);
         }
         None => {
             let mut entry = payload;
@@ -1317,4 +1360,47 @@ pub(crate) async fn admin_force_reload(
         "rooms": rooms_processed,
         "errors": errors,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_stats_merge_preserves_native_presenter_report() {
+        let mut existing = ClientStats {
+            identity: "Sam-1234".to_string(),
+            name: "Sam".to_string(),
+            room: "main".to_string(),
+            updated_at: 1,
+            ..Default::default()
+        };
+        let payload = ClientStats {
+            native_presenter: Some(NativePresenterReport {
+                state: "receiving".to_string(),
+                render_path: "native_receive_probe".to_string(),
+                target_identity: Some("Spencer-2222".to_string()),
+                target_track_sid: Some("TR_screen".to_string()),
+                native_receive_fps: Some(59.7),
+                native_presented_fps: None,
+                native_frames_received: 120,
+                native_frames_dropped: 0,
+                queue_depth: 0,
+                fallback_reason: None,
+                tile_width: Some(1920),
+                tile_height: Some(1080),
+                updated_at_ms: 4567,
+            }),
+            ..Default::default()
+        };
+
+        merge_client_stats(&mut existing, payload, 42);
+
+        let native = existing.native_presenter.expect("native presenter report");
+        assert_eq!(existing.updated_at, 42);
+        assert_eq!(native.state, "receiving");
+        assert_eq!(native.render_path, "native_receive_probe");
+        assert_eq!(native.native_receive_fps, Some(59.7));
+        assert_eq!(native.target_identity.as_deref(), Some("Spencer-2222"));
+    }
 }

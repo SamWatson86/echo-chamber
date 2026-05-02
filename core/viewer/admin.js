@@ -345,6 +345,13 @@ async function fetchAdminDashboard() {
           }
           if (s.ice_remote_type) chips += '<span class="adm-badge adm-ice-' + s.ice_remote_type + '">' + s.ice_remote_type + '</span>';
           if (s.screen_fps != null) chips += '<span class="adm-chip">' + s.screen_fps + 'fps ' + s.screen_width + 'x' + s.screen_height + '</span>';
+          if (s.native_presenter && s.native_presenter.state && s.native_presenter.state !== "disabled") {
+            var np = s.native_presenter;
+            var npText = "native " + np.state;
+            if (np.native_receive_fps != null) npText += " " + Math.round(np.native_receive_fps) + "fps";
+            if (np.fallback_reason) npText += " - " + np.fallback_reason;
+            chips += '<span class="adm-chip" title="Native presenter receive probe">' + escAdm(npText) + '</span>';
+          }
           if (s.quality_limitation && s.quality_limitation !== "none") chips += '<span class="adm-badge adm-badge-warn">' + s.quality_limitation + '</span>';
           html += '<div class="adm-participant"><span>' + escAdm(p.name || p.identity) + '</span><span class="adm-time">' + fmtDur(p.online_seconds) + '</span>' + chips + '</div>';
         });
