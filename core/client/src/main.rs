@@ -27,6 +27,8 @@ mod display_placement;
 mod file_debug_log;
 #[cfg(target_os = "windows")]
 mod gpu_converter;
+#[cfg(target_os = "windows")]
+mod native_presenter;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
 
