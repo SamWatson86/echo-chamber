@@ -263,6 +263,36 @@ fn set_always_on_top(app: tauri::AppHandle, on_top: bool) -> Result<(), String> 
     window.set_always_on_top(on_top).map_err(|e| e.to_string())
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_echo_displays(
+    app: tauri::AppHandle,
+    preferred_display_id: Option<String>,
+) -> Result<Vec<display_placement::EchoDisplayInfo>, String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    display_placement::list_echo_displays(&window, preferred_display_id.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_echo_display_status(
+    app: tauri::AppHandle,
+    preferred_display_id: Option<String>,
+) -> Result<display_placement::EchoDisplayStatus, String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    display_placement::build_display_status(&window, preferred_display_id.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn move_echo_to_display(
+    app: tauri::AppHandle,
+    display_id: String,
+) -> Result<display_placement::EchoDisplayStatus, String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    display_placement::move_window_to_display(&window, &display_id)
+}
+
 #[tauri::command]
 fn list_capturable_windows() -> Vec<audio_capture::WindowInfo> {
     audio_capture::list_capturable_windows()
@@ -550,6 +580,12 @@ fn main() {
             get_capture_health,
             #[cfg(target_os = "windows")]
             report_encoder_implementation,
+            #[cfg(target_os = "windows")]
+            list_echo_displays,
+            #[cfg(target_os = "windows")]
+            get_echo_display_status,
+            #[cfg(target_os = "windows")]
+            move_echo_to_display,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected
@@ -607,7 +643,7 @@ fn main() {
 
             // Load viewer from the server so JS/CSS updates are live without reinstalling
             let viewer_url = format!("{}/viewer/", app.state::<String>().inner());
-            WebviewWindowBuilder::new(
+            let main_window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(viewer_url.parse().unwrap()),
@@ -617,6 +653,30 @@ fn main() {
             .min_inner_size(800.0, 600.0)
             .initialization_script("window.__ECHO_NATIVE__ = true;")
             .build()?;
+
+            #[cfg(target_os = "windows")]
+            {
+                let app_handle = app.handle().clone();
+                match display_placement::move_window_to_saved_preferred_display(
+                    &app_handle,
+                    &main_window,
+                ) {
+                    Ok(Some(status)) => {
+                        eprintln!(
+                            "[display] moved Echo to preferred display {:?} current={:?} spans={}",
+                            status.preferred_display_id,
+                            status.current_display_name,
+                            status.window_spans_displays
+                        );
+                    }
+                    Ok(None) => {
+                        eprintln!("[display] no preferred Echo display saved");
+                    }
+                    Err(e) => {
+                        eprintln!("[display] preferred display move failed: {}", e);
+                    }
+                }
+            }
 
             // Check for updates in the background
             let handle = app.handle().clone();
