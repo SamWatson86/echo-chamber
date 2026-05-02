@@ -17,6 +17,7 @@ function addTile(label, element) {
 
 function addScreenTile(label, element, trackSid) {
   configureVideoElement(element, true);
+  element.classList.add("screen-video-surface");
   // Force contain so ultrawides and non-standard ratios are never stretched
   element.style.setProperty("object-fit", "contain", "important");
   element.style.width = "100%";
