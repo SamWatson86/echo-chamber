@@ -930,6 +930,13 @@ video {
   min-height: 0;
 }
 
+.grid-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .grid-header h2 {
   margin: 0;
   font-size: 15px;
@@ -937,6 +944,24 @@ video {
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: rgba(226, 232, 240, 0.9);
+}
+
+.echo-display-status {
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(8, 47, 73, 0.72);
+  color: rgba(226, 232, 240, 0.96);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.echo-display-status.display-warning {
+  border-color: rgba(245, 158, 11, 0.65);
+  background: rgba(69, 43, 8, 0.82);
+  color: #fde68a;
 }
 
 .screens-grid .tile video {

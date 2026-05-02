@@ -2,6 +2,15 @@
    SCREEN SHARE — AIMD bitrate control + adaptive layer switching + camera adaptation
    ========================================================= */
 
+function getScreenPresentationStatsForIdentity(identity) {
+  var tile = screenTileByIdentity.get(identity);
+  var video = tile ? tile.querySelector("video") : null;
+  if (typeof getVideoPresentationSnapshot === "function") {
+    return getVideoPresentationSnapshot(video);
+  }
+  return video?._echoPresentationStats || null;
+}
+
 function startInboundScreenStatsMonitor() {
   if (_inboundScreenStatsInterval) return;
   _inboundScreenStatsInterval = setInterval(async () => {
@@ -565,6 +574,10 @@ function startInboundScreenStatsMonitor() {
           var fromId = parts.slice(0, parts.length - 1).join("-");
           var avgF = dt.fpsHistory.length > 0
             ? dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length : 0;
+          var presentation = source === "screen" ? getScreenPresentationStatsForIdentity(fromId) : null;
+          var presentationAge = presentation?.updatedAt
+            ? Math.max(0, Date.now() - presentation.updatedAt)
+            : null;
           inboundArr2.push({
             from: fromId, source: source,
             fps: dt._lastReport.fps, width: dt._lastReport.w, height: dt._lastReport.h,
@@ -575,6 +588,11 @@ function startInboundScreenStatsMonitor() {
             layer: dt.currentQuality, codec: dt._lastReport.codec || null,
             ice_local_type: dt._lastReport.ice_local_type || null,
             ice_remote_type: dt._lastReport.ice_remote_type || null,
+            presented_fps: presentation ? presentation.fps : null,
+            presented_width: presentation ? presentation.width : null,
+            presented_height: presentation ? presentation.height : null,
+            presented_frames: presentation ? presentation.presentedFrames : null,
+            presentation_age_ms: presentationAge,
           });
         });
 
@@ -586,13 +604,16 @@ function startInboundScreenStatsMonitor() {
             captureHealth = await tauriInvoke("get_capture_health");
           }
         } catch (e) { /* IPC unavailable, e.g. browser viewer */ }
+        var displayStatus = typeof getEchoDisplayStatusSnapshot === "function"
+          ? getEchoDisplayStatusSnapshot()
+          : null;
 
         // Fire the POST whenever we have ANYTHING to report — either receive-side
         // inbound stats (other publishers exist) OR local capture health (we are
         // a Tauri publisher). Without this OR, a publisher alone in the room
         // would never report their own capture telemetry. Discovered live
         // 2026-04-08 during Phase 2 smoke test.
-        if (inboundArr2.length > 0 || captureHealth) {
+        if (inboundArr2.length > 0 || captureHealth || displayStatus) {
           fetch(apiUrl("/api/client-stats-report"), {
             method: "POST",
             headers: {
@@ -605,6 +626,7 @@ function startInboundScreenStatsMonitor() {
               room: currentRoomName || "",
               inbound: inboundArr2,
               capture_health: captureHealth,
+              display_status: displayStatus,
             }),
           }).catch(function() {});
         }
