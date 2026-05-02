@@ -72,6 +72,55 @@ pub struct LiveKitVideoGrant {
     pub canPublishData: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompanionIdentityKind {
+    ScreenPublisher,
+    NativePresenter,
+}
+
+pub(crate) fn companion_identity_kind(identity: &str) -> Option<CompanionIdentityKind> {
+    if identity.ends_with("$screen") {
+        Some(CompanionIdentityKind::ScreenPublisher)
+    } else if identity.ends_with("$native-presenter") {
+        Some(CompanionIdentityKind::NativePresenter)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn livekit_video_grant(
+    room: String,
+    kind: Option<CompanionIdentityKind>,
+) -> LiveKitVideoGrant {
+    match kind {
+        Some(CompanionIdentityKind::ScreenPublisher) => LiveKitVideoGrant {
+            room,
+            roomJoin: true,
+            canPublish: true,
+            canSubscribe: false,
+            canPublishData: true,
+        },
+        Some(CompanionIdentityKind::NativePresenter) => LiveKitVideoGrant {
+            room,
+            roomJoin: true,
+            canPublish: false,
+            canSubscribe: true,
+            canPublishData: false,
+        },
+        None => LiveKitVideoGrant {
+            room,
+            roomJoin: true,
+            canPublish: true,
+            canSubscribe: true,
+            canPublishData: true,
+        },
+    }
+}
+
+pub(crate) fn skip_participant_tracking(kind: Option<CompanionIdentityKind>) -> bool {
+    kind.is_some()
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────
 
 pub async fn login(
@@ -153,9 +202,8 @@ pub async fn issue_token(
     let now = now_ts();
     let exp = now + state.config.livekit_token_ttl_secs;
 
-    // $screen identities are companion connections for native screen capture.
-    // They publish video only (no subscribe needed) and skip name conflict checks.
-    let is_screen_identity = payload.identity.ends_with("$screen");
+    // Companion identities are system connections, not visible people.
+    let companion_kind = companion_identity_kind(&payload.identity);
 
     let claims = LiveKitClaims {
         iss: state.config.livekit_api_key.clone(),
@@ -163,13 +211,7 @@ pub async fn issue_token(
         iat: now as usize,
         exp: exp as usize,
         name: payload.name.clone(),
-        video: LiveKitVideoGrant {
-            room: payload.room.clone(),
-            roomJoin: true,
-            canPublish: true,
-            canSubscribe: !is_screen_identity, // screen identity only publishes
-            canPublishData: true,
-        },
+        video: livekit_video_grant(payload.room.clone(), companion_kind),
     };
 
     let token = encode(
@@ -179,9 +221,12 @@ pub async fn issue_token(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // $screen identities skip participant tracking — they're not real users
-    if is_screen_identity {
-        info!("issued $screen token for room={} identity={}", payload.room, payload.identity);
+    // Companion identities skip participant tracking because they are not real users.
+    if skip_participant_tracking(companion_kind) {
+        info!(
+            "issued companion token for room={} identity={} kind={:?}",
+            payload.room, payload.identity, companion_kind
+        );
         return Ok(Json(TokenResponse {
             token,
             expires_in_seconds: state.config.livekit_token_ttl_secs,
@@ -314,4 +359,45 @@ pub fn verify_password(config: &Config, password: &str) -> bool {
     }
     warn!("admin password not configured");
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_companion_identity_gets_publish_only_grant() {
+        let kind = companion_identity_kind("Sam-1234$screen");
+        let grant = livekit_video_grant("main".to_string(), kind);
+
+        assert_eq!(kind, Some(CompanionIdentityKind::ScreenPublisher));
+        assert!(grant.canPublish);
+        assert!(!grant.canSubscribe);
+        assert!(grant.canPublishData);
+        assert!(skip_participant_tracking(kind));
+    }
+
+    #[test]
+    fn native_presenter_identity_gets_receive_only_grant() {
+        let kind = companion_identity_kind("Sam-1234$native-presenter");
+        let grant = livekit_video_grant("main".to_string(), kind);
+
+        assert_eq!(kind, Some(CompanionIdentityKind::NativePresenter));
+        assert!(!grant.canPublish);
+        assert!(grant.canSubscribe);
+        assert!(!grant.canPublishData);
+        assert!(skip_participant_tracking(kind));
+    }
+
+    #[test]
+    fn normal_identity_gets_normal_viewer_grant() {
+        let kind = companion_identity_kind("Sam-1234");
+        let grant = livekit_video_grant("main".to_string(), kind);
+
+        assert_eq!(kind, None);
+        assert!(grant.canPublish);
+        assert!(grant.canSubscribe);
+        assert!(grant.canPublishData);
+        assert!(!skip_participant_tracking(kind));
+    }
 }
