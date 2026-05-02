@@ -7,6 +7,11 @@ var _capturePickerReject = null;
 var _selectedSource = null;
 var _capturePickerSupport = null;
 
+function isTauriCommandMissingError(err, commandName) {
+    var msg = (err && err.message) ? err.message : String(err || '');
+    return msg.indexOf('Command ' + commandName + ' not found') !== -1;
+}
+
 /**
  * Show the capture source picker modal.
  * Returns a Promise that resolves with the selected source or null if cancelled.
@@ -78,6 +83,15 @@ function _cancelPicker() {
         _capturePickerResolve(null);
         _capturePickerResolve = null;
     }
+}
+
+function _rejectPicker(err) {
+    _closePicker();
+    if (_capturePickerReject) {
+        _capturePickerReject(err);
+        _capturePickerReject = null;
+    }
+    _capturePickerResolve = null;
 }
 
 function _confirmPicker() {
@@ -172,6 +186,10 @@ async function _loadSources() {
         _loadThumbnails(sources);
 
     } catch (err) {
+        if (isTauriCommandMissingError(err, 'list_screen_sources')) {
+            _rejectPicker(err);
+            return;
+        }
         body.innerHTML = '<div class="capture-source-empty">Error loading sources: ' +
             (err.message || err) + '</div>';
     }
@@ -270,4 +288,8 @@ function _showThumbFallback(container, source) {
 function _escHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+}
+
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = { isTauriCommandMissingError };
 }

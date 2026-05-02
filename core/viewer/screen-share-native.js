@@ -71,7 +71,22 @@ async function startScreenShareManual() {
   var wgcSupported = true;
 
   if (isNativeClient) {
-    source = await showCapturePicker();
+    try {
+      source = await showCapturePicker();
+    } catch (pickerErr) {
+      if (typeof isTauriCommandMissingError === 'function' &&
+          isTauriCommandMissingError(pickerErr, 'list_screen_sources')) {
+        debugLog('[native-capture] list_screen_sources unavailable; using browser screen picker fallback');
+        showToast('Native screen picker unavailable; using browser picker', 5000);
+        isNativeClient = false;
+      } else {
+        showToast('Screen source picker failed: ' + (pickerErr.message || pickerErr), 8000);
+        return;
+      }
+    }
+  }
+
+  if (isNativeClient) {
     if (!source) return;
 
     // Detect OS build number for WGC availability (24H2+ = build 26100+)
