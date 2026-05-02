@@ -408,12 +408,59 @@ function getTrackSid(publication, track, fallback) {
 
 // ── Video diagnostics ──
 
+function createVideoFrameRateTracker(nowFn) {
+  const getNow = typeof nowFn === "function" ? nowFn : () => performance.now();
+  let callbackFrames = 0;
+  let lastCallbackFrames = 0;
+  let latestPresentedFrames = null;
+  let lastPresentedFrames = null;
+  let lastSampleTs = getNow();
+
+  function noteFrame(metadata) {
+    callbackFrames += 1;
+    const presented = Number(metadata?.presentedFrames);
+    if (Number.isFinite(presented)) {
+      if (lastPresentedFrames === null) {
+        lastPresentedFrames = presented;
+      }
+      latestPresentedFrames = presented;
+    }
+  }
+
+  function sample(sampleTs) {
+    const now = typeof sampleTs === "number" ? sampleTs : getNow();
+    const elapsed = (now - lastSampleTs) / 1000;
+    let frameDelta = callbackFrames - lastCallbackFrames;
+
+    if (latestPresentedFrames !== null && lastPresentedFrames !== null) {
+      frameDelta = latestPresentedFrames - lastPresentedFrames;
+      lastPresentedFrames = latestPresentedFrames;
+    }
+
+    lastCallbackFrames = callbackFrames;
+    lastSampleTs = now;
+
+    if (!Number.isFinite(frameDelta) || frameDelta < 0) {
+      frameDelta = 0;
+    }
+    return elapsed > 0 ? frameDelta / elapsed : 0;
+  }
+
+  function presentedFrames() {
+    return latestPresentedFrames;
+  }
+
+  return { noteFrame, sample, presentedFrames };
+}
+
+function getVideoPresentationSnapshot(element) {
+  return element?._echoPresentationStats || null;
+}
+
 function attachVideoDiagnostics(track, element, overlay) {
   if (!element || !overlay) return;
   const mediaTrack = track?.mediaStreamTrack;
-  let frames = 0;
-  let lastFrames = 0;
-  let lastTs = performance.now();
+  const frameRate = createVideoFrameRateTracker(() => performance.now());
   element._lastFrameTs = performance.now();
   element._firstFrameTs = element._firstFrameTs || 0;
   let lastMediaTime = element.currentTime || 0;
@@ -460,21 +507,30 @@ function attachVideoDiagnostics(track, element, overlay) {
         element._firstFrameTs = now;
       }
     }
-    const elapsed = (now - lastTs) / 1000;
-    const fps = elapsed > 0 ? (frames - lastFrames) / elapsed : 0;
-    lastFrames = frames;
-    lastTs = now;
+    const fps = frameRate.sample(now);
     const w = element.videoWidth || 0;
     const h = element.videoHeight || 0;
     const ready = element.readyState;
     const muted = mediaTrack?.muted ? "muted" : "live";
     const isBlack = detectBlack();
+    element._echoPresentationStats = {
+      fps,
+      width: w,
+      height: h,
+      readyState: ready,
+      muted: mediaTrack?.muted === true,
+      black: isBlack,
+      firstFrameTs: element._firstFrameTs || 0,
+      lastFrameTs: element._lastFrameTs || 0,
+      presentedFrames: frameRate.presentedFrames(),
+      updatedAt: Date.now(),
+    };
     overlay.textContent = `${w}x${h} | fps ${fps.toFixed(1)} | ${muted} | rs ${ready}${isBlack ? " | black" : ""}`;
   };
 
   if (typeof element.requestVideoFrameCallback === "function") {
-    const onFrame = () => {
-      frames += 1;
+    const onFrame = (_now, metadata) => {
+      frameRate.noteFrame(metadata);
       element._lastFrameTs = performance.now();
       if (!element._firstFrameTs) {
         element._firstFrameTs = element._lastFrameTs;
@@ -498,6 +554,13 @@ function attachVideoDiagnostics(track, element, overlay) {
       overlay.textContent = "track ended";
     };
   }
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    createVideoFrameRateTracker,
+    getVideoPresentationSnapshot,
+  };
 }
 
 function cleanupVideoDiagnostics(overlay) {
