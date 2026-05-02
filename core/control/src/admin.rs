@@ -65,6 +65,8 @@ pub(crate) struct ClientStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) capture_health: Option<CaptureHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) display_status: Option<ClientDisplayStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) watch_debug: Option<String>,
 }
 
@@ -104,6 +106,32 @@ pub(crate) struct SubscriptionStats {
     pub(crate) ice_local_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ice_remote_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) presented_fps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) presented_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) presented_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) presented_frames: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) presentation_age_ms: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct ClientDisplayStatus {
+    pub(crate) available: bool,
+    pub(crate) current_display_id: Option<String>,
+    pub(crate) current_display_name: Option<String>,
+    pub(crate) preferred_display_id: Option<String>,
+    pub(crate) on_preferred_display: bool,
+    pub(crate) window_spans_displays: bool,
+    pub(crate) window_x: i32,
+    pub(crate) window_y: i32,
+    pub(crate) window_width: u32,
+    pub(crate) window_height: u32,
+    pub(crate) scale_factor: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -578,6 +606,9 @@ pub(crate) async fn client_stats_report(
             }
             if payload.capture_health.is_some() {
                 existing.capture_health = payload.capture_health;
+            }
+            if payload.display_status.is_some() {
+                existing.display_status = payload.display_status;
             }
             if payload.watch_debug.is_some() {
                 existing.watch_debug = payload.watch_debug;
