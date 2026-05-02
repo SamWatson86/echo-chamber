@@ -22,6 +22,8 @@ mod capture_pipeline;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
+mod display_placement;
+#[cfg(target_os = "windows")]
 mod file_debug_log;
 #[cfg(target_os = "windows")]
 mod gpu_converter;
