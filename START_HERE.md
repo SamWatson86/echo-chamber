@@ -1,25 +1,25 @@
 # Start Here
 
-If Sam starts a new Codex thread in this worktree and says `continue`, read:
+If Sam starts a new Codex thread for Echo Chamber and says `continue`, read:
 
 1. `AGENTS.md`
-2. `docs/handovers/2026-05-02-screen-sources-command.md`
+2. `docs/OPERATIONS.md`
+3. `docs/RELEASE-BOUNDARIES.md`
+4. the latest relevant file in `docs/handovers/` only if Sam names a parked workstream or bug
 
-Then continue from the handover's **Exact Prompt to Continue With** section.
+Then run the Echo preflight from `docs/OPERATIONS.md` before claiming the machine is ready, before release work, or before live troubleshooting.
 
-This worktree is for the screen sharing source-list bug:
+Current production baseline after the v0.6.12 screen-share release:
 
-- Path: `F:\EC-worktrees\screen-sources-command`
-- Branch: `codex/screen-sources-command-investigation`
-- Local commit: `e4c25e0 Add fallback for missing native screen source command`
-- Status: parked local compatibility fix; not pushed; no PR opened.
-- Official `main` worktree should remain clean.
+- Main repo path: `F:\EC-worktrees\main`
+- Production branch: `main`
+- Expected live version: `0.6.12`
+- Production startup owner: `EchoCoreHost` Windows service
+- Production control child should launch from `F:\EC-worktrees\main\core\target\release\echo-core-control.exe`
 
-Important context:
+Operational reminders:
 
-- Sam reported Zane later became able to share his screen, so this is not an active live emergency.
-- The branch still contains a real server/client compatibility fallback for older desktop shells missing `list_screen_sources`.
-- Zane's separate missing-avatar issue was fixed live without a server restart by registering the existing `zane` avatar under the current `z` identity. That avatar fix is server state only; it is not part of this branch's code diff.
-- In Codex Desktop, do not try to switch the `Echo Chamber - Main` project to this branch. Open this folder as its own Project instead, because this branch is already checked out by this worktree.
-
-If Sam asks to "start the work", confirm the worktree and branch, review the handover, and wait for a specific instruction before pushing, opening a PR, deploying, or deleting the branch.
+- Do not assume a running process came from the repo being edited; verify service config, host log, `/api/version`, and `/health`.
+- Do not push, deploy, open a PR, delete a worktree, reload SAM-PC, or restart shared services unless Sam explicitly asks.
+- Tell Sam before closing/reopening his local Echo client. For desktop-client tests, always close and reopen so the tested version is unambiguous.
+- Keep `F:\EC-worktrees\main` clean unless Sam explicitly asks for local docs/code changes there.

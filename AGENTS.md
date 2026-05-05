@@ -15,6 +15,10 @@ Echo Chamber is a self-hosted real-time communication app. In this repo, active 
 - Prefer small, focused diffs over broad rewrites.
 - Keep release impact explicit: server-only vs desktop-binary vs both.
 - Avoid one-off patterns; prefer conventional, maintainable approaches.
+- Windows-only product/release reality: do not add or run macOS build/release work unless Sam explicitly asks.
+- Before release, reboot validation, or live troubleshooting, run the Echo preflight in `docs/OPERATIONS.md`.
+- Do not assume the running server is from the repo you are editing. Verify `/api/version`, `/health`, `EchoCoreHost`, and `C:\ProgramData\Echo Chamber\echo-core-host.json`.
+- Do not touch SAM-PC, reload remote clients, or restart shared services unless Sam asked for that specific action. Tell Sam before closing/reopening his local Echo client.
 
 ## Quality expectations
 - Any user-facing behavior change should include verification evidence.
@@ -23,3 +27,4 @@ Echo Chamber is a self-hosted real-time communication app. In this repo, active 
 
 ## Key context
 Use `docs/RELEASE-BOUNDARIES.md` and `docs/TERMINOLOGY.md` to avoid server/client/binary confusion when planning or describing changes.
+Use `docs/OPERATIONS.md` for production service/restart rules and `docs/GITHUB.md` for release verification.
