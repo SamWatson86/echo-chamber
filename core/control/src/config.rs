@@ -157,9 +157,10 @@ pub fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
             let assets = [
                 "style.css", "jam.css",
                 "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
-                "state.js", "debug.js", "urls.js", "settings.js", "identity.js",
+                "state.js", "debug.js", "urls.js", "settings.js", "display-status.js",
+                "native-presenter.js", "identity.js",
                 "rnnoise.js", "chimes.js", "room-status.js", "auth.js", "theme.js",
-                "chat.js", "soundboard.js",
+                "chat.js", "soundboard.js", "admin-panel.js",
                 "screen-share-state.js", "screen-share-config.js", "screen-share-quality.js",
                 "screen-share-adaptive.js", "screen-share-native.js",
                 "participants-grid.js", "participants-avatar.js", "participants-fullscreen.js",
@@ -224,6 +225,50 @@ pub fn identity_base(identity: &str) -> &str {
         }
     }
     identity
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stamp_viewer_index;
+    use std::fs;
+
+    #[test]
+    fn stamp_viewer_index_updates_recent_viewer_assets() {
+        let dir = std::env::temp_dir().join(format!(
+            "echo-stamp-test-{}-{}",
+            std::process::id(),
+            now_for_test()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("index.html"),
+            r#"
+            <link rel="stylesheet" href="capture-picker.css?v=old" />
+            <script src="display-status.js?v=old"></script>
+            <script src="native-presenter.js?v=old"></script>
+            <script src="admin-panel.js?v=old"></script>
+            "#,
+        )
+        .unwrap();
+
+        stamp_viewer_index(&dir, "0.6.12.test");
+
+        let stamped = fs::read_to_string(dir.join("index.html")).unwrap();
+        assert!(stamped.contains("capture-picker.css?v=0.6.12.test"));
+        assert!(stamped.contains("display-status.js?v=0.6.12.test"));
+        assert!(stamped.contains("native-presenter.js?v=0.6.12.test"));
+        assert!(stamped.contains("admin-panel.js?v=0.6.12.test"));
+        assert!(!stamped.contains("?v=old"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn now_for_test() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    }
 }
 
 pub fn random_secret() -> String {
