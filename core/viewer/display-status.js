@@ -10,6 +10,35 @@ function isEchoDisplayWarning(status) {
   return status.on_preferred_display === false || status.window_spans_displays === true;
 }
 
+function isRawWindowsDisplayName(name) {
+  return typeof name === "string" && /^\\\\\.\\DISPLAY\d+$/i.test(name.trim());
+}
+
+function describeEchoDisplayName(name) {
+  if (!name || isRawWindowsDisplayName(name)) return "current display";
+  return name;
+}
+
+function getEchoDisplayStatusLabel(status) {
+  return isEchoDisplayWarning(status) ? "Check display path" : "Full-tilt display";
+}
+
+function getEchoDisplayStatusTitle(status) {
+  var current = status && status.current_display_name ? status.current_display_name : "unknown display";
+  var parts = [
+    "Click to save this monitor as Echo's preferred full-performance display.",
+    "Shift-click moves Echo to the saved display.",
+  ];
+  if (status && status.window_spans_displays) {
+    parts.push("Echo appears to overlap more than one display.");
+  }
+  if (status && status.on_preferred_display === false) {
+    parts.push("Echo is not on the saved preferred display.");
+  }
+  parts.push("Detected path: " + current);
+  return parts.join(" ");
+}
+
 function getEchoDisplayStatusSnapshot() {
   return _echoDisplayStatus || null;
 }
@@ -58,7 +87,7 @@ async function saveCurrentEchoDisplayAsPreferred() {
     return;
   }
   echoSet("echo-preferred-display-id", status.current_display_id);
-  showToast("Echo display saved: " + (status.current_display_name || "current display"), 2500);
+  showToast("Echo display saved: " + describeEchoDisplayName(status.current_display_name), 2500);
   await refreshEchoDisplayStatus();
 }
 
@@ -71,10 +100,8 @@ function renderEchoDisplayStatus(status) {
   }
 
   var warning = isEchoDisplayWarning(status);
-  var name = status.current_display_name || "Display";
-  var suffix = warning ? "Check display path" : "Full-tilt display";
-  el.textContent = suffix + ": " + name;
-  el.title = "Click to save this monitor as Echo's preferred full-performance display. Shift-click moves Echo to the saved display.";
+  el.textContent = getEchoDisplayStatusLabel(status);
+  el.title = getEchoDisplayStatusTitle(status);
   el.classList.remove("hidden");
   el.classList.toggle("display-warning", warning);
 }
@@ -99,6 +126,8 @@ if (typeof document !== "undefined") {
 
 if (typeof module === "object" && module.exports) {
   module.exports = {
+    describeEchoDisplayName,
+    getEchoDisplayStatusLabel,
     isEchoDisplayWarning,
   };
 }
