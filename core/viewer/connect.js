@@ -1130,6 +1130,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           // Map remote participant's identity to their device ID (for chime/profile lookups)
           deviceIdByIdentity.set(msg.identityBase, msg.deviceId);
           debugLog("[device-profile] mapped " + msg.identityBase + " -> " + msg.deviceId);
+          participantCards.forEach((cardRef, ident) => {
+            if (getIdentityBase(ident) === msg.identityBase) {
+              updateAvatarDisplay(ident);
+            }
+          });
           // Pre-fetch their chime buffers now that we know their device ID
           fetchChimeBuffer(msg.deviceId, "enter").catch(function() {});
           fetchChimeBuffer(msg.deviceId, "exit").catch(function() {});
