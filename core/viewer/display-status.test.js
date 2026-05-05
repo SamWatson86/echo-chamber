@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
   describeEchoDisplayName,
   getEchoDisplayStatusLabel,
+  shouldShowEchoDisplayStatus,
   isEchoDisplayWarning,
 } = require("./display-status.js");
 
@@ -54,4 +55,19 @@ test("display warning label stays plain for non-technical users", () => {
 test("raw Windows display device names are described generically in toasts", () => {
   assert.equal(describeEchoDisplayName("\\\\.\\DISPLAY1"), "current display");
   assert.equal(describeEchoDisplayName("Samsung Odyssey"), "Samsung Odyssey");
+});
+
+test("display status is hidden unless there is an actionable warning", () => {
+  assert.equal(shouldShowEchoDisplayStatus(null), false);
+  assert.equal(shouldShowEchoDisplayStatus({ available: false }), false);
+  assert.equal(shouldShowEchoDisplayStatus({
+    available: true,
+    on_preferred_display: true,
+    window_spans_displays: false,
+  }), false);
+  assert.equal(shouldShowEchoDisplayStatus({
+    available: true,
+    on_preferred_display: false,
+    window_spans_displays: false,
+  }), true);
 });

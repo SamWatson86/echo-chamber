@@ -23,6 +23,10 @@ function getEchoDisplayStatusLabel(status) {
   return isEchoDisplayWarning(status) ? "Check display path" : "Full-tilt display";
 }
 
+function shouldShowEchoDisplayStatus(status) {
+  return isEchoDisplayWarning(status);
+}
+
 function getEchoDisplayStatusTitle(status) {
   var current = status && status.current_display_name ? status.current_display_name : "unknown display";
   var parts = [
@@ -94,7 +98,7 @@ async function saveCurrentEchoDisplayAsPreferred() {
 function renderEchoDisplayStatus(status) {
   var el = document.getElementById("echo-display-status");
   if (!el) return;
-  if (!status || status.available === false) {
+  if (!shouldShowEchoDisplayStatus(status)) {
     el.classList.add("hidden");
     return;
   }
@@ -128,6 +132,7 @@ if (typeof module === "object" && module.exports) {
   module.exports = {
     describeEchoDisplayName,
     getEchoDisplayStatusLabel,
+    shouldShowEchoDisplayStatus,
     isEchoDisplayWarning,
   };
 }
