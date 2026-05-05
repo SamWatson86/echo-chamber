@@ -22,9 +22,15 @@ mod capture_pipeline;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
+mod display_placement;
+#[cfg(target_os = "windows")]
 mod file_debug_log;
 #[cfg(target_os = "windows")]
 mod gpu_converter;
+#[cfg(target_os = "windows")]
+mod gpu_preference;
+#[cfg(target_os = "windows")]
+mod native_presenter;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
 
@@ -36,6 +42,10 @@ use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(target_os = "windows")]
 use crate::capture_health::{CaptureHealthSnapshot, CaptureHealthState};
+#[cfg(target_os = "windows")]
+use crate::native_presenter::{
+    NativePresenterManager, NativePresenterStartRequest, NativePresenterStatus,
+};
 
 const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 
@@ -261,6 +271,62 @@ fn set_always_on_top(app: tauri::AppHandle, on_top: bool) -> Result<(), String> 
     window.set_always_on_top(on_top).map_err(|e| e.to_string())
 }
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_echo_displays(
+    app: tauri::AppHandle,
+    preferred_display_id: Option<String>,
+) -> Result<Vec<display_placement::EchoDisplayInfo>, String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    display_placement::list_echo_displays(&window, preferred_display_id.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_echo_display_status(
+    app: tauri::AppHandle,
+    preferred_display_id: Option<String>,
+) -> Result<display_placement::EchoDisplayStatus, String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    display_placement::build_display_status(&window, preferred_display_id.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn move_echo_to_display(
+    app: tauri::AppHandle,
+    display_id: String,
+) -> Result<display_placement::EchoDisplayStatus, String> {
+    let window = app.get_webview_window("main").ok_or("window not found")?;
+    display_placement::move_window_to_display(&window, &display_id)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_native_presenter(
+    presenter: tauri::State<'_, Arc<NativePresenterManager>>,
+    request: NativePresenterStartRequest,
+) -> Result<NativePresenterStatus, String> {
+    presenter.start_receive_probe(request).await
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn stop_native_presenter(
+    presenter: tauri::State<'_, Arc<NativePresenterManager>>,
+    reason: Option<String>,
+) -> Result<NativePresenterStatus, String> {
+    Ok(presenter.stop(reason.as_deref().unwrap_or("stopped by viewer")))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_native_presenter_status(
+    presenter: tauri::State<'_, Arc<NativePresenterManager>>,
+) -> Result<NativePresenterStatus, String> {
+    Ok(presenter.status())
+}
+
 #[tauri::command]
 fn list_capturable_windows() -> Vec<audio_capture::WindowInfo> {
     audio_capture::list_capturable_windows()
@@ -372,11 +438,20 @@ async fn start_screen_share(
     source_id: u64,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
+    screen_capture::start_share(
+        source_id,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    )
+    .await
 }
 
 #[cfg(target_os = "windows")]
@@ -389,6 +464,12 @@ fn stop_screen_share() {
 #[tauri::command]
 fn get_source_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
     screen_capture::get_thumbnail(source_id, is_monitor)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_capture_window_status(source_id: u64) -> screen_capture::CaptureWindowStatus {
+    screen_capture::get_capture_window_status(source_id)
 }
 
 // ── Desktop Capture (DXGI Desktop Duplication) IPC Commands ──
@@ -406,11 +487,21 @@ async fn start_desktop_capture(
     fullscreen: bool,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
+    desktop_capture::start(
+        hwnd,
+        fullscreen,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    )
+    .await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically
@@ -455,12 +546,43 @@ fn report_encoder_implementation(state: tauri::State<Arc<CaptureHealthState>>, e
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        file_debug_log::reset();
+        let report = gpu_preference::ensure_startup_gpu_preferences();
+        let summary = report.summary();
+        eprintln!("[gpu-preference] startup {}", summary);
+        file_debug_log::append(&format!("[gpu-preference] startup {}", summary));
+        for path in &report.applied {
+            eprintln!(
+                "[gpu-preference] high-performance GPU preference set for {}",
+                path.display()
+            );
+            file_debug_log::append(&format!(
+                "[gpu-preference] high-performance GPU preference set for {}",
+                path.display()
+            ));
+        }
+        for (path, error) in &report.failed {
+            eprintln!(
+                "[gpu-preference] failed to set high-performance GPU preference for {}: {}",
+                path.display(),
+                error
+            );
+            file_debug_log::append(&format!(
+                "[gpu-preference] failed to set high-performance GPU preference for {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+
     // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
     #[cfg(target_os = "windows")]
     unsafe {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--ignore-certificate-errors --enable-features=AcceleratedVideoEncoder,MediaFoundationVideoEncoding --ignore-gpu-blocklist --webrtc-max-cpu-consumption-percentage=100 --force-fieldtrials=WebRTC-Bwe-AllocationProbing/Enabled/",
+            gpu_preference::webview2_additional_browser_arguments(),
         );
     }
 
@@ -489,7 +611,6 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        file_debug_log::reset();
         file_debug_log::append(&format!(
             "[startup] echo-core-client boot server={} force_software_encoder={} auto_force_software_encoder={} windows_build={}",
             server, force_software_encoder, auto_force_software_encoder, windows_build
@@ -512,6 +633,8 @@ fn main() {
     // Gate the state management so macOS builds compile.
     #[cfg(target_os = "windows")]
     let builder = builder.manage(Arc::new(CaptureHealthState::new()));
+    #[cfg(target_os = "windows")]
+    let builder = builder.manage(NativePresenterManager::new());
 
     builder
         .invoke_handler(tauri::generate_handler![
@@ -537,6 +660,8 @@ fn main() {
             #[cfg(target_os = "windows")]
             get_source_thumbnail,
             #[cfg(target_os = "windows")]
+            get_capture_window_status,
+            #[cfg(target_os = "windows")]
             check_desktop_capture_available,
             #[cfg(target_os = "windows")]
             start_desktop_capture,
@@ -548,6 +673,18 @@ fn main() {
             get_capture_health,
             #[cfg(target_os = "windows")]
             report_encoder_implementation,
+            #[cfg(target_os = "windows")]
+            list_echo_displays,
+            #[cfg(target_os = "windows")]
+            get_echo_display_status,
+            #[cfg(target_os = "windows")]
+            move_echo_to_display,
+            #[cfg(target_os = "windows")]
+            start_native_presenter,
+            #[cfg(target_os = "windows")]
+            stop_native_presenter,
+            #[cfg(target_os = "windows")]
+            get_native_presenter_status,
         ])
         .setup(move |app| {
             // Pre-initialize LiveKit runtime so NVENC hardware encoder is detected
@@ -605,7 +742,7 @@ fn main() {
 
             // Load viewer from the server so JS/CSS updates are live without reinstalling
             let viewer_url = format!("{}/viewer/", app.state::<String>().inner());
-            WebviewWindowBuilder::new(
+            let main_window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External(viewer_url.parse().unwrap()),
@@ -615,6 +752,30 @@ fn main() {
             .min_inner_size(800.0, 600.0)
             .initialization_script("window.__ECHO_NATIVE__ = true;")
             .build()?;
+
+            #[cfg(target_os = "windows")]
+            {
+                let app_handle = app.handle().clone();
+                match display_placement::move_window_to_saved_preferred_display(
+                    &app_handle,
+                    &main_window,
+                ) {
+                    Ok(Some(status)) => {
+                        eprintln!(
+                            "[display] moved Echo to preferred display {:?} current={:?} spans={}",
+                            status.preferred_display_id,
+                            status.current_display_name,
+                            status.window_spans_displays
+                        );
+                    }
+                    Ok(None) => {
+                        eprintln!("[display] no preferred Echo display saved");
+                    }
+                    Err(e) => {
+                        eprintln!("[display] preferred display move failed: {}", e);
+                    }
+                }
+            }
 
             // Check for updates in the background
             let handle = app.handle().clone();

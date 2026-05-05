@@ -52,7 +52,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
-use crate::capture_pipeline::CapturePublisher;
+use crate::capture_pipeline::{CapturePublisher, PublishProfile};
 use crate::file_debug_log;
 
 // ── GPU HDR→SDR Conversion Pipeline (shared module) ──
@@ -162,6 +162,7 @@ pub async fn start(
     fullscreen: bool,
     sfu_url: String,
     token: String,
+    publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
@@ -191,7 +192,16 @@ pub async fn start(
     tokio::spawn(async move {
         // Run DXGI capture on a blocking thread — it uses COM and blocking waits
         let result = tokio::task::spawn_blocking(move || {
-            capture_loop_blocking(&sfu_url, &token, &app, &r2, hwnd, fullscreen, health_clone)
+            capture_loop_blocking(
+                &sfu_url,
+                &token,
+                publish_profile,
+                &app,
+                &r2,
+                hwnd,
+                fullscreen,
+                health_clone,
+            )
         })
         .await
         .map_err(|e| format!("spawn_blocking: {e}"))?;
@@ -624,6 +634,7 @@ fn composite_cursor(
 fn capture_loop_blocking(
     sfu_url: &str,
     token: &str,
+    publish_profile: PublishProfile,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     hwnd: u64,
@@ -805,6 +816,7 @@ fn capture_loop_blocking(
         token,
         enc_w,
         enc_h,
+        publish_profile,
         "desktop-capture",
         TrackSource::Screenshare,
         true,
@@ -814,7 +826,7 @@ fn capture_loop_blocking(
         true,
         CaptureMode::DxgiDd,
         EncoderType::Nvenc,
-        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+        publish_profile.target_fps(),
     );
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback

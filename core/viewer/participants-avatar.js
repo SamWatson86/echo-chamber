@@ -169,8 +169,8 @@ function ensureParticipantCard(participant, isLocal = false) {
   const key = participant.identity;
   // Hide ghost subscriber from UI
   if (key.startsWith("__echo_ghost_")) return null;
-  // Hide $screen companion identities from participant list
-  if (isScreenIdentity(key)) return null;
+  // Hide internal companion identities from participant list.
+  if (isScreenIdentity(key) || isNativePresenterIdentity(key)) return null;
   if (participantCards.has(key)) {
     debugLog(`participant card already exists for ${key}`);
     return participantCards.get(key);

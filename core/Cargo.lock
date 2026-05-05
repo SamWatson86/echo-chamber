@@ -1304,9 +1304,11 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "base64 0.22.1",
+ "futures-util",
+ "libwebrtc",
  "livekit",
  "parking_lot",
  "reqwest 0.12.28",
@@ -1323,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-control"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "argon2",
  "axum",

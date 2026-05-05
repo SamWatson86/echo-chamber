@@ -18,7 +18,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
-use crate::capture_pipeline::CapturePublisher;
+use crate::capture_pipeline::{
+    CapturePublisher, PublishProfile, StaticFrameHeartbeat, STATIC_FRAME_HEARTBEAT_INTERVAL,
+};
+use crate::file_debug_log;
 
 // ── Types ──
 
@@ -33,10 +36,197 @@ pub struct CaptureSource {
     pub pid: u32,
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureWindowStatus {
+    pub available: bool,
+    pub visible: bool,
+    pub minimized: bool,
+    pub echo_above_source: bool,
+    pub echo_overlap_ratio: f64,
+    pub warning: Option<String>,
+}
+
+impl CaptureWindowStatus {
+    fn unavailable() -> Self {
+        Self {
+            available: false,
+            visible: false,
+            minimized: false,
+            echo_above_source: false,
+            echo_overlap_ratio: 0.0,
+            warning: Some("Shared window is unavailable".to_string()),
+        }
+    }
+}
+
 // ── Global State ──
 
 struct ShareHandle {
     running: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowBounds {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+fn window_overlap_ratio(source: WindowBounds, cover: WindowBounds) -> f64 {
+    let left = source.left.max(cover.left);
+    let top = source.top.max(cover.top);
+    let right = source.right.min(cover.right);
+    let bottom = source.bottom.min(cover.bottom);
+    if right <= left || bottom <= top {
+        return 0.0;
+    }
+    let source_width = (source.right - source.left).max(0) as u64;
+    let source_height = (source.bottom - source.top).max(0) as u64;
+    let source_area = source_width * source_height;
+    if source_area == 0 {
+        return 0.0;
+    }
+    let overlap_area = (right - left) as u64 * (bottom - top) as u64;
+    overlap_area as f64 / source_area as f64
+}
+
+fn capture_source_visibility_warning(
+    visible: bool,
+    minimized: bool,
+    echo_above_source: bool,
+    echo_overlap_ratio: f64,
+) -> Option<&'static str> {
+    if minimized {
+        return Some("Shared window is minimized");
+    }
+    if !visible {
+        return Some("Shared window is hidden");
+    }
+    if echo_above_source && echo_overlap_ratio >= 0.80 {
+        return Some("Echo is covering the shared window");
+    }
+    None
+}
+
+fn window_bounds_for_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Option<WindowBounds> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return None;
+    }
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return None;
+    }
+    Some(WindowBounds {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    })
+}
+
+fn find_current_process_main_window() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    struct Search {
+        current_pid: u32,
+        best_hwnd: HWND,
+        best_area: u64,
+    }
+
+    unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut Search);
+        if !IsWindowVisible(hwnd).as_bool() {
+            return TRUE;
+        }
+
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != search.current_pid {
+            return TRUE;
+        }
+
+        let Some(bounds) = window_bounds_for_hwnd(hwnd) else {
+            return TRUE;
+        };
+        let area =
+            (bounds.right - bounds.left).max(0) as u64 * (bounds.bottom - bounds.top).max(0) as u64;
+        if area > search.best_area {
+            search.best_hwnd = hwnd;
+            search.best_area = area;
+        }
+        TRUE
+    }
+
+    let mut search = Search {
+        current_pid: unsafe { GetCurrentProcessId() },
+        best_hwnd: HWND::default(),
+        best_area: 0,
+    };
+    let _ = unsafe {
+        EnumWindows(
+            Some(enum_window),
+            LPARAM(&mut search as *mut Search as isize),
+        )
+    };
+
+    if search.best_hwnd.0.is_null() {
+        None
+    } else {
+        Some(search.best_hwnd)
+    }
+}
+
+fn window_is_above(
+    source_hwnd: windows::Win32::Foundation::HWND,
+    candidate_hwnd: windows::Win32::Foundation::HWND,
+) -> bool {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    if source_hwnd == candidate_hwnd {
+        return true;
+    }
+
+    struct Search {
+        source_hwnd: HWND,
+        candidate_hwnd: HWND,
+        candidate_above_source: bool,
+    }
+
+    unsafe extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut Search);
+        if hwnd == search.candidate_hwnd {
+            search.candidate_above_source = true;
+            return BOOL(0);
+        }
+        if hwnd == search.source_hwnd {
+            search.candidate_above_source = false;
+            return BOOL(0);
+        }
+        TRUE
+    }
+
+    let mut search = Search {
+        source_hwnd,
+        candidate_hwnd,
+        candidate_above_source: false,
+    };
+    let _ = unsafe {
+        EnumWindows(
+            Some(enum_window),
+            LPARAM(&mut search as *mut Search as isize),
+        )
+    };
+    search.candidate_above_source
 }
 
 fn global_state() -> &'static Mutex<Option<ShareHandle>> {
@@ -266,6 +456,7 @@ pub async fn start_share(
     source_id: u64,
     sfu_url: String,
     token: String,
+    publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
@@ -283,7 +474,17 @@ pub async fn start_share(
     let app2 = app.clone();
     let r2 = running.clone();
     tokio::spawn(async move {
-        if let Err(e) = share_loop(source_id, &sfu_url, &token, &app2, &r2, health).await {
+        if let Err(e) = share_loop(
+            source_id,
+            &sfu_url,
+            &token,
+            publish_profile,
+            &app2,
+            &r2,
+            health,
+        )
+        .await
+        {
             eprintln!("[screen-capture] error: {}", e);
             let _ = app2.emit("screen-capture-error", format!("{}", e));
         }
@@ -306,6 +507,49 @@ pub fn stop_share() {
 }
 
 // ── Thumbnail Generation ──
+
+pub fn get_capture_window_status(source_id: u64) -> CaptureWindowStatus {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, IsWindowVisible};
+
+    let source_hwnd = HWND(source_id as *mut _);
+    if source_hwnd.0.is_null() || !unsafe { IsWindow(source_hwnd) }.as_bool() {
+        return CaptureWindowStatus::unavailable();
+    }
+
+    let visible = unsafe { IsWindowVisible(source_hwnd) }.as_bool();
+    let minimized = unsafe { IsIconic(source_hwnd) }.as_bool();
+    let source_bounds = window_bounds_for_hwnd(source_hwnd);
+
+    let (echo_above_source, echo_overlap_ratio) = if let (Some(source_bounds), Some(echo_hwnd)) =
+        (source_bounds, find_current_process_main_window())
+    {
+        let echo_above_source = window_is_above(source_hwnd, echo_hwnd);
+        let echo_overlap_ratio = window_bounds_for_hwnd(echo_hwnd)
+            .map(|echo_bounds| window_overlap_ratio(source_bounds, echo_bounds))
+            .unwrap_or(0.0);
+        (echo_above_source, echo_overlap_ratio)
+    } else {
+        (false, 0.0)
+    };
+
+    let warning = capture_source_visibility_warning(
+        visible,
+        minimized,
+        echo_above_source,
+        echo_overlap_ratio,
+    )
+    .map(ToOwned::to_owned);
+
+    CaptureWindowStatus {
+        available: true,
+        visible,
+        minimized,
+        echo_above_source,
+        echo_overlap_ratio,
+        warning,
+    }
+}
 
 /// Generate a 240x135 thumbnail of a capture source as a base64 BMP data URI.
 pub fn get_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
@@ -513,6 +757,7 @@ async fn share_loop(
     source_id: u64,
     sfu_url: &str,
     token: &str,
+    publish_profile: PublishProfile,
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     health: Arc<CaptureHealthState>,
@@ -523,6 +768,7 @@ async fn share_loop(
         token,
         1920,
         1080,
+        publish_profile,
         "screen-capture",
         TrackSource::Camera,
         false,
@@ -546,7 +792,7 @@ async fn share_loop(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+        publish_profile.target_fps(),
     );
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
@@ -570,6 +816,9 @@ async fn share_loop(
             running: Arc<AtomicBool>,
             wgc_frame_count: u64,
             wgc_start: std::time::Instant,
+            last_wgc_log_at: std::time::Instant,
+            last_wgc_log_count: u64,
+            channel_drop_count: u64,
             /// GPU pipeline: (device, context, converter) -- lazily created on first frame
             gpu: Option<(ID3D11Device, ID3D11DeviceContext, GpuConverter)>,
         }
@@ -588,6 +837,9 @@ async fn share_loop(
                     running,
                     wgc_frame_count: 0,
                     wgc_start: std::time::Instant::now(),
+                    last_wgc_log_at: std::time::Instant::now(),
+                    last_wgc_log_count: 0,
+                    channel_drop_count: 0,
                     gpu: None,
                 })
             }
@@ -674,7 +926,22 @@ async fn share_loop(
                     converter.unmap(context);
 
                     // Non-blocking: drop frame if receiver is behind
-                    let _ = self.tx.try_send((bgra, out_w, out_h));
+                    if self.tx.try_send((bgra, out_w, out_h)).is_err() {
+                        self.channel_drop_count += 1;
+                    }
+                }
+
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(self.last_wgc_log_at).as_secs_f64();
+                if elapsed >= 2.0 {
+                    let frame_delta = self.wgc_frame_count - self.last_wgc_log_count;
+                    let interval_fps = frame_delta as f64 / elapsed;
+                    file_debug_log::append(&format!(
+                        "[wgc-callback] source={}x{} interval_fps={:.1} total_frames={} channel_drops={}",
+                        w, h, interval_fps, self.wgc_frame_count, self.channel_drop_count
+                    ));
+                    self.last_wgc_log_at = now;
+                    self.last_wgc_log_count = self.wgc_frame_count;
                 }
 
                 Ok(())
@@ -716,30 +983,94 @@ async fn share_loop(
     let mut drop_count: u64 = 0;
     let mut yuv_total_us: u64 = 0;
     let mut capture_total_us: u64 = 0;
+    let mut publish_attempt_count: u64 = 0;
+    let mut last_publish_log_at = std::time::Instant::now();
+    let mut last_publish_attempt_count: u64 = 0;
+    let mut last_publish_frame_count: u64 = 0;
+    let mut last_sender_stats_at = std::time::Instant::now();
+    let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
+    let mut heartbeat = StaticFrameHeartbeat::new(STATIC_FRAME_HEARTBEAT_INTERVAL);
+    let mut heartbeat_attempt_count: u64 = 0;
+    let mut heartbeat_pushed_count: u64 = 0;
 
-    // Drain channel aggressively: if multiple frames queued, skip to latest
+    // Drain channel aggressively: if multiple frames queued, skip to latest.
+    // WGC window capture is repaint-driven, so a static browser window may stop
+    // producing new callbacks. Keep the SFU track alive by republishing the last
+    // good frame at a low heartbeat cadence until fresh frames resume.
     while running.load(Ordering::SeqCst) {
-        let frame = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(f) => f,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        let from_heartbeat = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(frame) => {
+                // Skip to newest frame if channel has backed up
+                let mut latest = frame;
+                while let Ok(newer) = frame_rx.try_recv() {
+                    drop_count += 1;
+                    latest = newer;
+                }
+                heartbeat.record_fresh_frame(std::time::Instant::now());
+                last_frame = Some(latest);
+                false
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let now = std::time::Instant::now();
+                if last_frame.is_none() || !heartbeat.should_publish(now) {
+                    continue;
+                }
+                true
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
-        // Skip to newest frame if channel has backed up
-        let mut latest = frame;
-        while let Ok(newer) = frame_rx.try_recv() {
-            drop_count += 1;
-            latest = newer;
-        }
-        let (bgra_data, width, height) = latest;
+        let Some((bgra_data, width, height)) = last_frame.as_ref() else {
+            continue;
+        };
 
         // Data arrives already downscaled to 1080p by GPU shader
         let t0 = std::time::Instant::now();
-        publisher.push_frame(&bgra_data, width, height);
+        publish_attempt_count += 1;
+        if from_heartbeat {
+            heartbeat_attempt_count += 1;
+        }
+        let pushed = publisher.push_frame(bgra_data, *width, *height);
+        if from_heartbeat && pushed {
+            heartbeat_pushed_count += 1;
+        }
         let t1 = std::time::Instant::now();
 
         yuv_total_us += (t1 - t0).as_micros() as u64;
         let fc = publisher.frame_count();
+
+        let now = std::time::Instant::now();
+        let interval = now.duration_since(last_publish_log_at).as_secs_f64();
+        if interval >= 2.0 {
+            let attempt_delta = publish_attempt_count - last_publish_attempt_count;
+            let pushed_delta = fc - last_publish_frame_count;
+            let attempt_fps = attempt_delta as f64 / interval;
+            let pushed_fps = pushed_delta as f64 / interval;
+            let paced_drops = attempt_delta.saturating_sub(pushed_delta);
+            file_debug_log::append(&format!(
+                "[wgc-publish] interval attempts_fps={:.1} pushed_fps={:.1} paced_drops={} total_pushed={} channel_drops={} heartbeat_attempts={} heartbeat_pushed={} last_pushed={} last_heartbeat={}",
+                attempt_fps,
+                pushed_fps,
+                paced_drops,
+                fc,
+                drop_count,
+                heartbeat_attempt_count,
+                heartbeat_pushed_count,
+                pushed,
+                from_heartbeat
+            ));
+            health.record_capture_fps(pushed_fps.round() as u32);
+            last_publish_log_at = now;
+            last_publish_attempt_count = publish_attempt_count;
+            last_publish_frame_count = fc;
+            heartbeat_attempt_count = 0;
+            heartbeat_pushed_count = 0;
+        }
+
+        if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
+            publisher.log_sender_stats("screen-capture").await;
+            last_sender_stats_at = now;
+        }
 
         if fc % 30 == 0 {
             let elapsed = publisher.elapsed().as_secs_f64();
@@ -758,7 +1089,7 @@ async fn share_loop(
                 width, height, fps, fc, drop_count, avg_yuv_ms
             );
             if let Some(emit_fps) =
-                publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", width, height, 30)
+                publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", *width, *height, 30)
             {
                 health.record_capture_fps(emit_fps);
             }
@@ -830,6 +1161,7 @@ async fn share_loop_monitor(
         token,
         1920,
         1080,
+        PublishProfile::Desktop,
         "screen-capture-monitor",
         TrackSource::Camera,
         false,
@@ -846,7 +1178,7 @@ async fn share_loop_monitor(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        crate::capture_pipeline::PUBLISH_TARGET_FPS,
+        PublishProfile::Desktop.target_fps(),
     );
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
@@ -1072,4 +1404,51 @@ async fn share_loop_monitor(
     health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_visibility_warning_flags_minimized_window() {
+        assert_eq!(
+            capture_source_visibility_warning(true, true, false, 0.0),
+            Some("Shared window is minimized")
+        );
+    }
+
+    #[test]
+    fn source_visibility_warning_flags_echo_covering_source() {
+        assert_eq!(
+            capture_source_visibility_warning(true, false, true, 0.81),
+            Some("Echo is covering the shared window")
+        );
+    }
+
+    #[test]
+    fn source_visibility_warning_allows_overlap_when_echo_is_behind_source() {
+        assert_eq!(
+            capture_source_visibility_warning(true, false, false, 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn window_overlap_ratio_uses_source_window_area() {
+        let source = WindowBounds {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let cover = WindowBounds {
+            left: 50,
+            top: 0,
+            right: 150,
+            bottom: 100,
+        };
+
+        assert_eq!(window_overlap_ratio(source, cover), 0.5);
+    }
 }

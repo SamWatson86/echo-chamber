@@ -4,6 +4,101 @@
    and per-process audio capture via WASAPI.
    ========================================================= */
 
+function _sourceVisibilityPollIntervalMs() {
+  return typeof SOURCE_VISIBILITY_POLL_MS === 'number' ? SOURCE_VISIBILITY_POLL_MS : 3000;
+}
+
+function _sourceVisibilityToastCooldownMs() {
+  return typeof SOURCE_VISIBILITY_TOAST_COOLDOWN_MS === 'number' ? SOURCE_VISIBILITY_TOAST_COOLDOWN_MS : 10000;
+}
+
+function _shouldMonitorNativeCaptureSource(source, mode) {
+  return !!(
+    source &&
+    source.id &&
+    source.sourceType !== 'monitor' &&
+    (mode === 'wgc' || mode === 'desktop-dd')
+  );
+}
+
+function _captureSourceVisibilityToastMessage(status) {
+  if (!status || !status.warning) return null;
+  return status.warning + '. Keep the shared window visible while sharing.';
+}
+
+function _stopSourceVisibilityMonitor() {
+  if (_sourceVisibilityInterval) {
+    clearInterval(_sourceVisibilityInterval);
+    _sourceVisibilityInterval = null;
+  }
+  _sourceVisibilityLastWarning = null;
+  _sourceVisibilityLastToastAt = 0;
+  if (typeof window !== 'undefined') window._echoNativeCaptureSource = null;
+}
+
+async function _pollNativeCaptureSourceVisibility(source) {
+  if (!source || !source.id || typeof tauriInvoke !== 'function') return;
+  try {
+    var status = await tauriInvoke('get_capture_window_status', { sourceId: source.id });
+    var message = _captureSourceVisibilityToastMessage(status);
+    if (!message) {
+      if (_sourceVisibilityLastWarning && typeof debugLog === 'function') {
+        debugLog('[source-visibility] recovered');
+      }
+      _sourceVisibilityLastWarning = null;
+      return;
+    }
+
+    var now = Date.now();
+    var warning = status.warning || message;
+    var shouldToast =
+      warning !== _sourceVisibilityLastWarning ||
+      now - _sourceVisibilityLastToastAt >= _sourceVisibilityToastCooldownMs();
+
+    if (shouldToast) {
+      if (typeof showToast === 'function') showToast(message, 5000);
+      if (typeof debugLog === 'function') {
+        var overlap = status.echoOverlapRatio;
+        if (typeof overlap !== 'number') overlap = status.echo_overlap_ratio;
+        debugLog('[source-visibility] ' + warning + ' overlap=' + (overlap || 0).toFixed(2));
+      }
+      _sourceVisibilityLastWarning = warning;
+      _sourceVisibilityLastToastAt = now;
+    }
+  } catch (err) {
+    if (typeof isTauriCommandMissingError === 'function' &&
+        isTauriCommandMissingError(err, 'get_capture_window_status')) {
+      if (typeof debugLog === 'function') {
+        debugLog('[source-visibility] get_capture_window_status unavailable; monitor disabled');
+      }
+      _stopSourceVisibilityMonitor();
+      return;
+    }
+    if (typeof debugLog === 'function') {
+      debugLog('[source-visibility] status poll failed: ' + (err.message || err));
+    }
+  }
+}
+
+function _startSourceVisibilityMonitor(source) {
+  _stopSourceVisibilityMonitor();
+  if (!_shouldMonitorNativeCaptureSource(source, window._echoNativeCaptureMode)) return;
+
+  window._echoNativeCaptureSource = {
+    id: source.id,
+    sourceType: source.sourceType,
+  };
+
+  _pollNativeCaptureSourceVisibility(window._echoNativeCaptureSource);
+  _sourceVisibilityInterval = setInterval(function() {
+    if (!window._echoNativeCaptureActive && !window._echoNativeCaptureMode) {
+      _stopSourceVisibilityMonitor();
+      return;
+    }
+    _pollNativeCaptureSourceVisibility(window._echoNativeCaptureSource);
+  }, _sourceVisibilityPollIntervalMs());
+}
+
 function _stopNativeCaptureStopListeners() {
   if (_nativeCaptureStopUnlisten) {
     try { _nativeCaptureStopUnlisten(); } catch (e) {}
@@ -15,8 +110,10 @@ async function _finalizeNativeCaptureStop(stopMessage) {
   var wasActive = !!(window._echoNativeCaptureActive || window._echoNativeCaptureMode || screenEnabled);
   window._echoNativeCaptureActive = false;
   window._echoNativeCaptureMode = null;
+  window._echoNativeCaptureSource = null;
   screenEnabled = false;
   _stopNativeCaptureStopListeners();
+  _stopSourceVisibilityMonitor();
   _stopQualityWarnListener();
   await stopNativeAudioCapture();
   renderPublishButtons();
@@ -71,7 +168,22 @@ async function startScreenShareManual() {
   var wgcSupported = true;
 
   if (isNativeClient) {
-    source = await showCapturePicker();
+    try {
+      source = await showCapturePicker();
+    } catch (pickerErr) {
+      if (typeof isTauriCommandMissingError === 'function' &&
+          isTauriCommandMissingError(pickerErr, 'list_screen_sources')) {
+        debugLog('[native-capture] list_screen_sources unavailable; using browser screen picker fallback');
+        showToast('Native screen picker unavailable; using browser picker', 5000);
+        isNativeClient = false;
+      } else {
+        showToast('Screen source picker failed: ' + (pickerErr.message || pickerErr), 8000);
+        return;
+      }
+    }
+  }
+
+  if (isNativeClient) {
     if (!source) return;
 
     // Detect OS build number for WGC availability (24H2+ = build 26100+)
@@ -207,6 +319,7 @@ async function startScreenShareManual() {
       }
       screenEnabled = true;
       window._echoNativeCaptureActive = true;
+      _startSourceVisibilityMonitor(source);
       _startQualityWarnListener();
       renderPublishButtons();
       var modeLabel = window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' : 'Window Capture';
@@ -236,10 +349,12 @@ async function startScreenShareManual() {
             sourceId: source.id,
             sfuUrl: sfuUrl,
             token: screenToken,
+            publishProfile: 'game',
           });
           window._echoNativeCaptureMode = 'wgc';
           screenEnabled = true;
           window._echoNativeCaptureActive = true;
+          _startSourceVisibilityMonitor(source);
           renderPublishButtons();
           fallbackStarted = true;
           showToast('Using standard capture (game hook unavailable)', 5000);

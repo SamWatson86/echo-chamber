@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { createRoomSwitchState } = require("./room-switch-state.js");
 const { createJamSessionState } = require("./jam-session-state.js");
 const { reconcilePublishIndicators } = require("./publish-state-reconcile.js");
+const { isTauriCommandMissingError } = require("./capture-picker.js");
 
 test("room transition keeps heartbeat on connected room until switch commit", () => {
   const rooms = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 0 });
@@ -12,6 +13,17 @@ test("room transition keeps heartbeat on connected room until switch commit", ()
 
   rooms.markConnected("gaming");
   assert.equal(rooms.heartbeatRoomName(), "gaming");
+});
+
+test("native picker detects missing Tauri command for compatibility fallback", () => {
+  assert.equal(
+    isTauriCommandMissingError(
+      new Error("Command list_screen_sources not found"),
+      "list_screen_sources"
+    ),
+    true
+  );
+  assert.equal(isTauriCommandMissingError(new Error("permission denied"), "list_screen_sources"), false);
 });
 
 test("switch transition publish drift is reconciled against actual publication", () => {

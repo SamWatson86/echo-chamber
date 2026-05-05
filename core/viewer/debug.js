@@ -45,21 +45,61 @@ function logEvent(eventName, detail) {
   } catch (e) {}
 }
 
+function buildNativePresenterDebugFallback(reason) {
+  return {
+    state: "fallback",
+    render_path: "webview2",
+    target_identity: null,
+    target_track_sid: null,
+    native_receive_fps: null,
+    native_presented_fps: null,
+    native_frames_received: 0,
+    native_frames_dropped: 0,
+    queue_depth: 0,
+    fallback_reason: reason || "native presenter unavailable",
+    tile_width: null,
+    tile_height: null,
+    updated_at_ms: Date.now(),
+  };
+}
+
+function getNativePresenterDebugReport() {
+  if (typeof getNativePresenterStatusForReport === "function") {
+    return getNativePresenterStatusForReport();
+  }
+  if (typeof getNativePresenterStatusSnapshot === "function") {
+    try {
+      return getNativePresenterStatusSnapshot()
+        || buildNativePresenterDebugFallback("native presenter status unavailable");
+    } catch (e) {
+      return buildNativePresenterDebugFallback(
+        "native presenter status error: " + (e && e.message ? e.message : e)
+      );
+    }
+  }
+  return typeof window !== "undefined" && window.__ECHO_NATIVE__ === true
+    ? buildNativePresenterDebugFallback("native presenter script unavailable")
+    : null;
+}
+
 function reportWatchDebug(message) {
   try {
     if (!message || !currentAccessToken || !room?.localParticipant?.identity) return;
+    var payload = {
+      identity: room.localParticipant.identity,
+      name: room.localParticipant.name || "",
+      room: currentRoomName || "",
+      watch_debug: message,
+    };
+    var nativePresenter = getNativePresenterDebugReport();
+    if (nativePresenter) payload.native_presenter = nativePresenter;
     fetch(apiUrl("/api/client-stats-report"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: "Bearer " + currentAccessToken,
       },
-      body: JSON.stringify({
-        identity: room.localParticipant.identity,
-        name: room.localParticipant.name || "",
-        room: currentRoomName || "",
-        watch_debug: message,
-      }),
+      body: JSON.stringify(payload),
     }).catch(function() {});
   } catch (e) {}
 }
@@ -123,4 +163,11 @@ function escAdm(s) {
   var d = document.createElement("div");
   d.textContent = s || "";
   return d.innerHTML;
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    buildNativePresenterDebugFallback,
+    getNativePresenterDebugReport,
+  };
 }

@@ -9,11 +9,12 @@ var _qualityWarnLowSince = 0;       // timestamp when FPS first dropped below th
 var _qualityWarnShowing = false;     // whether banner is currently visible
 var _qualityWarnDismissed = false;   // dismissed for this session
 var _qualityWarnBannerEl = null;     // DOM element
-// Capture is intentionally capped at 30fps in capture_pipeline.rs.
-// Under multi-publisher GPU contention, capture floats 22-28fps which is
-// fine — only warn when it drops below 18fps (real degradation).
+// Desktop sharing stays conservative, while game capture can opt into the
+// high-motion publish profile. Only warn here on obvious real degradation.
 const QUALITY_WARN_FPS_THRESHOLD = 18;
 const QUALITY_WARN_DURATION_MS = 5000;
+const SOURCE_VISIBILITY_POLL_MS = 3000;
+const SOURCE_VISIBILITY_TOAST_COOLDOWN_MS = 10000;
 
 // ── Screen share track refs (so we can unpublish on stop) ──
 let _screenShareVideoTrack = null;
@@ -41,6 +42,9 @@ var _nativeAudioTrack = null;       // Published LiveKit track
 var _nativeAudioUnlisten = null;    // Tauri event unlisten function
 var _nativeAudioActive = false;
 var _nativeCaptureStopUnlisten = null; // Tauri stop-event unlisten function
+var _sourceVisibilityInterval = null;
+var _sourceVisibilityLastWarning = null;
+var _sourceVisibilityLastToastAt = 0;
 
 // NOTE: The following state variables are declared in state.js (loaded earlier):
 //   _latestScreenStats, _cameraReducedForScreenShare, _bwLimitedCount,

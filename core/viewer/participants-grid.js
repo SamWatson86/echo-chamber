@@ -17,6 +17,7 @@ function addTile(label, element) {
 
 function addScreenTile(label, element, trackSid) {
   configureVideoElement(element, true);
+  element.classList.add("screen-video-surface");
   // Force contain so ultrawides and non-standard ratios are never stretched
   element.style.setProperty("object-fit", "contain", "important");
   element.style.width = "100%";
@@ -162,6 +163,11 @@ function removeScreenTile(trackSid) {
 }
 
 function clearMedia() {
+  if (typeof stopAllNativePresenter === "function") {
+    stopAllNativePresenter("media cleared").catch(function(e) {
+      debugLog("[native-presenter] clearMedia stop failed: " + (e && e.message ? e.message : e));
+    });
+  }
   screenGridEl.innerHTML = "";
   screenTileBySid.clear();
   screenTileByIdentity.clear();
