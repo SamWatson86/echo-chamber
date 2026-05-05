@@ -1010,6 +1010,60 @@ async function uploadAvatar(file) {
   }
 }
 
+function getServerAvatarCandidateUrls(identity, cardRef) {
+  if (typeof apiUrl !== "function") return [];
+  const identityBase = getIdentityBase(identity);
+  const candidates = [];
+  const seen = new Set();
+
+  function addCandidate(value) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    candidates.push(apiUrl("/api/avatar/" + encodeURIComponent(trimmed)));
+  }
+
+  const deviceId = deviceIdByIdentity?.get?.(identityBase);
+  addCandidate(deviceId);
+  addCandidate(identityBase);
+
+  const label = cardRef?.card?.querySelector(".user-name")?.textContent || "";
+  if (typeof slugifyIdentity === "function") addCandidate(slugifyIdentity(label));
+
+  return candidates;
+}
+
+function showAvatarImage(cardRef, urls) {
+  const avatar = cardRef.avatar;
+  if (!avatar || !urls || urls.length === 0) return;
+
+  let img = avatar.querySelector("img.avatar-img");
+  if (!img) {
+    img = document.createElement("img");
+    img.className = "avatar-img";
+    img.alt = "Avatar";
+    avatar.appendChild(img);
+  }
+
+  img._avatarFallbackUrls = urls;
+  img._avatarFallbackIndex = 0;
+  img.onload = function() {
+    const textNodes = Array.from(avatar.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
+    textNodes.forEach(n => n.remove());
+  };
+  img.onerror = function() {
+    const nextIndex = (img._avatarFallbackIndex || 0) + 1;
+    const fallbackUrls = img._avatarFallbackUrls || [];
+    if (nextIndex < fallbackUrls.length) {
+      img._avatarFallbackIndex = nextIndex;
+      img.src = fallbackUrls[nextIndex];
+      return;
+    }
+    img.remove();
+  };
+  img.src = urls[0];
+}
+
 function updateAvatarDisplay(identity) {
   const cardRef = participantCards.get(identity);
   if (!cardRef) return;
@@ -1024,19 +1078,13 @@ function updateAvatarDisplay(identity) {
   const avatarUrl = avatarUrls.get(identityBase);
 
   if (avatarUrl) {
-    // Show avatar image
-    let img = avatar.querySelector("img.avatar-img");
-    if (!img) {
-      // Clear initials text nodes
-      const textNodes = Array.from(avatar.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
-      textNodes.forEach(n => n.remove());
+    showAvatarImage(cardRef, [avatarUrl]);
+    return;
+  }
 
-      img = document.createElement("img");
-      img.className = "avatar-img";
-      img.alt = "Avatar";
-      avatar.appendChild(img);
-    }
-    img.src = avatarUrl;
+  const serverUrls = getServerAvatarCandidateUrls(identity, cardRef);
+  if (serverUrls.length > 0) {
+    showAvatarImage(cardRef, serverUrls);
   } else {
     // No avatar -- show initials (current behavior)
     const img = avatar.querySelector("img.avatar-img");
