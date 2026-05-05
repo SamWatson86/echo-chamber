@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow};
 
+const DISPLAY_SPAN_MIN_SECONDARY_EDGE_PX: u32 = 32;
+const DISPLAY_SPAN_MIN_SECONDARY_AREA_RATIO: f64 = 0.01;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DisplayRect {
     pub(crate) x: i32,
@@ -36,6 +39,10 @@ pub(crate) struct EchoDisplayStatus {
 }
 
 impl DisplayRect {
+    fn area(&self) -> u64 {
+        self.width as u64 * self.height as u64
+    }
+
     fn right(&self) -> i32 {
         self.x + self.width as i32
     }
@@ -44,20 +51,29 @@ impl DisplayRect {
         self.y + self.height as i32
     }
 
-    fn intersection_area(&self, other: &DisplayRect) -> u64 {
+    fn intersection_dimensions(&self, other: &DisplayRect) -> Option<(u32, u32)> {
         let left = self.x.max(other.x);
         let top = self.y.max(other.y);
         let right = self.right().min(other.right());
         let bottom = self.bottom().min(other.bottom());
         if right <= left || bottom <= top {
-            return 0;
+            return None;
         }
-        (right - left) as u64 * (bottom - top) as u64
+        Some(((right - left) as u32, (bottom - top) as u32))
+    }
+
+    fn intersection_area(&self, other: &DisplayRect) -> u64 {
+        self.intersection_dimensions(other)
+            .map(|(width, height)| width as u64 * height as u64)
+            .unwrap_or(0)
     }
 }
 
 pub(crate) fn make_display_id(name: &str, rect: &DisplayRect) -> String {
-    format!("{}:{}:{}:{}:{}", name, rect.x, rect.y, rect.width, rect.height)
+    format!(
+        "{}:{}:{}:{}:{}",
+        name, rect.x, rect.y, rect.width, rect.height
+    )
 }
 
 pub(crate) fn select_preferred_display<'a>(
@@ -84,12 +100,47 @@ pub(crate) fn display_with_largest_overlap<'a>(
         .max_by_key(|display| window_rect.intersection_area(&display.rect))
 }
 
-pub(crate) fn window_spans_displays(window_rect: &DisplayRect, displays: &[EchoDisplayInfo]) -> bool {
-    let overlap_count = displays
+pub(crate) fn window_spans_displays(
+    window_rect: &DisplayRect,
+    displays: &[EchoDisplayInfo],
+) -> bool {
+    let overlaps: Vec<_> = displays
         .iter()
-        .filter(|display| window_rect.intersection_area(&display.rect) > 0)
+        .filter_map(|display| {
+            let area = window_rect.intersection_area(&display.rect);
+            (area > 0).then_some((display, area))
+        })
+        .collect();
+    if overlaps.len() <= 1 {
+        return false;
+    }
+
+    let largest_overlap = overlaps.iter().map(|(_, area)| *area).max().unwrap_or(0);
+    let window_area = window_rect.area();
+    let overlap_count = overlaps
+        .iter()
+        .filter(|(display, area)| {
+            *area == largest_overlap
+                || is_meaningful_secondary_display_overlap(window_rect, &display.rect, window_area)
+        })
         .count();
     overlap_count > 1
+}
+
+fn is_meaningful_secondary_display_overlap(
+    window_rect: &DisplayRect,
+    display_rect: &DisplayRect,
+    window_area: u64,
+) -> bool {
+    let Some((width, height)) = window_rect.intersection_dimensions(display_rect) else {
+        return false;
+    };
+    if width < DISPLAY_SPAN_MIN_SECONDARY_EDGE_PX || height < DISPLAY_SPAN_MIN_SECONDARY_EDGE_PX {
+        return false;
+    }
+    let area = width as u64 * height as u64;
+    let min_area = (window_area as f64 * DISPLAY_SPAN_MIN_SECONDARY_AREA_RATIO).ceil() as u64;
+    area >= min_area
 }
 
 fn centered_window_rect(display: &EchoDisplayInfo, width: u32, height: u32) -> DisplayRect {
@@ -126,7 +177,10 @@ pub(crate) fn list_echo_displays(
         .primary_monitor()
         .map_err(|e| e.to_string())?
         .map(|monitor| {
-            let name = monitor.name().cloned().unwrap_or_else(|| "Display".to_string());
+            let name = monitor
+                .name()
+                .cloned()
+                .unwrap_or_else(|| "Display".to_string());
             let pos = monitor.position();
             let size = monitor.size();
             let rect = DisplayRect {
@@ -142,7 +196,10 @@ pub(crate) fn list_echo_displays(
     let displays = monitors
         .into_iter()
         .map(|monitor| {
-            let name = monitor.name().cloned().unwrap_or_else(|| "Display".to_string());
+            let name = monitor
+                .name()
+                .cloned()
+                .unwrap_or_else(|| "Display".to_string());
             let pos = monitor.position();
             let size = monitor.size();
             let rect = DisplayRect {
@@ -186,7 +243,11 @@ pub(crate) fn build_display_status(
     let spans = window_spans_displays(&window_rect, &displays);
     let on_preferred = preferred_id
         .filter(|value| !value.trim().is_empty())
-        .and_then(|id| current_display_id.as_ref().map(|current_id| current_id == id))
+        .and_then(|id| {
+            current_display_id
+                .as_ref()
+                .map(|current_id| current_id == id)
+        })
         .unwrap_or(true);
 
     Ok(EchoDisplayStatus {
@@ -216,10 +277,15 @@ pub(crate) fn move_window_to_display(
 
     let _ = window.unmaximize();
     window
-        .set_position(Position::Physical(PhysicalPosition::new(target.x, target.y)))
+        .set_position(Position::Physical(PhysicalPosition::new(
+            target.x, target.y,
+        )))
         .map_err(|e| e.to_string())?;
     window
-        .set_size(Size::Physical(PhysicalSize::new(target.width, target.height)))
+        .set_size(Size::Physical(PhysicalSize::new(
+            target.width,
+            target.height,
+        )))
         .map_err(|e| e.to_string())?;
     let _ = window.maximize();
 
@@ -240,11 +306,23 @@ pub(crate) fn move_window_to_saved_preferred_display(
 mod tests {
     use super::*;
 
-    fn display(id: &str, x: i32, y: i32, width: u32, height: u32, primary: bool) -> EchoDisplayInfo {
+    fn display(
+        id: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        primary: bool,
+    ) -> EchoDisplayInfo {
         EchoDisplayInfo {
             id: id.to_string(),
             name: id.to_string(),
-            rect: DisplayRect { x, y, width, height },
+            rect: DisplayRect {
+                x,
+                y,
+                width,
+                height,
+            },
             scale_factor: 1.0,
             primary,
             preferred: false,
@@ -259,7 +337,9 @@ mod tests {
         ];
 
         assert_eq!(
-            select_preferred_display(&displays, Some("intel")).unwrap().id,
+            select_preferred_display(&displays, Some("intel"))
+                .unwrap()
+                .id,
             "intel"
         );
     }
@@ -283,9 +363,30 @@ mod tests {
             display("left", -2560, 0, 2560, 1440, false),
             display("right", 0, 0, 2560, 1440, true),
         ];
-        let window = DisplayRect { x: -100, y: 10, width: 400, height: 400 };
+        let window = DisplayRect {
+            x: -100,
+            y: 10,
+            width: 400,
+            height: 400,
+        };
 
         assert!(window_spans_displays(&window, &displays));
+    }
+
+    #[test]
+    fn ignores_maximized_window_invisible_border_overlap() {
+        let displays = vec![
+            display("left", -2560, 0, 2560, 1440, false),
+            display("right", 0, 0, 2560, 1440, true),
+        ];
+        let window = DisplayRect {
+            x: -2568,
+            y: -8,
+            width: 2576,
+            height: 1456,
+        };
+
+        assert!(!window_spans_displays(&window, &displays));
     }
 
     #[test]
@@ -294,7 +395,12 @@ mod tests {
             display("left", -2560, 0, 2560, 1440, false),
             display("right", 0, 0, 2560, 1440, true),
         ];
-        let window = DisplayRect { x: 100, y: 10, width: 400, height: 400 };
+        let window = DisplayRect {
+            x: 100,
+            y: 10,
+            width: 400,
+            height: 400,
+        };
 
         assert!(!window_spans_displays(&window, &displays));
     }

@@ -8,6 +8,16 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-05-04",
+    title: "Screen Share Reliability Fixes (v0.6.12)",
+    notes: [
+      "Windows desktop clients now force Echo/WebView2 and common browser capture paths onto the high-performance GPU at startup. This targets the mixed-iGPU/NVIDIA setup where streams looked awful even though the PC had plenty of GPU headroom.",
+      "Native window shares now keep static browser/app windows alive with heartbeat frames instead of dropping toward 0fps when the source stops repainting.",
+      "If Echo is covering the shared window, or the source is minimized/hidden, the publisher gets a warning instead of silently sending a frozen or disappearing stream.",
+      "The display placement warning now ignores tiny invisible maximized-window borders crossing onto the next monitor, while still catching real cross-display placement."
+    ]
+  },
+  {
     version: "2026-04-13l",
     title: "Win10 Entire Screen Fix",
     notes: [

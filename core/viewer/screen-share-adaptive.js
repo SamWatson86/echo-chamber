@@ -11,6 +11,69 @@ function getScreenPresentationStatsForIdentity(identity) {
   return video?._echoPresentationStats || null;
 }
 
+function buildNativePresenterUnavailableReport(reason) {
+  return {
+    state: "fallback",
+    render_path: "webview2",
+    target_identity: null,
+    target_track_sid: null,
+    native_receive_fps: null,
+    native_presented_fps: null,
+    native_frames_received: 0,
+    native_frames_dropped: 0,
+    queue_depth: 0,
+    fallback_reason: reason || "native presenter unavailable",
+    tile_width: null,
+    tile_height: null,
+    updated_at_ms: Date.now(),
+  };
+}
+
+function getNativePresenterStatusForReport() {
+  var root = typeof globalThis === "object" ? globalThis : null;
+  var snapshot = typeof getNativePresenterStatusSnapshot === "function"
+    ? getNativePresenterStatusSnapshot
+    : root && typeof root.getNativePresenterStatusSnapshot === "function"
+    ? root.getNativePresenterStatusSnapshot
+    : null;
+  if (snapshot) {
+    try {
+      return snapshot() || buildNativePresenterUnavailableReport("native presenter status unavailable");
+    } catch (e) {
+      return buildNativePresenterUnavailableReport(
+        "native presenter status error: " + (e && e.message ? e.message : e)
+      );
+    }
+  }
+  var nativeShell = root && root.window && root.window.__ECHO_NATIVE__ === true;
+  return nativeShell ? buildNativePresenterUnavailableReport("native presenter script unavailable") : null;
+}
+
+async function resolveNativePresenterStatusForReport() {
+  var root = typeof globalThis === "object" ? globalThis : null;
+  var refresh = typeof refreshNativePresenterStatusSnapshot === "function"
+    ? refreshNativePresenterStatusSnapshot
+    : root && typeof root.refreshNativePresenterStatusSnapshot === "function"
+    ? root.refreshNativePresenterStatusSnapshot
+    : null;
+  if (refresh) {
+    try {
+      return await refresh() || buildNativePresenterUnavailableReport("native presenter status unavailable");
+    } catch (e) {
+      return buildNativePresenterUnavailableReport(
+        "native presenter status refresh error: " + (e && e.message ? e.message : e)
+      );
+    }
+  }
+  return getNativePresenterStatusForReport();
+}
+
+function exposeNativePresenterReportGlobals(root) {
+  if (!root) return;
+  root.getNativePresenterStatusForReport = getNativePresenterStatusForReport;
+  root.resolveNativePresenterStatusForReport = resolveNativePresenterStatusForReport;
+}
+
 function startInboundScreenStatsMonitor() {
   if (_inboundScreenStatsInterval) return;
   _inboundScreenStatsInterval = setInterval(async () => {
@@ -607,9 +670,7 @@ function startInboundScreenStatsMonitor() {
         var displayStatus = typeof getEchoDisplayStatusSnapshot === "function"
           ? getEchoDisplayStatusSnapshot()
           : null;
-        var nativePresenter = typeof getNativePresenterStatusSnapshot === "function"
-          ? getNativePresenterStatusSnapshot()
-          : null;
+        var nativePresenter = await resolveNativePresenterStatusForReport();
 
         // Fire the POST whenever we have ANYTHING to report — either receive-side
         // inbound stats (other publishers exist) OR local capture health (we are
@@ -637,6 +698,17 @@ function startInboundScreenStatsMonitor() {
       }
     } catch (e) {}
   }, 3000);
+}
+
+exposeNativePresenterReportGlobals(typeof globalThis === "object" ? globalThis : null);
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    buildNativePresenterUnavailableReport,
+    exposeNativePresenterReportGlobals,
+    getNativePresenterStatusForReport,
+    resolveNativePresenterStatusForReport,
+  };
 }
 
 function stopInboundScreenStatsMonitor() {

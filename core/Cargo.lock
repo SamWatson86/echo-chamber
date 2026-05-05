@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "base64 0.22.1",
  "futures-util",

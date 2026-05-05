@@ -853,6 +853,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     if (participant.identity.endsWith('$screen')) {
       debugLog('[screen-merge] $screen companion joined: ' + participant.identity);
       // Don't toast $screen companion joins — they're internal implementation detail
+    } else if (isNativePresenterIdentity(participant.identity)) {
+      debugLog('[native-presenter] companion joined: ' + participant.identity);
     }
     ensureParticipantCard(participant);
     debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
@@ -883,7 +885,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     // PERSONAL enter music plays every time anyone starts a screen share.
     // Bug reported by Sam during 2026-04-08 v0.6.4 friend testing.
     if (!_isRoomSwitch && !_isReconnecting && !wasPendingDisconnect &&
-        !participant.identity.endsWith('$screen')) {
+        !participant.identity.endsWith('$screen') &&
+        !isNativePresenterIdentity(participant.identity)) {
       playChimeForParticipant(participant.identity, "enter");
     }
     // Attach tracks — immediate on room switch (tracks already published), delayed on first connect

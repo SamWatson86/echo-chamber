@@ -97,6 +97,9 @@ function registerScreenTrack(trackSid, publication, tile, identity) {
       debugLog("[native-presenter] register start failed: " + (e && e.message ? e.message : e));
     });
   }
+  if (typeof scheduleNativePresenterProbeRetries === "function") {
+    scheduleNativePresenterProbeRetries({ trackSid, publication, tile, identity });
+  }
   if (ENABLE_SCREEN_WATCHDOG) startScreenWatchdog();
 }
 

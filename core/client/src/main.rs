@@ -28,6 +28,8 @@ mod file_debug_log;
 #[cfg(target_os = "windows")]
 mod gpu_converter;
 #[cfg(target_os = "windows")]
+mod gpu_preference;
+#[cfg(target_os = "windows")]
 mod native_presenter;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
@@ -436,11 +438,20 @@ async fn start_screen_share(
     source_id: u64,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    screen_capture::start_share(source_id, sfu_url, token, app, health_arc).await
+    screen_capture::start_share(
+        source_id,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    )
+    .await
 }
 
 #[cfg(target_os = "windows")]
@@ -453,6 +464,12 @@ fn stop_screen_share() {
 #[tauri::command]
 fn get_source_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
     screen_capture::get_thumbnail(source_id, is_monitor)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_capture_window_status(source_id: u64) -> screen_capture::CaptureWindowStatus {
+    screen_capture::get_capture_window_status(source_id)
 }
 
 // ── Desktop Capture (DXGI Desktop Duplication) IPC Commands ──
@@ -470,11 +487,21 @@ async fn start_desktop_capture(
     fullscreen: bool,
     sfu_url: String,
     token: String,
+    publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
 ) -> Result<(), String> {
     let health_arc = std::sync::Arc::clone(&*health);
-    desktop_capture::start(hwnd, fullscreen, sfu_url, token, app, health_arc).await
+    desktop_capture::start(
+        hwnd,
+        fullscreen,
+        sfu_url,
+        token,
+        publish_profile.unwrap_or_default(),
+        app,
+        health_arc,
+    )
+    .await
 }
 
 /// Start WGC monitor capture (entire screen). Includes the cursor automatically
@@ -519,12 +546,43 @@ fn report_encoder_implementation(state: tauri::State<Arc<CaptureHealthState>>, e
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        file_debug_log::reset();
+        let report = gpu_preference::ensure_startup_gpu_preferences();
+        let summary = report.summary();
+        eprintln!("[gpu-preference] startup {}", summary);
+        file_debug_log::append(&format!("[gpu-preference] startup {}", summary));
+        for path in &report.applied {
+            eprintln!(
+                "[gpu-preference] high-performance GPU preference set for {}",
+                path.display()
+            );
+            file_debug_log::append(&format!(
+                "[gpu-preference] high-performance GPU preference set for {}",
+                path.display()
+            ));
+        }
+        for (path, error) in &report.failed {
+            eprintln!(
+                "[gpu-preference] failed to set high-performance GPU preference for {}: {}",
+                path.display(),
+                error
+            );
+            file_debug_log::append(&format!(
+                "[gpu-preference] failed to set high-performance GPU preference for {}: {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+
     // Windows: WebView2 browser arguments for GPU encoding + self-signed TLS
     #[cfg(target_os = "windows")]
     unsafe {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--ignore-certificate-errors --enable-features=AcceleratedVideoEncoder,MediaFoundationVideoEncoding --ignore-gpu-blocklist --webrtc-max-cpu-consumption-percentage=100 --force-fieldtrials=WebRTC-Bwe-AllocationProbing/Enabled/",
+            gpu_preference::webview2_additional_browser_arguments(),
         );
     }
 
@@ -553,7 +611,6 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        file_debug_log::reset();
         file_debug_log::append(&format!(
             "[startup] echo-core-client boot server={} force_software_encoder={} auto_force_software_encoder={} windows_build={}",
             server, force_software_encoder, auto_force_software_encoder, windows_build
@@ -602,6 +659,8 @@ fn main() {
             stop_screen_share,
             #[cfg(target_os = "windows")]
             get_source_thumbnail,
+            #[cfg(target_os = "windows")]
+            get_capture_window_status,
             #[cfg(target_os = "windows")]
             check_desktop_capture_available,
             #[cfg(target_os = "windows")]
