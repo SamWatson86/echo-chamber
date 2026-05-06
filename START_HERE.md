@@ -9,11 +9,11 @@ If Sam starts a new Codex thread for Echo Chamber and says `continue`, read:
 
 Then run the Echo preflight from `docs/OPERATIONS.md` before claiming the machine is ready, before release work, or before live troubleshooting.
 
-Current production baseline after the v0.6.12 screen-share release:
+Current production baseline after the v0.6.13 screen-share/Jam release:
 
 - Main repo path: `F:\EC-worktrees\main`
 - Production branch: `main`
-- Expected live version: `0.6.12`
+- Expected live version: `0.6.13`
 - Production startup owner: `EchoCoreHost` Windows service
 - Production control child should launch from `F:\EC-worktrees\main\core\target\release\echo-core-control.exe`
 
