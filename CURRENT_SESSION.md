@@ -1,5 +1,44 @@
 # Echo Chamber - Current Session Handover
 
+## 2026-05-13 Jam Audio Silence Investigation
+
+**Worktree**: `F:\EC-worktrees\jam-audio-silence`
+**Branch**: `codex/jam-audio-silence-investigation`
+**Status**: Code patched and verified locally; not deployed live.
+
+Sam reported Jam audio was silent even though Spotify looked active. A Jam-only bot restart and Spotify playback resume did not fix it. Evidence showed the Jam audio WebSocket was sending correctly sized frames, but every decoded f32 sample was zero; Jam bot logs also stayed at `peak=0.000000 rms=0.000000`.
+
+Root-cause hypothesis now backed by code comparison: when process loopback `GetMixFormat` fails with `E_NOTIMPL`, Echo used a 48 kHz float32 fallback without `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`. Microsoft's ApplicationLoopback sample uses fixed stereo PCM16 at 44.1 kHz with autoconvert. This branch changes Echo's fallback to that shape and keeps the existing PCM16-to-f32 conversion path. The same stale fallback also existed in the desktop/admin native screen-share audio capture copies, so this is not Jam-only.
+
+Changed files:
+
+- `core/control/src/audio_capture.rs`
+  - cross-session Spotify root PID lookup via ToolHelp snapshot
+  - tested fallback format helper: stereo PCM16, 44.1 kHz, 16-bit
+  - fallback init flags include `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`
+- `core/client/src/audio_capture.rs`
+  - native screen-share audio fallback now uses stereo PCM16, 44.1 kHz, 16-bit
+  - fallback init flags include `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`
+- `core/admin-client/src/audio_capture.rs`
+  - same fallback fix for the local admin shell copy
+- `core/docs/AUDIO_PIPELINE.md`
+  - documents the shared process-loopback fallback and current Tauri event names
+- `core/control/src/jam_bot.rs`
+  - frame-level peak/RMS logging retained for live verification
+- `core/control/Cargo.toml`
+  - adds `Win32_System_Diagnostics_ToolHelp`
+
+Verification from `F:\EC-worktrees\jam-audio-silence\core`:
+
+- `cargo test -p echo-core-control audio_capture`: 4 passed, 0 failed
+- `cargo test -p echo-core-client audio_capture`: 2 passed, 0 failed
+- `cargo test -p echo-core-admin audio_capture`: 2 passed, 0 failed
+- `cargo check -p echo-core-control`: exit 0
+- `cargo check -p echo-core-client`: exit 0
+- `cargo check -p echo-core-admin`: exit 0
+
+This is both a server/control binary change and a desktop/admin client binary change. It is not live until Sam approves a build/deploy/restart/relaunch window. Do not restart EchoCoreHost/control, relaunch Sam's local client, or disrupt connected friends without explicit approval.
+
 ## 2026-04-10 Codex Handover Override
 
 This block supersedes the older v0.6.6 summary below it.

@@ -19,4 +19,8 @@ pub fn start_capture(_pid: u32, _app: tauri::AppHandle) -> Result<(), String> {
     Err("Per-process audio capture is not supported on this platform. Share your screen with system audio enabled instead.".to_string())
 }
 
+pub fn start_system_capture(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("System audio capture is not supported on this platform.".to_string())
+}
+
 pub fn stop_capture() {}

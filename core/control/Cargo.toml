@@ -1,6 +1,6 @@
 [package]
 name = "echo-core-control"
-version = "0.6.13"
+version = "0.6.14"
 edition = "2021"
 
 [dependencies]
@@ -33,6 +33,7 @@ features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_Security",
     "Win32_System_Registry",
     "Win32_System_Threading",

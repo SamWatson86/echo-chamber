@@ -26,6 +26,22 @@ function _captureSourceVisibilityToastMessage(status) {
   return status.warning + '. Keep the shared window visible while sharing.';
 }
 
+function nativeAudioCaptureRequestForSource(source) {
+  if (!source) return null;
+  if (source.sourceType === 'monitor') {
+    return { mode: 'system', pid: 0, toast: 'System audio streaming' };
+  }
+  if ((source.sourceType === 'game' || source.sourceType === 'window') &&
+      source.pid && source.pid > 0) {
+    return {
+      mode: 'process',
+      pid: source.pid,
+      toast: source.sourceType === 'game' ? 'Game audio streaming' : 'Window audio streaming'
+    };
+  }
+  return null;
+}
+
 function _stopSourceVisibilityMonitor() {
   if (_sourceVisibilityInterval) {
     clearInterval(_sourceVisibilityInterval);
@@ -326,14 +342,16 @@ async function startScreenShareManual() {
       showToast('Screen sharing started (' + modeLabel + ')', 4000);
 
       // Immediately start WASAPI per-process audio + publish pipeline using picker's PID
-      if (source.sourceType === 'game' && source.pid && source.pid > 0) {
-        debugLog('[audio] auto-starting native audio capture+publish for PID ' + source.pid);
-        startNativeAudioCapture(source.pid).then(function() {
-          debugLog('[audio] native audio pipeline started for PID ' + source.pid);
-          showToast('Game audio streaming', 3000);
+      var audioRequest = nativeAudioCaptureRequestForSource(source);
+      if (audioRequest) {
+        var audioLabel = audioRequest.mode === 'system' ? 'system loopback' : 'PID ' + audioRequest.pid;
+        debugLog('[audio] auto-starting native audio capture+publish for ' + audioLabel);
+        startNativeAudioCapture(audioRequest.pid, { system: audioRequest.mode === 'system' }).then(function() {
+          debugLog('[audio] native audio pipeline started for ' + audioLabel);
+          showToast(audioRequest.toast, 3000);
         }).catch(function(e) {
           debugLog('[audio] native audio failed: ' + e);
-          showToast('Game audio failed: ' + e, 8000);
+          showToast('Screen audio failed: ' + e, 8000);
         });
       } else {
         debugLog('[audio] skipped — type=' + source.sourceType + ' pid=' + (source.pid || 'none'));
@@ -1290,6 +1308,7 @@ async function startNativeAudioCapture(pid, opts) {
   var LK = getLiveKitClient();
   var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
   var trackName = opts.name || undefined;
+  var useSystemLoopback = !!opts.system;
 
   // Create AudioContext — DON'T hardcode sample rate, let it match system default
   // WASAPI will report its actual format and we adapt
@@ -1383,8 +1402,13 @@ async function startNativeAudioCapture(pid, opts) {
   };
 
   // Start the WASAPI capture on Rust side
-  await tauriInvoke("start_audio_capture", { pid: pid });
-  debugLog("[native-audio] WASAPI started for PID " + pid);
+  if (useSystemLoopback) {
+    await tauriInvoke("start_system_audio_capture");
+    debugLog("[native-audio] WASAPI started for system loopback");
+  } else {
+    await tauriInvoke("start_audio_capture", { pid: pid });
+    debugLog("[native-audio] WASAPI started for PID " + pid);
+  }
 
   // Publish the audio track via LiveKit
   var audioTrack = _nativeAudioDest.stream.getAudioTracks()[0];

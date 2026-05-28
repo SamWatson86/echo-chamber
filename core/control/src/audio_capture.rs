@@ -13,6 +13,10 @@ mod platform {
     use windows::Win32::Foundation::*;
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows::Win32::System::Registry::*;
     use windows::Win32::System::Threading::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -22,6 +26,7 @@ mod platform {
     const ACTIVATION_TYPE_PROCESS_LOOPBACK: u32 = 1;
     const LOOPBACK_MODE_INCLUDE_TREE: u32 = 0;
     const VT_BLOB: u16 = 65;
+    const BITS_PER_BYTE: u16 = 8;
 
     #[repr(C)]
     struct ProcessLoopbackParams {
@@ -221,12 +226,96 @@ mod platform {
 
     // --- Find Spotify ---
 
-    /// Search capturable windows for Spotify.exe and return its PID.
+    fn process_entry_name(entry: &PROCESSENTRY32W) -> String {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        String::from_utf16_lossy(&entry.szExeFile[..len])
+    }
+
+    fn find_processes_by_name(exe_name: &str) -> Vec<(u32, u32)> {
+        let mut processes = Vec::new();
+
+        unsafe {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+                return processes;
+            };
+
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let name = process_entry_name(&entry);
+                    if name.eq_ignore_ascii_case(exe_name) {
+                        processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    }
+
+                    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+
+            let _ = CloseHandle(snapshot);
+        }
+
+        processes
+    }
+
+    pub(super) fn select_root_process_pid(processes: &[(u32, u32)]) -> Option<u32> {
+        let pids: std::collections::HashSet<u32> = processes.iter().map(|(pid, _)| *pid).collect();
+        processes
+            .iter()
+            .find(|(_, parent_pid)| !pids.contains(parent_pid))
+            .or_else(|| processes.first())
+            .map(|(pid, _)| *pid)
+    }
+
+    /// Search running processes for Spotify.exe and return its root PID.
+    ///
+    /// The control plane normally runs as a Windows service in session 0, so it
+    /// cannot reliably enumerate the interactive user's visible Spotify window.
+    /// Process snapshot lookup works across sessions and the WASAPI process
+    /// loopback uses INCLUDE_TREE to capture child renderer/audio processes.
     pub fn find_spotify_pid() -> Option<u32> {
-        list_capturable_windows()
-            .into_iter()
-            .find(|w| w.exe_name.eq_ignore_ascii_case("Spotify.exe"))
-            .map(|w| w.pid)
+        select_root_process_pid(&find_processes_by_name("Spotify.exe")).or_else(|| {
+            list_capturable_windows()
+                .into_iter()
+                .find(|w| w.exe_name.eq_ignore_ascii_case("Spotify.exe"))
+                .map(|w| w.pid)
+        })
+    }
+
+    pub(super) fn process_loopback_initialize_flags(use_autoconvert: bool) -> u32 {
+        let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK;
+        if use_autoconvert {
+            flags | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+        } else {
+            flags
+        }
+    }
+
+    pub(super) fn process_loopback_fallback_format() -> WAVEFORMATEX {
+        let channels = 2_u16;
+        let sample_rate = 44_100_u32;
+        let bits = 16_u16;
+        let block_align = channels * bits / BITS_PER_BYTE;
+
+        WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM as u16,
+            nChannels: channels,
+            nSamplesPerSec: sample_rate,
+            nAvgBytesPerSec: sample_rate * block_align as u32,
+            nBlockAlign: block_align,
+            wBitsPerSample: bits,
+            cbSize: 0,
+        }
     }
 
     // --- Start / Stop ---
@@ -317,7 +406,7 @@ mod platform {
             eprintln!("[audio-capture] got IAudioClient");
 
             // Get mix format
-            let (sample_rate, channels, bits, block_align, is_float, fmt_ptr_owned);
+            let (sample_rate, channels, bits, block_align, is_float);
             match client.GetMixFormat() {
                 Ok(ptr) => {
                     let fmt = &*ptr;
@@ -353,45 +442,33 @@ mod platform {
                     let buffer_duration: i64 = 200_000;
                     client.Initialize(
                         AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+                        process_loopback_initialize_flags(false),
                         buffer_duration,
                         0,
                         ptr,
                         None,
                     )?;
-                    fmt_ptr_owned = None;
                 }
                 Err(e) => {
                     eprintln!(
-                        "[audio-capture] GetMixFormat failed: {} — using default 48kHz stereo float32",
+                        "[audio-capture] GetMixFormat failed: {} — using default 44.1kHz stereo PCM16",
                         e
                     );
 
-                    sample_rate = 48000;
-                    channels = 2;
-                    bits = 32;
+                    let default_fmt = process_loopback_fallback_format();
+                    sample_rate = default_fmt.nSamplesPerSec;
+                    channels = default_fmt.nChannels as u32;
+                    bits = default_fmt.wBitsPerSample;
                     block_align = channels as usize * bits as usize / 8;
-                    is_float = true;
-
-                    let default_fmt = WAVEFORMATEX {
-                        wFormatTag: 3,
-                        nChannels: channels as u16,
-                        nSamplesPerSec: sample_rate,
-                        nAvgBytesPerSec: sample_rate * block_align as u32,
-                        nBlockAlign: block_align as u16,
-                        wBitsPerSample: bits as u16,
-                        cbSize: 0,
-                    };
-                    fmt_ptr_owned = Some(default_fmt);
+                    is_float = false;
 
                     let buffer_duration: i64 = 200_000;
-                    let fmt_ref = fmt_ptr_owned.as_ref().unwrap() as *const WAVEFORMATEX;
                     client.Initialize(
                         AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+                        process_loopback_initialize_flags(true),
                         buffer_duration,
                         0,
-                        fmt_ref,
+                        &default_fmt as *const WAVEFORMATEX,
                         None,
                     )?;
                 }
@@ -504,6 +581,61 @@ mod platform {
             eprintln!("[audio-capture] stopped for PID {}", pid);
             Ok(())
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::platform::{
+        process_loopback_fallback_format, process_loopback_initialize_flags,
+        select_root_process_pid,
+    };
+    use windows::Win32::Media::Audio::{
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_LOOPBACK,
+    };
+
+    #[test]
+    fn selects_root_spotify_process_for_include_tree_capture() {
+        let processes = vec![(19836, 2360), (29512, 19836), (30340, 19836)];
+
+        assert_eq!(select_root_process_pid(&processes), Some(19836));
+    }
+
+    #[test]
+    fn falls_back_to_first_process_when_all_parents_are_spotify() {
+        let processes = vec![(10, 11), (11, 10)];
+
+        assert_eq!(select_root_process_pid(&processes), Some(10));
+    }
+
+    #[test]
+    fn process_loopback_fallback_uses_pcm16_format() {
+        let format = process_loopback_fallback_format();
+        let format_tag = format.wFormatTag;
+        let channels = format.nChannels;
+        let sample_rate = format.nSamplesPerSec;
+        let bits = format.wBitsPerSample;
+        let block_align = format.nBlockAlign;
+        let avg_bytes_per_sec = format.nAvgBytesPerSec;
+        let cb_size = format.cbSize;
+
+        assert_eq!(format_tag, 1);
+        assert_eq!(channels, 2);
+        assert_eq!(sample_rate, 44_100);
+        assert_eq!(bits, 16);
+        assert_eq!(block_align, 4);
+        assert_eq!(avg_bytes_per_sec, 176_400);
+        assert_eq!(cb_size, 0);
+    }
+
+    #[test]
+    fn process_loopback_fallback_enables_autoconvertpcm() {
+        let flags = process_loopback_initialize_flags(true);
+
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0);
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_LOOPBACK, 0);
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, 0);
     }
 }
 
