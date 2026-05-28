@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.15
+
+- Fix: Native screen-share audio now adapts WASAPI mono, multichannel, and sample-rate-mismatched formats to browser stereo before publishing, eliminating robotic or garbled shared audio.
+
 ## 0.6.14
 
 - Fix: Native screen sharing now starts audio for window shares and full-monitor shares, including system loopback for entire-screen captures.
