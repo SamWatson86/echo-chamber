@@ -1160,25 +1160,85 @@ var _nativeAudioWorkletCode = [
   "class NativeAudioProcessor extends AudioWorkletProcessor {",
   "  constructor() {",
   "    super();",
-  "    this.buf = new Float32Array(96000);", // ~1s at 48kHz stereo
-  "    this.wr = 0; this.rd = 0; this.len = 96000;",
+  "    this.frameCap = 48000;",
+  "    this.buf = new Float32Array(this.frameCap * 2);",
+  "    this.wr = 0; this.rd = 0; this.available = 0;",
+  "    this.inputChannels = 2;",
+  "    this.inputSampleRate = sampleRate;",
+  "    this.resamplePos = 0;",
   "    this.port.onmessage = (e) => {",
-  "      var samples = e.data;",
-  "      for (var i = 0; i < samples.length; i++) {",
-  "        this.buf[this.wr] = samples[i];",
-  "        this.wr = (this.wr + 1) % this.len;",
+  "      var msg = e.data;",
+  "      if (msg && msg.type === 'format') {",
+  "        this.inputChannels = Math.max(1, Math.min(8, msg.channels || 2));",
+  "        this.inputSampleRate = Math.max(8000, Math.min(192000, msg.sampleRate || sampleRate));",
+  "        this.resamplePos = 0;",
+  "        return;",
   "      }",
+  "      var samples = msg && msg.type === 'samples' ? msg.samples : msg;",
+  "      if (!samples || !samples.length) return;",
+  "      this.writeSamples(samples);",
   "    };",
+  "  }",
+  "  readFrame(samples, frame, channels) {",
+  "    var base = frame * channels;",
+  "    var l = samples[base] || 0;",
+  "    var r = channels > 1 ? (samples[base + 1] || 0) : l;",
+  "    if (channels === 3) {",
+  "      l += (samples[base + 2] || 0) * 0.707;",
+  "      r += (samples[base + 2] || 0) * 0.707;",
+  "    } else if (channels === 4) {",
+  "      l = (l + (samples[base + 2] || 0)) * 0.707;",
+  "      r = (r + (samples[base + 3] || 0)) * 0.707;",
+  "    } else if (channels >= 5) {",
+  "      l += (samples[base + 2] || 0) * 0.707;",
+  "      r += (samples[base + 2] || 0) * 0.707;",
+  "      l += (samples[base + 4] || 0) * 0.5;",
+  "      r += (samples[base + 5] || 0) * 0.5;",
+  "      if (channels >= 8) {",
+  "        l += (samples[base + 6] || 0) * 0.5;",
+  "        r += (samples[base + 7] || 0) * 0.5;",
+  "      }",
+  "      l *= 0.75; r *= 0.75;",
+  "    }",
+  "    return [Math.max(-1, Math.min(1, l)), Math.max(-1, Math.min(1, r))];",
+  "  }",
+  "  writeFrame(l, r) {",
+  "    var pos = this.wr * 2;",
+  "    this.buf[pos] = l; this.buf[pos + 1] = r;",
+  "    this.wr = (this.wr + 1) % this.frameCap;",
+  "    if (this.available < this.frameCap) this.available++;",
+  "    else this.rd = (this.rd + 1) % this.frameCap;",
+  "  }",
+  "  writeSamples(samples) {",
+  "    var channels = this.inputChannels || 2;",
+  "    var srcFrames = Math.floor(samples.length / channels);",
+  "    if (srcFrames <= 0) return;",
+  "    var ratio = (this.inputSampleRate || sampleRate) / sampleRate;",
+  "    var pos = Math.max(0, this.resamplePos || 0);",
+  "    while (pos < srcFrames) {",
+  "      var idx = Math.floor(pos);",
+  "      var frac = pos - idx;",
+  "      var a = this.readFrame(samples, idx, channels);",
+  "      var b = this.readFrame(samples, Math.min(idx + 1, srcFrames - 1), channels);",
+  "      this.writeFrame(a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac);",
+  "      pos += ratio;",
+  "    }",
+  "    this.resamplePos = pos - srcFrames;",
   "  }",
   "  process(inputs, outputs) {",
   "    var out = outputs[0];",
-  "    var ch = out.length;",
   "    for (var i = 0; i < out[0].length; i++) {",
-  "      for (var c = 0; c < ch; c++) {",
-  "        if (this.rd !== this.wr) {",
-  "          out[c][i] = this.buf[this.rd];",
-  "          this.rd = (this.rd + 1) % this.len;",
-  "        } else { out[c][i] = 0; }",
+  "      if (this.available > 0) {",
+  "        var pos = this.rd * 2;",
+  "        var l = this.buf[pos];",
+  "        var r = this.buf[pos + 1];",
+  "        this.rd = (this.rd + 1) % this.frameCap;",
+  "        this.available--;",
+  "        out[0][i] = l;",
+  "        if (out.length > 1) out[1][i] = r;",
+  "      } else {",
+  "        out[0][i] = 0;",
+  "        if (out.length > 1) out[1][i] = 0;",
   "      }",
   "    }",
   "    return true;",
@@ -1340,6 +1400,17 @@ async function startNativeAudioCapture(pid, opts) {
   var formatUn = await tauriListen("audio-capture-format", function (ev) {
     captureFormat = ev.payload;
     debugLog("[native-audio] WASAPI format: " + JSON.stringify(captureFormat));
+    if (_nativeAudioWorklet) {
+      _nativeAudioWorklet.port.postMessage({
+        type: "format",
+        channels: Number(captureFormat && captureFormat.channels) || 2,
+        sampleRate: Number(captureFormat && captureFormat.sampleRate) || _nativeAudioCtx.sampleRate,
+      });
+    }
+    if (captureFormat && (Number(captureFormat.channels) !== 2 || Number(captureFormat.sampleRate) !== _nativeAudioCtx.sampleRate)) {
+      debugLog("[native-audio] adapting WASAPI " + captureFormat.channels + "ch @" + captureFormat.sampleRate +
+        "Hz to browser stereo @" + _nativeAudioCtx.sampleRate + "Hz");
+    }
   });
 
   _nativeAudioUnlisten = await tauriListen("audio-capture-data", function (ev) {
@@ -1377,7 +1448,7 @@ async function startNativeAudioCapture(pid, opts) {
 
       // Send to AudioWorklet
       if (_nativeAudioWorklet) {
-        _nativeAudioWorklet.port.postMessage(floats);
+        _nativeAudioWorklet.port.postMessage({ type: "samples", samples: floats });
       }
     } catch (e) {
       debugLog("[native-audio] decode error: " + e);

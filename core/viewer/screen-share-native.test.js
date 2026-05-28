@@ -66,6 +66,33 @@ function loadScreenShareNative() {
   return { context, calls };
 }
 
+function loadNativeAudioProcessor(code) {
+  const registered = {};
+  const context = {
+    sampleRate: 48000,
+    Float32Array,
+    Math,
+    AudioWorkletProcessor: class {
+      constructor() {
+        this.port = { onmessage: null };
+      }
+    },
+    registerProcessor(name, processor) {
+      registered[name] = processor;
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(code, context, { filename: "native-audio-worklet.js" });
+  return new registered["native-audio-proc"]();
+}
+
+function assertFloatArrayApprox(actual, expected) {
+  assert.equal(actual.length, expected.length);
+  for (let i = 0; i < actual.length; i++) {
+    assert.ok(Math.abs(actual[i] - expected[i]) < 1e-6, `index ${i}: ${actual[i]} !== ${expected[i]}`);
+  }
+}
+
 test("game WGC fallback keeps the high-motion publish profile", async () => {
   const { context, calls } = loadScreenShareNative();
 
@@ -123,4 +150,40 @@ test("native audio capture request covers window and monitor shares", () => {
     context.nativeAudioCaptureRequestForSource({ sourceType: "window", pid: 0 }),
     null
   );
+});
+
+test("native audio worklet downmixes multichannel WASAPI frames to stereo", () => {
+  const { context } = loadScreenShareNative();
+  const processor = loadNativeAudioProcessor(context._nativeAudioWorkletCode);
+
+  processor.port.onmessage({ data: { type: "format", channels: 4, sampleRate: 48000 } });
+  processor.port.onmessage({
+    data: {
+      type: "samples",
+      samples: new Float32Array([
+        0.1, 0.2, 0.3, 0.4,
+        0.5, 0.6, 0.7, 0.8,
+      ]),
+    },
+  });
+
+  const out = [[new Float32Array(3), new Float32Array(3)]];
+  processor.process([], out);
+
+  assertFloatArrayApprox(Array.from(out[0][0]), [(0.1 + 0.3) * 0.707, (0.5 + 0.7) * 0.707, 0]);
+  assertFloatArrayApprox(Array.from(out[0][1]), [(0.2 + 0.4) * 0.707, (0.6 + 0.8) * 0.707, 0]);
+});
+
+test("native audio worklet duplicates mono WASAPI frames", () => {
+  const { context } = loadScreenShareNative();
+  const processor = loadNativeAudioProcessor(context._nativeAudioWorkletCode);
+
+  processor.port.onmessage({ data: { type: "format", channels: 1, sampleRate: 48000 } });
+  processor.port.onmessage({ data: { type: "samples", samples: new Float32Array([0.25, -0.5]) } });
+
+  const out = [[new Float32Array(2), new Float32Array(2)]];
+  processor.process([], out);
+
+  assert.deepEqual(Array.from(out[0][0]), [0.25, -0.5]);
+  assert.deepEqual(Array.from(out[0][1]), [0.25, -0.5]);
 });
