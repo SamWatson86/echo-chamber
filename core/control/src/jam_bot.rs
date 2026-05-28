@@ -95,15 +95,30 @@ async fn broadcast_loop(tx: broadcast::Sender<AudioFrame>, mut rx: mpsc::Receive
         // Drain full 20 ms frames
         while accum.len() >= FRAME_SAMPLES {
             let frame_data: Vec<f32> = accum.drain(..FRAME_SAMPLES).collect();
-            let frame = AudioFrame { data: frame_data };
 
             // broadcast::send only fails if there are zero receivers — that's fine
-            let _ = tx.send(frame);
-
             frame_count += 1;
             if frame_count == 1 {
                 info!("[jam-bot] first audio frame broadcast");
             }
+            if frame_count == 1 || frame_count % 250 == 0 {
+                let peak = frame_data
+                    .iter()
+                    .fold(0.0_f32, |acc, sample| acc.max(sample.abs()));
+                let rms = if frame_data.is_empty() {
+                    0.0
+                } else {
+                    let sum_sq: f32 = frame_data.iter().map(|sample| sample * sample).sum();
+                    (sum_sq / frame_data.len() as f32).sqrt()
+                };
+                info!(
+                    "[jam-bot] frame level frame={} peak={:.6} rms={:.6}",
+                    frame_count, peak, rms
+                );
+            }
+
+            let frame = AudioFrame { data: frame_data };
+            let _ = tx.send(frame);
         }
     }
 

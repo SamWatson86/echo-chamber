@@ -26,6 +26,7 @@ const ACTIVATION_TYPE_PROCESS_LOOPBACK: u32 = 1;
 const LOOPBACK_MODE_INCLUDE_TREE: u32 = 0;
 /// VT_BLOB variant type
 const VT_BLOB: u16 = 65;
+const BITS_PER_BYTE: u16 = 8;
 
 /// Manual repr(C) structs for process loopback activation params.
 /// These may not be available in all versions of the windows crate.
@@ -39,6 +40,32 @@ struct ProcessLoopbackParams {
 struct AudioClientActivationParams {
     activation_type: u32,
     loopback_params: ProcessLoopbackParams,
+}
+
+fn process_loopback_initialize_flags(use_autoconvert: bool) -> u32 {
+    let flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK;
+    if use_autoconvert {
+        flags | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+    } else {
+        flags
+    }
+}
+
+fn process_loopback_fallback_format() -> WAVEFORMATEX {
+    let channels = 2_u16;
+    let sample_rate = 44_100_u32;
+    let bits = 16_u16;
+    let block_align = channels * bits / BITS_PER_BYTE;
+
+    WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_PCM as u16,
+        nChannels: channels,
+        nSamplesPerSec: sample_rate,
+        nAvgBytesPerSec: sample_rate * block_align as u32,
+        nBlockAlign: block_align,
+        wBitsPerSample: bits,
+        cbSize: 0,
+    }
 }
 
 // --- Public types ---
@@ -337,7 +364,7 @@ fn capture_loop(
         eprintln!("[audio-capture] activation completed — got IAudioClient");
 
         // Get mix format — may fail with E_NOTIMPL on process loopback
-        let (sample_rate, channels, bits, block_align, is_float, fmt_ptr_owned);
+        let (sample_rate, channels, bits, block_align, is_float);
         match client.GetMixFormat() {
             Ok(ptr) => {
                 let fmt = &*ptr;
@@ -386,7 +413,7 @@ fn capture_loop(
                 let buffer_duration: i64 = 200_000;
                 client.Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    process_loopback_initialize_flags(false),
                     buffer_duration,
                     0,
                     ptr,
@@ -394,25 +421,14 @@ fn capture_loop(
                 )?;
             }
             Err(e) => {
-                eprintln!("[audio-capture] GetMixFormat failed: {} -- falling back to default float32 48kHz stereo", e);
+                eprintln!("[audio-capture] GetMixFormat failed: {} -- falling back to default 44.1kHz stereo PCM16", e);
 
-                // Build a default WAVEFORMATEX: float32, 48000 Hz, stereo
-                sample_rate = 48000;
-                channels = 2;
-                bits = 32;
-                block_align = channels as usize * bits as usize / 8; // 8 bytes per frame
-                is_float = true;
-
-                let default_fmt = WAVEFORMATEX {
-                    wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
-                    nChannels: channels as u16,
-                    nSamplesPerSec: sample_rate,
-                    nAvgBytesPerSec: sample_rate * block_align as u32,
-                    nBlockAlign: block_align as u16,
-                    wBitsPerSample: bits as u16,
-                    cbSize: 0,
-                };
-                fmt_ptr_owned = Some(default_fmt);
+                let default_fmt = process_loopback_fallback_format();
+                sample_rate = default_fmt.nSamplesPerSec;
+                channels = default_fmt.nChannels as u32;
+                bits = default_fmt.wBitsPerSample;
+                block_align = channels as usize * bits as usize / 8;
+                is_float = false;
 
                 eprintln!(
                     "[audio-capture] using default format: {}Hz {}ch {}bit blockAlign={} isFloat={}",
@@ -425,23 +441,22 @@ fn capture_loop(
                         "sampleRate": sample_rate,
                         "channels": channels,
                         "bitsPerSample": bits,
-                        "formatTag": 3,
-                        "isFloat": true,
+                        "formatTag": WAVE_FORMAT_PCM,
+                        "isFloat": false,
                     }),
                 );
 
-                // Initialize with default format + LOOPBACK flag
+                // Initialize with default format + LOOPBACK/AUTOCONVERTPCM flags
                 eprintln!(
-                    "[audio-capture] initializing audio client with default format + LOOPBACK flag"
+                    "[audio-capture] initializing audio client with default format + LOOPBACK/AUTOCONVERTPCM flags"
                 );
                 let buffer_duration: i64 = 200_000;
-                let fmt_ref = fmt_ptr_owned.as_ref().unwrap() as *const WAVEFORMATEX;
                 client.Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+                    process_loopback_initialize_flags(true),
                     buffer_duration,
                     0,
-                    fmt_ref,
+                    &default_fmt as *const WAVEFORMATEX,
                     None,
                 )?;
             }
@@ -570,5 +585,43 @@ fn capture_loop(
 
         eprintln!("[audio-capture] stopped for PID {}", pid);
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{process_loopback_fallback_format, process_loopback_initialize_flags};
+    use windows::Win32::Media::Audio::{
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_LOOPBACK,
+    };
+
+    #[test]
+    fn process_loopback_fallback_uses_pcm16_format() {
+        let format = process_loopback_fallback_format();
+        let format_tag = format.wFormatTag;
+        let channels = format.nChannels;
+        let sample_rate = format.nSamplesPerSec;
+        let bits = format.wBitsPerSample;
+        let block_align = format.nBlockAlign;
+        let avg_bytes_per_sec = format.nAvgBytesPerSec;
+        let cb_size = format.cbSize;
+
+        assert_eq!(format_tag, 1);
+        assert_eq!(channels, 2);
+        assert_eq!(sample_rate, 44_100);
+        assert_eq!(bits, 16);
+        assert_eq!(block_align, 4);
+        assert_eq!(avg_bytes_per_sec, 176_400);
+        assert_eq!(cb_size, 0);
+    }
+
+    #[test]
+    fn process_loopback_fallback_enables_autoconvertpcm() {
+        let flags = process_loopback_initialize_flags(true);
+
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0);
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_LOOPBACK, 0);
+        assert_ne!(flags & AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, 0);
     }
 }

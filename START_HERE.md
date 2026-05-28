@@ -1,5 +1,16 @@
 # Start Here
 
+## Active Handover
+
+If Sam says `continue` in this worktree, load `docs/handovers/2026-05-13-jam-audio-silence.md` first. This worktree is for the broader Echo audio silence bug where Jam Spotify capture and native screen-share audio can both produce silent process-loopback frames.
+
+Current active fix lane:
+
+- Worktree: `F:\EC-worktrees\jam-audio-silence`
+- Branch: `codex/jam-audio-silence-investigation`
+- Status: control, desktop client, and admin-client process-loopback fallback code patched; targeted tests passed; not deployed live.
+- Deployment boundary: server/control restart plus desktop/admin client rebuild/relaunch required to test live, so ask Sam before deploying, restarting shared services, or closing/reopening Sam's local Echo client.
+
 If Sam starts a new Codex thread for Echo Chamber and says `continue`, read:
 
 1. `AGENTS.md`
@@ -9,11 +20,11 @@ If Sam starts a new Codex thread for Echo Chamber and says `continue`, read:
 
 Then run the Echo preflight from `docs/OPERATIONS.md` before claiming the machine is ready, before release work, or before live troubleshooting.
 
-Current production baseline after the v0.6.12 screen-share release:
+Current production baseline after the v0.6.13 screen-share/Jam release:
 
 - Main repo path: `F:\EC-worktrees\main`
 - Production branch: `main`
-- Expected live version: `0.6.12`
+- Expected live version: `0.6.13`
 - Production startup owner: `EchoCoreHost` Windows service
 - Production control child should launch from `F:\EC-worktrees\main\core\target\release\echo-core-control.exe`
 

@@ -1345,27 +1345,88 @@ async fn share_loop_monitor(
 
     let mut drop_count: u64 = 0;
     let mut yuv_total_us: u64 = 0;
+    let mut publish_attempt_count: u64 = 0;
+    let mut last_publish_log_at = std::time::Instant::now();
+    let mut last_publish_attempt_count: u64 = 0;
+    let mut last_publish_frame_count: u64 = 0;
+    let mut last_sender_stats_at = std::time::Instant::now();
+    let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
+    let mut heartbeat = StaticFrameHeartbeat::new(STATIC_FRAME_HEARTBEAT_INTERVAL);
+    let mut heartbeat_attempt_count: u64 = 0;
+    let mut heartbeat_pushed_count: u64 = 0;
 
     while running.load(Ordering::SeqCst) {
-        let frame = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(f) => f,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        let from_heartbeat = match frame_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(frame) => {
+                let mut latest = frame;
+                while let Ok(newer) = frame_rx.try_recv() {
+                    drop_count += 1;
+                    latest = newer;
+                }
+                heartbeat.record_fresh_frame(std::time::Instant::now());
+                last_frame = Some(latest);
+                false
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let now = std::time::Instant::now();
+                if last_frame.is_none() || !heartbeat.should_publish(now) {
+                    continue;
+                }
+                true
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
-        let mut latest = frame;
-        while let Ok(newer) = frame_rx.try_recv() {
-            drop_count += 1;
-            latest = newer;
-        }
-        let (bgra_data, width, height) = latest;
+        let Some((bgra_data, width, height)) = last_frame.as_ref() else {
+            continue;
+        };
 
         let t0 = std::time::Instant::now();
-        publisher.push_frame(&bgra_data, width, height);
+        publish_attempt_count += 1;
+        if from_heartbeat {
+            heartbeat_attempt_count += 1;
+        }
+        let pushed = publisher.push_frame(bgra_data, *width, *height);
+        if from_heartbeat && pushed {
+            heartbeat_pushed_count += 1;
+        }
         let t1 = std::time::Instant::now();
 
         yuv_total_us += (t1 - t0).as_micros() as u64;
         let fc = publisher.frame_count();
+
+        let now = std::time::Instant::now();
+        let interval = now.duration_since(last_publish_log_at).as_secs_f64();
+        if interval >= 2.0 {
+            let attempt_delta = publish_attempt_count - last_publish_attempt_count;
+            let pushed_delta = fc - last_publish_frame_count;
+            let attempt_fps = attempt_delta as f64 / interval;
+            let pushed_fps = pushed_delta as f64 / interval;
+            let paced_drops = attempt_delta.saturating_sub(pushed_delta);
+            file_debug_log::append(&format!(
+                "[wgc-monitor-publish] interval attempts_fps={:.1} pushed_fps={:.1} paced_drops={} total_pushed={} channel_drops={} heartbeat_attempts={} heartbeat_pushed={} last_pushed={} last_heartbeat={}",
+                attempt_fps,
+                pushed_fps,
+                paced_drops,
+                fc,
+                drop_count,
+                heartbeat_attempt_count,
+                heartbeat_pushed_count,
+                pushed,
+                from_heartbeat
+            ));
+            health.record_capture_fps(pushed_fps.round() as u32);
+            last_publish_log_at = now;
+            last_publish_attempt_count = publish_attempt_count;
+            last_publish_frame_count = fc;
+            heartbeat_attempt_count = 0;
+            heartbeat_pushed_count = 0;
+        }
+
+        if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
+            publisher.log_sender_stats("screen-capture-monitor").await;
+            last_sender_stats_at = now;
+        }
 
         if fc % 30 == 0 {
             let elapsed = publisher.elapsed().as_secs_f64();
@@ -1387,8 +1448,8 @@ async fn share_loop_monitor(
                 app,
                 "screen-capture-stats",
                 "wgc-monitor",
-                width,
-                height,
+                *width,
+                *height,
                 30,
             ) {
                 health.record_capture_fps(emit_fps);
@@ -1450,5 +1511,27 @@ mod tests {
         };
 
         assert_eq!(window_overlap_ratio(source, cover), 0.5);
+    }
+
+    #[test]
+    fn monitor_share_loop_uses_static_frame_heartbeat() {
+        let source = include_str!("screen_capture.rs");
+        let start = source
+            .find("async fn share_loop_monitor")
+            .expect("share_loop_monitor exists");
+        let tail = &source[start..];
+        let end = tail
+            .find("running.store(false")
+            .expect("share_loop_monitor shutdown marker exists");
+        let body = &tail[..end];
+
+        assert!(
+            body.contains("StaticFrameHeartbeat::new"),
+            "monitor capture must republish the last good frame when WGC stops callbacks"
+        );
+        assert!(
+            body.contains("heartbeat.should_publish"),
+            "monitor capture must use heartbeat cadence during callback stalls"
+        );
     }
 }

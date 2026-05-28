@@ -375,40 +375,51 @@ pub(crate) async fn stop_jam_bot(state: &AppState) {
     }
 }
 
+fn apply_jam_start_result(jam: &mut JamState, identity: String, bot_started: bool) -> bool {
+    if !bot_started {
+        return false;
+    }
+
+    jam.active = true;
+    jam.host_identity = identity.clone();
+    jam.listeners.insert(identity);
+    true
+}
+
 pub(crate) async fn jam_start(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<JamStartRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    ensure_admin(&state, &headers)?;
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    ensure_admin(&state, &headers).map_err(|status| (status, String::new()))?;
+
+    {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if jam.spotify_token.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Spotify is not connected".to_string(),
+            ));
+        }
+    }
+
+    let bot = crate::jam_bot::JamBot::start().await.map_err(|e| {
+        warn!("Jam audio bot failed to start: {}", e);
+        (StatusCode::SERVICE_UNAVAILABLE, e)
+    })?;
+
+    stop_jam_bot(&state).await;
+    *state.jam_bot.lock().await = Some(bot);
+    info!("Jam audio bot started successfully");
 
     {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        if jam.spotify_token.is_none() {
-            return Err(StatusCode::BAD_REQUEST);
-        }
-        jam.active = true;
-        jam.host_identity = payload.identity.clone();
-        jam.listeners.insert(payload.identity);
+        apply_jam_start_result(&mut jam, payload.identity.clone(), true);
         info!(
             "Jam session started by {} (auto-joined as listener)",
             jam.host_identity
         );
     }
-
-    // Spawn the audio bot in background (don't block the response)
-    let bot_state = state.clone();
-    tokio::spawn(async move {
-        match crate::jam_bot::JamBot::start().await {
-            Ok(bot) => {
-                info!("Jam audio bot started successfully");
-                *bot_state.jam_bot.lock().await = Some(bot);
-            }
-            Err(e) => {
-                warn!("Jam audio bot failed to start: {}", e);
-            }
-        }
-    });
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -928,4 +939,47 @@ async fn jam_audio_ws_handler(mut socket: WebSocket, state: AppState) {
     }
 
     info!("[jam-audio-ws] client disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spotify_token() -> SpotifyToken {
+        SpotifyToken {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 999_999,
+        }
+    }
+
+    #[test]
+    fn failed_bot_start_does_not_activate_jam() {
+        let mut jam = JamState {
+            spotify_token: Some(spotify_token()),
+            ..JamState::default()
+        };
+
+        let activated = apply_jam_start_result(&mut jam, "sam-7475".to_string(), false);
+
+        assert!(!activated);
+        assert!(!jam.active);
+        assert!(jam.host_identity.is_empty());
+        assert!(jam.listeners.is_empty());
+    }
+
+    #[test]
+    fn successful_bot_start_activates_host_listener() {
+        let mut jam = JamState {
+            spotify_token: Some(spotify_token()),
+            ..JamState::default()
+        };
+
+        let activated = apply_jam_start_result(&mut jam, "sam-7475".to_string(), true);
+
+        assert!(activated);
+        assert!(jam.active);
+        assert_eq!(jam.host_identity, "sam-7475");
+        assert!(jam.listeners.contains("sam-7475"));
+    }
 }

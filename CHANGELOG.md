@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.14
+
+- Fix: Native screen sharing now starts audio for window shares and full-monitor shares, including system loopback for entire-screen captures.
+- Fix: WASAPI process-loopback fallback now uses PCM16 44.1 kHz with autoconvert, matching Microsoft's ApplicationLoopback sample and avoiding silent fallback frames.
+- Fix: Jam Spotify capture finds the root Spotify process across sessions and logs frame levels for live verification.
+
+## 0.6.13
+
+- Fix: Native full-monitor screen sharing keeps publishing heartbeat frames when Windows Graphics Capture stops delivering repaint callbacks, preventing connected screen publishers from sitting at `0fps/0kbps`.
+- Fix: Jam start now fails cleanly if the Spotify audio bot cannot start, instead of leaving an active Jam with no bot and causing reconnect loops.
+
 ## 0.6.11
 
 - Fix: Windows 10 native Entire Screen sharing now auto-falls back to software H264 on the native DXGI Desktop Duplication path when no encoder override is configured, eliminating the blank `0fps` viewer tile on Win10 publishers like `SAM-PC`
