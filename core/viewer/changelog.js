@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.22",
+    title: "WGC-Only Game Capture",
+    notes: [
+      "The Game picker no longer exposes Desktop Duplication as a normal capture mode.",
+      "If a stale Game capture request still asks for Desktop Duplication on a WGC-supported Windows build, Echo forces it back through WGC before native capture starts."
+    ]
+  },
+  {
     version: "v0.6.21",
     title: "WGC Fallback Guard",
     notes: [

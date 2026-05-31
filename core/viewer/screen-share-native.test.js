@@ -165,7 +165,7 @@ test("window auto capture uses WGC before Desktop Duplication", async () => {
   assert.equal(context.window._echoNativeCaptureMode, "wgc");
 });
 
-test("manual Desktop game capture skips WGC", async () => {
+test("game capture ignores Desktop Duplication mode on WGC-supported Windows", async () => {
   const { context, calls } = loadScreenShareNative();
   context.showCapturePicker = async () => ({
     sourceType: "game",
@@ -183,13 +183,13 @@ test("manual Desktop game capture skips WGC", async () => {
 
   await context.startScreenShareManual();
 
-  const desktopStart = calls.find((call) => call.command === "start_desktop_capture");
-  assert.ok(desktopStart);
-  assert.equal(desktopStart.args.hwnd, 4242);
-  assert.equal(desktopStart.args.fullscreen, false);
-  assert.equal(desktopStart.args.publishProfile, "game");
-  assert.equal(calls.some((call) => call.command === "start_screen_share"), false);
-  assert.equal(context.window._echoNativeCaptureMode, "desktop-dd");
+  const wgcStart = calls.find((call) => call.command === "start_screen_share");
+  assert.ok(wgcStart);
+  assert.equal(wgcStart.args.sourceId, 4242);
+  assert.equal(wgcStart.args.publishProfile, "game");
+  assert.equal(calls.some((call) => call.command === "check_desktop_capture_available"), false);
+  assert.equal(calls.some((call) => call.command === "start_desktop_capture"), false);
+  assert.equal(context.window._echoNativeCaptureMode, "wgc");
 });
 
 test("manual WGC game capture keeps the WGC path available", async () => {
