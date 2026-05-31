@@ -93,14 +93,65 @@ function assertFloatArrayApprox(actual, expected) {
   }
 }
 
-test("game WGC fallback keeps the high-motion publish profile", async () => {
+test("game auto capture does not silently fall back to WGC", async () => {
   const { context, calls } = loadScreenShareNative();
 
   await context.startScreenShareManual();
 
-  const screenStarts = calls.filter((call) => call.command === "start_screen_share");
-  assert.equal(screenStarts.length, 2);
-  assert.equal(screenStarts[1].args.publishProfile, "game");
+  assert.equal(calls.some((call) => call.command === "check_desktop_capture_available"), true);
+  assert.equal(calls.some((call) => call.command === "start_screen_share"), false);
+});
+
+test("game auto capture uses Desktop Duplication before WGC", async () => {
+  const { context, calls } = loadScreenShareNative();
+  context.showCapturePicker = async () => ({
+    sourceType: "game",
+    id: 4242,
+    pid: 5678,
+    isMonitor: false,
+    captureMode: "auto",
+  });
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_os_build_number") return 26100;
+    if (command === "check_desktop_capture_available") return [true, "available"];
+    return null;
+  };
+
+  await context.startScreenShareManual();
+
+  const desktopStart = calls.find((call) => call.command === "start_desktop_capture");
+  assert.ok(desktopStart);
+  assert.equal(desktopStart.args.hwnd, 4242);
+  assert.equal(desktopStart.args.fullscreen, false);
+  assert.equal(desktopStart.args.publishProfile, "game");
+  assert.equal(calls.some((call) => call.command === "start_screen_share"), false);
+  assert.equal(context.window._echoNativeCaptureMode, "desktop-dd");
+});
+
+test("manual WGC game capture keeps the WGC path available", async () => {
+  const { context, calls } = loadScreenShareNative();
+  context.showCapturePicker = async () => ({
+    sourceType: "game",
+    id: 4242,
+    pid: 5678,
+    isMonitor: false,
+    captureMode: "wgc",
+  });
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_os_build_number") return 26100;
+    return null;
+  };
+
+  await context.startScreenShareManual();
+
+  const wgcStart = calls.find((call) => call.command === "start_screen_share");
+  assert.ok(wgcStart);
+  assert.equal(wgcStart.args.sourceId, 4242);
+  assert.equal(wgcStart.args.publishProfile, "game");
+  assert.equal(calls.some((call) => call.command === "start_desktop_capture"), false);
+  assert.equal(context.window._echoNativeCaptureMode, "wgc");
 });
 
 test("source visibility warning tells the publisher to keep the shared window visible", () => {

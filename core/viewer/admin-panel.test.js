@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   formatStreamBitrate,
   renderInboundStreamStats,
+  renderSenderDiagnostics,
 } = require("./admin-panel.js");
 
 test("formats stream bitrate for admin diagnostics", () => {
@@ -54,4 +55,20 @@ test("renders receiver-side bitrate rows for every inbound stream", () => {
   assert.match(html, /loss 0 nack 0 pli 0 jitter 3ms/);
   assert.match(html, /David sees jeff-3333 camera/);
   assert.match(html, /30fps 1280x720 1\.2 Mbps/);
+});
+
+test("renders sender-side capture diagnostics", () => {
+  const html = renderSenderDiagnostics({
+    sender_fps: 8,
+    sender_target_bitrate_kbps: 5520,
+    sender_available_outgoing_bitrate_kbps: 5615,
+    sender_quality_limitation: "Cpu",
+    sender_encoder: "NVIDIA H264 Encoder",
+  });
+
+  assert.match(html, /sender 8fps/);
+  assert.match(html, /target 5\.5 Mbps/);
+  assert.match(html, /avail 5\.6 Mbps/);
+  assert.match(html, /quality Cpu/);
+  assert.match(html, /NVIDIA H264 Encoder/);
 });

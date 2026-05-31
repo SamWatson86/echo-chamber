@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::capture_health::{CaptureHealthState, CaptureSenderDiagnostics};
 use crate::file_debug_log;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
@@ -508,7 +509,7 @@ impl CapturePublisher {
         self.start_time.elapsed()
     }
 
-    pub async fn log_sender_stats(&self, log_prefix: &str) {
+    pub async fn log_sender_stats(&self, log_prefix: &str, health: Option<&CaptureHealthState>) {
         match self.track.get_stats().await {
             Ok(stats) => {
                 let transport = stats.iter().find_map(|stat| match stat {
@@ -551,6 +552,7 @@ impl CapturePublisher {
                     RtcStats::OutboundRtp(outbound) => Some(outbound),
                     _ => None,
                 });
+                let mut sender_diagnostics: Option<CaptureSenderDiagnostics> = None;
                 if let Some(outbound) = outbound {
                     let codec = codec_by_id.get(outbound.stream.codec_id.as_str()).copied();
                     let remote_inbound = if outbound.outbound.remote_id.is_empty() {
@@ -604,6 +606,24 @@ impl CapturePublisher {
                     );
                     eprintln!("{}", sender_line);
                     file_debug_log::append(&sender_line);
+                    sender_diagnostics = Some(CaptureSenderDiagnostics {
+                        fps: Some(outbound.outbound.frames_per_second as f32),
+                        target_bitrate_kbps: if outbound.outbound.target_bitrate > 0.0 {
+                            Some((outbound.outbound.target_bitrate / 1000.0).round() as u32)
+                        } else {
+                            None
+                        },
+                        available_outgoing_bitrate_kbps: None,
+                        quality_limitation: Some(format!(
+                            "{:?}",
+                            outbound.outbound.quality_limitation_reason
+                        )),
+                        encoder: if outbound.outbound.encoder_implementation.is_empty() {
+                            None
+                        } else {
+                            Some(outbound.outbound.encoder_implementation.clone())
+                        },
+                    });
                 } else {
                     eprintln!("[{}] sender-stats no outbound RTP report", log_prefix);
                     file_debug_log::append(&format!(
@@ -666,6 +686,17 @@ impl CapturePublisher {
                             pair.candidate_pair.current_round_trip_time,
                             pair.candidate_pair.available_outgoing_bitrate,
                         ));
+                        if let Some(diag) = sender_diagnostics.as_mut() {
+                            diag.available_outgoing_bitrate_kbps =
+                                if pair.candidate_pair.available_outgoing_bitrate > 0.0 {
+                                    Some(
+                                        (pair.candidate_pair.available_outgoing_bitrate / 1000.0)
+                                            .round() as u32,
+                                    )
+                                } else {
+                                    None
+                                };
+                        }
                     } else {
                         eprintln!(
                             "[{}] candidate-pair missing for selected transport pair",
@@ -701,6 +732,9 @@ impl CapturePublisher {
                     eprintln!("[{}] transport stats missing", log_prefix);
                     file_debug_log::append(&format!("[{}] transport stats missing", log_prefix));
                 }
+                if let (Some(health), Some(diagnostics)) = (health, sender_diagnostics) {
+                    health.record_sender_diagnostics(diagnostics);
+                }
             }
             Err(e) => {
                 eprintln!("[{}] sender-stats error: {}", log_prefix, e);
@@ -709,8 +743,13 @@ impl CapturePublisher {
         }
     }
 
-    pub fn log_sender_stats_blocking(&self, rt: &tokio::runtime::Handle, log_prefix: &str) {
-        rt.block_on(self.log_sender_stats(log_prefix));
+    pub fn log_sender_stats_blocking(
+        &self,
+        rt: &tokio::runtime::Handle,
+        log_prefix: &str,
+        health: Option<&CaptureHealthState>,
+    ) {
+        rt.block_on(self.log_sender_stats(log_prefix, health));
     }
 
     /// Close the SFU room connection.

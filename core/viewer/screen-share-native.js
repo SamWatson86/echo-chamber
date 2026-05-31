@@ -251,13 +251,13 @@ async function startScreenShareManual() {
     // Step 3: start capture
     try {
       if (source.sourceType === 'game') {
-        // Capture fallback chain: WGC (24H2+) → DXGI DD
-        // WGC = Windows.Graphics.Capture, 30-60fps (MPO-aware, Win11 24H2+ only)
-        // DXGI DD = DWM compositor, 4-35fps (universal fallback)
+        // Auto/default game capture uses Desktop Duplication. WGC stays
+        // available only as a manual diagnostics path.
         var captureStarted = false;
+        var gameCaptureMode = String(source.captureMode || 'auto').toLowerCase();
 
-        // 1. Try WGC window capture (MPO-aware, works at game's native FPS — requires Win11 24H2+)
-        if (!captureStarted && wgcSupported) {
+        // 1. Manual WGC window capture (diagnostics path; Win11 24H2+)
+        if (!captureStarted && gameCaptureMode === 'wgc' && wgcSupported) {
           try {
             debugLog('[wgc] trying WGC window capture for HWND ' + source.id + ' (build ' + osBuild + ')');
             await tauriInvoke('start_screen_share', {
@@ -271,12 +271,12 @@ async function startScreenShareManual() {
           } catch (wgcErr) {
             debugLog('[wgc] start failed: ' + (wgcErr.message || wgcErr));
           }
-        } else if (!captureStarted && !wgcSupported) {
+        } else if (!captureStarted && gameCaptureMode === 'wgc' && !wgcSupported) {
           debugLog('[wgc] skipped — requires Win11 24H2+ (build 26100+), current: ' + osBuild);
         }
 
-        // 2. Fall back to DXGI Desktop Duplication (compositor capture)
-        if (!captureStarted) {
+        // 2. Auto/default DXGI Desktop Duplication (compositor capture)
+        if (!captureStarted && gameCaptureMode !== 'wgc') {
           try {
             var ddResult = await tauriInvoke('check_desktop_capture_available');
             if (ddResult && ddResult[0]) {
@@ -296,6 +296,9 @@ async function startScreenShareManual() {
           } catch (ddErr) {
             debugLog('[desktop-dd] check/start failed: ' + (ddErr.message || ddErr));
           }
+        }
+        if (!captureStarted) {
+          throw new Error('Game capture unavailable for mode ' + gameCaptureMode);
         }
       } else {
         // Window/monitor capture
@@ -336,7 +339,11 @@ async function startScreenShareManual() {
       screenEnabled = true;
       window._echoNativeCaptureActive = true;
       _startSourceVisibilityMonitor(source);
-      _startQualityWarnListener();
+      try {
+        _startQualityWarnListener();
+      } catch (qualityWarnErr) {
+        debugLog('[screen-share] quality warning listener failed: ' + (qualityWarnErr.message || qualityWarnErr));
+      }
       renderPublishButtons();
       var modeLabel = window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' : 'Window Capture';
       showToast('Screen sharing started (' + modeLabel + ')', 4000);
@@ -358,29 +365,8 @@ async function startScreenShareManual() {
       }
 
     } catch (err) {
-      var fallbackStarted = false;
       showToast('Capture failed: ' + (err.message || err), 8000);
-      // If game capture failed, try WGC fallback (only on 24H2+)
-      if (source.sourceType === 'game' && screenToken && wgcSupported) {
-        try {
-          await tauriInvoke('start_screen_share', {
-            sourceId: source.id,
-            sfuUrl: sfuUrl,
-            token: screenToken,
-            publishProfile: 'game',
-          });
-          window._echoNativeCaptureMode = 'wgc';
-          screenEnabled = true;
-          window._echoNativeCaptureActive = true;
-          _startSourceVisibilityMonitor(source);
-          renderPublishButtons();
-          fallbackStarted = true;
-          showToast('Using standard capture (game hook unavailable)', 5000);
-        } catch (e2) {
-          showToast('Fallback capture also failed: ' + (e2.message || e2), 8000);
-        }
-      }
-      if (!fallbackStarted) _stopNativeCaptureStopListeners();
+      _stopNativeCaptureStopListeners();
     }
     return;
   }

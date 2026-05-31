@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.17",
+    title: "Game Capture Diagnostics",
+    notes: [
+      "Game sharing now defaults to Desktop Duplication with the game publish profile after live logs showed WGC collapsing at the sender on Crimson Desert.",
+      "WGC remains available from the game capture mode control for diagnostics and A/B testing.",
+      "Admin capture health now reports sender FPS, target bitrate, available outgoing bitrate, quality limitation, and encoder so live bitrate/FPS failures are visible immediately."
+    ]
+  },
+  {
     version: "2026-05-04",
     title: "Screen Share Reliability Fixes (v0.6.12)",
     notes: [

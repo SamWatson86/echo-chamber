@@ -125,6 +125,28 @@ function renderInboundStreamStats(data) {
   return html;
 }
 
+function renderSenderDiagnostics(ch) {
+  if (!ch) return "";
+  const parts = [];
+  if (typeof ch.sender_fps === "number" && Number.isFinite(ch.sender_fps)) {
+    parts.push("sender " + formatStreamFps(ch.sender_fps));
+  }
+  if (typeof ch.sender_target_bitrate_kbps === "number" && Number.isFinite(ch.sender_target_bitrate_kbps)) {
+    parts.push("target " + formatStreamBitrate(ch.sender_target_bitrate_kbps));
+  }
+  if (typeof ch.sender_available_outgoing_bitrate_kbps === "number" && Number.isFinite(ch.sender_available_outgoing_bitrate_kbps)) {
+    parts.push("avail " + formatStreamBitrate(ch.sender_available_outgoing_bitrate_kbps));
+  }
+  if (ch.sender_quality_limitation) {
+    parts.push("quality " + ch.sender_quality_limitation);
+  }
+  if (ch.sender_encoder) {
+    parts.push(ch.sender_encoder);
+  }
+  if (parts.length === 0) return "";
+  return `<div class="admin-row3 admin-sender-row">${adminPanelEscape(parts.join(" Â· "))}</div>`;
+}
+
 function renderAdminPanel(data) {
   const body = document.getElementById("adminPanelBody");
   if (!body) return;
@@ -157,6 +179,7 @@ function renderAdminPanel(data) {
         const skip = `skip ${(ch.encoder_skip_rate_pct || 0).toFixed(1)}%`;
         const ct = `consec_to ${ch.consecutive_timeouts || 0}`;
         html += `<div class="admin-row2">fps ${fpsTxt}  ${reinits}  ${skip}  ${ct}</div>`;
+        html += renderSenderDiagnostics(ch);
         if (ch.reasons && ch.reasons.length > 0) {
           html += `<div class="admin-row3">└─ ${escapeHtml(ch.reasons.join("; "))}</div>`;
         }
@@ -257,5 +280,6 @@ if (typeof module === "object" && module.exports) {
     formatStreamBitrate,
     renderInboundStreamStats,
     renderParticipantInboundStreamStats,
+    renderSenderDiagnostics,
   };
 }
