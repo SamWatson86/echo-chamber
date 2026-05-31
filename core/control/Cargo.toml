@@ -1,6 +1,6 @@
 [package]
 name = "echo-core-control"
-version = "0.6.19"
+version = "0.6.20"
 edition = "2021"
 
 [dependencies]
