@@ -82,15 +82,15 @@ impl PublishProfile {
 
     fn max_bitrate(self) -> u64 {
         match self {
-            Self::Desktop => 4_000_000,
-            Self::Game => 8_000_000,
+            Self::Desktop => 6_000_000,
+            Self::Game => 12_000_000,
         }
     }
 
     fn min_bitrate(self) -> u64 {
         match self {
-            Self::Desktop => 2_500_000,
-            Self::Game => 3_000_000,
+            Self::Desktop => 3_000_000,
+            Self::Game => 4_000_000,
         }
     }
 
@@ -254,8 +254,9 @@ impl CapturePublisher {
             video_codec: VideoCodec::H264,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                // Desktop uses the conservative multi-publisher budget validated
-                // 2026-04-07. Game shares opt into a higher-motion bitrate budget.
+                // Desktop stays multi-publisher-friendly while giving text and
+                // motion more bits than the old 4 Mbps cap. Game shares opt
+                // into a higher-motion bitrate budget.
                 max_bitrate: publish_profile.max_bitrate(),
                 // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
                 // to zero under packet loss / RTT spikes, so the stream stays
@@ -358,8 +359,9 @@ impl CapturePublisher {
             video_codec: VideoCodec::H264,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
-                // Desktop uses the conservative multi-publisher budget validated
-                // 2026-04-07. Game shares opt into a higher-motion bitrate budget.
+                // Desktop stays multi-publisher-friendly while giving text and
+                // motion more bits than the old 4 Mbps cap. Game shares opt
+                // into a higher-motion bitrate budget.
                 max_bitrate: publish_profile.max_bitrate(),
                 // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
                 // to zero under packet loss / RTT spikes, so the stream stays
@@ -727,10 +729,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn desktop_profile_stays_conservative() {
+    fn desktop_profile_uses_crisper_multi_publisher_budget() {
         assert_eq!(PublishProfile::Desktop.target_fps(), PUBLISH_TARGET_FPS);
-        assert_eq!(PublishProfile::Desktop.max_bitrate(), 4_000_000);
-        assert_eq!(PublishProfile::Desktop.min_bitrate(), 2_500_000);
+        assert_eq!(PublishProfile::Desktop.max_bitrate(), 6_000_000);
+        assert_eq!(PublishProfile::Desktop.min_bitrate(), 3_000_000);
     }
 
     #[test]
@@ -739,8 +741,8 @@ mod tests {
 
         assert_eq!(profile, PublishProfile::Game);
         assert_eq!(profile.target_fps(), 60);
-        assert_eq!(profile.max_bitrate(), 8_000_000);
-        assert_eq!(profile.min_bitrate(), 3_000_000);
+        assert_eq!(profile.max_bitrate(), 12_000_000);
+        assert_eq!(profile.min_bitrate(), 4_000_000);
     }
 
     fn pushed_frame_count(source_hz: u32, target_hz: u32, seconds: u32) -> usize {
