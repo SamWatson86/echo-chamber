@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.24",
+    title: "Game Quality Mode",
+    notes: [
+      "Game capture keeps the crisp 20 Mbps max / 8 Mbps minimum H264 budget from v0.6.23.",
+      "The Game profile now targets 1080p30 instead of 1080p60 to reduce encoder pressure in heavy foreground games while preserving image quality."
+    ]
+  },
+  {
     version: "v0.6.23",
     title: "Sharper Game Streaming",
     notes: [
