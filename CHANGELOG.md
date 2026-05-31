@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.16
+
+- Improve: Native screen sharing now publishes desktop and game captures with higher bitrate budgets for sharper streams.
+- Admin: Add receiver-side stream bitrate diagnostics so live sessions can show who sees whose stream, at what resolution/FPS/bitrate, with loss and jitter counters.
+
 ## 0.6.15
 
 - Fix: Native screen-share audio now adapts WASAPI mono, multichannel, and sample-rate-mismatched formats to browser stereo before publishing, eliminating robotic or garbled shared audio.
