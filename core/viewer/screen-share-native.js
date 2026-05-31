@@ -28,9 +28,7 @@ function _captureSourceVisibilityToastMessage(status) {
 
 function nativeAudioCaptureRequestForSource(source) {
   if (!source) return null;
-  if (source.sourceType === 'monitor') {
-    return { mode: 'system', pid: 0, toast: 'System audio streaming' };
-  }
+  if (source.sourceType === 'monitor') return null;
   if ((source.sourceType === 'game' || source.sourceType === 'window') &&
       source.pid && source.pid > 0) {
     return {
