@@ -209,7 +209,7 @@ test("source visibility monitor is only enabled for native window-like sources",
   );
 });
 
-test("native audio capture request covers window and monitor shares", () => {
+test("native audio capture request avoids system loopback for monitor shares", () => {
   const { context } = loadScreenShareNative();
 
   assert.equal(
@@ -221,8 +221,8 @@ test("native audio capture request covers window and monitor shares", () => {
     JSON.stringify({ mode: "process", pid: 5678, toast: "Game audio streaming" })
   );
   assert.equal(
-    JSON.stringify(context.nativeAudioCaptureRequestForSource({ sourceType: "monitor", pid: 0 })),
-    JSON.stringify({ mode: "system", pid: 0, toast: "System audio streaming" })
+    context.nativeAudioCaptureRequestForSource({ sourceType: "monitor", pid: 0 }),
+    null
   );
   assert.equal(
     context.nativeAudioCaptureRequestForSource({ sourceType: "window", pid: 0 }),
