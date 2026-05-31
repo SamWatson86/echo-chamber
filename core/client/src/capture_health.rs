@@ -98,6 +98,25 @@ pub struct CaptureHealthSnapshot {
     /// Zero when capture is inactive.
     #[serde(default)]
     pub seconds_since_capture_started: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_fps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_target_bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_available_outgoing_bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_quality_limitation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_encoder: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CaptureSenderDiagnostics {
+    pub fps: Option<f32>,
+    pub target_bitrate_kbps: Option<u32>,
+    pub available_outgoing_bitrate_kbps: Option<u32>,
+    pub quality_limitation: Option<String>,
+    pub encoder: Option<String>,
 }
 
 // ── State ───────────────────────────────────────────────────────────
@@ -112,6 +131,7 @@ pub struct CaptureHealthState {
     capture_active: AtomicBool,
     capture_mode: RwLock<CaptureMode>,
     encoder_type: RwLock<EncoderType>,
+    sender_diagnostics: RwLock<Option<CaptureSenderDiagnostics>>,
     /// Set when capture transitions from inactive→active. Used by the
     /// classifier to suppress fps-based checks during the COLD_START_GRACE
     /// window so the brief pre-first-frame period doesn't trigger Red.
@@ -135,6 +155,7 @@ impl CaptureHealthState {
             capture_active: AtomicBool::new(false),
             capture_mode: RwLock::new(CaptureMode::None),
             encoder_type: RwLock::new(EncoderType::None),
+            sender_diagnostics: RwLock::new(None),
             capture_started_at: Mutex::new(None),
             reinit_events: Mutex::new(Vec::new()),
             shader_error_events: Mutex::new(Vec::new()),
@@ -191,6 +212,10 @@ impl CaptureHealthState {
         self.last_capture_fps.store(fps, Ordering::Relaxed);
     }
 
+    pub fn record_sender_diagnostics(&self, diagnostics: CaptureSenderDiagnostics) {
+        *self.sender_diagnostics.write() = Some(diagnostics);
+    }
+
     pub fn set_active(&self, active: bool, mode: CaptureMode, encoder: EncoderType, target: u32) {
         let was_active = self.capture_active.swap(active, Ordering::Relaxed);
         *self.capture_mode.write() = mode;
@@ -221,6 +246,7 @@ impl CaptureHealthState {
         } else {
             self.last_capture_fps.store(0, Ordering::Relaxed);
             self.consecutive_timeouts.store(0, Ordering::Relaxed);
+            *self.sender_diagnostics.write() = None;
             *self.capture_started_at.lock() = None;
         }
     }
@@ -279,6 +305,7 @@ impl CaptureHealthState {
 
         let mode = self.capture_mode.read().clone();
         let encoder = self.encoder_type.read().clone();
+        let sender_diagnostics = self.sender_diagnostics.read().clone();
 
         let mut snap = CaptureHealthSnapshot {
             level: HealthLevel::Green,
@@ -305,6 +332,19 @@ impl CaptureHealthState {
                 let started = *self.capture_started_at.lock();
                 started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
             },
+            sender_fps: sender_diagnostics.as_ref().and_then(|diag| diag.fps),
+            sender_target_bitrate_kbps: sender_diagnostics
+                .as_ref()
+                .and_then(|diag| diag.target_bitrate_kbps),
+            sender_available_outgoing_bitrate_kbps: sender_diagnostics
+                .as_ref()
+                .and_then(|diag| diag.available_outgoing_bitrate_kbps),
+            sender_quality_limitation: sender_diagnostics
+                .as_ref()
+                .and_then(|diag| diag.quality_limitation.clone()),
+            sender_encoder: sender_diagnostics
+                .as_ref()
+                .and_then(|diag| diag.encoder.clone()),
         };
         let (level, reasons) = classify(&snap);
         snap.level = level;
@@ -378,7 +418,9 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
     // as either consecutive_timeouts climbing or fps being well below
     // target steady-state — both are caught by the OTHER signals.
     let in_cold_start = snap.seconds_since_capture_started < COLD_START_GRACE.as_secs();
-    if !in_cold_start && snap.capture_mode == "DXGI-DD" && snap.target_fps > 0 {
+    let fps_check_applies =
+        snap.capture_mode == "DXGI-DD" || (snap.capture_mode == "WGC" && snap.target_fps >= 60);
+    if !in_cold_start && fps_check_applies && snap.target_fps > 0 {
         let frac = snap.current_fps as f32 / snap.target_fps as f32;
         if frac < RED_FPS_FRACTION {
             level = level.max(HealthLevel::Red);
@@ -453,6 +495,11 @@ mod tests {
             // need to verify cold-start suppression set this to a small
             // value explicitly.
             seconds_since_capture_started: 60,
+            sender_fps: None,
+            sender_target_bitrate_kbps: None,
+            sender_available_outgoing_bitrate_kbps: None,
+            sender_quality_limitation: None,
+            sender_encoder: None,
         }
     }
 
@@ -578,6 +625,52 @@ mod tests {
             "WGC low fps should not produce reasons, got {:?}",
             reasons
         );
+    }
+
+    #[test]
+    fn wgc_high_motion_low_fps_is_red() {
+        let mut s = nominal();
+        s.capture_mode = "WGC".into();
+        s.current_fps = 23;
+        s.target_fps = 60;
+        let (lvl, reasons) = classify(&s);
+        assert_eq!(lvl, HealthLevel::Red);
+        assert!(
+            reasons.iter().any(|r| r.contains("capture fps 23/60")),
+            "expected WGC game fps reason, got {:?}",
+            reasons
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_sender_diagnostics_and_clears_when_inactive() {
+        let state = CaptureHealthState::new();
+        state.set_active(true, CaptureMode::DxgiDd, EncoderType::Nvenc, 60);
+        state.record_sender_diagnostics(CaptureSenderDiagnostics {
+            fps: Some(8.0),
+            target_bitrate_kbps: Some(5520),
+            available_outgoing_bitrate_kbps: Some(5615),
+            quality_limitation: Some("Cpu".into()),
+            encoder: Some("NVIDIA H264 Encoder".into()),
+        });
+
+        let active = state.snapshot();
+        assert_eq!(active.sender_fps, Some(8.0));
+        assert_eq!(active.sender_target_bitrate_kbps, Some(5520));
+        assert_eq!(active.sender_available_outgoing_bitrate_kbps, Some(5615));
+        assert_eq!(active.sender_quality_limitation.as_deref(), Some("Cpu"));
+        assert_eq!(
+            active.sender_encoder.as_deref(),
+            Some("NVIDIA H264 Encoder")
+        );
+
+        state.set_active(false, CaptureMode::None, EncoderType::None, 0);
+        let inactive = state.snapshot();
+        assert_eq!(inactive.sender_fps, None);
+        assert_eq!(inactive.sender_target_bitrate_kbps, None);
+        assert_eq!(inactive.sender_available_outgoing_bitrate_kbps, None);
+        assert_eq!(inactive.sender_quality_limitation, None);
+        assert_eq!(inactive.sender_encoder, None);
     }
 
     #[test]

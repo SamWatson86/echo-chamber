@@ -1306,7 +1306,7 @@ fn capture_loop_blocking(
                 ));
                 health.record_capture_fps(fps);
             }
-            publisher.log_sender_stats_blocking(&rt, "desktop-capture");
+            publisher.log_sender_stats_blocking(&rt, "desktop-capture", Some(health.as_ref()));
         }
     }
 

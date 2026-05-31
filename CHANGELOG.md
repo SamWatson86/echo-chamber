@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.17
+
+- Change: Game sharing now defaults to Desktop Duplication with the game publish profile instead of silently falling through WGC.
+- Diagnostics: WGC remains available as an explicit game capture mode for A/B testing.
+- Admin: Capture health now reports sender FPS, target bitrate, available outgoing bitrate, quality limitation, and encoder so live stream collapses are visible from the dashboard.
+- Release: Desktop and control versions are bumped to 0.6.17.
+
 ## 0.6.16
 
 - Improve: Native screen sharing now publishes desktop and game captures with higher bitrate budgets for sharper streams.

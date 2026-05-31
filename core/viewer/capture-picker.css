@@ -172,6 +172,41 @@
     border-top: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
 }
 
+.capture-mode-control {
+    margin-right: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.capture-mode-control[hidden] {
+    display: none;
+}
+.capture-mode-label {
+    color: var(--text-secondary, rgba(255,255,255,0.55));
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+.capture-mode-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-primary, #fff);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 52px;
+    padding: 6px 8px;
+}
+.capture-mode-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+.capture-mode-btn.active {
+    background: var(--accent, #7c3aed);
+    border-color: var(--accent, #7c3aed);
+}
+
 .capture-picker-btn {
     padding: 8px 20px;
     border-radius: 8px;

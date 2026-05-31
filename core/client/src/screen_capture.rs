@@ -1068,7 +1068,9 @@ async fn share_loop(
         }
 
         if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
-            publisher.log_sender_stats("screen-capture").await;
+            publisher
+                .log_sender_stats("screen-capture", Some(health.as_ref()))
+                .await;
             last_sender_stats_at = now;
         }
 
@@ -1424,7 +1426,9 @@ async fn share_loop_monitor(
         }
 
         if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
-            publisher.log_sender_stats("screen-capture-monitor").await;
+            publisher
+                .log_sender_stats("screen-capture-monitor", Some(health.as_ref()))
+                .await;
             last_sender_stats_at = now;
         }
 
