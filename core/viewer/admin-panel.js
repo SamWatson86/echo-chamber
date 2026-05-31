@@ -59,6 +59,72 @@ const _adminMutedUntil = new Map();
 const _adminConsecutiveRed = new Map();
 const HYSTERESIS_RED_TICKS = 2; // require 2 consecutive Red polls (~6s) before alerting
 
+function adminPanelEscape(text) {
+  if (typeof escapeHtml === "function") return escapeHtml(text);
+  return String(text == null ? "" : text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function formatStreamBitrate(kbps) {
+  if (typeof kbps !== "number" || !Number.isFinite(kbps) || kbps <= 0) return "? Mbps";
+  if (kbps >= 1000) return (kbps / 1000).toFixed(1) + " Mbps";
+  return Math.round(kbps) + " kbps";
+}
+
+function formatStreamFps(fps) {
+  if (typeof fps !== "number" || !Number.isFinite(fps)) return "?fps";
+  return Math.round(fps) + "fps";
+}
+
+function renderParticipantInboundStreamStats(participant) {
+  const stats = participant && participant.stats ? participant.stats : {};
+  const inbound = Array.isArray(stats.inbound) ? stats.inbound : [];
+  if (inbound.length === 0) return "";
+
+  const viewer = participant.name || participant.identity || "viewer";
+  return inbound
+    .slice()
+    .sort((a, b) => {
+      const sourceOrder = (a.source || "").localeCompare(b.source || "");
+      if (sourceOrder !== 0) return sourceOrder;
+      return (a.from || "").localeCompare(b.from || "");
+    })
+    .map((stream) => {
+      const source = stream.source || "stream";
+      const from = stream.from || "?";
+      const dims = stream.width && stream.height ? stream.width + "x" + stream.height : "?x?";
+      const primary = [
+        formatStreamFps(stream.fps),
+        dims,
+        formatStreamBitrate(stream.bitrate_kbps),
+      ].join(" ");
+      const network = [
+        "loss " + (stream.lost ?? 0),
+        "nack " + (stream.nack ?? 0),
+        "pli " + (stream.pli ?? 0),
+        "jitter " + (stream.jitter_ms ?? "?") + "ms",
+      ].join(" ");
+      const layer = stream.layer ? " " + stream.layer : "";
+      const ice = stream.ice_remote_type ? " " + stream.ice_remote_type : "";
+      return `<div class="admin-row3 admin-stream-row">${adminPanelEscape(viewer)} sees ${adminPanelEscape(from)} ${adminPanelEscape(source)}: ${adminPanelEscape(primary)}${adminPanelEscape(layer)}${adminPanelEscape(ice)} · ${adminPanelEscape(network)}</div>`;
+    })
+    .join("");
+}
+
+function renderInboundStreamStats(data) {
+  let html = "";
+  for (const room of (data && data.rooms ? data.rooms : [])) {
+    for (const participant of (room.participants || [])) {
+      html += renderParticipantInboundStreamStats(participant);
+    }
+  }
+  return html;
+}
+
 function renderAdminPanel(data) {
   const body = document.getElementById("adminPanelBody");
   if (!body) return;
@@ -95,6 +161,7 @@ function renderAdminPanel(data) {
           html += `<div class="admin-row3">└─ ${escapeHtml(ch.reasons.join("; "))}</div>`;
         }
       }
+      html += renderParticipantInboundStreamStats(p);
       html += `</div>`;
 
       // Hysteresis: track consecutive Red ticks per identity. Banner only
@@ -183,4 +250,12 @@ function playAdminAlertChime() {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    formatStreamBitrate,
+    renderInboundStreamStats,
+    renderParticipantInboundStreamStats,
+  };
 }
