@@ -129,6 +129,33 @@ test("game auto capture uses Desktop Duplication before WGC", async () => {
   assert.equal(context.window._echoNativeCaptureMode, "desktop-dd");
 });
 
+test("window auto capture uses Desktop Duplication before WGC", async () => {
+  const { context, calls } = loadScreenShareNative();
+  context.showCapturePicker = async () => ({
+    sourceType: "window",
+    id: 4242,
+    pid: 5678,
+    isMonitor: false,
+    captureMode: "auto",
+  });
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_os_build_number") return 26100;
+    if (command === "check_desktop_capture_available") return [true, "available"];
+    return null;
+  };
+
+  await context.startScreenShareManual();
+
+  const desktopStart = calls.find((call) => call.command === "start_desktop_capture");
+  assert.ok(desktopStart);
+  assert.equal(desktopStart.args.hwnd, 4242);
+  assert.equal(desktopStart.args.fullscreen, false);
+  assert.equal(desktopStart.args.publishProfile, "desktop");
+  assert.equal(calls.some((call) => call.command === "start_screen_share"), false);
+  assert.equal(context.window._echoNativeCaptureMode, "desktop-dd");
+});
+
 test("manual WGC game capture keeps the WGC path available", async () => {
   const { context, calls } = loadScreenShareNative();
   context.showCapturePicker = async () => ({

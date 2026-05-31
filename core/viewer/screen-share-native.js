@@ -250,11 +250,12 @@ async function startScreenShareManual() {
 
     // Step 3: start capture
     try {
-      if (source.sourceType === 'game') {
-        // Auto/default game capture uses Desktop Duplication. WGC stays
+      if (source.sourceType === 'game' || source.sourceType === 'window') {
+        // Auto/default window-like capture uses Desktop Duplication. WGC stays
         // available only as a manual diagnostics path.
         var captureStarted = false;
         var gameCaptureMode = String(source.captureMode || 'auto').toLowerCase();
+        var publishProfile = source.sourceType === 'game' ? 'game' : 'desktop';
 
         // 1. Manual WGC window capture (diagnostics path; Win11 24H2+)
         if (!captureStarted && gameCaptureMode === 'wgc' && wgcSupported) {
@@ -264,7 +265,7 @@ async function startScreenShareManual() {
               sourceId: source.id,
               sfuUrl: sfuUrl,
               token: screenToken,
-              publishProfile: 'game',
+              publishProfile: publishProfile,
             });
             window._echoNativeCaptureMode = 'wgc';
             captureStarted = true;
@@ -286,7 +287,7 @@ async function startScreenShareManual() {
                 fullscreen: source.isMonitor || false,
                 sfuUrl: sfuUrl,
                 token: screenToken,
-                publishProfile: 'game',
+                publishProfile: publishProfile,
               });
               window._echoNativeCaptureMode = 'desktop-dd';
               captureStarted = true;
@@ -298,17 +299,16 @@ async function startScreenShareManual() {
           }
         }
         if (!captureStarted) {
-          throw new Error('Game capture unavailable for mode ' + gameCaptureMode);
+          throw new Error('Window capture unavailable for mode ' + gameCaptureMode);
         }
       } else {
-        // Window/monitor capture
+        // Monitor capture
         // Monitors use DXGI Desktop Duplication. WGC monitor capture
         // (start_screen_share_monitor) is implemented but causes display flicker
         // on some HDR + high-refresh setups due to WGC's internal display state
         // polling. The Tauri command is left in place for future investigation.
         // Trade-off: DXGI DD doesn't include the mouse cursor in captured frames.
         // Cursor compositing into DXGI DD output is a v0.6.3 task.
-        // Windows use WGC on 24H2+, error on older.
         if (source.sourceType === 'monitor') {
           debugLog('[monitor] using DXGI DD for monitor capture');
           var ddResult = await tauriInvoke('check_desktop_capture_available');
