@@ -254,6 +254,7 @@ async function startScreenShareManual() {
         var captureStarted = false;
         var gameCaptureMode = String(source.captureMode || 'auto').toLowerCase();
         var publishProfile = source.sourceType === 'game' ? 'game' : 'desktop';
+        var wgcStartError = null;
 
         // 1. WGC window capture (default Auto path, or explicit WGC mode)
         if (!captureStarted && gameCaptureMode !== 'desktop-dd' && wgcSupported) {
@@ -268,14 +269,15 @@ async function startScreenShareManual() {
             window._echoNativeCaptureMode = 'wgc';
             captureStarted = true;
           } catch (wgcErr) {
-            debugLog('[wgc] start failed: ' + (wgcErr.message || wgcErr));
+            wgcStartError = wgcErr.message || wgcErr;
+            debugLog('[wgc] start failed: ' + wgcStartError);
           }
         } else if (!captureStarted && gameCaptureMode !== 'desktop-dd' && !wgcSupported) {
           debugLog('[wgc] skipped — requires Win11 24H2+ (build 26100+), current: ' + osBuild);
         }
 
         // 2. DXGI Desktop Duplication (explicit Desktop mode, or Auto fallback)
-        if (!captureStarted && gameCaptureMode !== 'wgc') {
+        if (!captureStarted && (gameCaptureMode === 'desktop-dd' || (!wgcSupported && gameCaptureMode !== 'wgc'))) {
           try {
             var ddResult = await tauriInvoke('check_desktop_capture_available');
             if (ddResult && ddResult[0]) {
@@ -297,6 +299,9 @@ async function startScreenShareManual() {
           }
         }
         if (!captureStarted) {
+          if (wgcStartError && gameCaptureMode === 'auto') {
+            throw new Error('WGC capture failed; select Desktop mode to use Desktop Duplication: ' + wgcStartError);
+          }
           throw new Error('Window capture unavailable for mode ' + gameCaptureMode);
         }
       } else {

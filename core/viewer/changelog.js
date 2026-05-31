@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.21",
+    title: "WGC Fallback Guard",
+    notes: [
+      "Game and window Auto capture on WGC-supported Windows no longer silently swaps to Desktop Duplication if WGC fails to start.",
+      "Desktop Duplication remains available from the explicit Desktop capture mode for diagnostics."
+    ]
+  },
+  {
     version: "v0.6.20",
     title: "WGC Auto Capture Restored",
     notes: [
