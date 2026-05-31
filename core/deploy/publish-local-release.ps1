@@ -26,6 +26,29 @@ $buildScript = Join-Path $scriptDir "build-release.ps1"
 $testScript = Join-Path $scriptDir "test-local-release-lib.ps1"
 . (Join-Path $scriptDir "local-release-lib.ps1")
 
+function Test-GitHubReleaseExists([string]$RepoName, [string]$ReleaseTag) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & gh release view $ReleaseTag --repo $RepoName --json tagName 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($exitCode -eq 0) {
+        return $true
+    }
+
+    $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    if ($text -match "release not found") {
+        return $false
+    }
+
+    throw "Failed to check GitHub Release ${ReleaseTag}: $text"
+}
+
 Get-RequiredCommand "git" | Out-Null
 Get-RequiredCommand "gh" | Out-Null
 Get-RequiredCommand "powershell" | Out-Null
@@ -44,8 +67,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "gh is not authenticated for github.com"
 }
 
-& gh release view $tag --repo $Repo *> $null
-if ($LASTEXITCODE -eq 0) {
+if (Test-GitHubReleaseExists -RepoName $Repo -ReleaseTag $tag) {
     throw "GitHub Release already exists: $tag"
 }
 
