@@ -31,8 +31,9 @@ struct TransportInner {
     renegotiate: bool,
     restarting_ice: bool,
     single_pc_mode: bool,
-    // Publish-side target bitrate (bps) for offer munging
+    // Publish-side bitrate bounds (bps) for offer munging.
     max_send_bitrate_bps: Option<u64>,
+    min_send_bitrate_bps: Option<u64>,
 }
 
 pub struct PeerTransport {
@@ -64,6 +65,7 @@ impl PeerTransport {
                 restarting_ice: false,
                 single_pc_mode,
                 max_send_bitrate_bps: None,
+                min_send_bitrate_bps: None,
             })),
         }
     }
@@ -136,9 +138,10 @@ impl PeerTransport {
         Ok(answer)
     }
 
-    pub async fn set_max_send_bitrate_bps(&self, bps: Option<u64>) {
+    pub async fn set_send_bitrate_bounds_bps(&self, max_bps: Option<u64>, min_bps: Option<u64>) {
         let mut inner = self.inner.lock().await;
-        inner.max_send_bitrate_bps = bps;
+        inner.max_send_bitrate_bps = max_bps;
+        inner.min_send_bitrate_bps = min_bps;
     }
 
     fn compute_start_bitrate_kbps(ultimate_bps: Option<u64>) -> Option<u32> {
@@ -327,6 +330,25 @@ impl PeerTransport {
         munged
     }
 
+    fn compute_h264_bitrate_hints(
+        max_bitrate_bps: Option<u64>,
+        min_bitrate_bps: Option<u64>,
+    ) -> Option<(u32, u32)> {
+        let max_kbps = (max_bitrate_bps? / 1000) as u32;
+        if max_kbps < 1000 {
+            return None;
+        }
+
+        let fallback_min_kbps = (max_kbps as f64 * 0.125).round() as u32;
+        let min_kbps = min_bitrate_bps
+            .map(|bps| (bps / 1000) as u32)
+            .filter(|kbps| *kbps > 0)
+            .unwrap_or(fallback_min_kbps)
+            .min(max_kbps);
+
+        Some((min_kbps, max_kbps))
+    }
+
     fn munge_x_google_start_bitrate(sdp: &str, start_bitrate_kbps: u32) -> String {
         // Detect what line ending the original SDP uses
         let uses_crlf = sdp.contains("\r\n");
@@ -481,32 +503,27 @@ impl PeerTransport {
         // This prevents TWCC BWE from starving the encoder on localhost or low-jitter links.
         let is_h264 = sdp.contains(" H264/90000");
         if is_h264 {
-            if let Some(max_bps) = inner.max_send_bitrate_bps {
-                let max_kbps = (max_bps / 1000) as u32;
-                if max_kbps >= 1000 {
-                    // min = 12.5% of max (soft SDP hint), start = 70% of max.
-                    // The real hard floor is RtpEncodingParameters.min_bitrate_bps
-                    // set in capture_pipeline.rs; this SDP hint is aligned to it
-                    // so the encoder target and GoogCC allocator agree.
-                    let min_kbps = (max_kbps as f64 * 0.125).round() as u32;
-                    let start_kbps = (max_kbps as f64 * 0.7).round() as u32;
-                    log::info!(
-                        "Applying H264 bitrate hints: min={}kbps start={}kbps (max={}kbps)",
-                        min_kbps, start_kbps, max_kbps
-                    );
+            if let Some((min_kbps, start_kbps)) = Self::compute_h264_bitrate_hints(
+                inner.max_send_bitrate_bps,
+                inner.min_send_bitrate_bps,
+            ) {
+                let max_kbps = (inner.max_send_bitrate_bps.unwrap_or_default() / 1000) as u32;
+                log::info!(
+                    "Applying H264 bitrate hints: min={}kbps start={}kbps (max={}kbps)",
+                    min_kbps, start_kbps, max_kbps
+                );
 
-                    let munged = Self::munge_h264_bitrate_hints(&sdp, min_kbps, start_kbps);
-                    if munged != sdp {
-                        log::info!("SDP munged successfully (H264)");
-                        match SessionDescription::parse(&munged, offer.sdp_type()) {
-                            Ok(parsed) => {
-                                offer = parsed;
-                                // sdp = munged; // not needed, last use
-                            }
-                            Err(e) => log::warn!(
-                                "Failed to parse H264-munged SDP, falling back: {e}"
-                            ),
+                let munged = Self::munge_h264_bitrate_hints(&sdp, min_kbps, start_kbps);
+                if munged != sdp {
+                    log::info!("SDP munged successfully (H264)");
+                    match SessionDescription::parse(&munged, offer.sdp_type()) {
+                        Ok(parsed) => {
+                            offer = parsed;
+                            // sdp = munged; // not needed, last use
                         }
+                        Err(e) => log::warn!(
+                            "Failed to parse H264-munged SDP, falling back: {e}"
+                        ),
                     }
                 }
             }
@@ -537,6 +554,16 @@ a=rtpmap:96 VP8/90000\n\
 a=fmtp:96 some=param\n";
         let out = PeerTransport::munge_x_google_start_bitrate(sdp, 3200);
         assert_eq!(out, sdp, "should not change SDP if no VP9/AV1 present");
+    }
+
+    #[test]
+    fn h264_hints_use_publish_min_floor_and_full_start_bitrate() {
+        let (min_kbps, start_kbps) =
+            PeerTransport::compute_h264_bitrate_hints(Some(12_000_000), Some(4_000_000))
+                .expect("h264 bitrate hints");
+
+        assert_eq!(min_kbps, 4000);
+        assert_eq!(start_kbps, 12000);
     }
 
     #[test]

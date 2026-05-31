@@ -70,6 +70,46 @@ fn global_state() -> &'static Mutex<Option<DesktopShareHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+fn should_emit_frame_count_stats(frame_count: u64, last_stats_frame_count: &mut u64) -> bool {
+    if frame_count == 0 || frame_count == *last_stats_frame_count || frame_count % 60 != 0 {
+        return false;
+    }
+
+    *last_stats_frame_count = frame_count;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_count_stats_gate_only_emits_once_per_60_frame_boundary() {
+        let mut last_stats_frame_count = 0;
+
+        assert!(!should_emit_frame_count_stats(
+            59,
+            &mut last_stats_frame_count
+        ));
+        assert!(should_emit_frame_count_stats(
+            60,
+            &mut last_stats_frame_count
+        ));
+        assert!(!should_emit_frame_count_stats(
+            60,
+            &mut last_stats_frame_count
+        ));
+        assert!(!should_emit_frame_count_stats(
+            61,
+            &mut last_stats_frame_count
+        ));
+        assert!(should_emit_frame_count_stats(
+            120,
+            &mut last_stats_frame_count
+        ));
+    }
+}
+
 fn windows_build_number() -> u32 {
     #[repr(C)]
     struct OsVersionInfoExW {
@@ -919,6 +959,8 @@ fn capture_loop_blocking(
     // (skip processing when the previous frame is identical) instead of
     // forcing the capture loop to sleep.
 
+    let mut last_stats_frame_count = 0u64;
+
     // 7. Frame loop
     while running.load(Ordering::SeqCst) {
         // Acquire next frame from compositor (blocks up to 100ms)
@@ -1289,8 +1331,9 @@ fn capture_loop_blocking(
             }
         }
 
-        // Stats every 60 frames
-        if frame_count % 60 == 0 {
+        // Stats every 60 published frames. If publisher pacing drops a frame,
+        // frame_count can stall on a multiple of 60; do not duplicate the block.
+        if should_emit_frame_count_stats(frame_count, &mut last_stats_frame_count) {
             if let Some(fps) = publisher.maybe_emit_stats(
                 app,
                 "desktop-capture-stats",

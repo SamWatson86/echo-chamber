@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.19
+
+- Fix: H264 SDP bitrate hints now use the publish profile's real minimum bitrate and full target start bitrate, so game streams start/ramp at the intended budget instead of falling back to a low allocator hint.
+- Diagnostics: Desktop Duplication sender stats now emit once per 60 published frames instead of repeating when publisher pacing holds the frame counter steady.
+- Diagnostics: Windows client startup logs now include the desktop binary version.
+- Release: Desktop and control package versions are bumped to 0.6.19.
+
 ## 0.6.18
 
 - Fix: Native screen shares now force WebRTC's framerate-preserving `ContentHint=Fluid` even when the track is labeled as a screenshare, preventing DXGI Desktop Duplication monitor/game streams from collapsing to single-digit FPS under CPU/backpressure adaptation.

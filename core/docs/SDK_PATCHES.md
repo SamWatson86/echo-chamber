@@ -50,6 +50,33 @@ Affects every app using non-simulcast video with this SDK.
 
 ---
 
+### Patch 1b - H264 Bitrate Hint Alignment
+
+**Files:**
+- `core/livekit-local/src/rtc_engine/peer_transport.rs`
+- `core/livekit-local/src/rtc_engine/rtc_session.rs`
+
+**What changed:**
+
+Echo stores both publish-side max and min bitrate bounds before creating the sender
+offer. For H264 offers, `x-google-min-bitrate` now uses the publish encoding's
+`min_bitrate` and `x-google-start-bitrate` uses the full publish target instead of a
+percentage of the target.
+
+**Why:** Live testing on Crimson Desert showed the sender using NVENC and Desktop
+Duplication with zero loss, but WebRTC negotiated `x-google-min-bitrate=1500` for a
+12 Mbps game profile that was supposed to have a 4 Mbps floor. The allocator eventually
+ramped to 60 fps, proving the path could carry the stream, but it started and stayed on
+the low hint for too long.
+
+**Impact:**
+- Before: game profile `max=12 Mbps`, `min=4 Mbps` advertised H264 hints as
+  `min=1.5 Mbps`, `start=8.4 Mbps`.
+- After: the same profile advertises `min=4 Mbps`, `start=12 Mbps`, aligning the SDP
+  hint with the publish profile that the capture pipeline already requested.
+
+---
+
 ## webrtc-sys-local
 
 ### Patch 2 — `is_screencast()` Method

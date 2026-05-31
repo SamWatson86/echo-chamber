@@ -81,6 +81,8 @@ The JS side always derives the SFU URL from the control URL (`https→wss`) — 
 - Simulcast: disabled for screen share; single layer labeled `f` (HIGH RID) so SFU allocates full bandwidth
 - Non-simulcast bug fixed: `VIDEO_RIDS[0]` was `'q'` (LOW) — changed to `'f'` (HIGH) in `core/livekit-local/`
 
+- H264 SDP bitrate hints are aligned to the publish profile: game streams advertise the real min bitrate floor and start at the full target bitrate so WebRTC's allocator does not begin from the old low fallback.
+
 ## Performance Numbers (RTX 4090, 4K source)
 
 | Scenario | Capture FPS | Viewer FPS |

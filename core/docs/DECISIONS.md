@@ -69,3 +69,15 @@ Two capture methods available: WGC (Win11 24H2+) and DXGI DD (all Windows). Deci
 Control plane split from monolithic `main.rs` into 9 focused modules. Viewer JS split: `screen-share.js` → 5 files, `participants.js` → 4 files. Dead capture code moved to `archive/`. Documentation rewritten from scratch.
 
 Rationale: ~9200-line `app.js` and monolithic control plane were hitting token limits in AI-assisted development, causing incomplete reads and missed context. Smaller modules enable focused edits and better test coverage.
+
+## 2026-05-31 - H264 Bitrate Hints Track Publish Floors
+
+Live Crimson Desert testing showed Desktop Duplication + NVENC could briefly reach crisp
+60fps, but the sender spent too long at single-digit FPS while WebRTC's H264 SDP hint
+advertised a 1.5 Mbps minimum for a 12 Mbps game profile. The capture profile already
+requested a 4 Mbps floor; the SDK fork was discarding that floor when munging H264 SDP.
+
+Decision: carry both max and min publish bitrate bounds into `PeerTransport` and use
+them for H264 `x-google-min-bitrate`/`x-google-start-bitrate`. This keeps the allocator,
+encoder target, and game publish profile aligned without changing the active capture
+backend.

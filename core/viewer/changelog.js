@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.19",
+    title: "Game Stream Bitrate Ramp Fix",
+    notes: [
+      "Game streams now advertise the real game publish bitrate floor to WebRTC's H264 allocator instead of the old low fallback hint.",
+      "The desktop client startup log includes the installed binary version, and Desktop Duplication sender stats no longer repeat stale frame-count blocks when publisher pacing pauses."
+    ]
+  },
+  {
     version: "v0.6.18",
     title: "Screen Share Framerate Fix",
     notes: [
