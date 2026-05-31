@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.20
+
+- Fix: Game and window Auto capture now tries WGC first again on supported Windows builds, with Desktop Duplication kept as the explicit Desktop mode and Auto fallback.
+- Release: Desktop and control package versions are bumped to 0.6.20.
+
 ## 0.6.19
 
 - Fix: H264 SDP bitrate hints now use the publish profile's real minimum bitrate and full target start bitrate, so game streams start/ramp at the intended budget instead of falling back to a low allocator hint.

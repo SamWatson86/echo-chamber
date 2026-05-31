@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.20",
+    title: "WGC Auto Capture Restored",
+    notes: [
+      "Game and window Auto capture now tries WGC first again on supported Windows builds.",
+      "Desktop Duplication stays available as the explicit Desktop mode and as the Auto fallback if WGC cannot start."
+    ]
+  },
+  {
     version: "v0.6.19",
     title: "Game Stream Bitrate Ramp Fix",
     notes: [
