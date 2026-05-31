@@ -90,7 +90,9 @@ impl PublishProfile {
     fn min_bitrate(self) -> u64 {
         match self {
             Self::Desktop => 3_000_000,
-            Self::Game => 8_000_000,
+            // Game still gets the 20 Mbps ceiling, but the floor must leave
+            // room for the browser mic sender on constrained uplinks.
+            Self::Game => 2_500_000,
         }
     }
 
@@ -776,13 +778,13 @@ mod tests {
     }
 
     #[test]
-    fn game_profile_is_high_motion_1080p60() {
+    fn game_profile_keeps_60fps_with_mic_safe_floor() {
         let profile: PublishProfile = serde_json::from_str("\"game\"").expect("game profile");
 
         assert_eq!(profile, PublishProfile::Game);
         assert_eq!(profile.target_fps(), 60);
         assert_eq!(profile.max_bitrate(), 20_000_000);
-        assert_eq!(profile.min_bitrate(), 8_000_000);
+        assert_eq!(profile.min_bitrate(), 2_500_000);
     }
 
     fn pushed_frame_count(source_hz: u32, target_hz: u32, seconds: u32) -> usize {

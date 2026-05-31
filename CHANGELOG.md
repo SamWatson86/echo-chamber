@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.26
+
+- Fix: Game capture keeps the 1080p60 / 20 Mbps ceiling but lowers the forced H264 minimum from 8 Mbps to 2.5 Mbps so mic audio has room on constrained uplinks.
+- Diagnostics: Native capture startup logs continue to report the active max/min bitrate so live tests can confirm clients loaded the new profile.
+- Release: Desktop and control package versions are bumped to 0.6.26.
+
 ## 0.6.25
 
 - Fix: Game capture defaults back to 1080p60 so strong game publishers like Jeff are not capped at 30fps by the 0.6.24 experiment.

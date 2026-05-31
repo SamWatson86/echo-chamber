@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.26",
+    title: "Mic-Safe Game Streaming",
+    notes: [
+      "Game capture keeps the 1080p60 / 20 Mbps ceiling for high-motion streams.",
+      "The forced H264 minimum is reduced from 8 Mbps to 2.5 Mbps so mic audio has room on constrained uplinks."
+    ]
+  },
+  {
     version: "v0.6.25",
     title: "Game 60fps Restored",
     notes: [
