@@ -7,6 +7,9 @@
 #   - Echo Chamber_<version>_x64-setup.exe       (installer for friends)
 #   - Echo Chamber_<version>_x64-setup.exe.sig   (signature for auto-updates)
 #   - latest.json                                 (update manifest for GitHub Releases)
+#
+# To publish the release end-to-end from this PC, use:
+#   powershell -ExecutionPolicy Bypass -File core\deploy\publish-local-release.ps1
 
 param(
     [switch]$SkipBuild
