@@ -93,13 +93,22 @@ function assertFloatArrayApprox(actual, expected) {
   }
 }
 
-test("game auto capture tries WGC before desktop duplication fallback", async () => {
+test("game auto capture does not silently fallback to desktop duplication on WGC-supported Windows", async () => {
   const { context, calls } = loadScreenShareNative();
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_os_build_number") return 26100;
+    if (command === "start_screen_share") throw new Error("WGC start failed");
+    if (command === "check_desktop_capture_available") return [true, "available"];
+    return null;
+  };
 
   await context.startScreenShareManual();
 
   assert.equal(calls.some((call) => call.command === "start_screen_share"), true);
-  assert.equal(calls.some((call) => call.command === "check_desktop_capture_available"), true);
+  assert.equal(calls.some((call) => call.command === "check_desktop_capture_available"), false);
+  assert.equal(calls.some((call) => call.command === "start_desktop_capture"), false);
+  assert.equal(context.screenEnabled, false);
 });
 
 test("game auto capture uses WGC before Desktop Duplication", async () => {
