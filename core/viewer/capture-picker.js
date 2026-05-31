@@ -6,7 +6,6 @@ var _capturePickerResolve = null;
 var _capturePickerReject = null;
 var _selectedSource = null;
 var _capturePickerSupport = null;
-var _selectedGameCaptureMode = 'auto';
 
 function isTauriCommandMissingError(err, commandName) {
     var msg = (err && err.message) ? err.message : String(err || '');
@@ -23,7 +22,6 @@ function showCapturePicker() {
         _capturePickerResolve = resolve;
         _capturePickerReject = reject;
         _selectedSource = null;
-        _selectedGameCaptureMode = 'auto';
         _buildPickerModal();
     });
 }
@@ -46,12 +44,6 @@ function _buildPickerModal() {
                 '<div style="text-align:center;padding:40px;color:rgba(255,255,255,0.5)">Loading sources...</div>' +
             '</div>' +
             '<div class="capture-picker-footer">' +
-                '<div class="capture-mode-control" id="cp-game-mode" hidden>' +
-                    '<span class="capture-mode-label">Game capture</span>' +
-                    '<button type="button" class="capture-mode-btn active" data-mode="auto">Auto</button>' +
-                    '<button type="button" class="capture-mode-btn" data-mode="desktop-dd">Desktop</button>' +
-                    '<button type="button" class="capture-mode-btn" data-mode="wgc">WGC</button>' +
-                '</div>' +
                 '<button class="capture-picker-btn secondary" id="cp-cancel">Cancel</button>' +
                 '<button class="capture-picker-btn primary" id="cp-share" disabled>Share</button>' +
             '</div>' +
@@ -68,7 +60,6 @@ function _buildPickerModal() {
     document.getElementById('cp-close').onclick = _cancelPicker;
     document.getElementById('cp-cancel').onclick = _cancelPicker;
     document.getElementById('cp-share').onclick = _confirmPicker;
-    _bindGameCaptureModeControl();
 
     // Close on overlay click (not modal body)
     overlay.onclick = function(e) {
@@ -119,37 +110,6 @@ function _closePicker() {
         overlay.classList.remove('visible');
         setTimeout(function() { overlay.remove(); }, 200);
     }
-}
-
-function _bindGameCaptureModeControl() {
-    var control = document.getElementById('cp-game-mode');
-    if (!control) return;
-    control.querySelectorAll('.capture-mode-btn').forEach(function(btn) {
-        btn.onclick = function(e) {
-            e.stopPropagation();
-            _selectedGameCaptureMode = btn.dataset.mode || 'auto';
-            _syncGameCaptureModeControl();
-            if (_selectedSource && _selectedSource.sourceType === 'game') {
-                _selectedSource.captureMode = _selectedGameCaptureMode;
-            }
-        };
-    });
-    _syncGameCaptureModeControl();
-}
-
-function _setGameCaptureModeVisible(visible) {
-    var control = document.getElementById('cp-game-mode');
-    if (!control) return;
-    control.hidden = !visible;
-    if (visible) _syncGameCaptureModeControl();
-}
-
-function _syncGameCaptureModeControl() {
-    var control = document.getElementById('cp-game-mode');
-    if (!control) return;
-    control.querySelectorAll('.capture-mode-btn').forEach(function(btn) {
-        btn.classList.toggle('active', btn.dataset.mode === _selectedGameCaptureMode);
-    });
 }
 
 async function _loadSources() {
@@ -207,14 +167,13 @@ async function _loadSources() {
                 });
                 card.classList.add('selected');
                 var sourceType = card.dataset.type;
-                _setGameCaptureModeVisible(sourceType === 'game');
                 _selectedSource = {
                     id: parseInt(card.dataset.id),
                     title: card.dataset.title,
                     sourceType: sourceType,
                     isMonitor: sourceType === 'monitor',
                     pid: parseInt(card.dataset.pid) || 0,
-                    captureMode: sourceType === 'game' ? _selectedGameCaptureMode : null,
+                    captureMode: sourceType === 'game' ? 'auto' : null,
                 };
                 document.getElementById('cp-share').disabled = false;
             };

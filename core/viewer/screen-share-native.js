@@ -250,9 +250,13 @@ async function startScreenShareManual() {
     try {
       if (source.sourceType === 'game' || source.sourceType === 'window') {
         // Auto/default window-like capture uses WGC on supported Windows.
-        // Desktop Duplication remains the explicit Desktop mode and fallback.
+        // Desktop Duplication is only kept as an unsupported-WGC fallback.
         var captureStarted = false;
         var gameCaptureMode = String(source.captureMode || 'auto').toLowerCase();
+        if (source.sourceType === 'game' && gameCaptureMode === 'desktop-dd' && wgcSupported) {
+          debugLog('[capture] ignoring Desktop Duplication request for game capture on WGC-supported Windows');
+          gameCaptureMode = 'auto';
+        }
         var publishProfile = source.sourceType === 'game' ? 'game' : 'desktop';
         var wgcStartError = null;
 
@@ -276,7 +280,7 @@ async function startScreenShareManual() {
           debugLog('[wgc] skipped — requires Win11 24H2+ (build 26100+), current: ' + osBuild);
         }
 
-        // 2. DXGI Desktop Duplication (explicit Desktop mode, or Auto fallback)
+        // 2. DXGI Desktop Duplication (unsupported-WGC fallback or legacy explicit requests)
         if (!captureStarted && (gameCaptureMode === 'desktop-dd' || (!wgcSupported && gameCaptureMode !== 'wgc'))) {
           try {
             var ddResult = await tauriInvoke('check_desktop_capture_available');
@@ -300,7 +304,7 @@ async function startScreenShareManual() {
         }
         if (!captureStarted) {
           if (wgcStartError && gameCaptureMode === 'auto') {
-            throw new Error('WGC capture failed; select Desktop mode to use Desktop Duplication: ' + wgcStartError);
+            throw new Error('WGC capture failed: ' + wgcStartError);
           }
           throw new Error('Window capture unavailable for mode ' + gameCaptureMode);
         }

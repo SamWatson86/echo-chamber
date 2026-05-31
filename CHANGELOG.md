@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.22
+
+- Fix: Game capture no longer exposes Desktop Duplication as a normal picker mode on WGC-supported Windows; stale `desktop-dd` requests are coerced back to WGC before native capture starts.
+- Release: Desktop and control package versions are bumped to 0.6.22.
+
 ## 0.6.21
 
 - Fix: Game and window Auto capture on WGC-supported Windows no longer silently falls back to Desktop Duplication if WGC fails to start. The publisher now sees the WGC failure and can explicitly choose Desktop mode for diagnostics.
