@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.23
+
+- Fix: WGC game shares now publish as screen-share tracks again while keeping the motion-friendly native source mode.
+- Tuning: Game capture now advertises a 20 Mbps max / 8 Mbps minimum H264 budget so WebRTC stops parking high-motion 1080p60 streams at the old 4 Mbps floor.
+- Diagnostics: Native capture startup logs now include the publish track source and screencast mode.
+- Release: Desktop and control package versions are bumped to 0.6.23.
+
 ## 0.6.22
 
 - Fix: Game capture no longer exposes Desktop Duplication as a normal picker mode on WGC-supported Windows; stale `desktop-dd` requests are coerced back to WGC before native capture starts.

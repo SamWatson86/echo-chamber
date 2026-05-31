@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.23",
+    title: "Sharper Game Streaming",
+    notes: [
+      "WGC game shares now publish as screen-share tracks while keeping the motion-friendly native source mode.",
+      "Game capture now advertises a 20 Mbps max / 8 Mbps minimum H264 budget for high-motion 1080p60 streams.",
+      "Native capture startup diagnostics now show the publish track source and screencast mode."
+    ]
+  },
+  {
     version: "v0.6.22",
     title: "WGC-Only Game Capture",
     notes: [
