@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.18
+
+- Fix: Native screen shares now force WebRTC's framerate-preserving `ContentHint=Fluid` even when the track is labeled as a screenshare, preventing DXGI Desktop Duplication monitor/game streams from collapsing to single-digit FPS under CPU/backpressure adaptation.
+- Release: Desktop and control package versions are bumped to 0.6.18 for the required native binary update.
+
 ## 0.6.17
 
 - Change: Game sharing now defaults to Desktop Duplication with the game publish profile instead of silently falling through WGC.
