@@ -753,6 +753,26 @@ pub fn get_thumbnail(source_id: u64, is_monitor: bool) -> Option<String> {
 
 // ── Capture + Publish Loop ──
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WgcPublishSettings {
+    track_source: TrackSource,
+    is_screencast: bool,
+}
+
+fn wgc_publish_settings(publish_profile: PublishProfile) -> WgcPublishSettings {
+    WgcPublishSettings {
+        track_source: TrackSource::Screenshare,
+        is_screencast: publish_profile == PublishProfile::Desktop,
+    }
+}
+
+fn wgc_monitor_publish_settings() -> WgcPublishSettings {
+    WgcPublishSettings {
+        track_source: TrackSource::Screenshare,
+        is_screencast: true,
+    }
+}
+
 async fn share_loop(
     source_id: u64,
     sfu_url: &str,
@@ -763,6 +783,7 @@ async fn share_loop(
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
+    let publish_settings = wgc_publish_settings(publish_profile);
     let mut publisher = CapturePublisher::connect_and_publish(
         sfu_url,
         token,
@@ -770,8 +791,8 @@ async fn share_loop(
         1080,
         publish_profile,
         "screen-capture",
-        TrackSource::Camera,
-        false,
+        publish_settings.track_source,
+        publish_settings.is_screencast,
     )
     .await?;
 
@@ -1158,6 +1179,7 @@ async fn share_loop_monitor(
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
+    let publish_settings = wgc_monitor_publish_settings();
     let mut publisher = CapturePublisher::connect_and_publish(
         sfu_url,
         token,
@@ -1165,8 +1187,8 @@ async fn share_loop_monitor(
         1080,
         PublishProfile::Desktop,
         "screen-capture-monitor",
-        TrackSource::Camera,
-        false,
+        publish_settings.track_source,
+        publish_settings.is_screencast,
     )
     .await?;
 
@@ -1515,6 +1537,22 @@ mod tests {
         };
 
         assert_eq!(window_overlap_ratio(source, cover), 0.5);
+    }
+
+    #[test]
+    fn wgc_game_share_publishes_as_screenshare_without_screencast_throttling() {
+        let settings = wgc_publish_settings(PublishProfile::Game);
+
+        assert_eq!(settings.track_source, TrackSource::Screenshare);
+        assert!(!settings.is_screencast);
+    }
+
+    #[test]
+    fn wgc_monitor_share_publishes_as_screenshare_with_screencast_semantics() {
+        let settings = wgc_monitor_publish_settings();
+
+        assert_eq!(settings.track_source, TrackSource::Screenshare);
+        assert!(settings.is_screencast);
     }
 
     #[test]

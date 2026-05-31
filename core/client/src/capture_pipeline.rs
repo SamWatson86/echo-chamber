@@ -84,14 +84,14 @@ impl PublishProfile {
     fn max_bitrate(self) -> u64 {
         match self {
             Self::Desktop => 6_000_000,
-            Self::Game => 12_000_000,
+            Self::Game => 20_000_000,
         }
     }
 
     fn min_bitrate(self) -> u64 {
         match self {
             Self::Desktop => 3_000_000,
-            Self::Game => 4_000_000,
+            Self::Game => 8_000_000,
         }
     }
 
@@ -211,7 +211,7 @@ impl CapturePublisher {
     ) -> Result<Self, String> {
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
         file_debug_log::append(&format!(
-            "[{}] connect_and_publish start sfu_url={} enc={}x{} profile={:?} target_fps={} max_bitrate={} min_bitrate={}",
+            "[{}] connect_and_publish start sfu_url={} enc={}x{} profile={:?} target_fps={} max_bitrate={} min_bitrate={} track_source={:?} is_screencast={}",
             log_prefix,
             sfu_url,
             enc_w,
@@ -219,7 +219,9 @@ impl CapturePublisher {
             publish_profile,
             publish_profile.target_fps(),
             publish_profile.max_bitrate(),
-            publish_profile.min_bitrate()
+            publish_profile.min_bitrate(),
+            track_source,
+            is_screencast
         ));
 
         let (room, events) = Room::connect(sfu_url, token, RoomOptions::default())
@@ -259,9 +261,8 @@ impl CapturePublisher {
                 // motion more bits than the old 4 Mbps cap. Game shares opt
                 // into a higher-motion bitrate budget.
                 max_bitrate: publish_profile.max_bitrate(),
-                // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
-                // to zero under packet loss / RTT spikes, so the stream stays
-                // visible instead of dropping to 0fps and slowly probing back up.
+                // Profile-selected hard floor. Game needs enough room for
+                // 1080p60 motion; desktop stays conservative for text sharing.
                 min_bitrate: publish_profile.min_bitrate(),
                 // Profile-selected wire target: desktop stays conservative;
                 // game/window capture gets the high-motion 60fps path.
@@ -318,7 +319,7 @@ impl CapturePublisher {
     ) -> Result<Self, String> {
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
         file_debug_log::append(&format!(
-            "[{}] connect_and_publish_blocking start sfu_url={} enc={}x{} profile={:?} target_fps={} max_bitrate={} min_bitrate={}",
+            "[{}] connect_and_publish_blocking start sfu_url={} enc={}x{} profile={:?} target_fps={} max_bitrate={} min_bitrate={} track_source={:?} is_screencast={}",
             log_prefix,
             sfu_url,
             enc_w,
@@ -326,7 +327,9 @@ impl CapturePublisher {
             publish_profile,
             publish_profile.target_fps(),
             publish_profile.max_bitrate(),
-            publish_profile.min_bitrate()
+            publish_profile.min_bitrate(),
+            track_source,
+            is_screencast
         ));
 
         let (room, events) = rt
@@ -364,9 +367,8 @@ impl CapturePublisher {
                 // motion more bits than the old 4 Mbps cap. Game shares opt
                 // into a higher-motion bitrate budget.
                 max_bitrate: publish_profile.max_bitrate(),
-                // 2.5 Mbps hard floor — prevents libwebrtc GoogCC from throttling
-                // to zero under packet loss / RTT spikes, so the stream stays
-                // visible instead of dropping to 0fps and slowly probing back up.
+                // Profile-selected hard floor. Game needs enough room for
+                // 1080p60 motion; desktop stays conservative for text sharing.
                 min_bitrate: publish_profile.min_bitrate(),
                 // Profile-selected wire target: desktop stays conservative;
                 // game/window capture gets the high-motion 60fps path.
@@ -780,8 +782,8 @@ mod tests {
 
         assert_eq!(profile, PublishProfile::Game);
         assert_eq!(profile.target_fps(), 60);
-        assert_eq!(profile.max_bitrate(), 12_000_000);
-        assert_eq!(profile.min_bitrate(), 4_000_000);
+        assert_eq!(profile.max_bitrate(), 20_000_000);
+        assert_eq!(profile.min_bitrate(), 8_000_000);
     }
 
     fn pushed_frame_count(source_hz: u32, target_hz: u32, seconds: u32) -> usize {
