@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.18",
+    title: "Screen Share Framerate Fix",
+    notes: [
+      "Native screen shares now force WebRTC's framerate-preserving mode even when the track is labeled as a screen share.",
+      "This targets the DXGI Desktop Duplication path where monitor/game streams could capture normally but WebRTC would throttle the sender down to single-digit FPS under CPU/backpressure adaptation."
+    ]
+  },
+  {
     version: "v0.6.17",
     title: "Game Capture Diagnostics",
     notes: [

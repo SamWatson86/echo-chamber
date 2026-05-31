@@ -101,17 +101,18 @@ content types.
 **What changed:**
 
 ```cpp
-// After track creation, set degradation preference for non-screencast sources:
-if (!source->is_screencast()) {
-    track->set_content_hint(ContentHint::Fluid);
-    std::cerr << "[webrtc] set ContentHint=Fluid (MAINTAIN_FRAMERATE) for non-screencast track" << std::endl;
-}
+// After track creation, set degradation preference for all native video sources:
+track->set_content_hint(ContentHint::Fluid);
+std::cerr << "[webrtc] set ContentHint=Fluid (MAINTAIN_FRAMERATE) for native video track" << std::endl;
 ```
 
 **Why:** WebRTC's default `DegradationPreference` for video is `BALANCED`, which reduces
 *both* resolution and frame rate under bandwidth pressure. For game capture content,
 dropping FPS is far more damaging than dropping resolution. `ContentHint::Fluid` maps to
 `DegradationPreference::MAINTAIN_FRAMERATE` — WebRTC will reduce resolution before FPS.
+Echo applies this to all native video tracks, including LiveKit screenshare-labeled DXGI
+Desktop Duplication captures, because monitor/game shares are interactive streams and
+single-digit FPS is worse than temporary spatial degradation.
 
 Without this patch, WebRTC's bandwidth estimator calls `SetRates` with `fps=10` under
 load. The encoder accepts the low rate target and the capture pipeline throttles down

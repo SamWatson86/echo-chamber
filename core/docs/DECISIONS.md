@@ -50,7 +50,7 @@ LiveKit SDK's `VIDEO_RIDS[0]` was `'q'` (LOW quality). Non-simulcast screen shar
 
 ## 2026-03-xx — ContentHint=Fluid
 
-WebRTC degrades FPS under bitrate pressure by default (`MAINTAIN_RESOLUTION` mode — reduces FPS to conserve quality). This caused viewer FPS to drop to 10fps even when NVENC was encoding at 45fps. Setting `ContentHint=Fluid` on the video track maps to `MAINTAIN_FRAMERATE` in peer_connection_factory, which prevents WebRTC from ever reducing FPS. Fixed in `core/livekit-local/`.
+WebRTC degrades FPS under bitrate pressure by default (`MAINTAIN_RESOLUTION` mode — reduces FPS to conserve quality). This caused viewer FPS to drop to 10fps even when NVENC was encoding at 45fps. Setting `ContentHint=Fluid` on native video tracks maps to `MAINTAIN_FRAMERATE` in peer_connection_factory, which prevents WebRTC from preserving resolution by collapsing FPS. Echo applies this to screenshare-labeled native tracks too, because DXGI Desktop Duplication monitor/game shares are interactive streams. Fixed in `core/livekit-local/`.
 
 ## 2026-04-xx — Audio Pipeline: startNativeAudioCapture() vs Raw IPC
 

@@ -106,6 +106,7 @@ impl PeerConnectionFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video_source::{native::NativeVideoSource, VideoResolution};
 
     #[tokio::test]
     async fn test_peer_connection_factory() {
@@ -114,6 +115,27 @@ mod tests {
         let factory = PeerConnectionFactory::default();
         let source = NativeVideoSource::default();
         let _track = factory.create_video_track("test", source);
+        drop(factory);
+    }
+
+    #[tokio::test]
+    async fn screencast_tracks_use_fluid_content_hint_to_preserve_framerate() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let factory = PeerConnectionFactory::default();
+        let source = NativeVideoSource::new(
+            VideoResolution {
+                width: 1920,
+                height: 1080,
+            },
+            true,
+        );
+        let track = factory.create_video_track("screen", source);
+
+        assert!(matches!(
+            track.handle.sys_handle.content_hint(),
+            webrtc_sys::video_track::ffi::ContentHint::Fluid
+        ));
         drop(factory);
     }
 }

@@ -116,13 +116,11 @@ std::shared_ptr<VideoTrack> PeerConnectionFactory::create_video_track(
   auto track = std::static_pointer_cast<VideoTrack>(
       rtc_runtime_->get_or_create_media_stream_track(
           peer_factory_->CreateVideoTrack(source->get(), label.c_str())));
-  // For non-screencast sources (game/motion content), set ContentHint to Fluid.
-  // This makes WebRTC use DegradationPreference::MAINTAIN_FRAMERATE — it will
-  // reduce resolution rather than FPS when bandwidth is constrained.
-  if (!source->is_screencast()) {
-    track->set_content_hint(ContentHint::Fluid);
-    std::cerr << "[webrtc] set ContentHint=Fluid (MAINTAIN_FRAMERATE) for non-screencast track" << std::endl;
-  }
+  // Echo's native video tracks are interactive screen/game streams. Keep
+  // WebRTC in MAINTAIN_FRAMERATE mode even when LiveKit labels the track as a
+  // screencast, otherwise CPU/bandwidth adaptation can collapse to single-digit FPS.
+  track->set_content_hint(ContentHint::Fluid);
+  std::cerr << "[webrtc] set ContentHint=Fluid (MAINTAIN_FRAMERATE) for native video track" << std::endl;
   return track;
 }
 
