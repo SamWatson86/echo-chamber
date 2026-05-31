@@ -64,6 +64,21 @@ version = "1.2.3"
     return $root
 }
 
+$gitRepo = Join-Path ([System.IO.Path]::GetTempPath()) ("echo-local-release-git-test-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $gitRepo | Out-Null
+try {
+    & git -C $gitRepo init | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "git init failed"
+    }
+
+    $isRepo = Get-GitOutput $gitRepo @("rev-parse", "--is-inside-work-tree")
+    Assert-Equal "true" $isRepo "Get-GitOutput forwards git arguments"
+}
+finally {
+    Remove-Item -LiteralPath $gitRepo -Recurse -Force
+}
+
 $repo = New-TestRepo
 try {
     $versions = Get-ReleaseVersionInfo -Root $repo

@@ -175,10 +175,10 @@ function Get-RequiredCommand([string]$Name) {
     return $command.Source
 }
 
-function Get-GitOutput([string]$Root, [string[]]$Args) {
-    $output = & git -C $Root @Args
+function Get-GitOutput([string]$Root, [string[]]$GitArgs) {
+    $output = & git -C $Root @GitArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "git $($Args -join ' ') failed with exit code $LASTEXITCODE"
+        throw "git $($GitArgs -join ' ') failed with exit code $LASTEXITCODE"
     }
     return ($output -join [Environment]::NewLine).Trim()
 }
