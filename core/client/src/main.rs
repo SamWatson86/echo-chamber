@@ -617,8 +617,8 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         file_debug_log::append(&format!(
-            "[startup] echo-core-client boot server={} force_software_encoder={} auto_force_software_encoder={} windows_build={}",
-            server, force_software_encoder, auto_force_software_encoder, windows_build
+            "[startup] echo-core-client boot version={} server={} force_software_encoder={} auto_force_software_encoder={} windows_build={}",
+            env!("CARGO_PKG_VERSION"), server, force_software_encoder, auto_force_software_encoder, windows_build
         ));
     }
 

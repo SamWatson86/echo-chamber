@@ -1583,11 +1583,17 @@ impl SessionInner {
         // If video track, derive "ultimate" bitrate from encodings and stash it for offer munging.
         // Must be done before encodings is moved into RtpTransceiverInit.
         if track.kind() == TrackKind::Video {
-            let ultimate_bps: Option<u64> = {
-                let sum: u64 = encodings.iter().filter_map(|e| e.max_bitrate).sum();
-                (sum > 0).then_some(sum)
+            let (ultimate_bps, min_bps): (Option<u64>, Option<u64>) = {
+                let max_sum: u64 = encodings.iter().filter_map(|e| e.max_bitrate).sum();
+                let min_sum: u64 = encodings.iter().filter_map(|e| e.min_bitrate).sum();
+                (
+                    (max_sum > 0).then_some(max_sum),
+                    (min_sum > 0).then_some(min_sum),
+                )
             };
-            self.publisher_pc.set_max_send_bitrate_bps(ultimate_bps).await;
+            self.publisher_pc
+                .set_send_bitrate_bounds_bps(ultimate_bps, min_bps)
+                .await;
         }
 
         let init = RtpTransceiverInit {
