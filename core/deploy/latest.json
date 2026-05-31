@@ -1,11 +1,11 @@
 {
-  "version": "0.6.17",
-  "notes": "Update to v0.6.17",
-  "pub_date": "2026-05-31T15:47:38Z",
+  "version": "0.6.18",
+  "notes": "Update to v0.6.18",
+  "pub_date": "2026-05-31T17:12:45Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEFJMEZZRmNqNWUydGN4ZjNIbEdlU1JHUUgydUViMWtPZ1hnQlovczJBeGgyalRCYjV3M2JJQW1WRjFnekZxdGJpZWxFbmYzZkczVUtPc2FSOUlwakFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwMjQyMzM5CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4xN194NjQtc2V0dXAuZXhlCnppai9aSUd1am5ERnZJazk1YjZsM25JV1ZvUlFOMk9RR1BSSndiTG1EOVA5WXVwV2M0S21PWGtBMXE5bThEeHB1VFZyUzVnU2YrSWttelpWTmtuQ0F3PT0K",
-      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.17/Echo.Chamber_0.6.17_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEpXTmlUdXh5QTRRRTV0MkdtRE95YU54cWFxclFkSEJidTVrWjBRMzI4TjBxTTlJaUpxWWxkZzFPSkZ3MWNValYraFhlRmJZNzc2N1BJeGkwbzRBY1F3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwMjQ3NTA1CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4xOF94NjQtc2V0dXAuZXhlCk54cG9pQ2NHdHR2MkE0cm4zc1VDOWNuOUU2Sm54eDFVczRxZEtub2RDdUlXWnlKYVhMdWRPYU9PZEdDM3NlQ2ZtSlMxS1pCUGFycUtySG5Sdm4veUJ3PT0K",
+      "url": "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.18/Echo.Chamber_0.6.18_x64-setup.exe"
     }
   }
 }
