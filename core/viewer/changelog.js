@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.25",
+    title: "Game 60fps Restored",
+    notes: [
+      "Game capture defaults back to 1080p60 so strong game publishers are not capped by the v0.6.24 quality experiment.",
+      "The 20 Mbps max / 8 Mbps minimum H264 game budget remains in place."
+    ]
+  },
+  {
     version: "v0.6.24",
     title: "Game Quality Mode",
     notes: [

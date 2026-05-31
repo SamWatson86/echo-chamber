@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.25
+
+- Fix: Game capture defaults back to 1080p60 so strong game publishers like Jeff are not capped at 30fps by the 0.6.24 experiment.
+- Tuning: The 20 Mbps max / 8 Mbps minimum H264 game budget remains in place.
+- Release: Desktop and control package versions are bumped to 0.6.25.
+
 ## 0.6.24
 
 - Tuning: Game capture keeps the crisp 20 Mbps max / 8 Mbps minimum H264 budget but targets 1080p30 instead of 1080p60, reducing encoder pressure in heavy foreground games like Crimson Desert while preserving the improved image quality from 0.6.23.
