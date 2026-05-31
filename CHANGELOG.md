@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.27
+
+- Fix: Roll back the v0.6.26 Game capture minimum bitrate change after live testing showed updated clients could fail to start streams.
+- Tuning: Game capture returns to the known-compatible 1080p60 / 20 Mbps max / 8 Mbps minimum profile from v0.6.25.
+- Release: Desktop and control package versions are bumped to 0.6.27.
+
 ## 0.6.26
 
 - Fix: Game capture keeps the 1080p60 / 20 Mbps ceiling but lowers the forced H264 minimum from 8 Mbps to 2.5 Mbps so mic audio has room on constrained uplinks.

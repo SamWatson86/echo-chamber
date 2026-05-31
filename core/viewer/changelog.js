@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.27",
+    title: "Game Streaming Rollback",
+    notes: [
+      "Game capture returns to the known-compatible 1080p60 profile from v0.6.25.",
+      "The forced H264 minimum is back to 8 Mbps after v0.6.26 caused stream-start failures in live testing."
+    ]
+  },
+  {
     version: "v0.6.26",
     title: "Mic-Safe Game Streaming",
     notes: [
