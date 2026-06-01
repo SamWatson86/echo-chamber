@@ -1350,14 +1350,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echo-game-hook"
-version = "0.1.0"
-dependencies = [
- "minhook",
- "windows 0.58.0",
-]
-
-[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3103,16 +3095,6 @@ checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
 dependencies = [
  "mime",
  "unicase",
-]
-
-[[package]]
-name = "minhook"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "455e088cb1600ffa5f1524c9702c9eeb0ba3604e0f4932efa165b99973272a8d"
-dependencies = [
- "cc",
- "tracing",
 ]
 
 [[package]]

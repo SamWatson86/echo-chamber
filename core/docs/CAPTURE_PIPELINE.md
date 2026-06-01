@@ -1,107 +1,92 @@
 # Capture Pipeline
 
-Screen capture runs in the Tauri client (Rust). Two active methods are used depending on OS version. The JS picker (`capture-picker.js`) selects the source; the Rust backend does the actual capture.
+Screen capture runs in the Tauri client. The viewer picker chooses the source,
+`screen-share-native.js` chooses the native path, and Rust captures/publishes
+through the shared LiveKit capture pipeline.
 
 ## Active Capture Methods
 
-### WGC — Windows.Graphics.Capture (Win11 24H2+ only)
+### WGC - Windows.Graphics.Capture
 
 - Module: `core/client/src/screen_capture.rs`
-- API: `windows-capture` crate wrapping WGC
-- Output: BGRA frames from GPU
-- Passes frames through `gpu_converter.rs` for HDR→SDR + downscale
-- Encoding: Media Foundation → NVENC (H264)
+- Used for window/game capture on supported Windows builds
+- Started through the `start_screen_share` Tauri command
+- Passes frames through `gpu_converter.rs`
+- Publishes through `capture_pipeline.rs`
 
-Activated when OS build ≥ 26100 (Win11 24H2). Detection in `screen-share-native.js`:
-
-```js
-var osBuild = await tauriInvoke('get_os_build_number');
-var useWgc = osBuild >= 26100;
-```
-
-### DXGI Desktop Duplication (fallback — Win10 / older builds)
+### DXGI Desktop Duplication
 
 - Module: `core/client/src/desktop_capture.rs`
-- API: `IDXGIOutputDuplication` (DWM compositor frames)
-- Works with every game in windowed/borderless regardless of DX version, DLSS FG, or anti-cheat
-- Also passes through `gpu_converter.rs`
+- Production monitor-capture path
+- Fallback path for older Windows builds and unsupported native sources
+- Started through the `start_desktop_capture` Tauri command
+- Passes frames through `gpu_converter.rs`
+- Publishes through `capture_pipeline.rs`
+
+The Tauri command `start_screen_share_monitor` exists for the older WGC monitor
+experiment, but it is not the production picker path. Do not call or revive that
+path for monitor sharing without a fresh design and explicit hardware-risk
+review. Current monitor shares should go through DXGI Desktop Duplication.
 
 ## GPU Shader Pipeline
 
 Shared module: `core/client/src/gpu_converter.rs`
 
-```
-Captured D3D11 texture (any format: BGRA8, RGBA16F/HDR)
-  │
-  ▼ CopyResource to GPU SRV texture (GPU→GPU, zero-copy)
-[GPU texture]
-  │
-  ▼ D3D11 compute shader dispatch (16×16 threadgroups)
-    • HDR→SDR: saturate() tonemap (no-op for SDR input)
-    • Downscale: nearest-neighbor to encode resolution
-    • R/B swap: HLSL outputs R8G8B8A8_UNORM (hardware UAV constraint)
-[BGRA8 texture @ encode resolution]
-  │
-  ▼ CopyResource to CPU staging texture (~8MB not ~66MB at 4K)
-[CPU memory]
-  │
-  ▼ libyuv BGRA→I420
-[I420 frame]
-  │
-  ▼ NativeVideoSource::capture_frame (Rust LiveKit SDK)
-[H264 via NVENC — RTX 4090]
-  │
-  ▼ RTP → SFU → viewer
-```
-
-HLSL shader summary:
-```hlsl
-Texture2D<float4> src : register(t0);
-RWTexture2D<unorm float4> dst : register(u0);
-// Nearest-neighbor sample from src, saturate(), write to dst
-// Note: UAV uses R8G8B8A8_UNORM — R/B swap done in HLSL
+```text
+Captured D3D11 texture
+  |
+  v
+GPU shader conversion / downscale
+  |
+  v
+CPU staging texture
+  |
+  v
+libyuv BGRA to I420
+  |
+  v
+NativeVideoSource::capture_frame
+  |
+  v
+H264 via NVENC
+  |
+  v
+RTP to SFU to viewer
 ```
 
 ## OS-Aware Fallback Chain
 
-Detection runs in JS (`screen-share-native.js`) before starting Tauri IPC capture:
+Detection runs in `core/viewer/screen-share-native.js` before starting native
+capture:
 
-1. Query `get_os_build_number` via Tauri IPC
-2. If build ≥ 26100: start `start_screen_share_wgc` (WGC path)
-3. Otherwise: start `start_screen_share_dxgi` (DXGI DD path)
-4. If Tauri IPC unavailable (browser fallback): use `getDisplayMedia` (browser capture, lower quality)
+1. Query `get_os_build_number` through Tauri IPC.
+2. For window/game sources on supported builds, call `start_screen_share`.
+3. For monitor sources, or when WGC is unsupported, call
+   `start_desktop_capture`.
+4. If Tauri IPC is unavailable, use browser `getDisplayMedia` fallback.
 
-The JS side always derives the SFU URL from the control URL (`https→wss`) — never connects to port 7880 directly.
+The JS side derives the SFU URL from the control URL. It does not connect to
+port 7880 directly.
 
 ## Encoding
 
-- Encoder: NVENC (H264) via webrtc-sys local fork
-- Local fork path: `core/webrtc-sys-local/` (fixes missing abseil headers that cause silent NVENC exclusion)
-- ContentHint: `fluid` — maps to MAINTAIN_FRAMERATE in libwebrtc, prevents WebRTC from reducing FPS under bitrate pressure
-- Simulcast: disabled for screen share; single layer labeled `f` (HIGH RID) so SFU allocates full bandwidth
-- Non-simulcast bug fixed: `VIDEO_RIDS[0]` was `'q'` (LOW) — changed to `'f'` (HIGH) in `core/livekit-local/`
-
-- H264 SDP bitrate hints are aligned to the publish profile: game streams advertise the real min bitrate floor and start at the full target bitrate so WebRTC's allocator does not begin from the old low fallback.
-
-## Performance Numbers (RTX 4090, 4K source)
-
-| Scenario | Capture FPS | Viewer FPS |
-|----------|------------|------------|
-| Desktop (no game) | 100+ | ~60 |
-| Light game (Megabonk) | 139 | ~60 |
-| Crimson Desert 4K borderless | 45-55 | 45-55 |
-| BF6 4K (WGC) | 53 | ~53 |
-
-Capture is limited by the DWM compositor under heavy GPU load, not by the pipeline.
+- Encoder: NVENC (H264) through the local `webrtc-sys` fork.
+- Local fork path: `core/webrtc-sys-local/`.
+- ContentHint: `fluid`, which maps to MAINTAIN_FRAMERATE in libwebrtc.
+- Simulcast: disabled for screen share.
+- Game streams advertise their real min bitrate floor and start bitrate.
 
 ## Archived Methods
 
-Dead methods live in `core/client/src/archive/`. Not compiled into the binary.
+Dead methods live in `core/client/src/archive/`. The old top-level `core/hook/`
+crate is also excluded from the active Cargo workspace. These paths are
+reference-only and must not be copied into production capture work without a
+fresh design review.
 
-| Method | File | Why Dead |
-|--------|------|----------|
-| NVFBC | `archive/nvfbc_capture.rs` | Blocked by NVIDIA driver 595.79 on GeForce. Also compositor-bound on Windows — no advantage over DXGI DD. |
-| Present() hook | `archive/hook/`, `archive/game_capture.rs`, `archive/injector.rs` | Fails with DLSS Frame Generation — swap chain buffers arrive empty/garbled. Not fixable. |
+| Method | File | Why dead |
+|---|---|---|
+| NVFBC | `archive/nvfbc_capture.rs` | Blocked by NVIDIA driver 595.79 on GeForce. |
+| Present hook | `archive/hook/`, `archive/game_capture.rs`, `archive/injector.rs` | Fails with DLSS Frame Generation. |
 | Control block client | `archive/control_block_client.rs` | Superseded by direct IPC approach. |
 
 See `core/client/src/archive/README.md` for details.

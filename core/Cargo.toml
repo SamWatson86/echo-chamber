@@ -3,7 +3,10 @@ members = [
   "control",
   "client",
   "admin-client",
+]
+exclude = [
   "hook",
+  "client/src/archive/hook",
 ]
 default-members = [
   "control",
