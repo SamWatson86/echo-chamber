@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.28
+
+- Fix: Game capture returns to the stable 1080p30 cadence after live testing showed the forced 60fps profile could crash or green-screen some publishers.
+- Tuning: The crisp 20 Mbps max / 8 Mbps minimum H264 game budget stays in place; only the frame cadence is reduced.
+- Release: Desktop and control package versions are bumped to 0.6.28.
+
 ## 0.6.27
 
 - Fix: Roll back the v0.6.26 Game capture minimum bitrate change after live testing showed updated clients could fail to start streams.
