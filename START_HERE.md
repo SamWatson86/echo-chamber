@@ -1,36 +1,57 @@
 # Start Here
 
-## Active Handover
+This file is a repo orientation checkpoint only. It is not a session handover,
+and it must not override the current user request, `AGENTS.md`, or the docs
+under `docs/`.
 
-If Sam says `continue` in this worktree, load `docs/handovers/2026-05-13-jam-audio-silence.md` first. This worktree is for the broader Echo audio silence bug where Jam Spotify capture and native screen-share audio can both produce silent process-loopback frames.
+## Current Baseline
 
-Current active fix lane:
+- Current good live baseline: Echo Chamber v0.6.28.
+- Active production branch: `main`, changed through PRs only.
+- Active product code lives under `core/`.
+- Normal desktop releases are Windows-only and are published locally from Sam's
+  PC with `core/deploy/publish-local-release.ps1` after the release commit has
+  landed on `main`.
+- GitHub Actions should not build installers or macOS artifacts unless Sam
+  explicitly asks for a one-off emergency path.
 
-- Worktree: `F:\EC-worktrees\jam-audio-silence`
-- Branch: `codex/jam-audio-silence-investigation`
-- Status: control, desktop client, and admin-client process-loopback fallback code patched; targeted tests passed; not deployed live.
-- Deployment boundary: server/control restart plus desktop/admin client rebuild/relaunch required to test live, so ask Sam before deploying, restarting shared services, or closing/reopening Sam's local Echo client.
+## Start A New Thread
 
-If Sam starts a new Codex thread for Echo Chamber and says `continue`, read:
+If Sam starts a new Codex thread for Echo Chamber, read these first:
 
 1. `AGENTS.md`
-2. `docs/OPERATIONS.md`
-3. `docs/RELEASE-BOUNDARIES.md`
-4. the latest relevant file in `docs/handovers/` only if Sam names a parked workstream or bug
+2. `docs/INDEX.md`
+3. `docs/ARCHITECTURE.md`
+4. `docs/RELEASE-BOUNDARIES.md`
+5. `docs/OPERATIONS.md`
+6. `docs/TESTING.md`
 
-Then run the Echo preflight from `docs/OPERATIONS.md` before claiming the machine is ready, before release work, or before live troubleshooting.
+Only read `docs/handovers/` if Sam names a parked workstream or bug. Historical
+plans and handovers are evidence, not current instructions.
 
-Current production baseline after the v0.6.13 screen-share/Jam release:
+## Active Runtime Areas
 
-- Main repo path: `F:\EC-worktrees\main`
-- Production branch: `main`
-- Expected live version: `0.6.13`
-- Production startup owner: `EchoCoreHost` Windows service
-- Production control child should launch from `F:\EC-worktrees\main\core\target\release\echo-core-control.exe`
+- `core/control/` - Rust control plane, API/auth/room state, viewer serving.
+- `core/viewer/` - production browser UI served from `/viewer/`.
+- `core/client/` - Tauri desktop shell, updater, and native integrations.
+- `core/sfu/`, `core/turn/` - media transport infrastructure.
+- `docs/` - operating docs and decision records.
 
-Operational reminders:
+## Do Not Start From These
 
-- Do not assume a running process came from the repo being edited; verify service config, host log, `/api/version`, and `/health`.
-- Do not push, deploy, open a PR, delete a worktree, reload SAM-PC, or restart shared services unless Sam explicitly asks.
-- Tell Sam before closing/reopening his local Echo client. For desktop-client tests, always close and reopen so the tested version is unambiguous.
-- Keep `F:\EC-worktrees\main` clean unless Sam explicitly asks for local docs/code changes there.
+- Root `apps/*` / old npm workspace references are retired.
+- `core/viewer-next/` is a staged refactor area, not the served production UI.
+- `core/client/src/archive/` and `core/hook/` contain abandoned capture
+  experiments. Do not copy or revive those patterns unless Sam explicitly asks
+  for a fresh design.
+- `docs/plans/`, `docs/handovers/`, and `docs/superpowers/` can contain stale
+  historical instructions. Treat them as dated context only.
+
+## Operational Reminders
+
+- Do not assume a running process came from the repo being edited; verify
+  service config, host log, `/api/version`, and `/health`.
+- Do not deploy, release, reload SAM-PC, restart shared services, or close and
+  reopen Sam's local Echo client unless Sam explicitly asks.
+- Run the Echo preflight from `docs/OPERATIONS.md` before release work, reboot
+  validation, or live troubleshooting.

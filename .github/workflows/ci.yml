@@ -1,31 +1,36 @@
-name: CI - Build & Check
+name: CI - Core Checks
 
 on:
-  workflow_dispatch:  # Manual only — viewer loads from server, no need to build on every push
+  workflow_dispatch:
 
-# Cancel in-progress runs on the same branch
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-core-checks-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build & Check (Windows)
+  verify:
+    name: Core Checks (Windows)
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo registry & build
+      - name: Cache cargo registry and build outputs
         uses: actions/cache@v4
         with:
           path: |
@@ -36,34 +41,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
-        working-directory: core
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-        working-directory: core
-
-      - name: Run clippy
-        run: cargo clippy --workspace -- -D warnings
-        working-directory: core
-        continue-on-error: true
-
-      - name: Build control plane
-        run: cargo build -p echo-core-control --release
-        working-directory: core
-
-      - name: Build Tauri client
-        working-directory: core/client
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          CI: 'true'
-        run: cargo tauri build --bundles nsis
-
-      - name: Upload Windows installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: echo-chamber-windows-installer
-          path: core/target/release/bundle/nsis/*
-          if-no-files-found: error
+      - name: Run extended verification
+        shell: bash
+        run: bash tools/verify/extended.sh

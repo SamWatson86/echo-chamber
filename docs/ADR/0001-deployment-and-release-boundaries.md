@@ -8,7 +8,7 @@
 The team observed recurring confusion around:
 - server-side updates vs desktop binary updates
 - what auto-updater can and cannot do
-- when EXE/DMG releases are actually required
+- when desktop binary releases are actually required
 
 This created coordination overhead and incorrect implementation requests.
 
