@@ -13,6 +13,7 @@ bash tools/verify/quick.sh
 
 What it does:
 
+- repo guardrail checks for release/workflow and archived capture boundaries
 - JS syntax checks for viewer files
 - deterministic JS state tests with `node --test core/viewer/*.test.js`
 - Rust compile check for the control plane with

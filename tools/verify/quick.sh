@@ -6,6 +6,9 @@ cd "$ROOT_DIR"
 
 echo "[verify] starting quick verification"
 
+echo "[verify] repo guardrails"
+node tools/verify/guardrails.mjs
+
 echo "[verify] JS syntax checks"
 node --check core/viewer/app.js
 node --check core/viewer/jam.js

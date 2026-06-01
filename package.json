@@ -3,6 +3,8 @@
   "private": true,
   "description": "Echo Chamber repo metadata. Active development lives under core/.",
   "scripts": {
-    "verify:viewer": "node --check core/viewer/app.js && node --check core/viewer/jam.js && node --test core/viewer/*.test.js"
+    "verify:guardrails": "node tools/verify/guardrails.mjs",
+    "verify:viewer": "node --check core/viewer/app.js && node --check core/viewer/jam.js && node --test core/viewer/*.test.js",
+    "verify:quick": "npm run verify:guardrails && npm run verify:viewer"
   }
 }
