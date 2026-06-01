@@ -11,6 +11,7 @@ agents.
   basics
 - [Testing](./TESTING.md) - verification model, CI expectations, regression
   strategy
+- [Codex operating model](./CODEX.md) - canonical project/thread/worktree rules
 - [Release Boundaries](./RELEASE-BOUNDARIES.md) - when desktop-binary updates
   are required vs server-only deploys
 - [Terminology](./TERMINOLOGY.md) - shared vocabulary for Sam/agents/contributors

@@ -137,10 +137,31 @@ function checkArchiveGuardrails() {
   );
 }
 
+function checkCodexOperatingModelGuardrails() {
+  assert(exists('docs/CODEX.md'), 'docs/CODEX.md must document the canonical Codex operating model.');
+
+  const codexDoc = read('docs/CODEX.md');
+  assert(
+    /Echo Chamber - Main/.test(codexDoc),
+    'docs/CODEX.md must name Echo Chamber - Main as the canonical Codex project.',
+  );
+  assert(
+    /Do not create additional Codex projects/i.test(codexDoc),
+    'docs/CODEX.md must warn against creating additional Echo Codex projects.',
+  );
+
+  const agents = read('AGENTS.md');
+  assert(
+    /Echo Chamber - Main/.test(agents),
+    'AGENTS.md must point future agents at the canonical Echo Chamber - Main project.',
+  );
+}
+
 checkWorkflowGuardrails();
 checkRootPackageGuardrails();
 checkCargoWorkspaceGuardrails();
 checkArchiveGuardrails();
+checkCodexOperatingModelGuardrails();
 
 if (failures.length > 0) {
   console.error('[guardrails] failed');
