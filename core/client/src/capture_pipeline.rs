@@ -52,11 +52,12 @@ const MIN_FRAME_INTERVAL_SOFTWARE: std::time::Duration =
 /// main.rs's startup probe and never changes after that.
 pub static HAS_NVCUDA: AtomicBool = AtomicBool::new(false);
 
-/// Desktop wire-level publish framerate cap. Game/window capture opts into a
-/// high-motion 60fps cadence while keeping the higher bitrate budget added for
-/// v0.6.23.
+/// Desktop wire-level publish framerate cap. Game/window capture uses the
+/// stable 30fps cadence with the higher bitrate budget added for v0.6.23.
+/// Live tests showed forcing 60fps could make some publishers crash or render
+/// green frames, while the 30fps profile preserved the crisp image.
 pub const PUBLISH_TARGET_FPS: u32 = 30;
-pub const GAME_PUBLISH_TARGET_FPS: u32 = 60;
+pub const GAME_PUBLISH_TARGET_FPS: u32 = 30;
 pub const STATIC_FRAME_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -778,11 +779,11 @@ mod tests {
     }
 
     #[test]
-    fn game_profile_keeps_60fps_with_compatible_floor() {
+    fn game_profile_uses_stable_1080p30_quality_profile() {
         let profile: PublishProfile = serde_json::from_str("\"game\"").expect("game profile");
 
         assert_eq!(profile, PublishProfile::Game);
-        assert_eq!(profile.target_fps(), 60);
+        assert_eq!(profile.target_fps(), 30);
         assert_eq!(profile.max_bitrate(), 20_000_000);
         assert_eq!(profile.min_bitrate(), 8_000_000);
     }

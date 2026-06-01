@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.28",
+    title: "Stable Game Streaming",
+    notes: [
+      "Game capture returns to the stable 1080p30 cadence after live testing showed forced 60fps could crash or green-screen some publishers.",
+      "The crisp 20 Mbps max / 8 Mbps minimum H264 game budget stays in place."
+    ]
+  },
+  {
     version: "v0.6.27",
     title: "Game Streaming Rollback",
     notes: [
