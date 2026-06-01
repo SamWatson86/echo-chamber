@@ -21,13 +21,18 @@ If Sam starts a new Codex thread for Echo Chamber, read these first:
 
 1. `AGENTS.md`
 2. `docs/INDEX.md`
-3. `docs/ARCHITECTURE.md`
-4. `docs/RELEASE-BOUNDARIES.md`
-5. `docs/OPERATIONS.md`
-6. `docs/TESTING.md`
+3. `docs/CODEX.md`
+4. `docs/ARCHITECTURE.md`
+5. `docs/RELEASE-BOUNDARIES.md`
+6. `docs/OPERATIONS.md`
+7. `docs/TESTING.md`
 
 Only read `docs/handovers/` if Sam names a parked workstream or bug. Historical
 plans and handovers are evidence, not current instructions.
+
+Codex operating rule: **Echo Chamber - Main** is the canonical project. For real
+bugs, start a new thread there and use a new worktree branch from `main` if code
+may change. Do not create another Echo project unless Sam explicitly asks.
 
 ## Active Runtime Areas
 

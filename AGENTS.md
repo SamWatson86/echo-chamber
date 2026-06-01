@@ -27,6 +27,9 @@ product development is centered in `core/`.
 ## Core Guardrails
 
 - PRs only. Never push directly to `main`/`master`.
+- For Codex usage, **Echo Chamber - Main** is the canonical project. Do not
+  create new Echo Codex projects for ordinary bugs or cleanup. Use a new thread
+  and, when code may change, a new worktree branch from `main`.
 - Prefer small, focused diffs over broad rewrites.
 - Keep release impact explicit: server-only vs desktop-binary vs both.
 - Avoid one-off patterns; prefer conventional, maintainable approaches.
@@ -56,3 +59,5 @@ Use `docs/RELEASE-BOUNDARIES.md` and `docs/TERMINOLOGY.md` to avoid
 server/client/binary confusion when planning or describing changes.
 Use `docs/OPERATIONS.md` for production service/restart rules and
 `docs/GITHUB.md` for release verification.
+Use `docs/CODEX.md` for the canonical Codex project/thread/worktree operating
+model.
