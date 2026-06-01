@@ -81,3 +81,18 @@ Decision: carry both max and min publish bitrate bounds into `PeerTransport` and
 them for H264 `x-google-min-bitrate`/`x-google-start-bitrate`. This keeps the allocator,
 encoder target, and game publish profile aligned without changing the active capture
 backend.
+
+## 2026-06-01 - Legacy Capture Quarantine
+
+The abandoned Present-hook DLL crate at `core/hook/` is excluded from the active
+Cargo workspace. It remains in the repo only as historical reference.
+
+Decision:
+
+- Active capture work starts from `screen_capture.rs`, `desktop_capture.rs`, and
+  `capture_pipeline.rs`.
+- `core/client/src/archive/` and `core/hook/` must not be imported, built, or
+  copied into production paths without a fresh design review.
+- Monitor sharing uses DXGI Desktop Duplication. The older WGC monitor IPC path
+  is not the production monitor path and must not be revived without explicit
+  hardware-risk review.
