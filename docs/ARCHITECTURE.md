@@ -45,7 +45,8 @@ Typical examples:
 - publish-state indicator truthfulness
 
 ### Desktop binary boundary
-Changes in Tauri/native shell or packaged assets generally require publishing new desktop artifacts (EXE/DMG) for installed desktop users.
+Changes in Tauri/native shell or packaged assets generally require publishing a
+new Windows desktop installer/updater artifact for installed desktop users.
 
 ---
 
