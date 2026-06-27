@@ -26,9 +26,52 @@ function _captureSourceVisibilityToastMessage(status) {
   return status.warning + '. Keep the shared window visible while sharing.';
 }
 
+function _nativeCaptureModeLabel(mode) {
+  if (mode === 'desktop-dd') return 'Desktop Duplication';
+  if (mode === 'wgc-monitor') return 'Monitor Capture';
+  if (mode === 'wgc-game-monitor') return 'Fullscreen Game Capture';
+  return 'Window Capture';
+}
+
+function _stringOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  return String(value);
+}
+
+function buildCaptureSourceReport(source, captureRoute, publishProfile) {
+  if (!source) return null;
+  var sourceType = source.sourceType || source.source_type || null;
+  var monitorId = source.monitorId || source.monitor_id || null;
+  if (!monitorId && sourceType === 'monitor') monitorId = source.id;
+  return {
+    source_type: _stringOrNull(sourceType) || 'unknown',
+    source_id: _stringOrNull(source.id),
+    source_title: _stringOrNull(source.title),
+    capture_route: _stringOrNull(captureRoute),
+    publish_profile: _stringOrNull(publishProfile),
+    monitor_id: _stringOrNull(monitorId),
+    fullscreen_like: typeof source.fullscreenLike === 'boolean'
+      ? source.fullscreenLike
+      : (typeof source.fullscreen_like === 'boolean' ? source.fullscreen_like : null),
+  };
+}
+
+function setCaptureSourceReport(source, captureRoute, publishProfile) {
+  var report = buildCaptureSourceReport(source, captureRoute, publishProfile);
+  if (typeof window !== 'undefined') window._echoCaptureSourceReport = report;
+  return report;
+}
+
+function getCaptureSourceReportSnapshot() {
+  if (typeof window === 'undefined') return null;
+  return window._echoCaptureSourceReport || null;
+}
+
 function nativeAudioCaptureRequestForSource(source) {
   if (!source) return null;
-  if (source.sourceType === 'monitor') return null;
+  if (source.sourceType === 'monitor') {
+    return { mode: 'system-exclude-echo', pid: 0, toast: 'System audio streaming (Echo voice excluded)' };
+  }
   if ((source.sourceType === 'game' || source.sourceType === 'window') &&
       source.pid && source.pid > 0) {
     return {
@@ -125,6 +168,7 @@ async function _finalizeNativeCaptureStop(stopMessage) {
   window._echoNativeCaptureActive = false;
   window._echoNativeCaptureMode = null;
   window._echoNativeCaptureSource = null;
+  window._echoCaptureSourceReport = null;
   screenEnabled = false;
   _stopNativeCaptureStopListeners();
   _stopSourceVisibilityMonitor();
@@ -132,6 +176,91 @@ async function _finalizeNativeCaptureStop(stopMessage) {
   await stopNativeAudioCapture();
   renderPublishButtons();
   if (stopMessage && wasActive) showToast(stopMessage, 3000);
+}
+
+function _clearNativeScreenTilesForIdentity(identity) {
+  if (!identity) return;
+  var identities = [identity];
+  if (!identity.endsWith('$screen')) identities.push(identity + '$screen');
+
+  function removeTile(tile, trackSid) {
+    if (trackSid && typeof removeScreenTile === 'function') {
+      removeScreenTile(trackSid);
+    } else if (tile) {
+      try {
+        if (tile.classList && tile.classList.contains && tile.classList.contains('is-focused') &&
+            typeof screenGridEl !== 'undefined' && screenGridEl && screenGridEl.classList) {
+          screenGridEl.classList.remove('is-focused');
+        }
+        if (typeof tile.remove === 'function') tile.remove();
+      } catch (_) {}
+    }
+    if (trackSid && typeof unregisterScreenTrack === 'function') unregisterScreenTrack(trackSid);
+    if (trackSid && typeof screenTileBySid !== 'undefined' && screenTileBySid) screenTileBySid.delete(trackSid);
+    if (trackSid && typeof screenRecoveryAttempts !== 'undefined' && screenRecoveryAttempts) screenRecoveryAttempts.delete(trackSid);
+    if (trackSid && typeof screenResubscribeIntent !== 'undefined' && screenResubscribeIntent) screenResubscribeIntent.delete(trackSid);
+  }
+
+  identities.forEach(function(key) {
+    var tile = (typeof screenTileByIdentity !== 'undefined' && screenTileByIdentity)
+      ? screenTileByIdentity.get(key)
+      : null;
+    var tileSid = tile && tile.dataset ? tile.dataset.trackSid : null;
+    if (tile) removeTile(tile, tileSid);
+    if (typeof screenTileByIdentity !== 'undefined' && screenTileByIdentity) screenTileByIdentity.delete(key);
+    if (typeof hiddenScreens !== 'undefined' && hiddenScreens) hiddenScreens.delete(key);
+    if (typeof watchedScreens !== 'undefined' && watchedScreens) watchedScreens.delete(key);
+    if (typeof _pubBitrateControl !== 'undefined' && _pubBitrateControl) _pubBitrateControl.delete(key);
+
+    if (typeof participantCards !== 'undefined' && participantCards) {
+      var cardRef = participantCards.get(key);
+      if (cardRef && cardRef.watchToggleBtn) {
+        cardRef.watchToggleBtn.style.display = 'none';
+        cardRef.watchToggleBtn.textContent = 'Stop Watching';
+        if (cardRef.ovWatchClone) {
+          cardRef.ovWatchClone.style.display = 'none';
+          cardRef.ovWatchClone.textContent = 'Stop Watching';
+        }
+      }
+    }
+  });
+
+  if (typeof screenTrackMeta !== 'undefined' && screenTrackMeta && screenTrackMeta.forEach) {
+    var staleSids = [];
+    screenTrackMeta.forEach(function(meta, sid) {
+      if (meta && identities.indexOf(meta.identity) >= 0) staleSids.push(sid);
+    });
+    staleSids.forEach(function(sid) {
+      var tile = (typeof screenTileBySid !== 'undefined' && screenTileBySid) ? screenTileBySid.get(sid) : null;
+      removeTile(tile, sid);
+    });
+  }
+}
+
+async function _removeNativeScreenCompanion(identity, roomName) {
+  if (!identity || !roomName || !adminToken || typeof fetch !== 'function') return false;
+  var companionIdentity = identity.endsWith('$screen') ? identity : identity + '$screen';
+  var path = '/v1/rooms/' + encodeURIComponent(roomName) + '/kick/' + encodeURIComponent(companionIdentity);
+  var url = typeof apiUrl === 'function'
+    ? apiUrl(path)
+    : ((_echoServerUrl || '').replace(/\/$/, '') + path);
+  if (!url) return false;
+
+  try {
+    var resp = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + adminToken },
+    });
+    if (!resp.ok && typeof debugLog === 'function') {
+      debugLog('[screen-share] companion cleanup returned HTTP ' + resp.status);
+    }
+    return resp.ok;
+  } catch (err) {
+    if (typeof debugLog === 'function') {
+      debugLog('[screen-share] companion cleanup failed: ' + (err.message || err));
+    }
+    return false;
+  }
 }
 
 async function _startNativeCaptureStopListeners() {
@@ -345,6 +474,8 @@ async function startScreenShareManual() {
       }
       screenEnabled = true;
       window._echoNativeCaptureActive = true;
+      var nativePublishProfile = source.sourceType === 'game' ? 'game' : 'desktop';
+      setCaptureSourceReport(source, window._echoNativeCaptureMode, nativePublishProfile);
       _startSourceVisibilityMonitor(source);
       try {
         _startQualityWarnListener();
@@ -352,15 +483,20 @@ async function startScreenShareManual() {
         debugLog('[screen-share] quality warning listener failed: ' + (qualityWarnErr.message || qualityWarnErr));
       }
       renderPublishButtons();
-      var modeLabel = window._echoNativeCaptureMode === 'desktop-dd' ? 'Desktop Duplication' : 'Window Capture';
+      var modeLabel = _nativeCaptureModeLabel(window._echoNativeCaptureMode);
       showToast('Screen sharing started (' + modeLabel + ')', 4000);
 
       // Immediately start WASAPI per-process audio + publish pipeline using picker's PID
       var audioRequest = nativeAudioCaptureRequestForSource(source);
       if (audioRequest) {
-        var audioLabel = audioRequest.mode === 'system' ? 'system loopback' : 'PID ' + audioRequest.pid;
+        var audioLabel = audioRequest.mode === 'system-exclude-echo'
+          ? 'system loopback excluding Echo'
+          : (audioRequest.mode === 'system' ? 'system loopback' : 'PID ' + audioRequest.pid);
         debugLog('[audio] auto-starting native audio capture+publish for ' + audioLabel);
-        startNativeAudioCapture(audioRequest.pid, { system: audioRequest.mode === 'system' }).then(function() {
+        startNativeAudioCapture(audioRequest.pid, {
+          system: audioRequest.mode === 'system',
+          systemExcludeEcho: audioRequest.mode === 'system-exclude-echo',
+        }).then(function() {
           debugLog('[audio] native audio pipeline started for ' + audioLabel);
           showToast(audioRequest.toast, 3000);
         }).catch(function(e) {
@@ -408,6 +544,11 @@ async function startScreenShareManual() {
     const settings = videoMst.getSettings();
     debugLog("Screen capture actual FPS: " + (settings.frameRate || "unknown") +
       ", resolution: " + settings.width + "x" + settings.height);
+    setCaptureSourceReport({
+      sourceType: "browser",
+      id: "browser-picker",
+      title: settings.displaySurface || videoMst.label || "Browser picker",
+    }, "browser", "desktop");
 
     // Set content hint for smooth motion (gaming/video)
     videoMst.contentHint = "motion";
@@ -799,6 +940,7 @@ async function startScreenShareManual() {
             ice_local_type: lType !== "?" ? lType : null,
             ice_remote_type: rType !== "?" ? rType : null,
             simulcast_layers: layers.length,
+            capture_source: getCaptureSourceReportSnapshot(),
           };
 
           // Report stats to admin dashboard (apiUrl handles native vs browser path)
@@ -817,6 +959,7 @@ async function startScreenShareManual() {
                 ice_local_type: lType !== "?" ? lType : null,
                 ice_remote_type: rType !== "?" ? rType : null,
                 simulcast_layers: layers.length,
+                capture_source: getCaptureSourceReportSnapshot(),
               }),
             }).catch(() => {});
           }
@@ -1074,12 +1217,16 @@ async function stopScreenShareManual() {
     var stopCommand = window._echoNativeCaptureMode === 'desktop-dd'
       ? 'stop_desktop_capture'
       : 'stop_screen_share';
+    var localIdentity = room && room.localParticipant ? room.localParticipant.identity : null;
+    var roomName = currentRoomName || 'main';
     _stopNativeCaptureStopListeners();
     try {
       await tauriInvoke(stopCommand);
     } catch (e) {
       console.error('[screen-share] native stop error:', e);
     }
+    _clearNativeScreenTilesForIdentity(localIdentity);
+    await _removeNativeScreenCompanion(localIdentity, roomName);
     await _finalizeNativeCaptureStop(null);
     return; // Don't fall through to browser path
   }
@@ -1115,6 +1262,7 @@ async function stopScreenShareManual() {
   _bweKickAttempted = false;
   _highPausedTicks = 0;
   _latestOutboundBwe = 0;
+  window._echoCaptureSourceReport = null;
   // Clean up publisher-side bitrate cap state
   _bitrateCaps.clear();
   _currentAppliedCap = null;
@@ -1148,6 +1296,13 @@ async function stopScreenShareManual() {
 }
 
 // ---------- Native per-process audio capture (Tauri client only) ----------
+
+var _nativeAudioActive = false;
+var _nativeAudioCtx = null;
+var _nativeAudioWorklet = null;
+var _nativeAudioDest = null;
+var _nativeAudioTrack = null;
+var _nativeAudioUnlisten = null;
 
 var _nativeAudioWorkletCode = [
   "class NativeAudioProcessor extends AudioWorkletProcessor {",
@@ -1362,6 +1517,7 @@ async function startNativeAudioCapture(pid, opts) {
   var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
   var trackName = opts.name || undefined;
   var useSystemLoopback = !!opts.system;
+  var useSystemExcludeEcho = !!opts.systemExcludeEcho;
 
   // Create AudioContext — DON'T hardcode sample rate, let it match system default
   // WASAPI will report its actual format and we adapt
@@ -1466,7 +1622,10 @@ async function startNativeAudioCapture(pid, opts) {
   };
 
   // Start the WASAPI capture on Rust side
-  if (useSystemLoopback) {
+  if (useSystemExcludeEcho) {
+    await tauriInvoke("start_system_audio_capture_excluding_echo");
+    debugLog("[native-audio] WASAPI started for system loopback excluding Echo playback");
+  } else if (useSystemLoopback) {
     await tauriInvoke("start_system_audio_capture");
     debugLog("[native-audio] WASAPI started for system loopback");
   } else {

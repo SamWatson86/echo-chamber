@@ -6,6 +6,7 @@ const vm = require("node:vm");
 
 function loadScreenShareNative() {
   const calls = [];
+  const fetches = [];
   const context = {
     window: { __ECHO_NATIVE__: true },
     _nativeCaptureStopUnlisten: null,
@@ -40,6 +41,19 @@ function loadScreenShareNative() {
       return null;
     },
     tauriListen: undefined,
+    document: {
+      body: { appendChild() {} },
+      createElement() {
+        return { style: {}, classList: { add() {}, remove() {} } };
+      },
+      getElementById() {
+        return null;
+      },
+    },
+    fetch: async (url, opts) => {
+      fetches.push({ url: String(url), opts: opts || {} });
+      return { ok: true, status: 200 };
+    },
     debugLog() {},
     showToast() {},
     renderPublishButtons() {},
@@ -63,7 +77,7 @@ function loadScreenShareNative() {
   vm.createContext(context);
   const code = fs.readFileSync(path.join(__dirname, "screen-share-native.js"), "utf8");
   vm.runInContext(code, context, { filename: "screen-share-native.js" });
-  return { context, calls };
+  return { context, calls, fetches };
 }
 
 function loadNativeAudioProcessor(code) {
@@ -245,7 +259,7 @@ test("source visibility monitor is only enabled for native window-like sources",
   );
 });
 
-test("native audio capture request avoids system loopback for monitor shares", () => {
+test("monitor audio capture requests system audio with Echo playback excluded", () => {
   const { context } = loadScreenShareNative();
 
   assert.equal(
@@ -256,14 +270,109 @@ test("native audio capture request avoids system loopback for monitor shares", (
     JSON.stringify(context.nativeAudioCaptureRequestForSource({ sourceType: "game", pid: 5678 })),
     JSON.stringify({ mode: "process", pid: 5678, toast: "Game audio streaming" })
   );
-  assert.equal(
-    context.nativeAudioCaptureRequestForSource({ sourceType: "monitor", pid: 0 }),
-    null
-  );
+  const request = context.nativeAudioCaptureRequestForSource({ sourceType: "monitor", pid: 0 });
+  assert.equal(request.mode, "system-exclude-echo");
+  assert.equal(request.pid, 0);
   assert.equal(
     context.nativeAudioCaptureRequestForSource({ sourceType: "window", pid: 0 }),
     null
   );
+});
+
+test("native audio capture uses the Echo-excluding system command for monitor audio", async () => {
+  const { context, calls } = loadScreenShareNative();
+
+  context.hasTauriIPC = () => true;
+  context.getLiveKitClient = () => ({
+    Track: { Source: { ScreenShareAudio: "screen_share_audio" } },
+    LocalAudioTrack: class {
+      constructor(mediaStreamTrack) {
+        this.mediaStreamTrack = mediaStreamTrack;
+      }
+    },
+  });
+  context.AudioContext = class {
+    constructor() {
+      this.state = "running";
+      this.sampleRate = 48000;
+      this.audioWorklet = { addModule: async () => {} };
+    }
+    createMediaStreamDestination() {
+      return { stream: { getAudioTracks: () => [{ enabled: true, muted: false, readyState: "live" }] } };
+    }
+    async resume() {}
+    async close() {}
+  };
+  context.AudioWorkletNode = class {
+    constructor() {
+      this.port = { postMessage() {} };
+    }
+    connect() {}
+    disconnect() {}
+  };
+  context.Blob = Blob;
+  context.URL = {
+    createObjectURL: () => "blob:native-audio",
+    revokeObjectURL() {},
+  };
+  context.tauriListen = async () => () => {};
+  context.room.localParticipant.publishTrack = async () => {};
+
+  await context.startNativeAudioCapture(0, { systemExcludeEcho: true });
+
+  assert.equal(
+    calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"),
+    true
+  );
+  assert.equal(
+    calls.some((call) => call.command === "start_system_audio_capture"),
+    false
+  );
+});
+
+test("native stop clears local screen tile and removes the screen companion", async () => {
+  const { context, calls, fetches } = loadScreenShareNative();
+  let removed = false;
+  let unregisteredSid = null;
+  const tile = {
+    dataset: { trackSid: "TR_SCREEN" },
+    classList: { contains: () => false },
+    remove() { removed = true; },
+  };
+  context.window._echoNativeCaptureActive = true;
+  context.window._echoNativeCaptureMode = "wgc-monitor";
+  context.screenEnabled = true;
+  context.screenTileByIdentity = new Map([["Sam", tile]]);
+  context.screenTileBySid = new Map([["TR_SCREEN", tile]]);
+  context.screenTrackMeta = new Map([["TR_SCREEN", { identity: "Sam" }]]);
+  context.screenRecoveryAttempts = new Map([["TR_SCREEN", 1]]);
+  context.screenResubscribeIntent = new Map([["TR_SCREEN", 1]]);
+  context.hiddenScreens = new Set(["Sam"]);
+  context.watchedScreens = new Set(["Sam"]);
+  context._pubBitrateControl = new Map([["Sam", {}]]);
+  context.removeScreenTile = (sid) => {
+    assert.equal(sid, "TR_SCREEN");
+    removed = true;
+    context.screenTileBySid.delete(sid);
+  };
+  context.unregisterScreenTrack = (sid) => {
+    unregisteredSid = sid;
+    context.screenTrackMeta.delete(sid);
+  };
+
+  await context.stopScreenShareManual();
+
+  assert.equal(calls.some((call) => call.command === "stop_screen_share"), true);
+  assert.equal(removed, true);
+  assert.equal(unregisteredSid, "TR_SCREEN");
+  assert.equal(context.screenTileByIdentity.has("Sam"), false);
+  assert.equal(context.hiddenScreens.has("Sam"), false);
+  assert.equal(context.watchedScreens.has("Sam"), false);
+  assert.equal(context._pubBitrateControl.has("Sam"), false);
+  assert.equal(fetches.length, 1);
+  assert.match(fetches[0].url, /\/v1\/rooms\/main\/kick\/Sam%24screen$/);
+  assert.equal(fetches[0].opts.method, "POST");
+  assert.equal(fetches[0].opts.headers.Authorization, "Bearer admin-token");
 });
 
 test("native audio worklet downmixes multichannel WASAPI frames to stereo", () => {

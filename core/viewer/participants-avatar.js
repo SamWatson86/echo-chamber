@@ -1036,6 +1036,8 @@ function getServerAvatarCandidateUrls(identity, cardRef) {
 function showAvatarImage(cardRef, urls) {
   const avatar = cardRef.avatar;
   if (!avatar || !urls || urls.length === 0) return;
+  const requestId = (avatar._avatarRequestId || 0) + 1;
+  avatar._avatarRequestId = requestId;
 
   let img = avatar.querySelector("img.avatar-img");
   if (!img) {
@@ -1045,23 +1047,35 @@ function showAvatarImage(cardRef, urls) {
     avatar.appendChild(img);
   }
 
-  img._avatarFallbackUrls = urls;
-  img._avatarFallbackIndex = 0;
-  img.onload = function() {
+  function commitLoadedAvatar(url) {
+    if (avatar._avatarRequestId !== requestId) return;
+    img.src = url;
     const textNodes = Array.from(avatar.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
     textNodes.forEach(n => n.remove());
-  };
-  img.onerror = function() {
-    const nextIndex = (img._avatarFallbackIndex || 0) + 1;
-    const fallbackUrls = img._avatarFallbackUrls || [];
-    if (nextIndex < fallbackUrls.length) {
-      img._avatarFallbackIndex = nextIndex;
-      img.src = fallbackUrls[nextIndex];
+  }
+
+  function failAllCandidates() {
+    if (avatar._avatarRequestId !== requestId) return;
+    if (!img.src && typeof img.remove === "function") img.remove();
+  }
+
+  function tryCandidate(index) {
+    if (avatar._avatarRequestId !== requestId) return;
+    if (index >= urls.length) {
+      failAllCandidates();
       return;
     }
-    img.remove();
-  };
-  img.src = urls[0];
+    const loader = new Image();
+    loader.onload = function() {
+      commitLoadedAvatar(urls[index]);
+    };
+    loader.onerror = function() {
+      tryCandidate(index + 1);
+    };
+    loader.src = urls[index];
+  }
+
+  tryCandidate(0);
 }
 
 function updateAvatarDisplay(identity) {

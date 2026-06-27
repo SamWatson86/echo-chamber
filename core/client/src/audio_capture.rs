@@ -15,6 +15,7 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -25,9 +26,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const ACTIVATION_TYPE_PROCESS_LOOPBACK: u32 = 1;
 /// PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0
 const LOOPBACK_MODE_INCLUDE_TREE: u32 = 0;
+/// PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1
+const LOOPBACK_MODE_EXCLUDE_TREE: u32 = 1;
 /// VT_BLOB variant type
 const VT_BLOB: u16 = 65;
 const BITS_PER_BYTE: u16 = 8;
+const KNOWN_ECHO_PROCESS_NAMES: [&str; 2] = ["Echo Chamber.exe", "echo-core-client.exe"];
 
 /// Manual repr(C) structs for process loopback activation params.
 /// These may not be available in all versions of the windows crate.
@@ -188,6 +192,98 @@ fn get_exe_name(pid: u32) -> Option<String> {
     }
 }
 
+fn process_entry_name(entry: &PROCESSENTRY32W) -> String {
+    let len = entry
+        .szExeFile
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(entry.szExeFile.len());
+    String::from_utf16_lossy(&entry.szExeFile[..len])
+}
+
+fn find_processes_by_name(exe_name: &str) -> Vec<(u32, u32)> {
+    let mut processes = Vec::new();
+
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return processes;
+        };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let name = process_entry_name(&entry);
+                if name.eq_ignore_ascii_case(exe_name) {
+                    processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                }
+
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+    }
+
+    processes
+}
+
+fn select_root_process_pid(processes: &[(u32, u32)]) -> Option<u32> {
+    let pids: std::collections::HashSet<u32> = processes.iter().map(|(pid, _)| *pid).collect();
+    processes
+        .iter()
+        .find(|(_, parent_pid)| !pids.contains(parent_pid))
+        .or_else(|| processes.first())
+        .map(|(pid, _)| *pid)
+}
+
+fn select_preferred_playback_exclusion_process<'a>(
+    candidates: &'a [(&'a str, Vec<(u32, u32)>)],
+) -> Option<(&'a str, u32)> {
+    candidates
+        .iter()
+        .find_map(|(name, processes)| select_root_process_pid(processes).map(|pid| (*name, pid)))
+}
+
+fn playback_exclusion_process_names() -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(path) = std::env::current_exe() {
+        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+            names.push(file_name.to_string());
+        }
+    }
+    for name in KNOWN_ECHO_PROCESS_NAMES {
+        if !names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+fn find_playback_feedback_exclusion_pid() -> Option<(String, u32)> {
+    let names = playback_exclusion_process_names();
+    let candidates = names
+        .iter()
+        .map(|name| (name.as_str(), find_processes_by_name(name)))
+        .collect::<Vec<_>>();
+
+    select_preferred_playback_exclusion_process(&candidates)
+        .map(|(name, pid)| (name.to_string(), pid))
+}
+
+fn system_audio_feedback_capture_loopback_mode() -> u32 {
+    LOOPBACK_MODE_EXCLUDE_TREE
+}
+
 // --- Windows build check ---
 
 /// Process loopback capture requires Windows 10 build 20348+.
@@ -273,7 +369,13 @@ pub fn start_capture(pid: u32, app: AppHandle) -> Result<()> {
     let r2 = running.clone();
 
     let thread = std::thread::spawn(move || {
-        if let Err(e) = capture_loop(pid, &app, &r2) {
+        if let Err(e) = capture_loop(
+            pid,
+            LOOPBACK_MODE_INCLUDE_TREE,
+            "process include-tree",
+            &app,
+            &r2,
+        ) {
             log_audio_capture(&format!("[audio-capture] error: {}", e));
             let _ = app.emit("audio-capture-error", format!("{}", e));
         }
@@ -298,6 +400,52 @@ pub fn start_system_capture(app: AppHandle) -> Result<()> {
 
     let thread = std::thread::spawn(move || {
         if let Err(e) = capture_system_loop(&app, &r2) {
+            log_audio_capture(&format!("[audio-capture] error: {}", e));
+            let _ = app.emit("audio-capture-error", format!("{}", e));
+        }
+        let _ = app.emit("audio-capture-stopped", ());
+        log_audio_capture("[audio-capture] thread exited");
+    });
+
+    *global_state().lock().unwrap() = Some(CaptureHandle {
+        running,
+        thread: Some(thread),
+    });
+
+    Ok(())
+}
+
+pub fn start_system_capture_excluding_echo(app: AppHandle) -> Result<()> {
+    if let Err(msg) = check_process_loopback_support() {
+        log_audio_capture(&format!("[audio-capture] {}", msg));
+        return Err(Error::new(E_FAIL, msg));
+    }
+
+    let Some((exe_name, exclude_pid)) = find_playback_feedback_exclusion_pid() else {
+        let msg =
+            "Cannot find Echo playback process to exclude; refusing unsafe system audio capture";
+        log_audio_capture(&format!("[audio-capture] {}", msg));
+        return Err(Error::new(E_FAIL, msg));
+    };
+
+    log_audio_capture(&format!(
+        "[audio-capture] start_system_capture_excluding_echo requested exclude={} pid={}",
+        exe_name, exclude_pid
+    ));
+    stop_capture();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r2 = running.clone();
+    let label = format!("system excluding {} tree", exe_name);
+
+    let thread = std::thread::spawn(move || {
+        if let Err(e) = capture_loop(
+            exclude_pid,
+            system_audio_feedback_capture_loopback_mode(),
+            &label,
+            &app,
+            &r2,
+        ) {
             log_audio_capture(&format!("[audio-capture] error: {}", e));
             let _ = app.emit("audio-capture-error", format!("{}", e));
         }
@@ -632,13 +780,15 @@ fn capture_system_loop(
 
 fn capture_loop(
     pid: u32,
+    process_loopback_mode: u32,
+    label: &str,
     app: &AppHandle,
     running: &AtomicBool,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     unsafe {
         log_audio_capture(&format!(
-            "[audio-capture] capture_loop starting for PID {}",
-            pid
+            "[audio-capture] capture_loop starting for {} PID {}",
+            label, pid
         ));
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         log_audio_capture("[audio-capture] COM initialized");
@@ -648,7 +798,7 @@ fn capture_loop(
             activation_type: ACTIVATION_TYPE_PROCESS_LOOPBACK,
             loopback_params: ProcessLoopbackParams {
                 target_process_id: pid,
-                process_loopback_mode: LOOPBACK_MODE_INCLUDE_TREE,
+                process_loopback_mode,
             },
         };
         let params_size = std::mem::size_of::<AudioClientActivationParams>() as u32;
@@ -701,7 +851,7 @@ fn capture_loop(
             })?;
         log_audio_capture("[audio-capture] activation completed -- got IAudioClient");
 
-        let result = capture_with_audio_client(client, app, running, &format!("PID {}", pid), pid);
+        let result = capture_with_audio_client(client, app, running, label, pid);
         CoUninitialize();
         result
     }
@@ -712,7 +862,8 @@ mod tests {
     use super::{
         audio_capture_frame_diagnostic, audio_capture_peak_from_f32_bytes,
         process_loopback_fallback_format, process_loopback_initialize_flags,
-        system_loopback_initialize_flags,
+        select_preferred_playback_exclusion_process, system_audio_feedback_capture_loopback_mode,
+        system_loopback_initialize_flags, LOOPBACK_MODE_EXCLUDE_TREE,
     };
     use windows::Win32::Media::Audio::{
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -754,6 +905,40 @@ mod tests {
 
         assert_ne!(flags & AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0);
         assert_ne!(flags & AUDCLNT_STREAMFLAGS_LOOPBACK, 0);
+    }
+
+    #[test]
+    fn system_audio_feedback_capture_uses_exclude_tree_mode() {
+        assert_eq!(
+            system_audio_feedback_capture_loopback_mode(),
+            LOOPBACK_MODE_EXCLUDE_TREE
+        );
+    }
+
+    #[test]
+    fn selects_echo_client_root_for_feedback_exclusion() {
+        let candidates = vec![
+            ("Echo Chamber.exe", vec![(50, 10), (51, 50)]),
+            ("echo-core-client.exe", vec![(80, 12)]),
+        ];
+
+        assert_eq!(
+            select_preferred_playback_exclusion_process(&candidates),
+            Some(("Echo Chamber.exe", 50))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_known_client_name_for_feedback_exclusion() {
+        let candidates = vec![
+            ("Echo Chamber.exe", vec![]),
+            ("echo-core-client.exe", vec![(80, 12)]),
+        ];
+
+        assert_eq!(
+            select_preferred_playback_exclusion_process(&candidates),
+            Some(("echo-core-client.exe", 80))
+        );
     }
 
     #[test]
