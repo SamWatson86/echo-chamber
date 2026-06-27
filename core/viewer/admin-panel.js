@@ -80,6 +80,30 @@ function formatStreamFps(fps) {
   return Math.round(fps) + "fps";
 }
 
+function formatCaptureRoute(route) {
+  if (route === "wgc-game-monitor") return "Fullscreen Game Capture";
+  if (route === "wgc-monitor") return "Monitor Capture";
+  if (route === "desktop-dd") return "Desktop Duplication";
+  if (route === "wgc") return "Window Capture";
+  if (route === "browser") return "Browser Capture";
+  return route || "?";
+}
+
+function renderCaptureSourceDiagnostics(stats) {
+  const source = stats && stats.capture_source;
+  if (!source) return "";
+  const parts = [];
+  if (source.source_type) parts.push("source " + source.source_type);
+  if (source.capture_route) parts.push("route " + formatCaptureRoute(source.capture_route));
+  if (source.publish_profile) parts.push("profile " + source.publish_profile);
+  if (typeof source.fullscreen_like === "boolean") {
+    parts.push("fullscreen-like " + (source.fullscreen_like ? "yes" : "no"));
+  }
+  if (source.source_title) parts.push(source.source_title);
+  if (parts.length === 0) return "";
+  return `<div class="admin-row3 admin-source-row">${adminPanelEscape(parts.join(" | "))}</div>`;
+}
+
 function renderParticipantInboundStreamStats(participant) {
   const stats = participant && participant.stats ? participant.stats : {};
   const inbound = Array.isArray(stats.inbound) ? stats.inbound : [];
@@ -180,9 +204,12 @@ function renderAdminPanel(data) {
         const ct = `consec_to ${ch.consecutive_timeouts || 0}`;
         html += `<div class="admin-row2">fps ${fpsTxt}  ${reinits}  ${skip}  ${ct}</div>`;
         html += renderSenderDiagnostics(ch);
+        html += renderCaptureSourceDiagnostics(stats);
         if (ch.reasons && ch.reasons.length > 0) {
           html += `<div class="admin-row3">└─ ${escapeHtml(ch.reasons.join("; "))}</div>`;
         }
+      } else {
+        html += renderCaptureSourceDiagnostics(stats);
       }
       html += renderParticipantInboundStreamStats(p);
       html += `</div>`;
@@ -278,6 +305,7 @@ function escapeHtml(s) {
 if (typeof module === "object" && module.exports) {
   module.exports = {
     formatStreamBitrate,
+    renderCaptureSourceDiagnostics,
     renderInboundStreamStats,
     renderParticipantInboundStreamStats,
     renderSenderDiagnostics,

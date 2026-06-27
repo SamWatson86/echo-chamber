@@ -11,6 +11,17 @@ function getChimeCtx() {
   return chimeAudioCtx;
 }
 
+function primeChimeAudio() {
+  const ctx = getChimeCtx();
+  try {
+    const p = ctx.resume?.();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {});
+    }
+  } catch {}
+  return ctx;
+}
+
 function playJoinChime(volume) {
   try {
     var vol = (volume != null ? volume : 1);
@@ -196,14 +207,49 @@ function playCustomChime(buffer, volume) {
   } catch {}
 }
 
+function uniqueChimeKeys(keys) {
+  var out = [];
+  var seen = new Set();
+  (keys || []).forEach(function(key) {
+    var value = String(key || "").trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  });
+  return out;
+}
+
+function getChimeCandidateKeys(identity) {
+  var identityBase = getIdentityBase(identity);
+  var deviceId = identityBase && deviceIdByIdentity && deviceIdByIdentity.get
+    ? deviceIdByIdentity.get(identityBase)
+    : null;
+  return uniqueChimeKeys([deviceId, identityBase]);
+}
+
+function getLocalChimeKeys() {
+  var identity = room && room.localParticipant ? room.localParticipant.identity : "";
+  var identityBase = identity ? getIdentityBase(identity) : "";
+  var deviceId = (typeof getLocalDeviceId === "function") ? getLocalDeviceId() : "";
+  return uniqueChimeKeys([deviceId, identityBase]);
+}
+
+async function fetchFirstChimeBuffer(keys, kind) {
+  var candidates = uniqueChimeKeys(keys);
+  for (var i = 0; i < candidates.length; i++) {
+    var buffer = await fetchChimeBuffer(candidates[i], kind);
+    if (buffer) return buffer;
+  }
+  return null;
+}
+
 async function playChimeForIdentities(identities, kind) {
   // Look up chime volume from first identity
   var volId = identities.length > 0 ? getIdentityBase(identities[0]) : null;
   var volState = volId ? participantState.get(volId) : null;
   var vol = (volState && volState.chimeVolume != null) ? volState.chimeVolume : 0.5;
   for (const id of identities) {
-    var chimeKey = getChimeKey(id);
-    const buffer = await fetchChimeBuffer(chimeKey, kind);
+    const buffer = await fetchFirstChimeBuffer(getChimeCandidateKeys(id), kind);
     if (buffer) {
       playCustomChime(buffer, vol);
       return;
@@ -215,10 +261,8 @@ async function playChimeForIdentities(identities, kind) {
 
 // Get the chime lookup key for a participant — deviceId if known, else identityBase (fallback)
 function getChimeKey(identity) {
-  var identityBase = getIdentityBase(identity);
-  // Check if we know this participant's device ID
-  var deviceId = deviceIdByIdentity.get(identityBase);
-  return deviceId || identityBase;
+  var keys = getChimeCandidateKeys(identity);
+  return keys[0] || "";
 }
 
 // Pre-fetch chime buffers for all participants in the current room so playback is instant
@@ -227,10 +271,12 @@ function prefetchChimeBuffersForRoom() {
   if (_isMobileDevice) return;
   if (!room || !room.remoteParticipants) return;
   room.remoteParticipants.forEach(function(participant) {
-    var chimeKey = getChimeKey(participant.identity);
+    var chimeKeys = getChimeCandidateKeys(participant.identity);
     // Fetch both enter and exit chimes into cache
-    fetchChimeBuffer(chimeKey, "enter").catch(function() {});
-    fetchChimeBuffer(chimeKey, "exit").catch(function() {});
+    chimeKeys.forEach(function(chimeKey) {
+      fetchChimeBuffer(chimeKey, "enter").catch(function() {});
+      fetchChimeBuffer(chimeKey, "exit").catch(function() {});
+    });
   });
 }
 
@@ -244,12 +290,11 @@ async function playChimeForParticipant(identity, kind) {
     if (kind === "enter") playJoinChime(vol); else playLeaveChime(vol);
     return;
   }
-  var chimeKey = getChimeKey(identity);
   // Look up this participant's chime volume preference
   var identityBase = getIdentityBase(identity);
   var pState = participantState.get(identityBase);
   var vol = (pState && pState.chimeVolume != null) ? pState.chimeVolume : 0.5;
-  var buffer = await fetchChimeBuffer(chimeKey, kind);
+  var buffer = await fetchFirstChimeBuffer(getChimeCandidateKeys(identity), kind);
   if (buffer) {
     playCustomChime(buffer, vol);
   } else if (kind === "enter") {

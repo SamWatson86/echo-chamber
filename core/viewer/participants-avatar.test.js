@@ -18,6 +18,11 @@ function makeAvatarElement(initials = "Z") {
     childNodes: [textNode],
     appendChild(element) {
       if (element.className === "avatar-img") img = element;
+      element.remove = function() {
+        const index = avatar.childNodes.indexOf(element);
+        if (index >= 0) avatar.childNodes.splice(index, 1);
+        if (img === element) img = null;
+      };
       this.childNodes.push(element);
       return element;
     },
@@ -34,7 +39,7 @@ function makeAvatarElement(initials = "Z") {
   return avatar;
 }
 
-function loadParticipantsAvatar({ deviceId } = {}) {
+function loadParticipantsAvatar({ deviceId, imageResults } = {}) {
   const avatar = makeAvatarElement();
   const card = {
     dataset: { identity: "z-6826" },
@@ -60,6 +65,20 @@ function loadParticipantsAvatar({ deviceId } = {}) {
         };
       },
     },
+    Image: class {
+      set src(value) {
+        this._src = value;
+        if (imageResults && imageResults.get(value) === false) {
+          if (typeof this.onerror === "function") this.onerror(new Error("image failed"));
+          return;
+        }
+        if (typeof this.onload === "function") this.onload();
+      }
+      get src() {
+        return this._src || "";
+      }
+    },
+    Node: { TEXT_NODE: 3 },
     apiUrl(pathname) {
       return "https://echo.example.test:9443" + pathname;
     },
@@ -96,6 +115,29 @@ test("remote avatar prefers the mapped device avatar once the device id is known
     deviceId: "70ff47ce-0128-4d5f-a29d",
   });
 
+  context.updateAvatarDisplay("z-6826");
+
+  assert.equal(
+    avatar.image?.src,
+    "https://echo.example.test:9443/api/avatar/70ff47ce-0128-4d5f-a29d"
+  );
+});
+
+test("remote avatar keeps the last good image when a replacement fails to load", () => {
+  const badUrl = "https://echo.example.test:9443/api/avatar/bad-device";
+  const identityUrl = "https://echo.example.test:9443/api/avatar/z";
+  const { context, avatar } = loadParticipantsAvatar({
+    deviceId: "70ff47ce-0128-4d5f-a29d",
+    imageResults: new Map([[badUrl, false], [identityUrl, false]]),
+  });
+
+  context.updateAvatarDisplay("z-6826");
+  assert.equal(
+    avatar.image?.src,
+    "https://echo.example.test:9443/api/avatar/70ff47ce-0128-4d5f-a29d"
+  );
+
+  context.deviceIdByIdentity.set("z", "bad-device");
   context.updateAvatarDisplay("z-6826");
 
   assert.equal(

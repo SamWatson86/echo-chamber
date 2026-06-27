@@ -343,6 +343,11 @@ fn start_system_audio_capture(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn start_system_audio_capture_excluding_echo(app: tauri::AppHandle) -> Result<(), String> {
+    audio_capture::start_system_capture_excluding_echo(app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn stop_audio_capture() -> Result<(), String> {
     audio_capture::stop_capture();
     Ok(())
@@ -653,6 +658,7 @@ fn main() {
             list_capturable_windows,
             start_audio_capture,
             start_system_audio_capture,
+            start_system_audio_capture_excluding_echo,
             stop_audio_capture,
             list_audio_output_devices,
             check_for_updates,

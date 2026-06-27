@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   formatStreamBitrate,
+  renderCaptureSourceDiagnostics,
   renderInboundStreamStats,
   renderSenderDiagnostics,
 } = require("./admin-panel.js");
@@ -71,4 +72,22 @@ test("renders sender-side capture diagnostics", () => {
   assert.match(html, /avail 5\.6 Mbps/);
   assert.match(html, /quality Cpu/);
   assert.match(html, /NVIDIA H264 Encoder/);
+});
+
+test("renders selected capture source diagnostics", () => {
+  const html = renderCaptureSourceDiagnostics({
+    capture_source: {
+      source_type: "game",
+      source_title: "Brotato",
+      capture_route: "wgc-game-monitor",
+      publish_profile: "game",
+      fullscreen_like: true,
+    },
+  });
+
+  assert.match(html, /source game/);
+  assert.match(html, /Fullscreen Game Capture/);
+  assert.match(html, /profile game/);
+  assert.match(html, /fullscreen-like yes/);
+  assert.match(html, /Brotato/);
 });

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.29
+
+- Fix: Entire monitor audio capture uses Windows process-loopback exclusion so Echo voice playback is blocked while other system audio can still be shared.
+- Fix: Native screen-share stop now clears stuck local screen tiles and removes the hidden screen companion publisher.
+- Fix: Remote avatars now preload replacement images and keep the last good avatar instead of going dark on failed image loads.
+- Fix: Uploaded intro and exit chimes resolve stable identity/device keys and resume the shared chime audio context before playback.
+- Diagnostics: Screen-share admin telemetry now reports selected source type, capture route, and publish profile.
+- Release: Desktop and control package versions are bumped to 0.6.29.
+
 ## 0.6.28
 
 - Fix: Game capture returns to the stable 1080p30 cadence after live testing showed the forced 60fps profile could crash or green-screen some publishers.

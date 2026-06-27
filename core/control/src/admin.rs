@@ -65,6 +65,8 @@ pub(crate) struct ClientStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) capture_health: Option<CaptureHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capture_source: Option<CaptureSourceReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) display_status: Option<ClientDisplayStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) native_presenter: Option<NativePresenterReport>,
@@ -156,8 +158,26 @@ pub(crate) struct NativePresenterReport {
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
+pub(crate) struct CaptureSourceReport {
+    pub(crate) source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) capture_route: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) publish_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) monitor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fullscreen_like: Option<bool>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub(crate) struct CaptureHealth {
-    pub(crate) level: String,                       // "Green" | "Yellow" | "Red"
+    pub(crate) level: String, // "Green" | "Yellow" | "Red"
     pub(crate) reasons: Vec<String>,
     pub(crate) capture_active: bool,
     pub(crate) capture_mode: String,
@@ -401,7 +421,11 @@ pub(crate) async fn admin_dashboard(
         ts: now,
         rooms,
         total_online: total,
-        server_version: state.viewer_stamp.read().unwrap_or_else(|e| e.into_inner()).clone(),
+        server_version: state
+            .viewer_stamp
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
     }))
 }
 
@@ -473,7 +497,11 @@ pub(crate) async fn admin_dashboard_metrics(
     // Count unique users by display name (not identity, which has random suffixes)
     let mut unique_names: HashSet<String> = HashSet::new();
     for ev in &all_events {
-        let key = if ev.name.is_empty() { ev.identity.clone() } else { ev.name.clone() };
+        let key = if ev.name.is_empty() {
+            ev.identity.clone()
+        } else {
+            ev.name.clone()
+        };
         unique_names.insert(key);
     }
     let unique_users = unique_names.len();
@@ -488,7 +516,11 @@ pub(crate) async fn admin_dashboard_metrics(
     // --- Per-user stats (grouped by display name, not identity) ---
     let mut user_map: HashMap<String, (usize, u64)> = HashMap::new();
     for ev in &leaves {
-        let key = if ev.name.is_empty() { ev.identity.clone() } else { ev.name.clone() };
+        let key = if ev.name.is_empty() {
+            ev.identity.clone()
+        } else {
+            ev.name.clone()
+        };
         let entry = user_map.entry(key).or_insert((0, 0));
         entry.0 += 1;
         entry.1 += ev.duration_secs.unwrap_or(0);
@@ -612,6 +644,9 @@ fn merge_client_stats(existing: &mut ClientStats, payload: ClientStats, now: u64
     }
     if payload.capture_health.is_some() {
         existing.capture_health = payload.capture_health;
+    }
+    if payload.capture_source.is_some() {
+        existing.capture_source = payload.capture_source;
     }
     if payload.display_status.is_some() {
         existing.display_status = payload.display_status;
@@ -768,7 +803,10 @@ pub(crate) async fn admin_metrics(
                 *enc_counts.entry(e.clone()).or_default() += 1;
             }
         }
-        let encoder = enc_counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e);
+        let encoder = enc_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(e, _)| e);
 
         // Most common ICE types
         let mut ice_local_counts: HashMap<String, usize> = HashMap::new();
@@ -868,7 +906,9 @@ pub(crate) async fn submit_bug_report(
         if let Ok(Some((number, url))) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             create_github_issue(client, pat, repo, gh_report, uploads_dir),
-        ).await {
+        )
+        .await
+        {
             report.github_issue_number = Some(number);
             report.github_issue_url = Some(url);
         }
@@ -957,7 +997,12 @@ pub(crate) async fn admin_deploys(
     // Run git log for recent commits on origin/main
     // Use ||| as field delimiter and %x00 as record separator (body can contain newlines)
     let git_output = std::process::Command::new("git")
-        .args(["log", "--format=%H|||%an|||%s|||%aI|||%b%x00", "-30", "origin/main"])
+        .args([
+            "log",
+            "--format=%H|||%an|||%s|||%aI|||%b%x00",
+            "-30",
+            "origin/main",
+        ])
         .output();
 
     let mut commits = vec![];
@@ -977,7 +1022,11 @@ pub(crate) async fn admin_deploys(
             let author = parts[1];
             let message = parts[2];
             let timestamp = parts[3];
-            let body = if parts.len() >= 5 { parts[4].trim() } else { "" };
+            let body = if parts.len() >= 5 {
+                parts[4].trim()
+            } else {
+                ""
+            };
 
             // Extract PR number from merge commit subjects like "Merge pull request #61 from ..."
             let pr_number: Option<u64> = if message.starts_with("Merge pull request #") {
@@ -1003,9 +1052,7 @@ pub(crate) async fn admin_deploys(
                         .get("error")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    let dur = event
-                        .get("duration_seconds")
-                        .and_then(|v| v.as_i64());
+                    let dur = event.get("duration_seconds").and_then(|v| v.as_i64());
                     (Some(status.to_string()), ts, err, dur)
                 } else {
                     (None, None, None, None)
@@ -1079,7 +1126,13 @@ pub(crate) fn append_bug_report(dir: &std::path::Path, report: &BugReport) {
 /// Create a GitHub Issue from a bug report.
 /// Returns (issue_number, html_url) on success.
 /// Silently returns None if creation fails.
-pub(crate) async fn create_github_issue(client: reqwest::Client, pat: String, repo: String, report: BugReport, uploads_dir: PathBuf) -> Option<(u64, String)> {
+pub(crate) async fn create_github_issue(
+    client: reqwest::Client,
+    pat: String,
+    repo: String,
+    report: BugReport,
+    uploads_dir: PathBuf,
+) -> Option<(u64, String)> {
     let feedback_type = report.feedback_type.as_deref().unwrap_or("bug");
     let prefix = match feedback_type {
         "enhancement" => "Enhancement",
@@ -1164,7 +1217,10 @@ pub(crate) async fn create_github_issue(client: reqwest::Client, pat: String, re
                     }
                 }
                 Err(_) => {
-                    body.push_str(&format!("\n### Screenshot\nScreenshot referenced but file not found: `{}`\n", file_name));
+                    body.push_str(&format!(
+                        "\n### Screenshot\nScreenshot referenced but file not found: `{}`\n",
+                        file_name
+                    ));
                 }
             }
         }
@@ -1187,7 +1243,10 @@ pub(crate) async fn create_github_issue(client: reqwest::Client, pat: String, re
         }
     }
 
-    body.push_str(&format!("\n---\n*Auto-created from in-app feedback ({})*", feedback_type));
+    body.push_str(&format!(
+        "\n---\n*Auto-created from in-app feedback ({})*",
+        feedback_type
+    ));
 
     let url = format!("https://api.github.com/repos/{}/issues", repo);
     let payload = serde_json::json!({
@@ -1216,10 +1275,16 @@ pub(crate) async fn create_github_issue(client: reqwest::Client, pat: String, re
                 let number = body["number"].as_u64();
                 let html_url = body["html_url"].as_str().map(|s| s.to_string());
                 if let (Some(n), Some(u)) = (number, html_url) {
-                    info!("GitHub Issue #{} created for bug report from {}", n, report.name);
+                    info!(
+                        "GitHub Issue #{} created for bug report from {}",
+                        n, report.name
+                    );
                     return Some((n, u));
                 }
-                info!("GitHub Issue created for bug report from {} (could not parse response)", report.name);
+                info!(
+                    "GitHub Issue created for bug report from {} (could not parse response)",
+                    report.name
+                );
             } else {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -1280,7 +1345,10 @@ pub(crate) async fn admin_force_reload(
     }
     let viewer_dir = resolve_viewer_dir();
     stamp_viewer_index(&viewer_dir, &new_stamp);
-    info!("force-reload: bumped viewer_stamp to {} (index.html updated)", new_stamp);
+    info!(
+        "force-reload: bumped viewer_stamp to {} (index.html updated)",
+        new_stamp
+    );
 
     // 2. Iterate every LiveKit room and kick everyone in it.
     // We use LiveKit's ListRooms as the source of truth (the control plane's
@@ -1298,9 +1366,7 @@ pub(crate) async fn admin_force_reload(
                     Ok(identities) => {
                         for ident in identities {
                             match crate::rooms::livekit_remove_participant(
-                                &state,
-                                &room_name,
-                                &ident,
+                                &state, &room_name, &ident,
                             )
                             .await
                             {
@@ -1310,10 +1376,14 @@ pub(crate) async fn admin_force_reload(
                                     identities_kicked.push(ident);
                                 }
                                 Ok(false) => {
-                                    info!("force-reload: {} already gone from {}", ident, room_name);
+                                    info!(
+                                        "force-reload: {} already gone from {}",
+                                        ident, room_name
+                                    );
                                 }
                                 Err(e) => {
-                                    let msg = format!("kick {} from {} failed: {}", ident, room_name, e);
+                                    let msg =
+                                        format!("kick {} from {} failed: {}", ident, room_name, e);
                                     warn!("{}", msg);
                                     errors.push(msg);
                                 }
@@ -1402,5 +1472,38 @@ mod tests {
         assert_eq!(native.render_path, "native_receive_probe");
         assert_eq!(native.native_receive_fps, Some(59.7));
         assert_eq!(native.target_identity.as_deref(), Some("Spencer-2222"));
+    }
+
+    #[test]
+    fn client_stats_merge_preserves_capture_source_report() {
+        let mut existing = ClientStats {
+            identity: "Zane-1234".to_string(),
+            name: "Zane".to_string(),
+            room: "main".to_string(),
+            updated_at: 1,
+            ..Default::default()
+        };
+        let payload = ClientStats {
+            capture_source: Some(CaptureSourceReport {
+                source_type: "game".to_string(),
+                source_id: Some("123456".to_string()),
+                source_title: Some("Brotato".to_string()),
+                capture_route: Some("wgc-game-monitor".to_string()),
+                publish_profile: Some("game".to_string()),
+                monitor_id: Some("654321".to_string()),
+                fullscreen_like: Some(true),
+            }),
+            ..Default::default()
+        };
+
+        merge_client_stats(&mut existing, payload, 42);
+
+        let source = existing.capture_source.expect("capture source report");
+        assert_eq!(existing.updated_at, 42);
+        assert_eq!(source.source_type, "game");
+        assert_eq!(source.source_title.as_deref(), Some("Brotato"));
+        assert_eq!(source.capture_route.as_deref(), Some("wgc-game-monitor"));
+        assert_eq!(source.publish_profile.as_deref(), Some("game"));
+        assert_eq!(source.fullscreen_like, Some(true));
     }
 }

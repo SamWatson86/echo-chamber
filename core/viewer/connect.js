@@ -1563,6 +1563,7 @@ async function connect() {
   // This MUST happen IMMEDIATELY while we still have the user gesture from the button click
   // Also prime soundboard AudioContext NOW (user gesture) so remote sound-play events work
   getSoundboardContext();
+  if (typeof primeChimeAudio === "function") primeChimeAudio();
   try {
     // Create a silent audio loop to maintain autoplay permission
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -1892,7 +1893,7 @@ function buildChimeSettingsUI() {
 
     var fileInput = document.createElement("input");
     fileInput.type = "file";
-    fileInput.accept = "audio/mpeg,audio/wav,audio/ogg,audio/webm,.mp3,.wav,.ogg,.webm";
+    fileInput.accept = "audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.ogg,.webm,.m4a,.aac,.flac,.opus";
     fileInput.className = "hidden";
 
     var uploadBtn = document.createElement("button");
@@ -1928,7 +1929,6 @@ function buildChimeSettingsUI() {
       }
       statusEl.textContent = "Uploading...";
       try {
-        var identityBase = getIdentityBase(room.localParticipant.identity);
         // Infer MIME from extension if browser doesn't provide one
         var mime = file.type;
         if (!mime || mime === "application/octet-stream") {
@@ -1936,20 +1936,28 @@ function buildChimeSettingsUI() {
           var mimeMap = { mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", webm: "audio/webm", m4a: "audio/mp4", aac: "audio/aac", flac: "audio/flac", opus: "audio/ogg" };
           mime = mimeMap[ext] || "audio/mpeg";
         }
-        var chimeDeviceId = getLocalDeviceId();
-        var res = await fetch(apiUrl("/api/chime/upload?identity=" + encodeURIComponent(chimeDeviceId) + "&kind=" + kind), {
-          method: "POST",
-          headers: { Authorization: "Bearer " + adminToken, "Content-Type": mime },
-          body: file
-        });
-        var data = await res.json().catch(function() { return {}; });
-        if (data && data.ok) {
+        var chimeKeys = (typeof getLocalChimeKeys === "function") ? getLocalChimeKeys() : [getLocalDeviceId()];
+        var uploadError = "";
+        for (var ki = 0; ki < chimeKeys.length; ki++) {
+          var chimeKey = chimeKeys[ki];
+          var res = await fetch(apiUrl("/api/chime/upload?identity=" + encodeURIComponent(chimeKey) + "&kind=" + kind), {
+            method: "POST",
+            headers: { Authorization: "Bearer " + adminToken, "Content-Type": mime },
+            body: file
+          });
+          var data = await res.json().catch(function() { return {}; });
+          if (!res.ok || !data || !data.ok) {
+            uploadError = (data && data.error) || "Upload failed";
+            break;
+          }
+          chimeBufferCache.delete(chimeKey + "-" + kind);
+        }
+        if (uploadError) {
+          statusEl.textContent = uploadError;
+        } else {
           statusEl.textContent = file.name;
           previewBtn.classList.remove("hidden");
           removeBtn.classList.remove("hidden");
-          chimeBufferCache.delete(chimeDeviceId + "-" + kind);
-        } else {
-          statusEl.textContent = (data && data.error) || "Upload failed";
         }
       } catch (e) {
         statusEl.textContent = "Upload error";
@@ -1958,21 +1966,29 @@ function buildChimeSettingsUI() {
     });
 
     previewBtn.addEventListener("click", async function() {
-      var chimeDeviceId = getLocalDeviceId();
-      chimeBufferCache.delete(chimeDeviceId + "-" + kind);
-      var buf = await fetchChimeBuffer(chimeDeviceId, kind);
+      if (typeof primeChimeAudio === "function") primeChimeAudio();
+      var chimeKeys = (typeof getLocalChimeKeys === "function") ? getLocalChimeKeys() : [getLocalDeviceId()];
+      chimeKeys.forEach(function(chimeKey) {
+        chimeBufferCache.delete(chimeKey + "-" + kind);
+      });
+      var buf = (typeof fetchFirstChimeBuffer === "function")
+        ? await fetchFirstChimeBuffer(chimeKeys, kind)
+        : await fetchChimeBuffer(chimeKeys[0], kind);
       if (buf) playCustomChime(buf);
     });
 
     removeBtn.addEventListener("click", async function() {
-      var chimeDeviceId = getLocalDeviceId();
+      var chimeKeys = (typeof getLocalChimeKeys === "function") ? getLocalChimeKeys() : [getLocalDeviceId()];
       try {
-        await fetch(apiUrl("/api/chime/delete"), {
-          method: "POST",
-          headers: { Authorization: "Bearer " + adminToken, "Content-Type": "application/json" },
-          body: JSON.stringify({ identity: chimeDeviceId, kind: kind })
-        });
-        chimeBufferCache.delete(chimeDeviceId + "-" + kind);
+        for (var di = 0; di < chimeKeys.length; di++) {
+          var chimeKey = chimeKeys[di];
+          await fetch(apiUrl("/api/chime/delete"), {
+            method: "POST",
+            headers: { Authorization: "Bearer " + adminToken, "Content-Type": "application/json" },
+            body: JSON.stringify({ identity: chimeKey, kind: kind })
+          });
+          chimeBufferCache.delete(chimeKey + "-" + kind);
+        }
         previewBtn.classList.add("hidden");
         removeBtn.classList.add("hidden");
         statusEl.textContent = "";
@@ -1982,13 +1998,17 @@ function buildChimeSettingsUI() {
     // Check if chime already exists
     (async function() {
       if (!room || !room.localParticipant) return;
-      var chimeDeviceId = getLocalDeviceId();
+      var chimeKeys = (typeof getLocalChimeKeys === "function") ? getLocalChimeKeys() : [getLocalDeviceId()];
       try {
-        var res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(chimeDeviceId) + "/" + kind), { method: "HEAD" });
-        if (res.ok) {
-          previewBtn.classList.remove("hidden");
-          removeBtn.classList.remove("hidden");
-          statusEl.textContent = "Custom sound set";
+        for (var hi = 0; hi < chimeKeys.length; hi++) {
+          var chimeKey = chimeKeys[hi];
+          var res = await fetch(apiUrl("/api/chime/" + encodeURIComponent(chimeKey) + "/" + kind), { method: "HEAD" });
+          if (res.ok) {
+            previewBtn.classList.remove("hidden");
+            removeBtn.classList.remove("hidden");
+            statusEl.textContent = "Custom sound set";
+            break;
+          }
         }
       } catch (e) {}
     })();

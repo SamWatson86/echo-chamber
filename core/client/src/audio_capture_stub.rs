@@ -23,4 +23,8 @@ pub fn start_system_capture(_app: tauri::AppHandle) -> Result<(), String> {
     Err("System audio capture is not supported on this platform.".to_string())
 }
 
+pub fn start_system_capture_excluding_echo(_app: tauri::AppHandle) -> Result<(), String> {
+    Err("System audio capture is not supported on this platform.".to_string())
+}
+
 pub fn stop_capture() {}

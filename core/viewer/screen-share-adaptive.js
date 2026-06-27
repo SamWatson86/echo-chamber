@@ -670,6 +670,9 @@ function startInboundScreenStatsMonitor() {
         var displayStatus = typeof getEchoDisplayStatusSnapshot === "function"
           ? getEchoDisplayStatusSnapshot()
           : null;
+        var captureSource = typeof getCaptureSourceReportSnapshot === "function"
+          ? getCaptureSourceReportSnapshot()
+          : null;
         var nativePresenter = await resolveNativePresenterStatusForReport();
 
         // Fire the POST whenever we have ANYTHING to report — either receive-side
@@ -677,7 +680,7 @@ function startInboundScreenStatsMonitor() {
         // a Tauri publisher). Without this OR, a publisher alone in the room
         // would never report their own capture telemetry. Discovered live
         // 2026-04-08 during Phase 2 smoke test.
-        if (inboundArr2.length > 0 || captureHealth || displayStatus || nativePresenter) {
+        if (inboundArr2.length > 0 || captureHealth || captureSource || displayStatus || nativePresenter) {
           fetch(apiUrl("/api/client-stats-report"), {
             method: "POST",
             headers: {
@@ -690,6 +693,7 @@ function startInboundScreenStatsMonitor() {
               room: currentRoomName || "",
               inbound: inboundArr2,
               capture_health: captureHealth,
+              capture_source: captureSource,
               display_status: displayStatus,
               native_presenter: nativePresenter,
             }),
