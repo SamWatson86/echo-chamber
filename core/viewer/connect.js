@@ -241,8 +241,6 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     ? await getCachedOrFetchToken(controlUrl, adminToken, roomId, identity, name)
     : await fetchRoomToken(controlUrl, adminToken, roomId, identity, name);
   if (seq !== connectSequence) return;
-  currentAccessToken = accessToken;
-  tokenCache.delete(roomId); // Invalidate cache for room we just joined
 
   // Save reference to old room so we can disconnect AFTER new room connects
   const oldRoom = room;
@@ -1299,6 +1297,17 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     watchedScreens.clear();
   }
   room = newRoom;
+  // Commit credentials only after the SFU connection and room swap succeed. A
+  // failed or superseded switch must keep the old room's participant token so
+  // heartbeat, Jam, chat, and native-presenter requests remain authenticated.
+  currentAccessToken = window.EchoRoomSwitchState &&
+    typeof window.EchoRoomSwitchState.commitConnectedAccessToken === "function"
+    ? window.EchoRoomSwitchState.commitConnectedAccessToken(tokenCache, roomId, accessToken)
+    : accessToken;
+  if (!window.EchoRoomSwitchState ||
+      typeof window.EchoRoomSwitchState.commitConnectedAccessToken !== "function") {
+    tokenCache.delete(roomId);
+  }
   _connectedRoomName = currentRoomName; // Heartbeat now safe to report this room
   // Recreate local participant card immediately so it's first in the list
   ensureParticipantCard({ identity: localIdentity, name }, true);

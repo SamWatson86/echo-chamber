@@ -1,7 +1,7 @@
 # Echo Chamber Deploy Agent - Setup Script for Test PC
 # Run this ONCE on SAM-PC (as Administrator) to:
 # 1. Create install directory
-# 2. Copy agent script
+# 2. Copy agent scripts
 # 3. Add firewall rule
 # 4. Install as scheduled task (runs at startup)
 #
@@ -14,6 +14,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$deployConfigLibrary = Join-Path $PSScriptRoot "deploy-config-lib.ps1"
+if (-not (Test-Path -LiteralPath $deployConfigLibrary -PathType Leaf)) {
+    throw "Required deploy-config-lib.ps1 is missing next to setup-agent.ps1."
+}
+. $deployConfigLibrary
+
 $clientTaskName = "EchoChamberClient"
 $exePath = Join-Path $InstallDir "echo-core-client.exe"
 
@@ -28,16 +34,13 @@ if (!(Test-Path $InstallDir)) {
     Write-Host "[OK] $InstallDir already exists" -ForegroundColor Green
 }
 
-# 2. Copy agent script
-$agentSrc = Join-Path $PSScriptRoot "agent.ps1"
-$agentDst = Join-Path $InstallDir "agent.ps1"
-if (Test-Path $agentSrc) {
-    Copy-Item $agentSrc $agentDst -Force
-    Write-Host "[OK] Copied agent.ps1 to $InstallDir" -ForegroundColor Green
-} else {
-    Write-Host "[!!] agent.ps1 not found next to this script" -ForegroundColor Red
-    Write-Host "     Copy agent.ps1 to $InstallDir manually" -ForegroundColor Yellow
+# 2. Copy both merge-aware agent scripts as one required set. Rerun this setup
+# before using push-build.ps1 -PushConfig against an older deploy agent.
+$installedAgentFiles = Install-EchoDeployAgentScripts -SourceDirectory $PSScriptRoot -InstallDirectory $InstallDir
+foreach ($fileName in $installedAgentFiles) {
+    Write-Host "[OK] Copied $fileName to $InstallDir" -ForegroundColor Green
 }
+$agentDst = Join-Path $InstallDir "agent.ps1"
 
 # 3. Firewall rule
 $ruleName = "Echo Chamber Deploy Agent"

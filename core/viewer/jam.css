@@ -490,50 +490,11 @@
   background: rgba(148, 163, 184, 0.04);
 }
 
-.jam-queue-remove {
-  background: none;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  margin-left: auto;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s;
-}
-.jam-queue-remove:hover {
-  color: #ef4444;
-  background: rgba(239, 68, 68, 0.12);
-}
-
 .jam-queue-empty {
   text-align: center;
   color: var(--muted);
   font-size: 12px;
   padding: 8px 0;
-}
-
-.jam-queue-remove {
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  font-size: 12px;
-  line-height: 1;
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  transition: var(--transition);
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.jam-queue-remove:hover {
-  background: rgba(239, 68, 68, 0.3);
 }
 
 /* --- Status / Error --- */

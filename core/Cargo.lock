@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.6.29"
+version = "0.6.30"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -1318,6 +1318,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-tungstenite 0.21.0",
  "windows 0.58.0",
  "windows-capture",
  "windows-core 0.58.0",
@@ -1325,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-control"
-version = "0.6.29"
+version = "0.6.30"
 dependencies = [
  "argon2",
  "axum",
@@ -1345,8 +1346,6 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
- "windows 0.58.0",
- "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -6024,7 +6023,9 @@ checksum = "c83b561d025642014097b66e6c1bb422783339e0909e4429cde4749d1990bc38"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite 0.21.0",
 ]
 

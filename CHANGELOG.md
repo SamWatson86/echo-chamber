@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.30
+
+- Fix: Spotify Jam audio now comes from one explicitly provisioned Echo desktop running beside Spotify in the interactive Windows session, eliminating the Windows service/session-0 silence failure and the VB-CABLE routing requirement.
+- Reliability: The authenticated Jam source protocol fences stale generations, reports real readiness and audio health, rebinds after Spotify process replacement, and recovers stalled capture without disconnecting listeners.
+- Experience: Any authenticated Echo user can start or join the one global Jam, search, add songs, and skip through Echo; listeners do not need Spotify accounts.
+- Security: Listener audio authentication is room-bound and server-derived, queue state updates only after Spotify succeeds, and Jam source credentials are preserved safely during desktop deployment.
+- Deployment: Control and the complete server-served viewer publish atomically so mixed Jam protocol versions cannot be served as a current bundle.
+- Release: Desktop and control package versions are bumped to 0.6.30.
+
 ## 0.6.29
 
 - Fix: Entire monitor audio capture uses Windows process-loopback exclusion so Echo voice playback is blocked while other system audio can still be shared.

@@ -401,7 +401,7 @@ function hideStaleBanner() {
 function startHeartbeat() {
   stopHeartbeat();
   const controlUrl = controlUrlInput.value.trim();
-  if (!controlUrl || !adminToken) return;
+  if (!controlUrl || !currentAccessToken) return;
   _heartbeatAbort = new AbortController();
   const sendBeat = async () => {
     if (!_heartbeatAbort || _heartbeatAbort.signal.aborted) return;
@@ -413,11 +413,17 @@ function startHeartbeat() {
     try {
       const resp = await fetch(`${controlUrl}/v1/participants/heartbeat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentAccessToken}` },
         body: JSON.stringify({ room: beatRoom, identity, name, viewer_version: _viewerVersion }),
         signal: _heartbeatAbort.signal,
       });
-      if (resp.ok) {
+      if (resp.status === 401 || resp.status === 403) {
+        // A control restart clears the in-memory participant binding even when
+        // the old LiveKit JWT still verifies cryptographically. Treat that as
+        // the same forced-stale condition as an explicit stale heartbeat so the
+        // viewer reloads, obtains a fresh binding, and rejoins cleanly.
+        showStaleBanner();
+      } else if (resp.ok) {
         const data = await resp.json().catch(() => null);
         if (data && data.stale) {
           showStaleBanner();
@@ -446,10 +452,10 @@ function stopHeartbeat() {
 function sendLeaveNotification() {
   const controlUrl = controlUrlInput.value.trim();
   const identity = identityInput ? identityInput.value : "";
-  if (!controlUrl || !adminToken || !identity) return;
+  if (!controlUrl || !currentAccessToken || !identity) return;
   fetch(`${controlUrl}/v1/participants/leave`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentAccessToken}` },
     body: JSON.stringify({ identity }),
   }).catch(() => {});
 }

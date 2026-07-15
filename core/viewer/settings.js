@@ -33,7 +33,7 @@ var _SETTINGS_KEYS = [
   "echo-noise-cancel", "echo-nc-level",
   "echo-device-mic", "echo-device-cam", "echo-device-speaker",
   "echo-core-remember-name", "echo-core-remember-pass",
-  "echo-core-identity-suffix", "echo-core-device-id",
+  "echo-core-identity-suffix", "echo-core-device-id", "echo-core-participant-auth-key",
   "echo-avatar-device", "echo-volume-prefs",
   "echo-performance-mode", "echo-native-presenter-mode",
   "echo-preferred-display-id", "echo-auto-move-to-preferred-display"

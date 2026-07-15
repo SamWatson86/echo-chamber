@@ -127,7 +127,18 @@
     };
   }
 
+  function commitConnectedAccessToken(tokenCache, roomId, accessToken) {
+    if (!accessToken) {
+      throw new Error("Cannot commit an empty room access token");
+    }
+    if (tokenCache && typeof tokenCache.delete === "function") {
+      tokenCache.delete(roomId);
+    }
+    return accessToken;
+  }
+
   return {
+    commitConnectedAccessToken,
     createRoomSwitchState,
   };
 });

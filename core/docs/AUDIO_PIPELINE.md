@@ -85,9 +85,36 @@ Normal microphone audio uses the standard LiveKit SDK flow:
 
 ## Jam Session Audio (Spotify)
 
-JamBot captures Spotify from the control plane with `core/control/src/audio_capture.rs`. It finds `Spotify.exe`, starts WASAPI process loopback with `INCLUDE_TARGET_PROCESS_TREE`, converts chunks to 48 kHz stereo 20 ms float32 frames, and serves them to viewers over `/api/jam/audio`.
+Jam capture is owned by one explicitly configured Echo desktop client running in
+the same interactive Windows session as Spotify. The Windows service/control
+plane must never attempt WASAPI capture: services run in session 0 and cannot
+reliably capture a user's Spotify process or audio session.
 
-The control-plane capture path uses the same PCM16 44.1 kHz autoconvert fallback described above. Jam audio does not depend on WebRTC mic publishing or VB-Cable in this flow.
+The dedicated client source in `core/client/src/jam_source.rs` connects to
+`/api/jam/source` using Jam source protocol v2 and separate source credentials.
+On a generation-scoped `start` command it finds the Spotify root process,
+starts an independently owned WASAPI process-loopback capture, and reports its
+format and readiness before uploading float32 PCM. This capture is independent
+of the viewer window, screen sharing, microphone state, and room media state.
+
+`core/control/src/jam_source.rs` authenticates the single configured source,
+fences messages by connection and generation, measures source health, and
+replays the current `start` command after a reconnect. `JamBot` in
+`core/control/src/jam_bot.rs` only normalizes uploaded PCM to 48 kHz stereo
+20 ms frames and relays it to listeners over `/api/jam/audio`.
+
+Spotify may be paused when a Jam starts. Readiness therefore means the source
+has successfully opened capture; it does not require audible PCM. While
+Spotify is playing, the control plane independently reports live, silent, or
+stalled audio based on received frames and measured peak level.
+
+If packet delivery stalls while Spotify is expected to be audible, the control
+plane sends a generation-fenced, debounced `restart` command. The source drops
+only the Jam-owned WASAPI handle, acknowledges the ordered restart boundary,
+and opens a replacement capture. Existing listener sockets stay connected and
+resume after the replacement reports ready.
+
+Jam audio does not depend on WebRTC microphone publishing or VB-Cable.
 
 WASAPI output device switching (`set_audio_output_device`) was removed because changing the system-wide default is too dangerous. WebView2's `setSinkId` is a silent no-op.
 

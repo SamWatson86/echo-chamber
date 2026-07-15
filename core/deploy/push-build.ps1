@@ -1,7 +1,11 @@
 # Echo Chamber - Push Build to Test PC
 # Builds the client in release mode and pushes it to SAM-PC's deploy agent.
 #
-# Usage: powershell -ExecutionPolicy Bypass -File push-build.ps1 [-SkipBuild] [-Target <ip:port>]
+# Usage: powershell -ExecutionPolicy Bypass -File push-build.ps1 [-SkipBuild] [-Target <ip:port>] [-PushConfig]
+#
+# Config is intentionally NOT pushed by default. Before using -PushConfig,
+# rerun setup-agent.ps1 on the target so its /config endpoint preserves the
+# machine's provisioned Jam source credentials.
 
 param(
     [string]$Target = "192.168.5.149:8080",
@@ -9,13 +13,19 @@ param(
     [switch]$LogsOnly,
     [switch]$Restart,
     [switch]$Stop,
-    [switch]$Health
+    [switch]$Health,
+    [switch]$PushConfig
 )
 
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $coreDir = Join-Path $root "core"
 $exePath = Join-Path $coreDir "target\release\echo-core-client.exe"
 $baseUrl = "http://$Target"
+$deployConfigLibrary = Join-Path $PSScriptRoot "deploy-config-lib.ps1"
+if (-not (Test-Path -LiteralPath $deployConfigLibrary -PathType Leaf)) {
+    throw "Required deploy config library is missing."
+}
+. $deployConfigLibrary
 
 function Write-Status([string]$msg, [string]$color = "Cyan") {
     Write-Host "[deploy] " -NoNewline -ForegroundColor DarkGray
@@ -32,6 +42,7 @@ if ($Health) {
         Write-Status "Client running: $($data.client_running)"
         Write-Status "Client PID: $($data.client_pid)"
         Write-Status "Has exe: $($data.has_exe)"
+        Write-Status "Config update mode: $($data.config_update_mode)"
     } catch {
         Write-Status "Agent not reachable: $_" Red
     }
@@ -111,10 +122,31 @@ try {
     return
 }
 
-# Push config.json so the client knows where the server is
+# Config is a separate, explicit deployment operation. Old deploy agents
+# overwrite config.json wholesale, so never POST until /health advertises the
+# merge-aware endpoint installed by the current setup-agent.ps1.
 $configFile = Join-Path $PSScriptRoot "config.json"
+if (-not $PushConfig) {
+    Write-Status "Config not pushed (safe default). Use -PushConfig only after rerunning setup-agent.ps1 on the target." Yellow
+    return
+}
+
 if (Test-Path $configFile) {
-    Write-Status "Pushing config.json..."
+    Write-Status "Verifying the target has merge-safe config updates..."
+    try {
+        $healthResponse = Invoke-WebRequest -Uri "$baseUrl/health" -UseBasicParsing -TimeoutSec 5
+        $healthData = $healthResponse.Content | ConvertFrom-Json
+    } catch {
+        Write-Status "Config NOT pushed: target capability check failed." Red
+        throw "Refusing config upload because merge-safe target capability could not be verified."
+    }
+
+    if (-not (Test-EchoClientConfigUpdateCapability -Health $healthData)) {
+        Write-Status "Config NOT pushed: this deploy agent can overwrite Jam source credentials." Red
+        throw "Rerun setup-agent.ps1 on the target before using -PushConfig."
+    }
+
+    Write-Status "Pushing config.json; omitted Jam source credentials will be preserved..."
     $configBody = Get-Content $configFile -Raw
     try {
         Invoke-WebRequest -Uri "$baseUrl/config" -Method POST -Body $configBody -ContentType "application/json" -UseBasicParsing -TimeoutSec 10 | Out-Null
@@ -123,5 +155,5 @@ if (Test-Path $configFile) {
         Write-Status "Config push failed (client may use defaults): $_" Yellow
     }
 } else {
-    Write-Status "No config.json in deploy folder, client will use defaults." Yellow
+    Write-Status "Config NOT pushed: no config.json exists in the deploy folder." Yellow
 }

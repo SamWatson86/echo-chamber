@@ -15,11 +15,11 @@ The control plane is an Axum HTTPS server. It handles auth, room management, par
 | `file_serving` | `file_serving.rs` | Viewer/admin dir resolution, `stamp_viewer_index()` (cache-busting), chime MIME detection, path utilities |
 | `config` | `config.rs` | `Config` struct, `load_dotenv()`, `resolve_path()`, TLS setup (`generate_self_signed()`) |
 | `admin` | `admin.rs` | Admin dashboard API: live participants, session history, metrics, bug reports, deploy history, kick/mute |
-| `audio_capture` | `audio_capture.rs` | Jam session audio WebSocket endpoint (`/api/jam/audio`) — streams PCM from host to listeners |
 | `chat` | `chat.rs` | Chat message save/delete/history, file upload, upload serve |
 | `soundboard` | `soundboard.rs` | Sound file upload/list/serve per room, per-room limits |
 | `jam_session` | `jam_session.rs` | Spotify OAuth, now-playing state, queue management, join/leave, host controls |
-| `jam_bot` | `jam_bot.rs` | Background bot that polls Spotify API and advances the queue |
+| `jam_source` | `jam_source.rs` | Authenticated protocol-v2 WebSocket source, generation fencing, and source health |
+| `jam_bot` | `jam_bot.rs` | Normalizes source PCM and relays 48 kHz stereo frames to Jam listeners |
 
 ## AppState
 
@@ -30,6 +30,7 @@ The control plane is an Axum HTTPS server. It handles auth, room management, par
 | `config` | `Arc<Config>` | config |
 | `rooms` | `Arc<Mutex<HashMap<String, RoomInfo>>>` | rooms |
 | `participants` | `Arc<Mutex<HashMap<String, ParticipantEntry>>>` | rooms |
+| `participant_bindings` | `Arc<Mutex<HashMap<String, ParticipantBinding>>>` | auth/rooms/jam_session |
 | `client_stats` | `Arc<Mutex<HashMap<String, ClientStats>>>` | rooms/admin |
 | `joined_at` | `Arc<Mutex<HashMap<String, u64>>>` | rooms |
 | `stats_history` | `Arc<Mutex<Vec<StatsSnapshot>>>` | rooms/admin |
@@ -40,6 +41,9 @@ The control plane is an Axum HTTPS server. It handles auth, room management, par
 | `chimes` | `Arc<Mutex<HashMap<String, ChimeEntry>>>` | file_serving |
 | `jam` | `Arc<Mutex<JamState>>` | jam_session |
 | `jam_bot` | `Arc<tokio::sync::Mutex<Option<JamBot>>>` | jam_bot |
+| `jam_source` | `JamSourceRegistry` | jam_source |
+| `jam_lifecycle` | `Arc<tokio::sync::Mutex<()>>` | jam_session/rooms |
+| `jam_state_refresh` | `Arc<tokio::sync::Mutex<()>>` | jam_session |
 | `spotify_pending` | `Arc<Mutex<Option<SpotifyPending>>>` | jam_session |
 | `viewer_stamp` | `Arc<RwLock<String>>` | file_serving |
 | `login_attempts` | `Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>` | auth |
@@ -60,6 +64,12 @@ GET  /admin/*             → ServeDir (admin_dir)
 POST /v1/auth/login       → login (rate-limited, issues JWT)
 POST /v1/auth/token       → issue_token (issues LiveKit access token)
 ```
+
+Normal viewer token requests include a private, random per-install `participantAuthKey`.
+The key remains only in the server's in-memory binding registry and is never returned,
+serialized, logged, or broadcast. Signed LiveKit tokens carry a stable custom binding ID.
+Prefetched room tokens for the same installation share that ID, and binding tombstones
+outlive the 20-second presence row so a throttled browser can recover securely.
 
 ### Rooms & Participants
 ```
@@ -119,12 +129,27 @@ POST /api/jam/stop                → jam_stop
 GET  /api/jam/state               → jam_state
 POST /api/jam/search              → jam_search
 POST /api/jam/queue               → jam_queue_add
-POST /api/jam/queue-remove        → jam_queue_remove
 POST /api/jam/skip                → jam_skip
 POST /api/jam/join                → jam_join
 POST /api/jam/leave               → jam_leave
 GET  /api/jam/audio               → jam_audio_ws (WebSocket)
+GET  /api/jam/source              → jam_source_ws (authenticated protocol-v2 WebSocket)
 ```
+
+Spotify configuration and Jam state reads use the shared admin token. Jam mutations also
+require the caller's bound LiveKit token in `X-Echo-Participant-Token`; host and listener
+rights store both the exact identity and binding ID. The Jam audio WebSocket query contains
+only `jam_protocol_version=2` and the active `generation`; it rejects extra query fields.
+Its first frame (within five seconds) must be
+`{"type":"auth","token":"<bound LiveKit JWT>"}`. The server derives the identity and
+binding from that token, verifies active Jam membership, replies `{"type":"ready"}`, and
+continues rechecking membership while it sends PCM. Participant heartbeat/leave use the
+bound LiveKit token instead of the shared admin identity.
+
+There is one control-plane-wide Echo Jam, not one Jam per user, link, or room. Any
+authenticated Echo participant can start it, join it, search, add tracks, and skip through
+Echo's Jam UI. Listener accounts do not need Spotify accounts; the only Spotify login is the
+configured Premium host account used by Echo OAuth and Spotify desktop on the source PC.
 
 ### Admin API
 ```
@@ -159,7 +184,7 @@ POST /api/open-url        → open_url (server-side URL open, Sam-only)
 
 ### Viewer File Watcher
 - Runs every 15 seconds
-- Checks mtime on: `app.js`, `style.css`, `index.html`, `connect.js`, `room-status.js`, `participants.js`, `audio-routing.js`, `media-controls.js`, `chat.js`, `soundboard.js`, `state.js`, `jam.js`
+- Checks mtime on: `app.js`, `style.css`, `index.html`, `connect.js`, `room-status.js`, `participants.js`, `audio-routing.js`, `media-controls.js`, `chat.js`, `soundboard.js`, `state.js`, `jam.js`, `jam-session-state.js`, `jam.css`
 - On any change: re-runs `stamp_viewer_index()` with new timestamp
 - Updates `viewer_stamp` RwLock → stale-version banner fires in connected clients
 
@@ -184,6 +209,10 @@ POST /api/open-url        → open_url (server-side URL open, Sam-only)
 | `TURN_USER` | — | TURN credentials |
 | `TURN_PASS` | — | TURN credentials |
 | `SPOTIFY_CLIENT_ID` | — | Spotify OAuth client ID |
+| `JAM_SOURCE_ID` | — | ID of the one configured desktop Jam source |
+| `JAM_SOURCE_TOKEN` | — | Separate bearer secret for that source |
+| `SPOTIFY_DEVICE_ID` | — | Optional exact Spotify Connect device ID; may rotate |
+| `SPOTIFY_DEVICE_NAME` | — | Preferred exact unique device name for long-lived configuration |
 | `GITHUB_PAT` | — | GitHub token for release API |
 | `GITHUB_REPO` | — | `owner/repo` for releases |
 | `CORE_SESSION_LOG_DIR` | `../logs/sessions` | Session event log dir |

@@ -16,6 +16,12 @@ param(
     [string]$InstallDir = "C:\EchoChamber"
 )
 
+$deployConfigLibrary = Join-Path $PSScriptRoot "deploy-config-lib.ps1"
+if (-not (Test-Path -LiteralPath $deployConfigLibrary -PathType Leaf)) {
+    throw "Required deploy config library is missing. Re-run setup-agent.ps1."
+}
+. $deployConfigLibrary
+
 $ErrorActionPreference = "Continue"
 
 # Ensure install directory exists
@@ -208,6 +214,7 @@ while ($listener.IsListening) {
                     sandbox_exe_path = $exePath
                     installed_exe_path = $installedPath
                     installed_exe_exists = [bool]$installedPath
+                    config_update_mode = $EchoClientConfigUpdateMode
                 } | ConvertTo-Json
                 Send-Response $context 200 $body
             }
@@ -309,8 +316,18 @@ while ($listener.IsListening) {
                 $reader.Dispose()
                 $configPath = Join-Path $InstallDir "config.json"
                 # Write without BOM — serde_json can't parse UTF-8 BOM
-                [System.IO.File]::WriteAllText($configPath, $body, (New-Object System.Text.UTF8Encoding($false)))
-                Write-Log "Config written to $configPath"
+                try {
+                    Set-EchoClientConfig -IncomingJson $body -ConfigPath $configPath | Out-Null
+                } catch [System.IO.InvalidDataException] {
+                    Write-Log "Config update rejected; installed config was left unchanged."
+                    Send-Response $context 400 '{"error":"invalid config; installed config left unchanged"}'
+                    continue
+                } catch {
+                    Write-Log "Config update failed; installed config was left unchanged."
+                    Send-Response $context 500 '{"error":"config update failed; installed config left unchanged"}'
+                    continue
+                }
+                Write-Log "Config updated at $configPath"
                 Send-Response $context 200 '{"status":"config updated"}'
             }
 

@@ -7,8 +7,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     time::{Duration, Instant},
 };
@@ -35,6 +37,8 @@ pub struct TokenRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub viewer_version: Option<String>,
+    #[serde(default, rename = "participantAuthKey")]
+    pub participant_auth_key: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +61,11 @@ pub struct LiveKitClaims {
     pub sub: String,
     pub exp: usize,
     pub iat: usize,
+    #[serde(
+        rename = "echoParticipantAuthId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub echo_participant_auth_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub video: LiveKitVideoGrant,
@@ -121,6 +130,149 @@ pub(crate) fn skip_participant_tracking(kind: Option<CompanionIdentityKind>) -> 
     kind.is_some()
 }
 
+const PARTICIPANT_ACTIVE_SECS: u64 = 20;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RevokedParticipantBinding {
+    pub(crate) identity: String,
+    pub(crate) auth_id: String,
+}
+
+struct ParticipantBindResult {
+    auth_id: String,
+    revoked: Vec<RevokedParticipantBinding>,
+}
+
+fn participant_auth_key_is_valid(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn participant_auth_keys_equal(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.bytes()
+        .zip(right.bytes())
+        .fold(0_u8, |different, (a, b)| different | (a ^ b))
+        == 0
+}
+
+fn new_participant_auth_id() -> String {
+    let mut rng = OsRng;
+    format!("{:016x}{:016x}", rng.next_u64(), rng.next_u64())
+}
+
+fn bind_participant_identity(
+    participants: &mut HashMap<String, crate::ParticipantEntry>,
+    bindings: &mut HashMap<String, crate::ParticipantBinding>,
+    payload: &TokenRequest,
+    now: u64,
+    replacement_auth_id: String,
+) -> Result<ParticipantBindResult, StatusCode> {
+    let auth_key = payload
+        .participant_auth_key
+        .as_deref()
+        .filter(|key| participant_auth_key_is_valid(key))
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let existing_binding = bindings.get(&payload.identity).cloned();
+    let same_installation = existing_binding
+        .as_ref()
+        .map(|binding| participant_auth_keys_equal(&binding.auth_key, auth_key))
+        .unwrap_or(false);
+    // A binding is a tombstone as well as a capability. A different browser
+    // installation cannot take over the exact identity merely by waiting for
+    // its heartbeat to expire. An explicit admin kick removes the tombstone.
+    if existing_binding.is_some() && !same_installation {
+        info!("bound identity conflict: {}", payload.identity);
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let name_base = payload
+        .identity
+        .rsplitn(2, '-')
+        .last()
+        .unwrap_or(&payload.identity)
+        .to_string();
+    let same_name_identities: HashSet<String> = participants
+        .keys()
+        .chain(bindings.keys())
+        .filter(|key| {
+            *key != &payload.identity && key.rsplitn(2, '-').last().unwrap_or(key) == name_base
+        })
+        .cloned()
+        .collect();
+
+    for key in &same_name_identities {
+        if participants
+            .get(key)
+            .map(|entry| now.saturating_sub(entry.last_seen) < PARTICIPANT_ACTIVE_SECS)
+            .unwrap_or(false)
+        {
+            info!(
+                "name conflict: {} is active, rejecting {}",
+                key, payload.identity
+            );
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+    let mut revoked = Vec::new();
+    for key in same_name_identities {
+        info!(
+            "dedup: removing stale identity {} (replaced by {})",
+            key, payload.identity
+        );
+        participants.remove(&key);
+        if let Some(binding) = bindings.remove(&key) {
+            revoked.push(RevokedParticipantBinding {
+                identity: key,
+                auth_id: binding.auth_id,
+            });
+        }
+    }
+
+    let participant_auth_id = if same_installation {
+        existing_binding
+            .expect("same installation has binding")
+            .auth_id
+    } else {
+        bindings.insert(
+            payload.identity.clone(),
+            crate::ParticipantBinding {
+                auth_key: auth_key.to_string(),
+                auth_id: replacement_auth_id.clone(),
+            },
+        );
+        replacement_auth_id
+    };
+
+    if let Some(existing) = participants.get_mut(&payload.identity) {
+        if now.saturating_sub(existing.last_seen) >= PARTICIPANT_ACTIVE_SECS {
+            existing.room_id = payload.room.clone();
+            if let Some(name) = &payload.name {
+                existing.name = name.clone();
+            }
+        }
+        existing.last_seen = now;
+    } else {
+        participants.insert(
+            payload.identity.clone(),
+            crate::ParticipantEntry {
+                identity: payload.identity.clone(),
+                name: payload.name.clone().unwrap_or_default(),
+                room_id: payload.room.clone(),
+                last_seen: now,
+                viewer_version: None,
+            },
+        );
+    }
+
+    Ok(ParticipantBindResult {
+        auth_id: participant_auth_id,
+        revoked,
+    })
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────
 
 pub async fn login(
@@ -138,7 +290,10 @@ pub async fn login(
     // Rate limit: 5 failed attempts per 15 minutes per IP
     let ip = connect_info.0.ip();
     {
-        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut attempts = state
+            .login_attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Clean up expired entries while we have the lock
         let window = Duration::from_secs(15 * 60);
         attempts.retain(|_, (_, first)| first.elapsed() < window);
@@ -153,7 +308,10 @@ pub async fn login(
     if !verify_password(&state.config, &payload.password) {
         warn!("login failed (bad password) ip={}", ip);
         // Record failed attempt
-        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut attempts = state
+            .login_attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let entry = attempts.entry(ip).or_insert((0, Instant::now()));
         entry.0 += 1;
         return Err(StatusCode::UNAUTHORIZED);
@@ -161,7 +319,10 @@ pub async fn login(
 
     // Successful login — clear any failed attempts for this IP
     {
-        let mut attempts = state.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut attempts = state
+            .login_attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         attempts.remove(&ip);
     }
 
@@ -204,12 +365,40 @@ pub async fn issue_token(
 
     // Companion identities are system connections, not visible people.
     let companion_kind = companion_identity_kind(&payload.identity);
+    let (participant_auth_id, revoked_bindings) = if skip_participant_tracking(companion_kind) {
+        (None, Vec::new())
+    } else {
+        let replacement_auth_id = new_participant_auth_id();
+        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+        let mut bindings = state
+            .participant_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let result = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &payload,
+            now,
+            replacement_auth_id,
+        )?;
+        (Some(result.auth_id), result.revoked)
+    };
+
+    if !revoked_bindings.is_empty() {
+        crate::jam_session::reconcile_revoked_participant_bindings(
+            &state,
+            &revoked_bindings,
+            "identity replacement",
+        )
+        .await;
+    }
 
     let claims = LiveKitClaims {
         iss: state.config.livekit_api_key.clone(),
         sub: payload.identity.clone(),
         iat: now as usize,
         exp: exp as usize,
+        echo_participant_auth_id: participant_auth_id,
         name: payload.name.clone(),
         video: livekit_video_grant(payload.room.clone(), companion_kind),
     };
@@ -231,69 +420,6 @@ pub async fn issue_token(
             token,
             expires_in_seconds: state.config.livekit_token_ttl_secs,
         }));
-    }
-
-    // Track participant in room (dedup old sessions, reject active name conflicts)
-    {
-        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-        let name_base = payload
-            .identity
-            .rsplitn(2, '-')
-            .last()
-            .unwrap_or(&payload.identity)
-            .to_string();
-        let same_name_entries: Vec<(String, u64)> = participants
-            .iter()
-            .filter(|(k, _)| {
-                *k != &payload.identity && k.rsplitn(2, '-').last().unwrap_or(k) == name_base
-            })
-            .map(|(k, v)| (k.clone(), v.last_seen))
-            .collect();
-        for (key, last_seen) in &same_name_entries {
-            if now.saturating_sub(*last_seen) < 20 {
-                // Another user with this name is currently connected — reject
-                info!(
-                    "name conflict: {} is active, rejecting {}",
-                    key, payload.identity
-                );
-                return Err(StatusCode::CONFLICT);
-            }
-        }
-        // Remove stale entries with same name base (old sessions)
-        for (key, _) in same_name_entries {
-            info!(
-                "dedup: removing stale identity {} (replaced by {})",
-                key, payload.identity
-            );
-            participants.remove(&key);
-        }
-        // Only update room_id if the participant is NEW or STALE (>20s since last seen).
-        // Prefetching tokens for breakout rooms (fast room switching) should NOT overwrite
-        // the participant's actual current room — that's the heartbeat's job.
-        if let Some(existing) = participants.get_mut(&payload.identity) {
-            if now.saturating_sub(existing.last_seen) >= 20 {
-                // Stale entry — treat as new join, update everything
-                existing.room_id = payload.room.clone();
-                existing.last_seen = now;
-                if let Some(ref name) = payload.name {
-                    existing.name = name.clone();
-                }
-            }
-            // Active entry: DON'T overwrite room_id (prefetch tokens shouldn't move them)
-            // Just refresh last_seen so dedup logic considers them active
-        } else {
-            // Brand new participant — register them
-            participants.insert(
-                payload.identity.clone(),
-                crate::ParticipantEntry {
-                    identity: payload.identity.clone(),
-                    name: payload.name.clone().unwrap_or_default(),
-                    room_id: payload.room.clone(),
-                    last_seen: now,
-                    viewer_version: None,
-                },
-            );
-        }
     }
 
     Ok(Json(TokenResponse {
@@ -333,6 +459,13 @@ pub fn ensure_livekit(state: &AppState, headers: &HeaderMap) -> Result<LiveKitCl
     let token = auth
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    decode_livekit_token(state, token)
+}
+
+pub(crate) fn decode_livekit_token(
+    state: &AppState,
+    token: &str,
+) -> Result<LiveKitClaims, StatusCode> {
     let validation = Validation::default();
     let decoded = decode::<LiveKitClaims>(
         token,
@@ -344,6 +477,71 @@ pub fn ensure_livekit(state: &AppState, headers: &HeaderMap) -> Result<LiveKitCl
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(decoded.claims)
+}
+
+fn participant_claims_match(
+    claims: &LiveKitClaims,
+    claimed_identity: &str,
+    binding: &crate::ParticipantBinding,
+) -> bool {
+    !claimed_identity.trim().is_empty()
+        && claims.sub == claimed_identity
+        && companion_identity_kind(&claims.sub).is_none()
+        && claims.video.roomJoin
+        && claims.echo_participant_auth_id.is_some()
+        && claims.echo_participant_auth_id.as_deref() == Some(binding.auth_id.as_str())
+}
+
+fn ensure_current_participant_claims(
+    state: &AppState,
+    claims: LiveKitClaims,
+    claimed_identity: &str,
+) -> Result<LiveKitClaims, StatusCode> {
+    let bindings = state
+        .participant_bindings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let binding = bindings
+        .get(claimed_identity)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !participant_claims_match(&claims, claimed_identity, binding) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    drop(bindings);
+    Ok(claims)
+}
+
+pub(crate) fn ensure_livekit_participant(
+    state: &AppState,
+    headers: &HeaderMap,
+    claimed_identity: &str,
+) -> Result<LiveKitClaims, StatusCode> {
+    let claims = ensure_livekit(state, headers)?;
+    ensure_current_participant_claims(state, claims, claimed_identity)
+}
+
+pub(crate) fn ensure_jam_participant(
+    state: &AppState,
+    headers: &HeaderMap,
+    claimed_identity: Option<&str>,
+) -> Result<LiveKitClaims, StatusCode> {
+    let token = headers
+        .get("x-echo-participant-token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let claims = decode_livekit_token(state, token)?;
+    let identity = claimed_identity.unwrap_or(&claims.sub).to_string();
+    ensure_current_participant_claims(state, claims, &identity)
+}
+
+pub(crate) fn ensure_jam_participant_token(
+    state: &AppState,
+    token: &str,
+) -> Result<LiveKitClaims, StatusCode> {
+    let claims = decode_livekit_token(state, token)?;
+    let identity = claims.sub.clone();
+    ensure_current_participant_claims(state, claims, &identity)
 }
 
 pub fn verify_password(config: &Config, password: &str) -> bool {
@@ -364,6 +562,28 @@ pub fn verify_password(config: &Config, password: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn token_request(room: &str, identity: &str, key: &str) -> TokenRequest {
+        TokenRequest {
+            room: room.to_string(),
+            identity: identity.to_string(),
+            name: Some("Sam".to_string()),
+            viewer_version: None,
+            participant_auth_key: Some(key.to_string()),
+        }
+    }
+
+    fn participant_claims(identity: &str, auth_id: &str) -> LiveKitClaims {
+        LiveKitClaims {
+            iss: "livekit-key".to_string(),
+            sub: identity.to_string(),
+            exp: usize::MAX,
+            iat: 1,
+            echo_participant_auth_id: Some(auth_id.to_string()),
+            name: Some("Sam".to_string()),
+            video: livekit_video_grant("main".to_string(), None),
+        }
+    }
 
     #[test]
     fn screen_companion_identity_gets_publish_only_grant() {
@@ -399,5 +619,153 @@ mod tests {
         assert!(grant.canSubscribe);
         assert!(grant.canPublishData);
         assert!(!skip_participant_tracking(kind));
+    }
+
+    #[test]
+    fn token_prefetch_reuses_the_installation_binding_without_moving_presence() {
+        let key = "a".repeat(64);
+        let mut participants = HashMap::new();
+        let mut bindings = HashMap::new();
+
+        let first = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-7475", &key),
+            100,
+            "epoch-a".to_string(),
+        )
+        .expect("first bind");
+        let prefetched = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("games", "sam-7475", &key),
+            101,
+            "must-not-rotate".to_string(),
+        )
+        .expect("same installation prefetch");
+
+        assert_eq!(first.auth_id, "epoch-a");
+        assert_eq!(prefetched.auth_id, "epoch-a");
+        assert!(prefetched.revoked.is_empty());
+        assert_eq!(participants["sam-7475"].room_id, "main");
+        assert_eq!(bindings["sam-7475"].auth_id, "epoch-a");
+    }
+
+    #[test]
+    fn active_identity_rejects_a_different_installation_key() {
+        let key_a = "a".repeat(64);
+        let key_b = "b".repeat(64);
+        let mut participants = HashMap::new();
+        let mut bindings = HashMap::new();
+        bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-7475", &key_a),
+            100,
+            "epoch-a".to_string(),
+        )
+        .expect("first bind");
+
+        let result = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-7475", &key_b),
+            101,
+            "epoch-b".to_string(),
+        );
+
+        assert!(matches!(result, Err(StatusCode::CONFLICT)));
+        assert_eq!(bindings["sam-7475"].auth_id, "epoch-a");
+    }
+
+    #[test]
+    fn binding_tombstone_recovers_same_installation_and_rejects_a_new_one() {
+        let key_a = "a".repeat(64);
+        let key_b = "b".repeat(64);
+        let mut participants = HashMap::new();
+        let mut bindings = HashMap::new();
+        bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-7475", &key_a),
+            100,
+            "epoch-a".to_string(),
+        )
+        .expect("first bind");
+
+        participants.clear();
+        let recovered = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("games", "sam-7475", &key_a),
+            200,
+            "must-not-rotate".to_string(),
+        )
+        .expect("same installation recovery");
+        assert_eq!(recovered.auth_id, "epoch-a");
+        assert_eq!(participants["sam-7475"].room_id, "games");
+
+        participants.clear();
+        let rebound = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-7475", &key_b),
+            300,
+            "epoch-b".to_string(),
+        );
+        assert!(matches!(rebound, Err(StatusCode::CONFLICT)));
+        assert_eq!(bindings["sam-7475"].auth_id, "epoch-a");
+    }
+
+    #[test]
+    fn stale_same_name_replacement_reports_the_revoked_binding() {
+        let key_a = "a".repeat(64);
+        let key_b = "b".repeat(64);
+        let mut participants = HashMap::new();
+        let mut bindings = HashMap::new();
+        bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-1111", &key_a),
+            100,
+            "epoch-a".to_string(),
+        )
+        .expect("first bind");
+
+        participants.clear();
+        let replacement = bind_participant_identity(
+            &mut participants,
+            &mut bindings,
+            &token_request("main", "sam-2222", &key_b),
+            200,
+            "epoch-b".to_string(),
+        )
+        .expect("stale same-name replacement");
+
+        assert_eq!(replacement.auth_id, "epoch-b");
+        assert_eq!(
+            replacement.revoked,
+            vec![RevokedParticipantBinding {
+                identity: "sam-1111".to_string(),
+                auth_id: "epoch-a".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn signed_participant_claim_requires_exact_identity_and_current_binding() {
+        let binding = crate::ParticipantBinding {
+            auth_key: "a".repeat(64),
+            auth_id: "epoch-a".to_string(),
+        };
+        let claims = participant_claims("sam-7475", "epoch-a");
+
+        assert!(participant_claims_match(&claims, "sam-7475", &binding));
+        assert!(!participant_claims_match(&claims, "other-1234", &binding));
+        assert!(!participant_claims_match(
+            &participant_claims("sam-7475", "epoch-old"),
+            "sam-7475",
+            &binding
+        ));
     }
 }

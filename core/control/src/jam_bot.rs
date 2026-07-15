@@ -1,175 +1,381 @@
-//! WebSocket-based audio streaming for Jam Sessions.
-//!
-//! When a Jam starts, JamBot captures Spotify audio via WASAPI and
-//! broadcasts raw f32 PCM frames over a tokio broadcast channel.
-//! WebSocket clients (viewers) subscribe to receive the audio.
+//! Relay for audio uploaded by the configured interactive-session Jam source.
 
-use crate::audio_capture::{self, AudioChunk, CaptureHandle};
-use tokio::sync::{broadcast, mpsc};
-use tracing::info;
+use crate::jam_source::{JamSourceRegistry, SourceEvent};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tracing::{info, warn};
 
-/// 48 kHz stereo, 20 ms frames → 960 samples/ch × 2 ch = 1920 f32 samples per frame.
-const TARGET_RATE: u32 = 48000;
+const TARGET_RATE: u32 = 48_000;
 const TARGET_CHANNELS: u32 = 2;
 const FRAME_DURATION_MS: u32 = 20;
-const SAMPLES_PER_CHANNEL: u32 = TARGET_RATE * FRAME_DURATION_MS / 1000; // 960
-const FRAME_SAMPLES: usize = (SAMPLES_PER_CHANNEL * TARGET_CHANNELS) as usize; // 1920
+const SAMPLES_PER_CHANNEL: u32 = TARGET_RATE * FRAME_DURATION_MS / 1000;
+const FRAME_SAMPLES: usize = (SAMPLES_PER_CHANNEL * TARGET_CHANNELS) as usize;
 
-/// A single 20 ms audio frame: 1920 f32 samples (48 kHz stereo).
-/// Sent as raw little-endian bytes over WebSocket binary messages.
 #[derive(Clone)]
 pub struct AudioFrame {
-    /// 1920 f32 samples, interleaved L/R.
     pub data: Vec<f32>,
 }
 
-/// A running JamBot instance.
 pub struct JamBot {
-    capture_handle: Option<CaptureHandle>,
+    generation: u64,
+    source: JamSourceRegistry,
     publish_task: Option<tokio::task::JoinHandle<()>>,
-    /// Broadcast sender — WebSocket handlers subscribe to this.
     audio_tx: broadcast::Sender<AudioFrame>,
+    healthy: Arc<AtomicBool>,
 }
 
 impl JamBot {
-    /// Start the bot: find Spotify, capture audio, broadcast frames.
-    pub async fn start() -> Result<Self, String> {
-        // Find Spotify PID
-        let pid = audio_capture::find_spotify_pid()
-            .ok_or_else(|| "Spotify.exe not found — is Spotify running?".to_string())?;
+    /// Ask the configured user-session source to capture Spotify, then wait for
+    /// its WASAPI-ready acknowledgement. PCM health is measured independently:
+    /// a paused Spotify process is allowed to produce no frames at startup.
+    pub async fn start(
+        generation: u64,
+        source: JamSourceRegistry,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let mut source_rx = source.subscribe();
+        source.start(generation).await?;
 
-        info!("[jam-bot] found Spotify PID {}", pid);
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let event = match tokio::time::timeout_at(deadline, source_rx.recv()).await {
+                Ok(Ok(event)) => event,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
+                    source.stop(generation).await;
+                    return Err("Jam source event channel closed".to_string());
+                }
+                Err(_) => {
+                    let snapshot = source.snapshot().await;
+                    source.stop(generation).await;
+                    return Err(format!(
+                        "Jam source did not become ready before timeout (status: {})",
+                        snapshot.status
+                    ));
+                }
+            };
 
-        // Broadcast channel: capacity 64 frames (~1.3 s at 20 ms/frame).
-        // Slow receivers will drop oldest frames (lagged).
+            match event {
+                SourceEvent::Ready {
+                    generation: event_generation,
+                    pid,
+                } if event_generation == generation => {
+                    info!(
+                        "[jam-bot] source ready generation={} pid={}",
+                        generation, pid
+                    );
+                    break;
+                }
+                SourceEvent::Format {
+                    generation: event_generation,
+                    sample_rate,
+                    channels,
+                } if event_generation == generation => {
+                    info!(
+                        "[jam-bot] source format generation={} {}Hz {}ch",
+                        generation, sample_rate, channels
+                    );
+                }
+                SourceEvent::Error {
+                    generation: event_generation,
+                    message,
+                } if event_generation == generation => {
+                    source.stop(generation).await;
+                    return Err(format!("Jam source error: {}", message));
+                }
+                SourceEvent::Disconnected => {
+                    warn!(
+                        "[jam-bot] source disconnected during startup generation={}; waiting for reconnect",
+                        generation
+                    );
+                }
+                _ => {}
+            }
+        }
+
         let (audio_tx, _) = broadcast::channel::<AudioFrame>(64);
+        let healthy = Arc::new(AtomicBool::new(true));
+        let publish_task = tokio::spawn(broadcast_loop(
+            generation,
+            audio_tx.clone(),
+            source_rx,
+            healthy.clone(),
+        ));
 
-        // Start WASAPI capture → mpsc channel → broadcast loop
-        let (cap_tx, cap_rx) = mpsc::channel::<AudioChunk>(64);
-        let capture_handle = audio_capture::start_capture(pid, cap_tx)?;
-
-        let broadcast_tx = audio_tx.clone();
-        let publish_task = tokio::spawn(broadcast_loop(broadcast_tx, cap_rx));
-
-        info!("[jam-bot] audio capture started, broadcasting frames");
-
-        Ok(JamBot {
-            capture_handle: Some(capture_handle),
+        Ok(Self {
+            generation,
+            source,
             publish_task: Some(publish_task),
             audio_tx,
+            healthy,
         })
     }
 
-    /// Get a new broadcast receiver for a WebSocket client.
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
         self.audio_tx.subscribe()
     }
 
-    /// Stop the bot: stop capture, abort broadcast task.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub async fn stop(mut self) {
-        info!("[jam-bot] stopping...");
-
-        if let Some(ref mut handle) = self.capture_handle {
-            audio_capture::stop_capture(handle);
-        }
-
+        info!("[jam-bot] stopping generation={}", self.generation);
+        self.healthy.store(false, Ordering::Release);
+        self.source.stop(self.generation).await;
         if let Some(task) = self.publish_task.take() {
             task.abort();
             let _ = task.await;
         }
-
-        info!("[jam-bot] stopped");
+        info!("[jam-bot] stopped generation={}", self.generation);
     }
 }
 
-/// Async loop: read AudioChunks from WASAPI, convert to 48 kHz stereo 20 ms frames,
-/// broadcast to all WebSocket subscribers.
-async fn broadcast_loop(tx: broadcast::Sender<AudioFrame>, mut rx: mpsc::Receiver<AudioChunk>) {
+async fn broadcast_loop(
+    generation: u64,
+    tx: broadcast::Sender<AudioFrame>,
+    mut source_rx: broadcast::Receiver<SourceEvent>,
+    healthy: Arc<AtomicBool>,
+) {
     let mut accum: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 4);
-    let mut frame_count: u64 = 0;
-
-    while let Some(chunk) = rx.recv().await {
-        let converted = convert_chunk(&chunk, TARGET_RATE, TARGET_CHANNELS);
-        accum.extend_from_slice(&converted);
-
-        // Drain full 20 ms frames
-        while accum.len() >= FRAME_SAMPLES {
-            let frame_data: Vec<f32> = accum.drain(..FRAME_SAMPLES).collect();
-
-            // broadcast::send only fails if there are zero receivers — that's fine
-            frame_count += 1;
-            if frame_count == 1 {
-                info!("[jam-bot] first audio frame broadcast");
+    let mut frame_count = 0_u64;
+    loop {
+        match source_rx.recv().await {
+            Ok(SourceEvent::Audio {
+                generation: event_generation,
+                sample_rate,
+                channels,
+                samples,
+                ..
+            }) if event_generation == generation => {
+                accum.extend(convert_samples(
+                    &samples,
+                    sample_rate,
+                    channels,
+                    TARGET_RATE,
+                    TARGET_CHANNELS,
+                ));
+                while accum.len() >= FRAME_SAMPLES {
+                    frame_count += 1;
+                    let data = accum.drain(..FRAME_SAMPLES).collect();
+                    let _ = tx.send(AudioFrame { data });
+                    if frame_count == 1 {
+                        info!("[jam-bot] first listener frame generation={}", generation);
+                    }
+                }
             }
-            if frame_count == 1 || frame_count % 250 == 0 {
-                let peak = frame_data
-                    .iter()
-                    .fold(0.0_f32, |acc, sample| acc.max(sample.abs()));
-                let rms = if frame_data.is_empty() {
-                    0.0
-                } else {
-                    let sum_sq: f32 = frame_data.iter().map(|sample| sample * sample).sum();
-                    (sum_sq / frame_data.len() as f32).sqrt()
-                };
+            Ok(SourceEvent::Error {
+                generation: event_generation,
+                message,
+            }) if event_generation == generation => {
+                warn!(
+                    "[jam-bot] source failed generation={}: {}",
+                    generation, message
+                );
+                healthy.store(false, Ordering::Release);
+                accum.clear();
+            }
+            Ok(SourceEvent::Disconnected) => {
+                warn!("[jam-bot] source disconnected generation={}", generation);
+                healthy.store(false, Ordering::Release);
+                accum.clear();
+            }
+            Ok(SourceEvent::Connected) => {
+                warn!("[jam-bot] source reconnecting generation={}", generation);
+                healthy.store(false, Ordering::Release);
+                accum.clear();
+            }
+            Ok(SourceEvent::Restarting {
+                generation: event_generation,
+            }) if event_generation == generation => {
                 info!(
-                    "[jam-bot] frame level frame={} peak={:.6} rms={:.6}",
-                    frame_count, peak, rms
+                    "[jam-bot] source capture restarting generation={}",
+                    generation
+                );
+                healthy.store(false, Ordering::Release);
+                accum.clear();
+            }
+            Ok(SourceEvent::Ready {
+                generation: event_generation,
+                ..
+            }) if event_generation == generation => {
+                healthy.store(true, Ordering::Release);
+                accum.clear();
+                info!("[jam-bot] source recovered generation={}", generation);
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(count)) => {
+                warn!(
+                    "[jam-bot] source relay lagged generation={} dropped={}",
+                    generation, count
                 );
             }
-
-            let frame = AudioFrame { data: frame_data };
-            let _ = tx.send(frame);
+            Err(broadcast::error::RecvError::Closed) => {
+                healthy.store(false, Ordering::Release);
+                break;
+            }
         }
     }
-
-    info!("[jam-bot] broadcast loop ended (capture channel closed)");
 }
 
-/// Convert an AudioChunk to the target sample rate and channel count.
-/// Uses simple nearest-neighbor resampling and mono↔stereo conversion.
-fn convert_chunk(chunk: &AudioChunk, target_rate: u32, target_channels: u32) -> Vec<f32> {
-    let src_rate = chunk.sample_rate;
-    let src_ch = chunk.channels;
-    let samples = &chunk.samples;
-
-    if src_rate == target_rate && src_ch == target_channels {
-        return samples.clone();
+fn convert_samples(
+    samples: &[f32],
+    source_rate: u32,
+    source_channels: u32,
+    target_rate: u32,
+    target_channels: u32,
+) -> Vec<f32> {
+    if source_rate == target_rate && source_channels == target_channels {
+        return samples.to_vec();
     }
-
-    let src_frame_count = samples.len() / src_ch.max(1) as usize;
-    let target_frame_count =
-        (src_frame_count as u64 * target_rate as u64 / src_rate.max(1) as u64) as usize;
-
-    let mut out = Vec::with_capacity(target_frame_count * target_channels as usize);
-
-    for i in 0..target_frame_count {
-        let src_idx = (i as u64 * src_rate as u64 / target_rate as u64) as usize;
-        let src_idx = src_idx.min(src_frame_count.saturating_sub(1));
-
-        if src_ch == target_channels {
-            for ch in 0..target_channels as usize {
-                let idx = src_idx * src_ch as usize + ch;
-                out.push(samples.get(idx).copied().unwrap_or(0.0));
+    let source_channels = source_channels.max(1);
+    let source_frames = samples.len() / source_channels as usize;
+    if source_frames == 0 {
+        return Vec::new();
+    }
+    let target_frames =
+        (source_frames as u64 * target_rate as u64 / source_rate.max(1) as u64) as usize;
+    let mut output = Vec::with_capacity(target_frames * target_channels as usize);
+    for target_frame in 0..target_frames {
+        let source_frame = (target_frame as u64 * source_rate as u64 / target_rate as u64)
+            .min(source_frames.saturating_sub(1) as u64) as usize;
+        match (source_channels, target_channels) {
+            (1, 2) => {
+                let sample = samples[source_frame];
+                output.extend_from_slice(&[sample, sample]);
             }
-        } else if src_ch == 1 && target_channels == 2 {
-            let val = samples.get(src_idx).copied().unwrap_or(0.0);
-            out.push(val);
-            out.push(val);
-        } else if src_ch == 2 && target_channels == 1 {
-            let l = samples.get(src_idx * 2).copied().unwrap_or(0.0);
-            let r = samples.get(src_idx * 2 + 1).copied().unwrap_or(0.0);
-            out.push((l + r) * 0.5);
-        } else {
-            for ch in 0..target_channels as usize {
-                if ch < src_ch as usize {
-                    let idx = src_idx * src_ch as usize + ch;
-                    out.push(samples.get(idx).copied().unwrap_or(0.0));
-                } else {
-                    out.push(0.0);
+            (2, 1) => {
+                let offset = source_frame * 2;
+                output.push((samples[offset] + samples[offset + 1]) * 0.5);
+            }
+            _ => {
+                for channel in 0..target_channels as usize {
+                    output.push(
+                        samples
+                            .get(source_frame * source_channels as usize + channel)
+                            .copied()
+                            .unwrap_or(0.0),
+                    );
                 }
             }
         }
     }
+    output
+}
 
-    out
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_is_duplicated_to_stereo() {
+        assert_eq!(
+            convert_samples(&[0.25, -0.5], 48_000, 1, 48_000, 2),
+            vec![0.25, 0.25, -0.5, -0.5]
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_connection_marks_relay_unhealthy_until_ready() {
+        let (source_tx, source_rx) = broadcast::channel(16);
+        let (audio_tx, mut audio_rx) = broadcast::channel(16);
+        let healthy = Arc::new(AtomicBool::new(true));
+        let task = tokio::spawn(broadcast_loop(7, audio_tx, source_rx, healthy.clone()));
+
+        source_tx.send(SourceEvent::Connected).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!healthy.load(Ordering::Acquire));
+        source_tx
+            .send(SourceEvent::Ready {
+                generation: 7,
+                pid: 123,
+            })
+            .unwrap();
+        source_tx
+            .send(SourceEvent::Audio {
+                generation: 7,
+                sample_rate: 48_000,
+                channels: 2,
+                samples: vec![0.25; FRAME_SAMPLES],
+            })
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), audio_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.data.len(), FRAME_SAMPLES);
+        assert!(healthy.load(Ordering::Acquire));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_listener_resumes_after_capture_restart() {
+        let (source_tx, source_rx) = broadcast::channel(16);
+        let (audio_tx, mut existing_listener) = broadcast::channel(16);
+        let healthy = Arc::new(AtomicBool::new(true));
+        let task = tokio::spawn(broadcast_loop(8, audio_tx, source_rx, healthy.clone()));
+
+        source_tx
+            .send(SourceEvent::Restarting { generation: 8 })
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!healthy.load(Ordering::Acquire));
+
+        source_tx
+            .send(SourceEvent::Ready {
+                generation: 8,
+                pid: 456,
+            })
+            .unwrap();
+        source_tx
+            .send(SourceEvent::Audio {
+                generation: 8,
+                sample_rate: 48_000,
+                channels: 2,
+                samples: vec![0.5; FRAME_SAMPLES],
+            })
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), existing_listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.data, vec![0.5; FRAME_SAMPLES]);
+        assert!(healthy.load(Ordering::Acquire));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn startup_waits_for_reconnect_and_replayed_start() {
+        let source = JamSourceRegistry::new(true);
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
+        let first_connection = source.test_register(first_tx).await;
+        let start_source = source.clone();
+        let start_task =
+            tokio::spawn(
+                async move { JamBot::start(31, start_source, Duration::from_secs(1)).await },
+            );
+
+        first_rx.recv().await.expect("initial start command");
+        source.test_unregister(first_connection).await;
+
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+        let second_connection = source.test_register(second_tx).await;
+        second_rx.recv().await.expect("replayed start command");
+        source.test_ready(second_connection, 31).await;
+
+        let bot = start_task
+            .await
+            .expect("startup task")
+            .expect("startup recovered");
+        assert!(bot.is_healthy());
+        bot.stop().await;
+    }
 }

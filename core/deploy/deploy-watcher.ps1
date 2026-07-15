@@ -6,7 +6,14 @@
 #   powershell -ExecutionPolicy Bypass -File deploy-watcher.ps1
 #   powershell -ExecutionPolicy Bypass -File deploy-watcher.ps1 -Once
 
-param([switch]$Once)
+param(
+    [switch]$Once,
+    # Loads the functions for isolated tests without starting the poll loop or
+    # writing repository logs. Production never passes this switch.
+    [switch]$NoMain
+)
+
+$ErrorActionPreference = "Stop"
 
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent  # repo root
 $coreDir = Join-Path $root "core"
@@ -16,8 +23,12 @@ $stateFile = Join-Path $deployDir ".last-deployed-sha"
 $logDir = Join-Path $coreDir "logs"
 $logFile = Join-Path $logDir "deploy-watcher.log"
 $envFile = Join-Path $coreDir "control\.env"
+$viewerSourceDir = Join-Path $coreDir "viewer"
+$viewerRuntimeLib = Join-Path $deployDir "viewer-runtime-lib.ps1"
 
-if (!(Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+. $viewerRuntimeLib
+
+if (!$NoMain -and !(Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
 # Load config
 $config = Get-Content $configFile -Raw | ConvertFrom-Json
@@ -32,7 +43,9 @@ function Write-Log([string]$msg, [string]$level = "INFO") {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$ts] [$level] $msg"
     Write-Host $line
-    Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
+    if (!$NoMain) {
+        Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
+    }
 }
 
 function Load-Env([string]$path) {
@@ -110,12 +123,18 @@ function Start-OldProcess {
     $pidFile = Join-Path $coreDir "control\core-control.pid"
     $outLog = Join-Path $logDir "core-control.out.log"
     $errLog = Join-Path $logDir "core-control.err.log"
-    Load-Env $envFile
-    Write-Log "Restarting control plane..."
-    $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-    if ($proc) {
+    try {
+        Load-Env $envFile
+        Write-Log "Restarting control plane..."
+        $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+        if (!$proc) { throw "Start-Process returned no process" }
         [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
         Write-Log "Control plane restarted (PID $($proc.Id))"
+        return $true
+    }
+    catch {
+        Write-Log "Control plane restart failed: $_" "ERROR"
+        return $false
     }
 }
 
@@ -131,9 +150,11 @@ function Run-Tests {
     Write-Log "Running test suite..."
 
     $env:VERIFY_SKIP_RUST = "1"  # We do our own cargo build separately
-    # Run node tests directly instead of bash — avoids Git bash CWD issues
+    # Run npm directly instead of bash to avoid Git Bash CWD issues.
     Push-Location $root
-    $testOutput = & node --test tools/verify/tests/*.test.js 2>&1 | Out-String
+    # Run the repository's real quick suite. The old tools/verify/tests glob
+    # matched no files, and Node treated that as a successful zero-test run.
+    $testOutput = & npm.cmd run verify:quick 2>&1 | Out-String
     $testExitCode = $LASTEXITCODE
     Pop-Location
 
@@ -176,29 +197,283 @@ function Build-Control {
     }
 }
 
-function Deploy-BlueGreen {
-    # Process already killed and backup already made before Build-Control
+function Get-ViewerRuntimePreflight {
+    param(
+        [string]$ConfiguredRuntime,
+        [string]$SourceDirectory
+    )
+
+    $runtime = $null
+    $source = $null
+    try {
+        if (!$PSBoundParameters.ContainsKey("ConfiguredRuntime")) {
+            Load-Env $envFile
+            $ConfiguredRuntime = $env:ECHO_CORE_VIEWER_DIR
+        }
+        if ([string]::IsNullOrWhiteSpace($ConfiguredRuntime)) {
+            throw "ECHO_CORE_VIEWER_DIR must name a dedicated viewer runtime directory"
+        }
+        if ([string]::IsNullOrWhiteSpace($SourceDirectory)) {
+            $SourceDirectory = $viewerSourceDir
+        }
+        if (!(Test-Path -LiteralPath $SourceDirectory -PathType Container)) {
+            throw "Viewer source directory does not exist: $SourceDirectory"
+        }
+
+        $source = [IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\', '/')
+        $runtime = if ([IO.Path]::IsPathRooted($ConfiguredRuntime)) {
+            [IO.Path]::GetFullPath($ConfiguredRuntime).TrimEnd('\', '/')
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path $coreDir $ConfiguredRuntime)).TrimEnd('\', '/')
+        }
+
+        if ($runtime -ieq $source) {
+            throw "ECHO_CORE_VIEWER_DIR must be different from the checked-out viewer source"
+        }
+        $sourcePrefix = $source + [IO.Path]::DirectorySeparatorChar
+        $runtimePrefix = $runtime + [IO.Path]::DirectorySeparatorChar
+        if ($runtime.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            $source.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Viewer source and runtime directories must not contain one another"
+        }
+
+        # A deploy runtime inside the checkout is not isolated from git pull.
+        # Require production snapshots to live completely outside this repo.
+        $repo = [IO.Path]::GetFullPath($root).TrimEnd('\', '/')
+        $repoPrefix = $repo + [IO.Path]::DirectorySeparatorChar
+        if ($runtime -ieq $repo -or
+            $runtime.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ECHO_CORE_VIEWER_DIR must be outside the git checkout"
+        }
+
+        $runtimeParent = Split-Path -Parent $runtime
+        if (!(Test-Path -LiteralPath $runtimeParent -PathType Container)) {
+            throw "Viewer runtime parent does not exist: $runtimeParent"
+        }
+        if ((Test-Path -LiteralPath $runtime) -and
+            !(Test-Path -LiteralPath $runtime -PathType Container)) {
+            throw "Viewer runtime path exists but is not a directory: $runtime"
+        }
+
+        return [pscustomobject]@{
+            Succeeded = $true
+            RuntimeDirectory = $runtime
+            SourceDirectory = $source
+            Error = $null
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Succeeded = $false
+            RuntimeDirectory = $runtime
+            SourceDirectory = $source
+            Error = "$_"
+        }
+    }
+}
+
+function Publish-ViewerForDeploy {
+    param(
+        # Tests pass an isolated directory explicitly. Production omits it and
+        # must obtain a value from the control environment.
+        [string]$ConfiguredRuntime,
+        [string]$SourceDirectory,
+        [switch]$AllowRunningControl
+    )
+
+    $runtime = $null
+    try {
+        $preflightArgs = @{}
+        if ($PSBoundParameters.ContainsKey("ConfiguredRuntime")) {
+            $preflightArgs.ConfiguredRuntime = $ConfiguredRuntime
+        }
+        if ($PSBoundParameters.ContainsKey("SourceDirectory")) {
+            $preflightArgs.SourceDirectory = $SourceDirectory
+        }
+        $preflight = Get-ViewerRuntimePreflight @preflightArgs
+        if (!$preflight.Succeeded) {
+            throw $preflight.Error
+        }
+        $runtime = $preflight.RuntimeDirectory
+        $source = $preflight.SourceDirectory
+
+        Write-Log "Publishing complete viewer snapshot to $runtime..."
+        $result = Publish-ViewerRuntimeSnapshot `
+            -SourceDirectory $source `
+            -RuntimeDirectory $runtime `
+            -AllowRunningControl:$AllowRunningControl
+        Write-Log "Viewer snapshot published: $($result.FileCount) files"
+        return [pscustomobject]@{
+            Succeeded = $true
+            Published = $true
+            RuntimeDirectory = $result.RuntimeDirectory
+            BackupDirectory = $result.BackupDirectory
+            HadRuntime = $result.HadRuntime
+            ViewerStateSafe = $true
+            Error = $null
+        }
+    }
+    catch {
+        $viewerStateSafe = !([bool]$_.Exception.Data["ViewerRollbackFailed"])
+        Write-Log "Viewer snapshot publish failed: $_" "ERROR"
+        return [pscustomobject]@{
+            Succeeded = $false
+            Published = $false
+            RuntimeDirectory = $runtime
+            BackupDirectory = $null
+            HadRuntime = $false
+            ViewerStateSafe = $viewerStateSafe
+            Error = "$_"
+        }
+    }
+}
+
+function Restore-ViewerAfterFailedDeploy($viewerPublish) {
+    if (!$viewerPublish -or !$viewerPublish.Published) { return $true }
+    $runtime = $viewerPublish.RuntimeDirectory
+    $backup = $viewerPublish.BackupDirectory
+    $hadRuntime = [bool]$viewerPublish.HadRuntime
+
+    if ($hadRuntime -and
+        ([string]::IsNullOrWhiteSpace($backup) -or
+         !(Test-Path -LiteralPath $backup -PathType Container))) {
+        Write-Log "Viewer rollback unavailable: prior runtime backup is missing" "ERROR"
+        return $false
+    }
+
+    try {
+        if (Test-Path -LiteralPath $runtime) {
+            $failed = "$runtime.failed-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+            Move-Item -LiteralPath $runtime -Destination $failed
+            Write-Log "Retained failed viewer snapshot at $failed"
+        }
+        if ($hadRuntime) {
+            Move-Item -LiteralPath $backup -Destination $runtime
+            Write-Log "Restored previous viewer runtime snapshot"
+        }
+        else {
+            Write-Log "Restored prior viewer state (no runtime directory)"
+        }
+        return $true
+    }
+    catch {
+        Write-Log "Viewer rollback failed: $_" "ERROR"
+        return $false
+    }
+}
+
+function Restore-ControlBinary([string]$Executable, [string]$Backup) {
+    if (!(Test-Path -LiteralPath $Backup -PathType Leaf)) {
+        Write-Log "Control rollback unavailable: backup binary is missing" "ERROR"
+        return $false
+    }
+    try {
+        Copy-Item -LiteralPath $Backup -Destination $Executable -Force
+        Write-Log "Restored backup control binary"
+        return $true
+    }
+    catch {
+        Write-Log "Control binary rollback failed: $_" "ERROR"
+        return $false
+    }
+}
+
+function Invoke-ReleaseRollback($viewerPublish, [string]$Executable, [string]$Backup, [bool]$NewProcessStopped = $true) {
+    if (!$NewProcessStopped) {
+        Write-Log "Rollback skipped because the new control process is still running" "ERROR"
+        return [pscustomobject]@{
+            Succeeded = $false
+            NewProcessStopped = $false
+            BinaryRestored = $false
+            ViewerRestored = $false
+            ControlRestarted = $false
+        }
+    }
+
+    $binaryRestored = Restore-ControlBinary -Executable $Executable -Backup $Backup
+    $viewerRestored = Restore-ViewerAfterFailedDeploy $viewerPublish
+    $controlRestarted = $false
+    if ($binaryRestored -and $viewerRestored) {
+        $controlRestarted = Start-OldProcess
+    }
+    else {
+        Write-Log "Control restart skipped because rollback prerequisites failed" "ERROR"
+    }
+
+    $succeeded = $NewProcessStopped -and $binaryRestored -and $viewerRestored -and $controlRestarted
+    if (!$succeeded) {
+        Write-Log "ROLLBACK INCOMPLETE: processStopped=$NewProcessStopped binary=$binaryRestored viewer=$viewerRestored restarted=$controlRestarted" "ERROR"
+    }
+    return [pscustomobject]@{
+        Succeeded = $succeeded
+        NewProcessStopped = $NewProcessStopped
+        BinaryRestored = $binaryRestored
+        ViewerRestored = $viewerRestored
+        ControlRestarted = $controlRestarted
+    }
+}
+
+function New-DeployResult([bool]$Succeeded, [bool]$RollbackAttempted, [bool]$RollbackSucceeded, [string]$ErrorMessage) {
+    return [pscustomobject]@{
+        Succeeded = $Succeeded
+        RollbackAttempted = $RollbackAttempted
+        RollbackSucceeded = $RollbackSucceeded
+        Error = $ErrorMessage
+    }
+}
+
+function Stop-TrackedControlProcess($Process) {
+    if (!$Process) { return $true }
+    try {
+        if (Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) {
+            Stop-Process -Id $Process.Id -Force
+        }
+        # Windows PowerShell 5.1 has no Wait-Process -Timeout. Poll the exact
+        # PID briefly instead of killing every process with the same image name.
+        for ($i = 0; $i -lt 20; $i++) {
+            if (!(Get-Process -Id $Process.Id -ErrorAction SilentlyContinue)) {
+                return $true
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "PID $($Process.Id) is still running"
+    }
+    catch {
+        Write-Log "Failed to stop unhealthy control process: $_" "ERROR"
+        return $false
+    }
+}
+
+function Deploy-BlueGreen($viewerPublish) {
+    # Process already killed and backup already made before Build-Control.
     $exe = Join-Path $coreDir "target\debug\echo-core-control.exe"
     $bak = "$exe.bak"
     $pidFile = Join-Path $coreDir "control\core-control.pid"
     $outLog = Join-Path $logDir "core-control.out.log"
     $errLog = Join-Path $logDir "core-control.err.log"
 
-    # Load env vars for the new process
     Load-Env $envFile
-
-    # Start new process (working dir must be core/ to match run-core.ps1 behavior)
     Write-Log "Starting new control plane..."
-    $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-    if ($proc) {
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+        if (!$proc) { throw "Start-Process returned no process" }
         [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
         Write-Log "New control plane started (PID $($proc.Id))"
-    } else {
-        Write-Log "Failed to start new control plane!" "ERROR"
-        return $false
+    }
+    catch {
+        $startError = "New control plane failed to start: $_"
+        Write-Log $startError "ERROR"
+        $newProcessStopped = Stop-TrackedControlProcess $proc
+        $rollback = Invoke-ReleaseRollback `
+            -viewerPublish $viewerPublish `
+            -Executable $exe `
+            -Backup $bak `
+            -NewProcessStopped $newProcessStopped
+        return New-DeployResult -Succeeded $false -RollbackAttempted $true -RollbackSucceeded $rollback.Succeeded -ErrorMessage $startError
     }
 
-    # Health check with retry
     Write-Log "Waiting for health check..."
     Start-Sleep -Seconds 3
     $healthy = $false
@@ -212,41 +487,46 @@ function Deploy-BlueGreen {
 
     if ($healthy) {
         Write-Log "Health check PASSED - deploy successful"
-        if (Test-Path $bak) { Remove-Item $bak -Force -ErrorAction SilentlyContinue }
-        return $true
-    } else {
-        Write-Log "Health check FAILED - rolling back!" "ERROR"
-        # Kill the bad process
-        try {
-            Start-Process powershell -ArgumentList '-Command "taskkill /F /IM echo-core-control.exe 2>$null"' -Verb RunAs -Wait -WindowStyle Hidden
-        } catch {}
-        Start-Sleep -Seconds 2
-
-        # Restore backup
-        if (Test-Path $bak) {
-            Copy-Item $bak $exe -Force
-            Write-Log "Restored backup binary"
-            $proc2 = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-            if ($proc2) {
-                [System.IO.File]::WriteAllText($pidFile, "$($proc2.Id)")
-                Write-Log "Rollback complete - old binary restarted (PID $($proc2.Id))"
-            }
-        } else {
-            Write-Log "No backup binary found - cannot rollback!" "ERROR"
+        if (Test-Path -LiteralPath $bak) {
+            Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
         }
-        return $false
+        return New-DeployResult -Succeeded $true -RollbackAttempted $false -RollbackSucceeded $false -ErrorMessage $null
     }
+
+    $healthError = "New control plane failed its health check"
+    Write-Log "$healthError - rolling back" "ERROR"
+    $newProcessStopped = Stop-TrackedControlProcess $proc
+
+    $rollback = Invoke-ReleaseRollback `
+        -viewerPublish $viewerPublish `
+        -Executable $exe `
+        -Backup $bak `
+        -NewProcessStopped $newProcessStopped
+    return New-DeployResult -Succeeded $false -RollbackAttempted $true -RollbackSucceeded $rollback.Succeeded -ErrorMessage $healthError
 }
 
 # --- Main Loop ---
-Write-Log "========================================="
-Write-Log "Deploy Watcher starting"
-Write-Log "Repo root: $root"
-Write-Log "Poll interval: ${pollInterval}s"
-Write-Log "Max consecutive failures: $maxFailures"
-Write-Log "========================================="
+if (!$NoMain) {
+    Write-Log "========================================="
+    Write-Log "Deploy Watcher starting"
+    Write-Log "Repo root: $root"
+    Write-Log "Poll interval: ${pollInterval}s"
+    Write-Log "Max consecutive failures: $maxFailures"
+    Write-Log "========================================="
 
-do {
+    # This gate MUST run before Get-RemoteSha or git pull. If control serves the
+    # checkout directly, pulling first would already publish a mismatched viewer
+    # before the watcher had a chance to reject the deployment.
+    $startupViewerPreflight = Get-ViewerRuntimePreflight
+    if (!$startupViewerPreflight.Succeeded) {
+        Write-Log "CIRCUIT BREAKER: viewer runtime preflight failed" "ERROR"
+        Write-Log $startupViewerPreflight.Error "ERROR"
+        Write-Log "No remote poll or git pull was attempted" "ERROR"
+        exit 1
+    }
+    Write-Log "Viewer runtime preflight passed: $($startupViewerPreflight.RuntimeDirectory)"
+
+    do {
     $remoteSha = Get-RemoteSha
     $localSha = Get-LastDeployedSha
 
@@ -298,24 +578,52 @@ do {
                     $dur = [int]((Get-Date) - $deployStart).TotalSeconds
                     Write-DeployEvent $remoteSha "failed" $dur "Build failed"
                     # Restore backup and restart
-                    if (Test-Path $bak) {
-                        Copy-Item $bak $exe -Force
-                        Write-Log "Restored backup binary"
+                    $binaryRestored = Restore-ControlBinary -Executable $exe -Backup $bak
+                    if ($binaryRestored) {
+                        Start-OldProcess | Out-Null
                     }
-                    Start-OldProcess
                     $consecutiveFailures++
                 } else {
-                    # Deploy (process already killed, binary already built)
-                    $deployed = Deploy-BlueGreen
-                    $dur = [int]((Get-Date) - $deployStart).TotalSeconds
-                    if ($deployed) {
-                        Set-LastDeployedSha $remoteSha
-                        $consecutiveFailures = 0
-                        Write-DeployEvent $remoteSha "success" $dur $null
-                        Write-Log "Deploy complete: $shortRemote"
-                    } else {
-                        Write-DeployEvent $remoteSha "rollback" $dur "Health check failed - rolled back"
+                    # Publish the complete viewer while control is stopped, then
+                    # start the matching binary. A failed health check rolls both
+                    # halves back as one release unit.
+                    $viewerPublish = Publish-ViewerForDeploy
+                    if (-not $viewerPublish.Succeeded) {
+                        Write-Log "Viewer publish failed - restoring prior control binary" "ERROR"
+                        $binaryRestored = Restore-ControlBinary -Executable $exe -Backup $bak
+                        $controlRestarted = $false
+                        if ($binaryRestored -and $viewerPublish.ViewerStateSafe) {
+                            $controlRestarted = Start-OldProcess
+                        }
+                        elseif (!$viewerPublish.ViewerStateSafe) {
+                            Write-Log "Control restart skipped because viewer publish rollback was incomplete" "ERROR"
+                        }
+                        $dur = [int]((Get-Date) - $deployStart).TotalSeconds
+                        $recoveryMessage = if ($binaryRestored -and $viewerPublish.ViewerStateSafe -and $controlRestarted) {
+                            "Viewer snapshot publish failed; prior control restored"
+                        }
+                        else {
+                            "Viewer snapshot publish failed; recovery incomplete (viewerSafe=$($viewerPublish.ViewerStateSafe) binary=$binaryRestored restarted=$controlRestarted)"
+                        }
+                        Write-DeployEvent $remoteSha "failed" $dur $recoveryMessage
                         $consecutiveFailures++
+                    } else {
+                        # Deploy (process already killed, binary and viewer already prepared)
+                        $deployResult = Deploy-BlueGreen $viewerPublish
+                        $dur = [int]((Get-Date) - $deployStart).TotalSeconds
+                        if ($deployResult.Succeeded) {
+                            Set-LastDeployedSha $remoteSha
+                            $consecutiveFailures = 0
+                            Write-DeployEvent $remoteSha "success" $dur $null
+                            Write-Log "Deploy complete: $shortRemote"
+                        } elseif ($deployResult.RollbackSucceeded) {
+                            Write-DeployEvent $remoteSha "rollback" $dur "$($deployResult.Error); binary and viewer rolled back"
+                            $consecutiveFailures++
+                        } else {
+                            Write-DeployEvent $remoteSha "failed" $dur "$($deployResult.Error); rollback incomplete"
+                            Write-Log "Deploy failed and rollback was incomplete; manual recovery is required" "ERROR"
+                            $consecutiveFailures++
+                        }
                     }
                 }
             }
@@ -329,7 +637,8 @@ do {
         }
     }
 
-    if (!$Once) {
-        Start-Sleep -Seconds $pollInterval
-    }
-} while (!$Once)
+        if (!$Once) {
+            Start-Sleep -Seconds $pollInterval
+        }
+    } while (!$Once)
+}
