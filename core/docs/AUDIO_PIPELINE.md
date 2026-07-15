@@ -91,11 +91,34 @@ plane must never attempt WASAPI capture: services run in session 0 and cannot
 reliably capture a user's Spotify process or audio session.
 
 The dedicated client source in `core/client/src/jam_source.rs` connects to
-`/api/jam/source` using Jam source protocol v2 and separate source credentials.
-On a generation-scoped `start` command it finds the Spotify root process,
-starts an independently owned WASAPI process-loopback capture, and reports its
-format and readiness before uploading float32 PCM. This capture is independent
-of the viewer window, screen sharing, microphone state, and room media state.
+`/api/jam/source` using Jam source protocol v3 and separate source credentials.
+Its local takeover preference is exposed by the source-only **Allow Echo Jam to
+use Spotify on this PC** switch, which is available before Echo login. Enabling
+that preference while idle does not change Spotify, the system default, or any
+application route.
+
+For an active, generation-scoped Jam, the source temporarily assigns only the
+Spotify desktop app to the exact `CABLE Input (VB-Audio Virtual Cable)` playback
+endpoint. It never changes the Windows system-default output and does not route
+other applications through the cable. Echo captures the paired VB-CABLE signal,
+reports its format/readiness, and uploads float32 PCM independently of the
+viewer window, screen sharing, microphone state, and room media state.
+
+```text
+[Spotify desktop app]
+  |
+  v temporary per-app route (active Jam only)
+[CABLE Input (VB-Audio Virtual Cable)]
+  |
+  v paired VB-CABLE capture endpoint
+[Echo Desktop Jam source - float32 PCM]
+  |
+  v authenticated protocol-v3 /api/jam/source, fenced by generation
+[control jam_source -> JamBot normalization]
+  |
+  v 48 kHz stereo, 20 ms frames over /api/jam/audio
+[listener Web Audio gain -> selected Echo output]
+```
 
 `core/control/src/jam_source.rs` authenticates the single configured source,
 fences messages by connection and generation, measures source health, and
@@ -110,13 +133,28 @@ stalled audio based on received frames and measured peak level.
 
 If packet delivery stalls while Spotify is expected to be audible, the control
 plane sends a generation-fenced, debounced `restart` command. The source drops
-only the Jam-owned WASAPI handle, acknowledges the ordered restart boundary,
-and opens a replacement capture. Existing listener sockets stay connected and
-resume after the replacement reports ready.
+only the Jam-owned cable capture handle, acknowledges the ordered restart
+boundary, and opens a replacement capture. Existing listener sockets stay
+connected and resume after the replacement reports ready.
 
-Jam audio does not depend on WebRTC microphone publishing or VB-Cable.
+The source PC's **Hear Jam on this PC** switch controls the same synchronized
+relay heard by other listeners. It does not restore direct Spotify playback.
+The relay uses its own Jam Volume and still obeys room-wide Mute All. If native
+takeover is active and monitoring is off, only this local relay gain is zero;
+the saved Jam Volume is unchanged. A legacy source-host path remains muted to
+avoid doubled direct Spotify and relayed audio.
 
-WASAPI output device switching (`set_audio_output_device`) was removed because changing the system-wide default is too dangerous. WebView2's `setSinkId` is a silent no-op.
+**Stop Music** uses Spotify's pause API against the exact device already bound
+for the Jam. It performs no transfer and preserves the active generation,
+listeners, queue, cable capture/route, and listener sockets. By contrast,
+turning local takeover off, the empty-listener timeout, and full teardown pause
+that bound device first and then release the temporary Spotify-only route.
+
+The source PC requires Spotify Desktop, the matching Echo Desktop source
+binary, VB-CABLE with the exact playback endpoint above, and matching source
+credentials on a reachable protocol-v3 server. The server/control plane and
+its complete viewer snapshot are the server-side half of the release; the
+configured source PC is the desktop-binary half. Deploy them together.
 
 ## Platform Stubs
 

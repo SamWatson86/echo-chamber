@@ -18,7 +18,7 @@ The control plane is an Axum HTTPS server. It handles auth, room management, par
 | `chat` | `chat.rs` | Chat message save/delete/history, file upload, upload serve |
 | `soundboard` | `soundboard.rs` | Sound file upload/list/serve per room, per-room limits |
 | `jam_session` | `jam_session.rs` | Spotify OAuth, now-playing state, queue management, join/leave, host controls |
-| `jam_source` | `jam_source.rs` | Authenticated protocol-v2 WebSocket source, generation fencing, and source health |
+| `jam_source` | `jam_source.rs` | Authenticated protocol-v3 WebSocket source, generation fencing, takeover availability, and source health |
 | `jam_bot` | `jam_bot.rs` | Normalizes source PCM and relays 48 kHz stereo frames to Jam listeners |
 
 ## AppState
@@ -134,13 +134,13 @@ POST /api/jam/skip                → jam_skip
 POST /api/jam/join                → jam_join
 POST /api/jam/leave               → jam_leave
 GET  /api/jam/audio               → jam_audio_ws (WebSocket)
-GET  /api/jam/source              → jam_source_ws (authenticated protocol-v2 WebSocket)
+GET  /api/jam/source              → jam_source_ws (authenticated protocol-v3 WebSocket)
 ```
 
 Spotify configuration and Jam state reads use the shared admin token. Jam mutations also
 require the caller's bound LiveKit token in `X-Echo-Participant-Token`; host and listener
 rights store both the exact identity and binding ID. The Jam audio WebSocket query contains
-only `jam_protocol_version=2` and the active `generation`; it rejects extra query fields.
+only `jam_protocol_version=3` and the active `generation`; it rejects extra query fields.
 Its first frame (within five seconds) must be
 `{"type":"auth","token":"<bound LiveKit JWT>"}`. The server derives the identity and
 binding from that token, verifies active Jam membership, replies `{"type":"ready"}`, and
@@ -152,13 +152,40 @@ authenticated Echo participant can start it, join it, search, add tracks, and sk
 Echo's Jam UI. Listener accounts do not need Spotify accounts; the only Spotify login is the
 configured Premium host account used by Echo OAuth and Spotify desktop on the source PC.
 
+Jam state protocol v3 exposes `source_enabled` and
+`source_availability_known` in addition to source health. `disabled` means the
+source PC's local takeover preference is off; `negotiating` means the desktop
+source is preparing the Spotify route/capture boundary. The viewer requires
+availability to be explicitly known, enabled, and capture-ready before Start
+Jam is enabled. Missing fields fail closed instead of guessing that the source
+is usable.
+
+The configured source PC exposes **Allow Echo Jam to use Spotify on this PC**
+on the login portal before Echo Connect and in the Jam panel. Enabling it while
+idle changes only the stored native preference: Spotify and all Windows routes
+remain untouched. During an active Jam, Echo Desktop temporarily routes only
+Spotify to the exact `CABLE Input (VB-Audio Virtual Cable)` endpoint, captures
+the paired cable signal, and relays it to the control plane. It never changes
+the system-default output. **Hear Jam on this PC** enables the synchronized
+local relay through Echo's normal selected output and independent Jam Volume.
+
 `Stop Music` is a shared playback control with the same participant authorization as queue and
 skip. It calls Spotify's pause endpoint for the exact configured source device without
 transferring playback, then marks playback paused while preserving the active Jam generation,
-listeners, queue, source capture, and audio sockets. It remains available when capture health is
-degraded because Spotify playback control is independent of PCM delivery. The older
+listeners, queue, source capture/route, and audio sockets. It remains available when capture
+health is degraded because Spotify playback control is independent of PCM delivery. Turning
+the source PC's Allow switch off, the empty-listener timeout, and full teardown instead pause
+that exact device first, then release the temporary Spotify-only route. The older
 `POST /api/jam/stop` lifecycle endpoint remains exact-host-binding-only: it ends the Jam and
-stops capture, but it does not control Spotify playback.
+clears listeners/queue, and drives the source teardown that pauses playback and releases capture
+and routing. It is not the shared Stop Music action.
+
+Protocol v3 has a coordinated release boundary. The control plane and complete
+server-served viewer snapshot are deployed together; the configured source PC
+also needs the matching Echo Desktop Windows binary, Spotify Desktop in the
+same interactive session, VB-CABLE, matching source credentials, and the same
+Premium account authorized by Echo OAuth. Ordinary listeners need neither a
+Spotify account nor Jam-source credentials.
 
 ### Admin API
 ```
