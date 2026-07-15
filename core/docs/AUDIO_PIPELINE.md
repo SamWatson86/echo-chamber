@@ -98,19 +98,22 @@ that preference while idle does not change Spotify, the system default, or any
 application route.
 
 For an active, generation-scoped Jam, the source temporarily assigns only the
-Spotify desktop app to the exact `CABLE Input (VB-Audio Virtual Cable)` playback
-endpoint. It never changes the Windows system-default output and does not route
-other applications through the cable. Echo captures the paired VB-CABLE signal,
-reports its format/readiness, and uploads float32 PCM independently of the
-viewer window, screen sharing, microphone state, and room media state.
+Microsoft Store Spotify desktop app to the exact
+`CABLE Input (VB-Audio Virtual Cable)` playback endpoint. It never changes the
+Windows system-default output and does not route other applications through
+the cable. Separately, Echo opens Windows process-
+loopback capture for Spotify's process tree, reports its format/readiness, and
+uploads float32 PCM independently of the selected endpoint, viewer window,
+screen sharing, microphone state, and room media state.
 
 ```text
 [Spotify desktop app]
+  |-- temporary per-app route (active Jam only)
+  |     `-> [CABLE Input (silent local sink; not the capture source)]
   |
-  v temporary per-app route (active Jam only)
-[CABLE Input (VB-Audio Virtual Cable)]
-  |
-  v paired VB-CABLE capture endpoint
+  `-- Windows process-loopback capture
+        |
+        v
 [Echo Desktop Jam source - float32 PCM]
   |
   v authenticated protocol-v3 /api/jam/source, fenced by generation
@@ -121,8 +124,9 @@ viewer window, screen sharing, microphone state, and room media state.
 ```
 
 `core/control/src/jam_source.rs` authenticates the single configured source,
-fences messages by connection and generation, measures source health, and
-replays the current `start` command after a reconnect. `JamBot` in
+fences messages by connection and generation, and measures source health. An
+active Jam fails closed and pauses playback when the source disconnects or its
+heartbeat becomes stale. `JamBot` in
 `core/control/src/jam_bot.rs` only normalizes uploaded PCM to 48 kHz stereo
 20 ms frames and relays it to listeners over `/api/jam/audio`.
 
@@ -132,9 +136,9 @@ Spotify is playing, the control plane independently reports live, silent, or
 stalled audio based on received frames and measured peak level.
 
 If packet delivery stalls while Spotify is expected to be audible, the control
-plane sends a generation-fenced, debounced `restart` command. The source drops
-only the Jam-owned cable capture handle, acknowledges the ordered restart
-boundary, and opens a replacement capture. Existing listener sockets stay
+plane sends a generation-fenced, debounced `restart` command. The source keeps
+the temporary Spotify route, drops only its Jam-owned process-loopback handle,
+acknowledges the ordered restart boundary, and opens a replacement capture. Existing listener sockets stay
 connected and resume after the replacement reports ready.
 
 The source PC's **Hear Jam on this PC** switch controls the same synchronized
@@ -146,12 +150,29 @@ avoid doubled direct Spotify and relayed audio.
 
 **Stop Music** uses Spotify's pause API against the exact device already bound
 for the Jam. It performs no transfer and preserves the active generation,
-listeners, queue, cable capture/route, and listener sockets. By contrast,
+listeners, queue, process capture/route, and listener sockets. By contrast,
 turning local takeover off, the empty-listener timeout, and full teardown pause
 that bound device first and then release the temporary Spotify-only route.
 
-The source PC requires Spotify Desktop, the matching Echo Desktop source
-binary, VB-CABLE with the exact playback endpoint above, and matching source
+Before takeover, Echo durably journals Spotify's exact prior per-app route. A
+per-session Windows mutex serializes each complete journal-and-policy
+transaction across Echo processes, preventing a stale recovery from touching a
+newer takeover. An exact-generation source teardown command restores
+immediately. Local takeover Off first advertises unavailable and has a
+three-second local restore fallback. An unexpected source socket/capture
+failure retains the silent route for 36
+seconds before restore, covering heartbeat, watchdog, and bounded server-pause
+latency. App exit waits up to 16 seconds for that exact teardown command and
+otherwise preserves the silent route plus journal. A forced kill also leaves
+that journal. Startup recovery restores only after the exact journal owner has
+been continuously
+observed dead for 36 seconds. The recorded Windows session ID is audit metadata,
+not a stable recovery identity: after reboot, logoff, or Fast User Switch, Echo
+can recover through the current same-session Spotify process only when its
+Microsoft Store package family and AUMID match the journal.
+
+The source PC requires the Microsoft Store Spotify Desktop app, the matching
+Echo Desktop source binary, VB-CABLE with the exact playback endpoint above, and matching source
 credentials on a reachable protocol-v3 server. The server/control plane and
 its complete viewer snapshot are the server-side half of the release; the
 configured source PC is the desktop-binary half. Deploy them together.

@@ -164,13 +164,14 @@ The configured source PC exposes **Allow Echo Jam to use Spotify on this PC**
 on the login portal before Echo Connect and in the Jam panel. Enabling it while
 idle changes only the stored native preference: Spotify and all Windows routes
 remain untouched. During an active Jam, Echo Desktop temporarily routes only
-Spotify to the exact `CABLE Input (VB-Audio Virtual Cable)` endpoint, captures
-the paired cable signal, and relays it to the control plane. It never changes
+Microsoft Store Spotify to the exact `CABLE Input (VB-Audio Virtual Cable)` endpoint as a silent
+local sink, captures Spotify independently through Windows process loopback,
+and relays that PCM to the control plane. It never changes
 the system-default output. **Hear Jam on this PC** enables the synchronized
 local relay through Echo's normal selected output and independent Jam Volume.
 
 `Stop Music` is a shared playback control with the same participant authorization as queue and
-skip. It calls Spotify's pause endpoint for the exact configured source device without
+skip. It calls Spotify's pause endpoint for the exact device ID already bound to the active Jam without
 transferring playback, then marks playback paused while preserving the active Jam generation,
 listeners, queue, source capture/route, and audio sockets. It remains available when capture
 health is degraded because Spotify playback control is independent of PCM delivery. Turning
@@ -182,8 +183,8 @@ and routing. It is not the shared Stop Music action.
 
 Protocol v3 has a coordinated release boundary. The control plane and complete
 server-served viewer snapshot are deployed together; the configured source PC
-also needs the matching Echo Desktop Windows binary, Spotify Desktop in the
-same interactive session, VB-CABLE, matching source credentials, and the same
+also needs the matching Echo Desktop Windows binary, Microsoft Store Spotify
+Desktop in the same interactive session, VB-CABLE, matching source credentials, and the same
 Premium account authorized by Echo OAuth. Ordinary listeners need neither a
 Spotify account nor Jam-source credentials.
 

@@ -15,8 +15,8 @@ target the host app's Spotify Connect device.
 The source PC also needs:
 
 - the current Echo Desktop Windows binary;
-- the Spotify desktop app, signed in and visible as the server's exact bound
-  Spotify Connect device;
+- the Microsoft Store build of Spotify Desktop, signed in and visible as the
+  server's exact bound Spotify Connect device;
 - VB-CABLE installed with the playback endpoint named exactly
   `CABLE Input (VB-Audio Virtual Cable)`; and
 - a trusted HTTPS connection to the current Echo control-plane server.
@@ -57,7 +57,8 @@ control the same native settings:
 When an allowed Jam becomes active, Echo temporarily routes only the Spotify
 desktop app to the exact `CABLE Input (VB-Audio Virtual Cable)` endpoint. Echo
 does not change the Windows system-default output or reroute other apps. It
-captures the cable signal and uploads protocol-v3, generation-fenced audio for
+captures Spotify's process tree through Windows process loopback and uploads
+protocol-v3, generation-fenced audio for
 the server to relay. With local monitoring off, Echo mutes only its local relay;
 with monitoring on, the relay plays through Echo's selected output at the saved
 Jam Volume.
@@ -68,6 +69,24 @@ route, and audio sockets remain ready. Disabling local takeover, the last-
 listener empty timeout, and full Jam teardown are different lifecycle events.
 Those paths pause the bound Spotify device first, then release the temporary
 Spotify-only cable route.
+
+Echo records the exact prior Spotify route before takeover. Echo also serializes
+the complete journal-and-policy transaction across local Echo processes so an
+older recovery cannot undo a newer takeover. An exact-generation source
+teardown command restores it immediately. Turning local Allow off advertises the
+source unavailable first and uses a three-second local restore fallback if the
+server never sends that command. An unexpected socket or capture failure keeps
+Spotify on the silent route for 36 seconds before restoring, covering
+heartbeat, watchdog, and server pause timeouts. App exit waits up to 16 seconds
+for that exact teardown command; on timeout it leaves the route journaled and
+silent. A forced kill does the same implicitly. Startup recovery retains that
+silent route until the exact journal owner has been continuously observed dead
+for 36 seconds, then restores
+the recorded route (or Windows Default if the old endpoint no longer exists).
+After a reboot, logoff, or Fast User Switch, the old journal session ID is
+diagnostic only: recovery accepts the current Spotify process only when it is
+in Echo's current Windows session and its Store package family and app ID still
+match the journal.
 
 ## Release boundary
 
