@@ -17,6 +17,7 @@ use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::System::Registry::*;
+use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -31,6 +32,7 @@ const LOOPBACK_MODE_EXCLUDE_TREE: u32 = 1;
 /// VT_BLOB variant type
 const VT_BLOB: u16 = 65;
 const BITS_PER_BYTE: u16 = 8;
+const OWNED_CAPTURE_CHANNEL_CAPACITY: usize = 64;
 const KNOWN_ECHO_PROCESS_NAMES: [&str; 2] = ["Echo Chamber.exe", "echo-core-client.exe"];
 
 /// Manual repr(C) structs for process loopback activation params.
@@ -107,6 +109,51 @@ pub struct WindowInfo {
     pub hwnd: u64,
     pub title: String,
     pub exe_name: String,
+}
+
+/// Native process-loopback events for callers that own their capture handle.
+/// `Data` is always little-endian float32 PCM bytes.
+#[derive(Debug)]
+pub enum ProcessCaptureEvent {
+    Format(ProcessCaptureFormat),
+    Started { pid: u32 },
+    Data(Vec<u8>),
+    Error(String),
+    Stopped,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessCaptureFormat {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub bits_per_sample: u16,
+    pub format_tag: u16,
+    pub is_float: bool,
+}
+
+type ProcessCaptureSink = Arc<dyn Fn(ProcessCaptureEvent) + Send + Sync + 'static>;
+
+/// A process-loopback capture owned by one subsystem. Dropping it cannot stop
+/// captures owned by any other subsystem (notably screen-share audio).
+pub struct OwnedProcessCapture {
+    running: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl OwnedProcessCapture {
+    pub fn stop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for OwnedProcessCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 // --- Window enumeration ---
@@ -236,11 +283,82 @@ fn find_processes_by_name(exe_name: &str) -> Vec<(u32, u32)> {
 
 fn select_root_process_pid(processes: &[(u32, u32)]) -> Option<u32> {
     let pids: std::collections::HashSet<u32> = processes.iter().map(|(pid, _)| *pid).collect();
-    processes
+    let mut roots = processes
         .iter()
-        .find(|(_, parent_pid)| !pids.contains(parent_pid))
-        .or_else(|| processes.first())
+        .filter(|(_, parent_pid)| !pids.contains(parent_pid))
         .map(|(pid, _)| *pid)
+        .collect::<Vec<_>>();
+    roots.sort_unstable();
+    roots
+        .into_iter()
+        .next()
+        .or_else(|| processes.iter().map(|(pid, _)| *pid).min())
+}
+
+fn process_session_id(pid: u32) -> Option<u32> {
+    let mut session_id = 0_u32;
+    unsafe {
+        ProcessIdToSessionId(pid, &mut session_id)
+            .is_ok()
+            .then_some(session_id)
+    }
+}
+
+fn select_root_process_pid_for_session(
+    processes: &[(u32, u32, u32)],
+    session_id: u32,
+) -> Option<u32> {
+    let same_session = processes
+        .iter()
+        .filter(|(_, _, candidate_session)| *candidate_session == session_id)
+        .map(|(pid, parent_pid, _)| (*pid, *parent_pid))
+        .collect::<Vec<_>>();
+    select_root_process_pid(&same_session)
+}
+
+/// Return the root Spotify.exe PID in Echo's interactive Windows session.
+/// Capturing that root with INCLUDE_TREE covers Spotify's renderer descendants
+/// and avoids binding to an arbitrary child process or another user session.
+pub fn find_spotify_root_pid() -> std::result::Result<u32, String> {
+    let current_pid = unsafe { GetCurrentProcessId() };
+    let current_session = process_session_id(current_pid)
+        .ok_or_else(|| "Cannot determine Echo's Windows session".to_string())?;
+    let processes = find_processes_by_name("Spotify.exe")
+        .into_iter()
+        .filter_map(|(pid, parent_pid)| {
+            process_session_id(pid).map(|session_id| (pid, parent_pid, session_id))
+        })
+        .collect::<Vec<_>>();
+
+    select_root_process_pid_for_session(&processes, current_session).ok_or_else(|| {
+        format!(
+            "Spotify.exe not found in Echo's Windows session {}",
+            current_session
+        )
+    })
+}
+
+/// Verify that an existing Jam capture is still bound to the Spotify root
+/// selected for Echo's current Windows session. Spotify can exit without
+/// WASAPI reporting a terminal capture event, so the Jam source polls this
+/// cheaply and reconnects when the process tree changes.
+pub fn validate_spotify_root_pid(expected_pid: u32) -> std::result::Result<(), String> {
+    let selected_pid = find_spotify_root_pid()?;
+    validate_selected_spotify_root_pid(expected_pid, selected_pid)
+}
+
+fn validate_selected_spotify_root_pid(
+    expected_pid: u32,
+    selected_pid: u32,
+) -> std::result::Result<(), String> {
+    if selected_pid == expected_pid {
+        Ok(())
+    } else {
+        Err(format!(
+            "Spotify root PID changed from {} to {}",
+            expected_pid, selected_pid
+        ))
+    }
 }
 
 fn select_preferred_playback_exclusion_process<'a>(
@@ -352,6 +470,82 @@ fn global_state() -> &'static Mutex<Option<CaptureHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+fn tauri_capture_sink(app: AppHandle) -> ProcessCaptureSink {
+    Arc::new(move |event| match event {
+        ProcessCaptureEvent::Format(format) => {
+            let _ = app.emit("audio-capture-format", format);
+        }
+        ProcessCaptureEvent::Started { pid } => {
+            let _ = app.emit("audio-capture-started", pid);
+        }
+        ProcessCaptureEvent::Data(bytes) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let _ = app.emit("audio-capture-data", b64);
+        }
+        ProcessCaptureEvent::Error(message) => {
+            let _ = app.emit("audio-capture-error", message);
+        }
+        ProcessCaptureEvent::Stopped => {
+            let _ = app.emit("audio-capture-stopped", ());
+        }
+    })
+}
+
+/// Start a process-loopback capture whose lifecycle belongs entirely to the
+/// caller. Unlike `start_capture`, this does not touch the screen-share slot.
+pub fn start_owned_process_capture(
+    pid: u32,
+) -> std::result::Result<
+    (
+        OwnedProcessCapture,
+        tokio::sync::mpsc::Receiver<ProcessCaptureEvent>,
+    ),
+    String,
+> {
+    check_process_loopback_support()?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(OWNED_CAPTURE_CHANNEL_CAPACITY);
+    let sink: ProcessCaptureSink = Arc::new(move |event| {
+        // WASAPI must never block behind network upload. Format and Started are
+        // emitted before PCM begins; once the bounded queue fills, dropping PCM
+        // is preferable to unbounded memory growth and increasing latency.
+        let _ = try_send_owned_capture_event(&tx, event);
+    });
+    let running = Arc::new(AtomicBool::new(true));
+    let thread_running = running.clone();
+    let thread_sink = sink.clone();
+
+    let thread = std::thread::spawn(move || {
+        if let Err(error) = capture_loop(
+            pid,
+            LOOPBACK_MODE_INCLUDE_TREE,
+            "owned process include-tree",
+            &thread_sink,
+            &thread_running,
+        ) {
+            log_audio_capture(&format!("[audio-capture] owned capture error: {}", error));
+            thread_sink(ProcessCaptureEvent::Error(error.to_string()));
+        }
+        thread_sink(ProcessCaptureEvent::Stopped);
+        log_audio_capture("[audio-capture] owned capture thread exited");
+    });
+
+    Ok((
+        OwnedProcessCapture {
+            running,
+            thread: Some(thread),
+        },
+        rx,
+    ))
+}
+
+fn try_send_owned_capture_event(
+    tx: &tokio::sync::mpsc::Sender<ProcessCaptureEvent>,
+    event: ProcessCaptureEvent,
+) -> bool {
+    tx.try_send(event).is_ok()
+}
+
 pub fn start_capture(pid: u32, app: AppHandle) -> Result<()> {
     // Check if this Windows build supports process loopback
     if let Err(msg) = check_process_loopback_support() {
@@ -367,19 +561,20 @@ pub fn start_capture(pid: u32, app: AppHandle) -> Result<()> {
 
     let running = Arc::new(AtomicBool::new(true));
     let r2 = running.clone();
+    let sink = tauri_capture_sink(app);
 
     let thread = std::thread::spawn(move || {
         if let Err(e) = capture_loop(
             pid,
             LOOPBACK_MODE_INCLUDE_TREE,
             "process include-tree",
-            &app,
+            &sink,
             &r2,
         ) {
             log_audio_capture(&format!("[audio-capture] error: {}", e));
-            let _ = app.emit("audio-capture-error", format!("{}", e));
+            sink(ProcessCaptureEvent::Error(e.to_string()));
         }
-        let _ = app.emit("audio-capture-stopped", ());
+        sink(ProcessCaptureEvent::Stopped);
         log_audio_capture("[audio-capture] thread exited");
     });
 
@@ -397,13 +592,14 @@ pub fn start_system_capture(app: AppHandle) -> Result<()> {
 
     let running = Arc::new(AtomicBool::new(true));
     let r2 = running.clone();
+    let sink = tauri_capture_sink(app);
 
     let thread = std::thread::spawn(move || {
-        if let Err(e) = capture_system_loop(&app, &r2) {
+        if let Err(e) = capture_system_loop(&sink, &r2) {
             log_audio_capture(&format!("[audio-capture] error: {}", e));
-            let _ = app.emit("audio-capture-error", format!("{}", e));
+            sink(ProcessCaptureEvent::Error(e.to_string()));
         }
-        let _ = app.emit("audio-capture-stopped", ());
+        sink(ProcessCaptureEvent::Stopped);
         log_audio_capture("[audio-capture] thread exited");
     });
 
@@ -437,19 +633,20 @@ pub fn start_system_capture_excluding_echo(app: AppHandle) -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let r2 = running.clone();
     let label = format!("system excluding {} tree", exe_name);
+    let sink = tauri_capture_sink(app);
 
     let thread = std::thread::spawn(move || {
         if let Err(e) = capture_loop(
             exclude_pid,
             system_audio_feedback_capture_loopback_mode(),
             &label,
-            &app,
+            &sink,
             &r2,
         ) {
             log_audio_capture(&format!("[audio-capture] error: {}", e));
-            let _ = app.emit("audio-capture-error", format!("{}", e));
+            sink(ProcessCaptureEvent::Error(e.to_string()));
         }
-        let _ = app.emit("audio-capture-stopped", ());
+        sink(ProcessCaptureEvent::Stopped);
         log_audio_capture("[audio-capture] thread exited");
     });
 
@@ -498,7 +695,7 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
 
 fn capture_with_audio_client(
     client: IAudioClient,
-    app: &AppHandle,
+    sink: &ProcessCaptureSink,
     running: &AtomicBool,
     capture_label: &str,
     started_pid: u32,
@@ -538,16 +735,13 @@ fn capture_with_audio_client(
                     "[audio-capture] format from GetMixFormat: {}Hz {}ch {}bit blockAlign={} formatTag={} isFloat={}",
                     sample_rate, channels, bits, block_align, format_tag, is_float
                 ));
-                let _ = app.emit(
-                    "audio-capture-format",
-                    serde_json::json!({
-                        "sampleRate": sample_rate,
-                        "channels": channels,
-                        "bitsPerSample": bits,
-                        "formatTag": format_tag,
-                        "isFloat": is_float,
-                    }),
-                );
+                sink(ProcessCaptureEvent::Format(ProcessCaptureFormat {
+                    sample_rate,
+                    channels,
+                    bits_per_sample: bits,
+                    format_tag,
+                    is_float,
+                }));
 
                 // Initialize with the mix format
                 log_audio_capture(
@@ -581,16 +775,13 @@ fn capture_with_audio_client(
                     sample_rate, channels, bits, block_align, is_float
                 ));
 
-                let _ = app.emit(
-                    "audio-capture-format",
-                    serde_json::json!({
-                        "sampleRate": sample_rate,
-                        "channels": channels,
-                        "bitsPerSample": bits,
-                        "formatTag": WAVE_FORMAT_PCM,
-                        "isFloat": false,
-                    }),
-                );
+                sink(ProcessCaptureEvent::Format(ProcessCaptureFormat {
+                    sample_rate,
+                    channels,
+                    bits_per_sample: bits,
+                    format_tag: WAVE_FORMAT_PCM as u16,
+                    is_float: false,
+                }));
 
                 // Initialize with default format + LOOPBACK/AUTOCONVERTPCM flags
                 log_audio_capture(
@@ -618,7 +809,7 @@ fn capture_with_audio_client(
 
         client.Start()?;
         log_audio_capture(&format!("[audio-capture] started for {}", capture_label));
-        let _ = app.emit("audio-capture-started", started_pid);
+        sink(ProcessCaptureEvent::Started { pid: started_pid });
 
         // Read loop
         let mut frame_count: u64 = 0;
@@ -670,9 +861,16 @@ fn capture_with_audio_client(
                         ));
                     }
 
-                    let send_bytes: Vec<u8> = if is_float {
-                        // Already float32 - send raw bytes as-is
+                    let send_bytes: Vec<u8> = if is_float && bits == 32 {
+                        // Already float32 - send raw bytes as-is.
                         slice.to_vec()
+                    } else if is_float && bits == 64 {
+                        let mut float_buf = Vec::with_capacity((data_len / 8) * 4);
+                        for chunk in slice.chunks_exact(8) {
+                            let sample = f64::from_le_bytes(chunk.try_into().unwrap()) as f32;
+                            float_buf.extend_from_slice(&sample.to_le_bytes());
+                        }
+                        float_buf
                     } else if bits == 16 {
                         // Int16 PCM to Float32 conversion
                         let sample_count = data_len / 2;
@@ -716,15 +914,23 @@ fn capture_with_audio_client(
                             ));
                         }
                         float_buf
+                    } else if bits == 32 {
+                        // Signed PCM32 to Float32 conversion.
+                        let mut float_buf = Vec::with_capacity(data_len);
+                        for chunk in slice.chunks_exact(4) {
+                            let sample = i32::from_le_bytes(chunk.try_into().unwrap());
+                            let value = sample as f32 / 2_147_483_648.0;
+                            float_buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        float_buf
                     } else {
-                        // Unknown format - send raw and log warning
                         if frame_count <= 3 {
                             log_audio_capture(&format!(
-                                "[audio-capture] WARNING: unknown format {}bit, sending raw bytes",
+                                "[audio-capture] WARNING: unsupported format {}bit; dropping packet",
                                 bits
                             ));
                         }
-                        slice.to_vec()
+                        Vec::new()
                     };
 
                     if frame_count <= 5 || frame_count % 50 == 0 {
@@ -737,8 +943,9 @@ fn capture_with_audio_client(
                         ));
                     }
 
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&send_bytes);
-                    let _ = app.emit("audio-capture-data", b64);
+                    if !send_bytes.is_empty() {
+                        sink(ProcessCaptureEvent::Data(send_bytes));
+                    }
                 }
 
                 capture.ReleaseBuffer(frames)?;
@@ -754,7 +961,7 @@ fn capture_with_audio_client(
 }
 
 fn capture_system_loop(
-    app: &AppHandle,
+    sink: &ProcessCaptureSink,
     running: &AtomicBool,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     unsafe {
@@ -770,7 +977,7 @@ fn capture_system_loop(
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
         log_audio_capture("[audio-capture] activated default render endpoint");
 
-        let result = capture_with_audio_client(client, app, running, "system loopback", 0);
+        let result = capture_with_audio_client(client, sink, running, "system loopback", 0);
         CoUninitialize();
         result
     }
@@ -782,7 +989,7 @@ fn capture_loop(
     pid: u32,
     process_loopback_mode: u32,
     label: &str,
-    app: &AppHandle,
+    sink: &ProcessCaptureSink,
     running: &AtomicBool,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     unsafe {
@@ -851,7 +1058,7 @@ fn capture_loop(
             })?;
         log_audio_capture("[audio-capture] activation completed -- got IAudioClient");
 
-        let result = capture_with_audio_client(client, app, running, label, pid);
+        let result = capture_with_audio_client(client, sink, running, label, pid);
         CoUninitialize();
         result
     }
@@ -862,8 +1069,10 @@ mod tests {
     use super::{
         audio_capture_frame_diagnostic, audio_capture_peak_from_f32_bytes,
         process_loopback_fallback_format, process_loopback_initialize_flags,
-        select_preferred_playback_exclusion_process, system_audio_feedback_capture_loopback_mode,
-        system_loopback_initialize_flags, LOOPBACK_MODE_EXCLUDE_TREE,
+        select_preferred_playback_exclusion_process, select_root_process_pid,
+        select_root_process_pid_for_session, system_audio_feedback_capture_loopback_mode,
+        system_loopback_initialize_flags, try_send_owned_capture_event,
+        validate_selected_spotify_root_pid, ProcessCaptureEvent, LOOPBACK_MODE_EXCLUDE_TREE,
     };
     use windows::Win32::Media::Audio::{
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -939,6 +1148,54 @@ mod tests {
             select_preferred_playback_exclusion_process(&candidates),
             Some(("echo-core-client.exe", 80))
         );
+    }
+
+    #[test]
+    fn selects_spotify_root_instead_of_renderer_child() {
+        let spotify = vec![(20948, 900), (21000, 20948), (21001, 20948), (21002, 21000)];
+
+        assert_eq!(select_root_process_pid(&spotify), Some(20948));
+    }
+
+    #[test]
+    fn spotify_root_selection_is_limited_to_echo_session() {
+        let spotify = vec![
+            (100, 10, 0),
+            (101, 100, 0),
+            (20948, 900, 1),
+            (21000, 20948, 1),
+            (21001, 20948, 1),
+        ];
+
+        assert_eq!(
+            select_root_process_pid_for_session(&spotify, 1),
+            Some(20948)
+        );
+    }
+
+    #[test]
+    fn spotify_root_liveness_rejects_a_replacement_pid() {
+        assert!(validate_selected_spotify_root_pid(20948, 20948).is_ok());
+
+        let error = validate_selected_spotify_root_pid(20948, 31000).unwrap_err();
+        assert!(error.contains("changed from 20948 to 31000"));
+    }
+
+    #[test]
+    fn owned_capture_queue_drops_pcm_instead_of_blocking_when_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        assert!(try_send_owned_capture_event(
+            &tx,
+            ProcessCaptureEvent::Started { pid: 20948 }
+        ));
+        assert!(!try_send_owned_capture_event(
+            &tx,
+            ProcessCaptureEvent::Data(vec![0, 0, 0, 0])
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ProcessCaptureEvent::Started { pid: 20948 })
+        ));
     }
 
     #[test]

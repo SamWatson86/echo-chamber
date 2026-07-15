@@ -5,6 +5,214 @@
     root.EchoJamSessionState = factory();
   }
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  const JAM_PROTOCOL_VERSION = 2;
+
+  function normalizeSourceStatus(value) {
+    const status = String(value || "unknown").trim().toLowerCase();
+    return status || "unknown";
+  }
+
+  function numberOrNull(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function planAudioFrame(nextPlayTime, currentTime, duration, maxLeadSeconds) {
+    const now = Number(currentTime);
+    const frameDuration = Number(duration);
+    const next = Number(nextPlayTime);
+    const maxLead = Number.isFinite(maxLeadSeconds) ? maxLeadSeconds : 0.5;
+    if (!Number.isFinite(now) || !Number.isFinite(frameDuration) || frameDuration <= 0) {
+      return { drop: true, startTime: null, nextPlayTime: Number.isFinite(next) ? next : 0 };
+    }
+
+    const startTime = !Number.isFinite(next) || next < now ? now + 0.02 : next;
+    if (startTime - now > maxLead) {
+      // Keep already-scheduled audio intact and discard newly arrived backlog.
+      // Resetting to `now` here would overlap buffers Web Audio already accepted.
+      return { drop: true, startTime: null, nextPlayTime: startTime };
+    }
+    return {
+      drop: false,
+      startTime,
+      nextPlayTime: startTime + frameDuration,
+    };
+  }
+
+  function shouldResetListeningForServerState(serverState, listeningGeneration) {
+    const input = serverState && typeof serverState === "object" ? serverState : {};
+    if (input.active !== true) return true;
+    const expected = Number(listeningGeneration);
+    const actual = Number(input.generation);
+    return Number.isFinite(expected) && Number.isFinite(actual) && expected !== actual;
+  }
+
+  function createLatestRequestGate() {
+    let latestRequest = 0;
+    return {
+      begin() {
+        latestRequest += 1;
+        return latestRequest;
+      },
+      isCurrent(request) {
+        return request === latestRequest;
+      },
+    };
+  }
+
+  function shouldMuteLocalRelay(isSourceHost, listenerJoined) {
+    return isSourceHost === true && listenerJoined !== false;
+  }
+
+  function effectiveJamGain(volumePercent, roomAudioMuted) {
+    if (roomAudioMuted === true) return 0;
+    const volume = Number(volumePercent);
+    if (!Number.isFinite(volume)) return 0;
+    return Math.max(0, Math.min(100, volume)) / 100;
+  }
+
+  function buildJamAudioSocketQuery(protocolVersion, generation) {
+    const protocol = Number(protocolVersion);
+    if (generation === null || generation === undefined || generation === "") {
+      throw new Error("Invalid Jam generation");
+    }
+    const currentGeneration = Number(generation);
+    if (!Number.isInteger(protocol) || protocol <= 0) {
+      throw new Error("Invalid Jam protocol version");
+    }
+    if (!Number.isSafeInteger(currentGeneration) || currentGeneration < 0) {
+      throw new Error("Invalid Jam generation");
+    }
+    return `jam_protocol_version=${encodeURIComponent(protocol)}&generation=${encodeURIComponent(currentGeneration)}`;
+  }
+
+  function parseJamAudioControlMessage(message) {
+    if (typeof message !== "string") return { type: "binary" };
+    let payload;
+    try {
+      payload = JSON.parse(message);
+    } catch (error) {
+      return { type: "invalid", message: "Invalid Jam audio control message" };
+    }
+    if (!payload || typeof payload !== "object") {
+      return { type: "invalid", message: "Invalid Jam audio control message" };
+    }
+    if (payload.type === "ready") return { type: "ready" };
+    if (payload.type === "error") {
+      return {
+        type: "error",
+        message: typeof payload.message === "string" && payload.message.trim()
+          ? payload.message.trim()
+          : "Jam audio authentication failed",
+      };
+    }
+    return { type: "invalid", message: "Unexpected Jam audio control message" };
+  }
+
+  function shouldOpenAudioAfterRejoin(listenerState, expectedGeneration, currentGeneration, tokenUnchanged) {
+    const listener = listenerState && typeof listenerState === "object" ? listenerState : {};
+    const expected = expectedGeneration === null || expectedGeneration === undefined || expectedGeneration === ""
+      ? Number.NaN
+      : Number(expectedGeneration);
+    const current = currentGeneration === null || currentGeneration === undefined || currentGeneration === ""
+      ? Number.NaN
+      : Number(currentGeneration);
+    return listener.desiredListening === true &&
+      listener.serverJoined === true &&
+      listener.pendingLeave !== true &&
+      Number.isSafeInteger(expected) &&
+      Number.isSafeInteger(current) &&
+      expected === current &&
+      tokenUnchanged === true;
+  }
+
+  function shouldApplyBannerResponse(fullPollingActive, requestIsCurrent) {
+    return fullPollingActive !== true && requestIsCurrent === true;
+  }
+
+  function evaluateJamContract(serverState) {
+    const input = serverState && typeof serverState === "object" ? serverState : {};
+    const rawProtocol = input.jam_protocol_version;
+    const actualProtocol = rawProtocol === null || rawProtocol === undefined || rawProtocol === ""
+      ? Number.NaN
+      : Number(rawProtocol);
+    const compatible = Number.isFinite(actualProtocol) && actualProtocol === JAM_PROTOCOL_VERSION;
+    const sourceStatus = normalizeSourceStatus(input.source_status);
+    const sourceUnavailable = ["offline", "unconfigured", "error", "failed"].includes(sourceStatus);
+    const sourceReady = sourceStatus !== "stalled" && !sourceUnavailable &&
+      (input.source_ready === true || ["ready", "live", "silent"].includes(sourceStatus));
+    // A stalled source is still the configured, generation-current source. Keep
+    // queue/skip available so users can recover Spotify playback, while joining
+    // and opening new audio sockets remain fail-closed until PCM is healthy.
+    const sourceControlReady = !sourceUnavailable &&
+      (input.source_ready === true || ["ready", "live", "silent", "stalled"].includes(sourceStatus));
+    const active = input.active === true;
+    const spotifyConnected = input.spotify_connected === true;
+    const sourceError = typeof input.source_error === "string" ? input.source_error.trim() : "";
+
+    let sourceTone = "waiting";
+    let sourceMessage = "Host source status is unavailable";
+    if (sourceStatus === "ready" || (sourceReady && sourceStatus === "unknown")) {
+      sourceTone = "ready";
+      sourceMessage = "Host source is online";
+    } else if (sourceStatus === "live") {
+      sourceTone = "ready";
+      sourceMessage = "Host source audio is live";
+    } else if (sourceStatus === "silent") {
+      sourceTone = "warning";
+      sourceMessage = "Host source is connected — Spotify is silent or paused";
+    } else if (sourceStatus === "configured") {
+      sourceMessage = "Host source is configured — waiting for capture";
+    } else if (sourceStatus === "starting") {
+      sourceMessage = "Host source is starting…";
+    } else if (sourceStatus === "offline") {
+      sourceTone = "error";
+      sourceMessage = sourceError || "Host source is offline";
+    } else if (sourceStatus === "unconfigured") {
+      sourceTone = "error";
+      sourceMessage = sourceError || "Host source is not configured";
+    } else if (sourceStatus === "stalled") {
+      sourceTone = "error";
+      sourceMessage = sourceError || "Spotify is playing but Echo audio has stalled";
+    } else if (sourceStatus === "error" || sourceStatus === "failed") {
+      sourceTone = "error";
+      sourceMessage = sourceError || "Host source failed";
+    } else if (sourceError) {
+      sourceTone = "error";
+      sourceMessage = sourceError;
+    }
+
+    const compatibilityMessage = compatible
+      ? ""
+      : Number.isFinite(actualProtocol)
+        ? `Jam viewer/server mismatch (viewer v${JAM_PROTOCOL_VERSION}, server v${actualProtocol}) — reopen Echo after the server update`
+        : `Jam viewer/server mismatch (viewer v${JAM_PROTOCOL_VERSION}, server did not report a protocol) — reopen Echo after the server update`;
+
+    return {
+      expectedProtocol: JAM_PROTOCOL_VERSION,
+      actualProtocol: Number.isFinite(actualProtocol) ? actualProtocol : null,
+      compatible,
+      compatibilityMessage,
+      active,
+      spotifyConnected,
+      sourceStatus,
+      sourceReady,
+      sourceControlReady,
+      sourceTone,
+      sourceMessage,
+      sourceError,
+      sourceLastFrameMs: numberOrNull(input.source_last_frame_ms),
+      sourcePeak: numberOrNull(input.source_peak),
+      canStart: compatible && !active && spotifyConnected && sourceReady,
+      // New listeners fail closed on stalled PCM. Queue/skip intentionally stay
+      // available against the current source so they can recover Spotify playback.
+      canJoin: compatible && active && sourceReady,
+      canControl: compatible && active && sourceControlReady,
+      canConfigure: compatible,
+    };
+  }
+
   function createJamSessionState(options) {
     const opts = options || {};
     const reconnectBaseMs = Number.isFinite(opts.reconnectBaseMs) ? opts.reconnectBaseMs : 500;
@@ -159,6 +367,17 @@
   }
 
   return {
+    JAM_PROTOCOL_VERSION,
+    buildJamAudioSocketQuery,
+    evaluateJamContract,
+    effectiveJamGain,
+    parseJamAudioControlMessage,
+    planAudioFrame,
+    shouldApplyBannerResponse,
+    shouldResetListeningForServerState,
+    shouldOpenAudioAfterRejoin,
+    createLatestRequestGate,
+    shouldMuteLocalRelay,
     createJamSessionState,
   };
 });

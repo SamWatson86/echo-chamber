@@ -1,6 +1,196 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createJamSessionState } = require("./jam-session-state.js");
+const {
+  JAM_PROTOCOL_VERSION,
+  buildJamAudioSocketQuery,
+  createLatestRequestGate,
+  createJamSessionState,
+  effectiveJamGain,
+  evaluateJamContract,
+  parseJamAudioControlMessage,
+  planAudioFrame,
+  shouldApplyBannerResponse,
+  shouldMuteLocalRelay,
+  shouldOpenAudioAfterRejoin,
+  shouldResetListeningForServerState,
+} = require("./jam-session-state.js");
+
+test("only the newest concurrent Jam state request may update the viewer", () => {
+  const gate = createLatestRequestGate();
+  const older = gate.begin();
+  const newer = gate.begin();
+
+  assert.equal(gate.isCurrent(older), false);
+  assert.equal(gate.isCurrent(newer), true);
+});
+
+test("the Spotify source host mutes its relayed copy after auto-join", () => {
+  assert.equal(shouldMuteLocalRelay(true, true), true);
+  assert.equal(shouldMuteLocalRelay(true, false), false);
+  assert.equal(shouldMuteLocalRelay(false, true), false);
+});
+
+test("Jam audio socket query contains protocol and generation only", () => {
+  const query = buildJamAudioSocketQuery(2, 41);
+  const params = new URLSearchParams(query);
+
+  assert.deepEqual(Array.from(params.keys()), ["jam_protocol_version", "generation"]);
+  assert.equal(params.get("jam_protocol_version"), "2");
+  assert.equal(params.get("generation"), "41");
+  assert.equal(query.includes("token"), false);
+  assert.equal(query.includes("identity"), false);
+  assert.throws(() => buildJamAudioSocketQuery(2, null), /Invalid Jam generation/);
+});
+
+test("Jam audio is connected only after the explicit ready control frame", () => {
+  assert.deepEqual(parseJamAudioControlMessage('{"type":"ready"}'), { type: "ready" });
+  assert.deepEqual(parseJamAudioControlMessage('{"type":"error","message":"expired"}'), {
+    type: "error",
+    message: "expired",
+  });
+  assert.equal(parseJamAudioControlMessage("not-json").type, "invalid");
+  assert.equal(parseJamAudioControlMessage(new ArrayBuffer(8)).type, "binary");
+});
+
+test("global room mute wins when the Jam gain is first created", () => {
+  assert.equal(effectiveJamGain(50, false), 0.5);
+  assert.equal(effectiveJamGain(50, true), 0);
+  assert.equal(effectiveJamGain(250, false), 1);
+});
+
+test("rejoin may open audio only for unchanged intent, generation, and binding token", () => {
+  const listening = { desiredListening: true, serverJoined: true, pendingLeave: false };
+  assert.equal(shouldOpenAudioAfterRejoin(listening, 7, 7, true), true);
+  assert.equal(shouldOpenAudioAfterRejoin({ ...listening, pendingLeave: true }, 7, 7, true), false);
+  assert.equal(shouldOpenAudioAfterRejoin(listening, 7, 8, true), false);
+  assert.equal(shouldOpenAudioAfterRejoin(listening, 7, 7, false), false);
+  assert.equal(shouldOpenAudioAfterRejoin(listening, null, null, true), false);
+});
+
+test("banner response cannot overwrite state after full polling starts", () => {
+  assert.equal(shouldApplyBannerResponse(false, true), true);
+  assert.equal(shouldApplyBannerResponse(true, true), false);
+  assert.equal(shouldApplyBannerResponse(false, false), false);
+});
+
+test("Jam protocol v2 rejects missing and mismatched server contracts", () => {
+  assert.equal(JAM_PROTOCOL_VERSION, 2);
+
+  const missing = evaluateJamContract({ source_status: "ready" });
+  assert.equal(missing.compatible, false);
+  assert.equal(missing.canStart, false);
+  assert.match(missing.compatibilityMessage, /did not report a protocol/);
+
+  const mismatched = evaluateJamContract({ jam_protocol_version: 1, source_status: "ready" });
+  assert.equal(mismatched.compatible, false);
+  assert.equal(mismatched.actualProtocol, 1);
+  assert.match(mismatched.compatibilityMessage, /viewer v2, server v1/);
+});
+
+test("ready, live, and silent sources are capture-ready for a new Jam", () => {
+  for (const source_status of ["ready", "live", "silent"]) {
+    const contract = evaluateJamContract({
+      jam_protocol_version: 2,
+      spotify_connected: true,
+      active: false,
+      source_status,
+    });
+    assert.equal(contract.compatible, true, source_status);
+    assert.equal(contract.sourceReady, true, source_status);
+    assert.equal(contract.canStart, true, source_status);
+    assert.equal(contract.canControl, false, source_status);
+  }
+
+  assert.equal(evaluateJamContract({
+    jam_protocol_version: 2,
+    source_status: "ready",
+  }).sourceMessage, "Host source is online");
+  assert.equal(evaluateJamContract({
+    jam_protocol_version: 2,
+    source_status: "live",
+  }).sourceMessage, "Host source audio is live");
+});
+
+test("offline and failed sources block start and preserve their diagnostic", () => {
+  const offline = evaluateJamContract({
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    source_status: "offline",
+    source_error: "Configured source disconnected",
+  });
+  assert.equal(offline.canStart, false);
+  assert.equal(offline.sourceTone, "error");
+  assert.equal(offline.sourceMessage, "Configured source disconnected");
+
+  const failed = evaluateJamContract({
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    source_status: "error",
+    source_error: "Spotify capture helper exited",
+  });
+  assert.equal(failed.canStart, false);
+  assert.equal(failed.sourceMessage, "Spotify capture helper exited");
+});
+
+test("a stalled source keeps queue and skip recovery controls but blocks new listeners", () => {
+  const stalled = evaluateJamContract({
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    active: true,
+    source_status: "stalled",
+    source_ready: true,
+  });
+  assert.equal(stalled.sourceReady, false);
+  assert.equal(stalled.canStart, false);
+  assert.equal(stalled.canJoin, false);
+  assert.equal(stalled.canControl, true);
+  assert.equal(stalled.sourceTone, "error");
+  assert.equal(stalled.sourceMessage, "Spotify is playing but Echo audio has stalled");
+
+  const stalledWithDiagnostic = evaluateJamContract({
+    jam_protocol_version: 2,
+    source_status: "stalled",
+    source_error: "Host capture stopped delivering frames",
+  });
+  assert.equal(stalledWithDiagnostic.sourceMessage, "Host capture stopped delivering frames");
+});
+
+test("an active degraded Jam fails closed while its source recovers", () => {
+  const contract = evaluateJamContract({
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    active: true,
+    source_status: "offline",
+  });
+  assert.equal(contract.sourceReady, false);
+  assert.equal(contract.canStart, false);
+  assert.equal(contract.canJoin, false);
+  assert.equal(contract.canControl, false);
+});
+
+test("an active healthy Jam permits join and control actions", () => {
+  const contract = evaluateJamContract({
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    active: true,
+    source_status: "live",
+  });
+  assert.equal(contract.sourceReady, true);
+  assert.equal(contract.canStart, false);
+  assert.equal(contract.canJoin, true);
+  assert.equal(contract.canControl, true);
+});
+
+test("explicit source_ready can confirm a source before its status label catches up", () => {
+  const contract = evaluateJamContract({
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    source_status: "starting",
+    source_ready: true,
+  });
+  assert.equal(contract.sourceReady, true);
+  assert.equal(contract.canStart, true);
+});
 
 test("join success then stream open => connected UI", () => {
   const s = createJamSessionState();
@@ -208,4 +398,29 @@ test("late stream-open callback is ignored once leave is pending", () => {
   assert.equal(s.snapshot().streamConnected, false);
   assert.equal(s.snapshot().pendingLeave, true);
   assert.equal(s.ui().status, "idle");
+});
+
+test("audio scheduler drops backlog instead of overlapping accepted buffers", () => {
+  const normal = planAudioFrame(10.1, 10, 0.02, 0.5);
+  assert.deepEqual(normal, {
+    drop: false,
+    startTime: 10.1,
+    nextPlayTime: 10.12,
+  });
+
+  const late = planAudioFrame(9, 10, 0.02, 0.5);
+  assert.equal(late.drop, false);
+  assert.equal(late.startTime, 10.02);
+  assert.equal(late.nextPlayTime, 10.04);
+
+  const backlog = planAudioFrame(10.75, 10, 0.02, 0.5);
+  assert.equal(backlog.drop, true);
+  assert.equal(backlog.startTime, null);
+  assert.equal(backlog.nextPlayTime, 10.75);
+});
+
+test("listener intent is reset on auto-end or a different Jam generation", () => {
+  assert.equal(shouldResetListeningForServerState({ active: false, generation: 7 }, 7), true);
+  assert.equal(shouldResetListeningForServerState({ active: true, generation: 7 }, 7), false);
+  assert.equal(shouldResetListeningForServerState({ active: true, generation: 8 }, 7), true);
 });

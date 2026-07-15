@@ -5,6 +5,8 @@
 mod audio_capture;
 #[cfg(not(target_os = "windows"))]
 mod audio_capture_stub;
+#[cfg(target_os = "windows")]
+mod jam_source;
 #[cfg(not(target_os = "windows"))]
 use audio_capture_stub as audio_capture;
 
@@ -36,6 +38,7 @@ use audio_output_stub as audio_output;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
@@ -53,6 +56,40 @@ const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 struct Config {
     server: Option<String>,
     force_software_encoder: Option<bool>,
+    #[cfg(target_os = "windows")]
+    #[serde(default)]
+    jam_source: Option<jam_source::JamSourceConfig>,
+}
+
+struct JamSourceHost(AtomicBool);
+
+impl JamSourceHost {
+    fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn is_active(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn set_active(&self, active: bool) {
+        self.0.store(active, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod jam_source_host_role_tests {
+    use super::JamSourceHost;
+
+    #[test]
+    fn source_host_role_is_false_until_agent_start_is_confirmed() {
+        let role = JamSourceHost::new();
+        assert!(!role.is_active());
+        role.set_active(true);
+        assert!(role.is_active());
+        role.set_active(false);
+        assert!(!role.is_active());
+    }
 }
 
 #[derive(Serialize)]
@@ -127,42 +164,67 @@ fn load_config() -> Config {
         .unwrap_or_else(|| PathBuf::from("config.json"));
 
     if config_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            let contents = contents.trim_start_matches('\u{FEFF}');
-            if let Ok(cfg) = serde_json::from_str::<Config>(contents) {
-                let server = cfg
-                    .server
-                    .as_deref()
-                    .unwrap_or(DEFAULT_SERVER)
-                    .trim_end_matches('/')
-                    .to_string();
-                eprintln!("[config] server = {}", server);
-                match cfg.force_software_encoder {
-                    Some(force_software_encoder) => {
-                        eprintln!(
-                            "[config] force_software_encoder = {}",
-                            force_software_encoder
-                        );
+        match std::fs::read_to_string(&config_path) {
+            Ok(contents) => {
+                let contents = contents.trim_start_matches('\u{FEFF}');
+                match serde_json::from_str::<Config>(contents) {
+                    Ok(cfg) => {
+                        let server = cfg
+                            .server
+                            .as_deref()
+                            .unwrap_or(DEFAULT_SERVER)
+                            .trim_end_matches('/')
+                            .to_string();
+                        eprintln!("[config] server = {}", server);
+                        match cfg.force_software_encoder {
+                            Some(force_software_encoder) => {
+                                eprintln!(
+                                    "[config] force_software_encoder = {}",
+                                    force_software_encoder
+                                );
+                            }
+                            None => {
+                                eprintln!("[config] force_software_encoder = <auto>");
+                            }
+                        }
+                        return Config {
+                            server: Some(server),
+                            force_software_encoder: cfg.force_software_encoder,
+                            #[cfg(target_os = "windows")]
+                            jam_source: cfg.jam_source,
+                        };
                     }
-                    None => {
-                        eprintln!("[config] force_software_encoder = <auto>");
+                    Err(error) => {
+                        let message =
+                            format!("[config] invalid {}: {}", config_path.display(), error);
+                        eprintln!("{}", message);
+                        #[cfg(target_os = "windows")]
+                        file_debug_log::append(&message);
                     }
                 }
-                return Config {
-                    server: Some(server),
-                    force_software_encoder: cfg.force_software_encoder,
-                };
+            }
+            Err(error) => {
+                let message = format!(
+                    "[config] could not read {}: {}",
+                    config_path.display(),
+                    error
+                );
+                eprintln!("{}", message);
+                #[cfg(target_os = "windows")]
+                file_debug_log::append(&message);
             }
         }
     }
 
     eprintln!(
-        "[config] no config.json found, using default: {}",
+        "[config] using default server configuration: {}",
         DEFAULT_SERVER
     );
     Config {
         server: Some(DEFAULT_SERVER.to_string()),
         force_software_encoder: None,
+        #[cfg(target_os = "windows")]
+        jam_source: None,
     }
 }
 
@@ -223,6 +285,11 @@ fn get_app_info(server: tauri::State<'_, String>) -> AppInfo {
 #[tauri::command]
 fn get_control_url(server: tauri::State<'_, String>) -> String {
     server.to_string()
+}
+
+#[tauri::command]
+fn is_jam_source_host(role: tauri::State<'_, JamSourceHost>) -> bool {
+    role.is_active()
 }
 
 #[tauri::command]
@@ -597,6 +664,8 @@ fn main() {
     }
 
     let config = load_config();
+    #[cfg(target_os = "windows")]
+    let jam_source_config = config.jam_source.clone();
     let server = config
         .server
         .clone()
@@ -637,7 +706,8 @@ fn main() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(server);
+        .manage(server)
+        .manage(JamSourceHost::new());
 
     // capture_health module is Windows-only (DXGI + WGC capture paths).
     // Gate the state management so macOS builds compile.
@@ -650,6 +720,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_control_url,
+            is_jam_source_host,
             toggle_fullscreen,
             set_always_on_top,
             open_external_url,
@@ -752,6 +823,29 @@ fn main() {
             // Clear WebView2 cache on version upgrade so stale cached content doesn't persist
             clear_cache_on_upgrade(app);
 
+            // The configured Jam source is an app-lifetime native agent. It is
+            // deliberately independent of viewer login/panels and owns a
+            // separate WASAPI handle from screen-share audio.
+            #[cfg(target_os = "windows")]
+            if let Some(source_config) = jam_source_config.clone() {
+                let source_server = app.state::<String>().inner().clone();
+                match jam_source::JamSourceAgent::start(source_server, source_config) {
+                    Ok(agent) => {
+                        app.manage(agent);
+                        app.state::<JamSourceHost>().set_active(true);
+                        eprintln!("[jam-source] native source agent started");
+                        file_debug_log::append("[jam-source] native source agent started");
+                    }
+                    Err(error) => {
+                        eprintln!("[jam-source] source agent disabled: {}", error);
+                        file_debug_log::append(&format!(
+                            "[jam-source] source agent disabled: {}",
+                            error
+                        ));
+                    }
+                }
+            }
+
             // Load viewer from the server so JS/CSS updates are live without reinstalling
             let viewer_url = format!("{}/viewer/", app.state::<String>().inner());
             let main_window = WebviewWindowBuilder::new(
@@ -843,5 +937,16 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("Error while building Echo Chamber")
-        .run(|_app, _event| {});
+        .run(|app, event| {
+            #[cfg(target_os = "windows")]
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Some(agent) = app.try_state::<jam_source::JamSourceAgent>() {
+                    agent.stop();
+                }
+                app.state::<JamSourceHost>().set_active(false);
+            }
+        });
 }

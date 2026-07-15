@@ -1,6 +1,20 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createRoomSwitchState } = require("./room-switch-state.js");
+const { commitConnectedAccessToken, createRoomSwitchState } = require("./room-switch-state.js");
+
+test("room access token is committed only through the post-connect helper", () => {
+  const cache = new Map([
+    ["main", { token: "old-main" }],
+    ["studio", { token: "new-studio" }],
+  ]);
+
+  const committed = commitConnectedAccessToken(cache, "studio", "connected-token");
+
+  assert.equal(committed, "connected-token");
+  assert.equal(cache.has("studio"), false);
+  assert.equal(cache.has("main"), true);
+  assert.throws(() => commitConnectedAccessToken(cache, "studio", ""), /empty room access token/);
+});
 
 test("requestSwitch marks state as in-flight and optimistic", () => {
   const s = createRoomSwitchState({ initialRoomName: "main", cooldownMs: 500 });

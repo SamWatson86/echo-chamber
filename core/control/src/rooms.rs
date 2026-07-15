@@ -1,10 +1,10 @@
-use crate::{AppState, ParticipantEntry, JamState, epoch_days_to_date};
 use crate::auth::*;
 use crate::config::*;
 use crate::jam_bot;
+use crate::{epoch_days_to_date, AppState, JamState, ParticipantEntry};
 
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{Json, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 // ── Structs ──────────────────────────────────────────────────────────
 
@@ -153,25 +153,28 @@ pub(crate) async fn participant_heartbeat(
     headers: HeaderMap,
     Json(payload): Json<TokenRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    ensure_admin(&state, &headers)?;
+    let claims = ensure_livekit_participant(&state, &headers, &payload.identity)?;
+    let identity = claims.sub;
+    let room_id = claims.video.room;
+    let name = claims.name.unwrap_or_else(|| identity.clone());
     let now = now_ts();
     let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = participants.get_mut(&payload.identity) {
+    if let Some(entry) = participants.get_mut(&identity) {
         entry.last_seen = now;
-        entry.room_id = payload.room.clone();
-        if let Some(name) = &payload.name {
-            entry.name = name.clone();
-        }
+        entry.room_id = room_id.clone();
+        entry.name = name.clone();
         if payload.viewer_version.is_some() {
             entry.viewer_version = payload.viewer_version.clone();
         }
     } else {
+        // Presence may have timed out while the browser was throttled. A token
+        // with the still-current binding is authoritative enough to recover it.
         participants.insert(
-            payload.identity.clone(),
+            identity.clone(),
             ParticipantEntry {
-                identity: payload.identity.clone(),
-                name: payload.name.clone().unwrap_or_default(),
-                room_id: payload.room.clone(),
+                identity: identity.clone(),
+                name: name.clone(),
+                room_id: room_id.clone(),
                 last_seen: now,
                 viewer_version: payload.viewer_version.clone(),
             },
@@ -182,28 +185,27 @@ pub(crate) async fn participant_heartbeat(
     // Detect first heartbeat = join event
     {
         let mut ja = state.joined_at.lock().unwrap_or_else(|e| e.into_inner());
-        if !ja.contains_key(&payload.identity) {
-            ja.insert(payload.identity.clone(), now);
+        if !ja.contains_key(&identity) {
+            ja.insert(identity.clone(), now);
             let event = SessionEvent {
                 event_type: "join".to_string(),
-                identity: payload.identity.clone(),
-                name: payload.name.clone().unwrap_or_default(),
-                room_id: payload.room.clone(),
+                identity: identity.clone(),
+                name: name.clone(),
+                room_id: room_id.clone(),
                 timestamp: now,
                 duration_secs: None,
             };
             append_session_event(&state.session_log_dir, &event);
-            info!(
-                "session: {} ({}) joined {}",
-                payload.identity,
-                payload.name.clone().unwrap_or_default(),
-                payload.room
-            );
+            info!("session: {} ({}) joined {}", identity, name, room_id);
         }
     }
 
     // Tell viewer if its version is stale
-    let current_stamp = state.viewer_stamp.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let current_stamp = state
+        .viewer_stamp
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let stale = match &payload.viewer_version {
         Some(v) => *v != current_stamp,
         None => true,
@@ -216,16 +218,20 @@ pub(crate) async fn participant_leave(
     headers: HeaderMap,
     Json(payload): Json<ParticipantLeaveRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    ensure_admin(&state, &headers)?;
+    let claims = ensure_livekit_participant(&state, &headers, &payload.identity)?;
+    let identity = claims.sub;
+    let participant_auth_id = claims
+        .echo_participant_auth_id
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Log leave event
     let now = now_ts();
     {
         let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = participants.get(&payload.identity) {
+        if let Some(entry) = participants.get(&identity) {
             let join_time = {
                 let mut ja = state.joined_at.lock().unwrap_or_else(|e| e.into_inner());
-                ja.remove(&payload.identity)
+                ja.remove(&identity)
             };
             let duration = join_time.map(|jt| now.saturating_sub(jt));
             let event = SessionEvent {
@@ -246,30 +252,53 @@ pub(crate) async fn participant_leave(
     // Also remove client stats
     {
         let mut cs = state.client_stats.lock().unwrap_or_else(|e| e.into_inner());
-        cs.remove(&payload.identity);
+        cs.remove(&identity);
     }
 
-    let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
-    participants.remove(&payload.identity);
-
-    // Also remove from jam listeners
-    let should_auto_end = {
-        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        if jam.active {
-            let base = identity_base(&payload.identity);
-            let before = jam.listeners.len();
-            jam.listeners.retain(|l| identity_base(l) != base);
-            if jam.listeners.len() < before {
-                info!(
-                    "Jam: removed leaving participant {} from listeners",
-                    payload.identity
-                );
-            }
+    // Remove presence and Jam rights only if this exact installation binding is
+    // still current. The shared lock order matches token issuance and cleanup.
+    let auto_end_generation = {
+        let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+        let bindings = state
+            .participant_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if bindings
+            .get(&identity)
+            .map(|binding| binding.auth_id.as_str())
+            != Some(participant_auth_id.as_str())
+        {
+            return Err(StatusCode::UNAUTHORIZED);
         }
-        jam.active && jam.listeners.is_empty()
+        participants.remove(&identity);
+
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if jam.listeners.get(&identity) == Some(&participant_auth_id) {
+            jam.listeners.remove(&identity);
+            info!(
+                "Jam: removed leaving participant {} from listeners",
+                identity
+            );
+        }
+        let remove_audio = jam
+            .audio_connections
+            .get(&identity)
+            .map(|connection| connection.participant_auth_id == participant_auth_id)
+            .unwrap_or(false);
+        if remove_audio {
+            jam.audio_connections.remove(&identity);
+        }
+        (jam.active && jam.listeners.is_empty()).then_some(jam.generation)
     };
-    if should_auto_end {
-        schedule_jam_auto_end(state.jam.clone(), state.jam_bot.clone(), "participant left");
+    if let Some(generation) = auto_end_generation {
+        schedule_jam_auto_end(
+            state.jam.clone(),
+            state.jam_bot.clone(),
+            state.jam_source.clone(),
+            state.jam_lifecycle.clone(),
+            generation,
+            "participant left",
+        );
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -315,7 +344,11 @@ pub(crate) async fn ice_servers(
 
 // ── Admin: kick / mute ───────────────────────────────────────────────
 
-pub(crate) fn livekit_service_token(api_key: &str, api_secret: &str, room: &str) -> Result<String, StatusCode> {
+pub(crate) fn livekit_service_token(
+    api_key: &str,
+    api_secret: &str,
+    room: &str,
+) -> Result<String, StatusCode> {
     #[derive(Serialize)]
     struct ServiceClaims {
         iss: String,
@@ -394,7 +427,11 @@ pub(crate) async fn livekit_list_rooms(state: &AppState) -> Result<Vec<String>, 
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .filter_map(|r| {
+                    r.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -417,7 +454,10 @@ pub(crate) async fn livekit_list_participants(
     let sfu = livekit_sfu_url();
     let resp = state
         .http_client
-        .post(format!("{}/twirp/livekit.RoomService/ListParticipants", sfu))
+        .post(format!(
+            "{}/twirp/livekit.RoomService/ListParticipants",
+            sfu
+        ))
         .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({ "room": room }))
@@ -520,6 +560,24 @@ pub(crate) async fn admin_kick_participant(
     {
         let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
         participants.retain(|_, p| p.identity != identity);
+    }
+    // A kick is explicit revocation, unlike ordinary stale-presence cleanup.
+    let revoked_binding = state
+        .participant_bindings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&identity)
+        .map(|binding| RevokedParticipantBinding {
+            identity: identity.clone(),
+            auth_id: binding.auth_id,
+        });
+    if let Some(binding) = revoked_binding {
+        crate::jam_session::reconcile_revoked_participant_bindings(
+            &state,
+            &[binding],
+            "admin kick",
+        )
+        .await;
     }
 
     info!(
@@ -663,21 +721,26 @@ pub(crate) fn append_session_event(dir: &std::path::Path, event: &SessionEvent) 
 
 // ── Jam auto-end helper (used by participant_leave and cleanup task) ──
 
+fn jam_auto_end_matches(jam: &JamState, generation: u64) -> bool {
+    jam.active && jam.generation == generation && jam.listeners.is_empty()
+}
+
 pub(crate) fn schedule_jam_auto_end(
     jam_state: Arc<Mutex<JamState>>,
     jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
+    jam_source: crate::jam_source::JamSourceRegistry,
+    jam_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    generation: u64,
     reason: &'static str,
 ) {
     tokio::spawn(async move {
         info!("Jam auto-end ({}): no listeners, waiting 30s...", reason);
         tokio::time::sleep(Duration::from_secs(30)).await;
+        let _lifecycle = jam_lifecycle.lock().await;
         let should_stop = {
             let mut jam = jam_state.lock().unwrap_or_else(|e| e.into_inner());
-            if jam.active && jam.listeners.is_empty() {
-                jam.active = false;
-                jam.queue.clear();
-                jam.listeners.clear();
-                jam.now_playing = None;
+            if jam_auto_end_matches(&jam, generation) {
+                crate::jam_session::clear_active_jam_state(&mut jam);
                 info!("Jam auto-ended ({}): no listeners for 30s", reason);
                 true
             } else {
@@ -689,9 +752,40 @@ pub(crate) fn schedule_jam_auto_end(
             }
         };
         if should_stop {
-            if let Some(bot) = jam_bot.lock().await.take() {
+            let bot = {
+                let mut guard = jam_bot.lock().await;
+                if guard.as_ref().map(|bot| bot.generation()) == Some(generation) {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(bot) = bot {
                 bot.stop().await;
+            } else {
+                jam_source.stop(generation).await;
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jam_auto_end_is_fenced_to_the_scheduled_generation() {
+        let mut jam = JamState {
+            active: true,
+            generation: 8,
+            ..JamState::default()
+        };
+
+        assert!(jam_auto_end_matches(&jam, 8));
+        assert!(!jam_auto_end_matches(&jam, 7));
+
+        jam.listeners
+            .insert("sam-7475".to_string(), "binding-a".to_string());
+        assert!(!jam_auto_end_matches(&jam, 8));
+    }
 }

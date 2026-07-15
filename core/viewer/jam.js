@@ -19,17 +19,246 @@ var _jamAudioCtx = null;       // AudioContext for playback
 var _jamGainNode = null;       // GainNode for volume control
 var _jamNextPlayTime = 0;      // next scheduled buffer start time
 var _jamReconnectTimer = null;
+var _jamRejoinPromise = null;
+var JAM_PROTOCOL_VERSION = 2;
+var _jamContract = null;
+var _jamListeningGeneration = null;
+var _jamIsSourceHost = null;
+var _jamSourceHostPromise = null;
+var _jamStateRequestGate = (window.EchoJamSessionState && window.EchoJamSessionState.createLatestRequestGate)
+  ? window.EchoJamSessionState.createLatestRequestGate()
+  : (function() {
+      var latestRequest = 0;
+      return {
+        begin: function() { latestRequest += 1; return latestRequest; },
+        isCurrent: function(request) { return request === latestRequest; }
+      };
+    })();
 var _jamSessionState = (window.EchoJamSessionState && window.EchoJamSessionState.createJamSessionState)
   ? window.EchoJamSessionState.createJamSessionState({ reconnectBaseMs: 500, reconnectMaxMs: 8000 })
   : null;
 
+function jamActorHeaders(participantToken) {
+  return {
+    "Authorization": "Bearer " + adminToken,
+    "X-Echo-Participant-Token": participantToken === undefined ? currentAccessToken : participantToken,
+    "Content-Type": "application/json"
+  };
+}
+
+async function detectJamSourceHost() {
+  if (_jamIsSourceHost !== null) return _jamIsSourceHost;
+  if (_jamSourceHostPromise) return _jamSourceHostPromise;
+  if (typeof tauriInvoke !== "function" || typeof hasTauriIPC !== "function" || !hasTauriIPC()) {
+    _jamIsSourceHost = false;
+    return false;
+  }
+  _jamSourceHostPromise = tauriInvoke("is_jam_source_host")
+    .then(function(isSourceHost) {
+      _jamIsSourceHost = isSourceHost === true;
+      return _jamIsSourceHost;
+    })
+    .catch(function(e) {
+      _jamIsSourceHost = false;
+      debugLog("[jam] could not determine native Jam source role: " + e);
+      return false;
+    })
+    .finally(function() { _jamSourceHostPromise = null; });
+  return _jamSourceHostPromise;
+}
+
+function muteSourceHostRelayIfNeeded(listenerJoined) {
+  var shouldMute = window.EchoJamSessionState &&
+    typeof window.EchoJamSessionState.shouldMuteLocalRelay === "function"
+    ? window.EchoJamSessionState.shouldMuteLocalRelay(_jamIsSourceHost, listenerJoined)
+    : _jamIsSourceHost === true && listenerJoined !== false;
+  if (!shouldMute) return;
+
+  _jamVolume = 0;
+  var volumeInput = document.getElementById("jam-volume-slider");
+  var volumeLabel = document.getElementById("jam-volume-value");
+  if (volumeInput) volumeInput.value = "0";
+  if (volumeLabel) volumeLabel.textContent = "0%";
+  if (_jamGainNode) _jamGainNode.gain.value = 0;
+  showJamToast("Local Jam relay muted - Spotify is already playing on this PC");
+}
+
+function evaluateJamServerContract(state) {
+  if (window.EchoJamSessionState && typeof window.EchoJamSessionState.evaluateJamContract === "function") {
+    return window.EchoJamSessionState.evaluateJamContract(state);
+  }
+
+  // Fail closed when the state helper is missing or stale. A mixed viewer bundle
+  // must never attempt a Jam against an API contract it cannot validate.
+  return {
+    expectedProtocol: JAM_PROTOCOL_VERSION,
+    actualProtocol: null,
+    compatible: false,
+    compatibilityMessage: "Jam viewer assets are incomplete — reopen Echo after the server update",
+    active: false,
+    spotifyConnected: false,
+    sourceStatus: "unknown",
+    sourceReady: false,
+    sourceTone: "error",
+    sourceMessage: "Host source status is unavailable",
+    sourceError: "",
+    sourceLastFrameMs: null,
+    sourcePeak: null,
+    canStart: false,
+    canJoin: false,
+    canControl: false,
+    canConfigure: false,
+  };
+}
+
+function unavailableJamContract(message) {
+  var contract = evaluateJamServerContract(null);
+  if (window.EchoJamSessionState && typeof window.EchoJamSessionState.evaluateJamContract === "function") {
+    contract.compatibilityMessage = message;
+  }
+  return contract;
+}
+
+function ensureJamSourceStatusElement() {
+  var el = document.getElementById("jam-source-status");
+  if (el) return el;
+  var row = document.querySelector(".jam-spotify-row");
+  if (!row || !row.parentNode) return null;
+  el = document.createElement("div");
+  el.id = "jam-source-status";
+  el.className = "jam-source-status waiting";
+  el.setAttribute("role", "status");
+  el.style.cssText = "margin:6px 0 10px;font-size:12px;color:var(--muted,#94a3b8);";
+  row.parentNode.insertBefore(el, row.nextSibling);
+  return el;
+}
+
+function renderJamContractStatus() {
+  var contract = _jamContract || evaluateJamServerContract(null);
+  var el = ensureJamSourceStatusElement();
+  if (!el) return;
+
+  var message = contract.compatible ? contract.sourceMessage : contract.compatibilityMessage;
+  var tone = contract.compatible ? contract.sourceTone : "error";
+  el.textContent = message;
+  el.className = "jam-source-status " + tone;
+  el.style.color = tone === "error"
+    ? "var(--danger,#f87171)"
+    : tone === "ready"
+      ? "var(--success,#4ade80)"
+      : tone === "warning"
+        ? "var(--warning,#fbbf24)"
+        : "var(--muted,#94a3b8)";
+
+  var details = [];
+  if (contract.sourceLastFrameMs !== null) details.push("last frame ms=" + contract.sourceLastFrameMs);
+  if (contract.sourcePeak !== null) details.push("peak=" + contract.sourcePeak.toFixed(6));
+  el.title = details.join(" · ");
+}
+
+function jamActionAllowed(action) {
+  var contract = _jamContract || evaluateJamServerContract(null);
+  if (!contract.compatible) {
+    showJamError(contract.compatibilityMessage);
+    return false;
+  }
+  if (action === "configure") return contract.canConfigure !== false;
+  if (action === "start") {
+    if (!contract.canStart) {
+      showJamError(contract.spotifyConnected ? contract.sourceMessage : "Connect Spotify before starting a Jam");
+      return false;
+    }
+    return true;
+  }
+  if (action === "join") {
+    if (!contract.canJoin) {
+      showJamError(contract.active ? contract.sourceMessage : "No active Jam is available to join");
+      return false;
+    }
+    return true;
+  }
+  return contract.canControl;
+}
+
+function applyJamContractToControls() {
+  var contract = _jamContract || evaluateJamServerContract(null);
+  var connectBtn = document.getElementById("jam-connect-spotify");
+  var startBtn = document.getElementById("jam-start-btn");
+  var skipBtn = document.getElementById("jam-skip-btn");
+  var searchInput = document.getElementById("jam-search-input");
+  var searchSection = document.getElementById("jam-search-section");
+  var queueSection = document.getElementById("jam-queue-section");
+
+  if (connectBtn) connectBtn.disabled = !contract.compatible;
+  if (startBtn) {
+    startBtn.disabled = !contract.canStart;
+    startBtn.title = contract.canStart
+      ? "Start Jam"
+      : !contract.compatible
+        ? contract.compatibilityMessage
+        : !contract.spotifyConnected
+          ? "Connect Spotify first"
+          : contract.sourceMessage;
+  }
+  if (skipBtn) skipBtn.disabled = !contract.canControl || !contract.active;
+  if (searchInput) searchInput.disabled = !contract.canControl;
+  document.querySelectorAll(".jam-result-add").forEach(function(button) {
+    button.disabled = !contract.canControl;
+  });
+  if (!contract.canControl) {
+    if (searchSection) searchSection.style.display = "none";
+    if (queueSection) queueSection.style.display = "none";
+  }
+
+  syncJamButtonsFromState();
+}
+
+function stopJamForCompatibilityFailure() {
+  if (!_jamContract || _jamContract.compatible) return;
+  resetLocalJamListening();
+}
+
+function resetLocalJamListening() {
+  clearJamReconnectTimer();
+  if (_jamSessionState && _jamSessionState.leaveSucceeded) {
+    _jamSessionState.leaveSucceeded();
+  }
+  _jamListeningGeneration = null;
+  stopJamAudioStream();
+}
+
+function reconcileJamListeningWithServer(nextState) {
+  if (!_jamSessionState || !_jamSessionState.snapshot) return;
+  var listener = _jamSessionState.snapshot();
+  var hasListeningState = listener.desiredListening || listener.serverJoined ||
+    listener.streamConnected || listener.streamConnecting || listener.pendingLeave;
+  if (!hasListeningState) return;
+
+  var shouldReset = window.EchoJamSessionState &&
+    typeof window.EchoJamSessionState.shouldResetListeningForServerState === "function"
+    ? window.EchoJamSessionState.shouldResetListeningForServerState(nextState, _jamListeningGeneration)
+    : !nextState || nextState.active !== true ||
+      (_jamListeningGeneration !== null && Number(nextState.generation) !== _jamListeningGeneration);
+  if (shouldReset) {
+    resetLocalJamListening();
+  }
+}
+
 function syncJamButtonsFromState() {
   if (!_jamSessionState || !_jamSessionState.ui) return;
   var ui = _jamSessionState.ui();
+  var contract = _jamContract || evaluateJamServerContract(null);
   var joinBtn = document.getElementById("jam-join-btn");
   var leaveBtn = document.getElementById("jam-leave-btn");
-  if (joinBtn) joinBtn.style.display = ui.joinVisible ? "" : "none";
-  if (leaveBtn) leaveBtn.style.display = ui.leaveVisible ? "" : "none";
+  if (joinBtn) {
+    joinBtn.style.display = contract.active && ui.joinVisible ? "" : "none";
+    joinBtn.disabled = !contract.canJoin;
+    joinBtn.title = contract.compatible ? contract.sourceMessage : contract.compatibilityMessage;
+  }
+  if (leaveBtn) {
+    leaveBtn.style.display = contract.active && ui.leaveVisible ? "" : "none";
+    leaveBtn.disabled = !contract.compatible;
+  }
 }
 
 function clearJamReconnectTimer() {
@@ -41,20 +270,92 @@ function clearJamReconnectTimer() {
 
 function scheduleJamReconnect(delayMs) {
   clearJamReconnectTimer();
-  _jamReconnectTimer = setTimeout(function() {
+  _jamReconnectTimer = setTimeout(async function() {
     _jamReconnectTimer = null;
-    if (!_jamSessionState || !_jamSessionState.reconnectAttemptStarted) {
-      startJamAudioStream();
-      return;
-    }
+    if (!_jamSessionState || !_jamSessionState.reconnectAttemptStarted || _jamRejoinPromise) return;
     var step = _jamSessionState.reconnectAttemptStarted();
     if (!step.shouldConnect) {
       syncJamButtonsFromState();
       return;
     }
     syncJamButtonsFromState();
-    startJamAudioStream();
+
+    var rejoinPromise = restoreJamMembershipForReconnect();
+    _jamRejoinPromise = rejoinPromise;
+    try {
+      if (await rejoinPromise) {
+        if (_jamContract && _jamContract.canJoin) {
+          startJamAudioStream();
+        } else if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+          var notReady = _jamSessionState.streamClosedTransient("jam-contract-not-ready");
+          syncJamButtonsFromState();
+          if (notReady.shouldReconnect && (!_jamContract || _jamContract.compatible)) {
+            scheduleJamReconnect(notReady.delayMs);
+          }
+        }
+      } else if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+        var superseded = _jamSessionState.streamClosedTransient("membership-refresh-superseded");
+        syncJamButtonsFromState();
+        if (superseded.shouldReconnect && (!_jamContract || _jamContract.compatible)) {
+          scheduleJamReconnect(superseded.delayMs);
+        }
+      }
+    } catch (e) {
+      debugLog("[jam] listener membership refresh failed: " + (e && e.message ? e.message : "request failed"));
+      if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+        var failure = _jamSessionState.streamClosedTransient("membership-refresh-failed");
+        syncJamButtonsFromState();
+        if (failure.shouldReconnect && (!_jamContract || _jamContract.compatible)) {
+          scheduleJamReconnect(failure.delayMs);
+        }
+      }
+    } finally {
+      if (_jamRejoinPromise === rejoinPromise) _jamRejoinPromise = null;
+    }
   }, Math.max(0, delayMs || 0));
+}
+
+async function restoreJamMembershipForReconnect() {
+  var generation = _jamListeningGeneration;
+  var participantToken = currentAccessToken;
+  var identity = room && room.localParticipant ? room.localParticipant.identity : "";
+  var before = _jamSessionState && _jamSessionState.snapshot ? _jamSessionState.snapshot() : null;
+  if (!before || !before.desiredListening || !before.serverJoined || before.pendingLeave) return false;
+
+  var resp = await fetch(apiUrl("/api/jam/join"), {
+    method: "POST",
+    headers: jamActorHeaders(participantToken),
+    body: JSON.stringify({ identity: identity, generation: generation })
+  });
+  if (!resp.ok) throw new Error("join-status-" + resp.status);
+
+  var after = _jamSessionState && _jamSessionState.snapshot ? _jamSessionState.snapshot() : null;
+  var shouldOpen = window.EchoJamSessionState &&
+    typeof window.EchoJamSessionState.shouldOpenAudioAfterRejoin === "function"
+    ? window.EchoJamSessionState.shouldOpenAudioAfterRejoin(
+        after,
+        generation,
+        _jamListeningGeneration,
+        participantToken === currentAccessToken
+      )
+    : !!after && after.desiredListening && after.serverJoined && !after.pendingLeave &&
+      Number(generation) === Number(_jamListeningGeneration) && participantToken === currentAccessToken;
+  if (shouldOpen && _jamSessionState.joinAccepted) {
+    _jamSessionState.joinAccepted();
+    syncJamButtonsFromState();
+  }
+  return shouldOpen;
+}
+
+function startPendingJamAudioIfNeeded() {
+  if (_jamAudioWs || _jamReconnectTimer || _jamRejoinPromise || !_jamContract || !_jamContract.canJoin) return;
+  if (!_jamSessionState || !_jamSessionState.snapshot) return;
+  var listener = _jamSessionState.snapshot();
+  // Only the first accepted join may open directly. Every transport reconnect
+  // must refresh server membership immediately before opening its socket.
+  if (listener.reconnectAttempt > 0) return;
+  if (!listener.desiredListening || !listener.serverJoined || !listener.streamConnecting || listener.pendingLeave) return;
+  startJamAudioStream();
 }
 
 // === HTML Escape ===
@@ -101,6 +402,7 @@ async function generateCodeChallenge(verifier) {
 
 async function connectSpotify() {
   try {
+    if (!jamActionAllowed("configure")) return;
     showJamStatus("Connecting to Spotify...");
 
     // Generate PKCE state + verifier
@@ -198,11 +500,13 @@ async function connectSpotify() {
 
 async function startJam() {
   try {
+    if (!jamActionAllowed("start")) return;
+    await detectJamSourceHost();
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
-    debugLog("[jam] startJam called by " + identity);
+    debugLog("[jam] startJam requested");
     var resp = await fetch(apiUrl("/api/jam/start"), {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
+      headers: jamActorHeaders(),
       body: JSON.stringify({ identity: identity })
     });
 
@@ -210,6 +514,19 @@ async function startJam() {
       var errText = await resp.text();
       showJamError("Start failed: " + errText);
       return;
+    }
+
+    var startData = await resp.json().catch(function() { return {}; });
+    muteSourceHostRelayIfNeeded(startData.listener_joined);
+
+    // The server auto-joins the starter unless it explicitly says otherwise.
+    // Mirror that transition before opening audio so host reconnect/backoff works.
+    if (startData.listener_joined !== false && _jamSessionState) {
+      var startGeneration = Number(startData.generation);
+      _jamListeningGeneration = Number.isFinite(startGeneration) ? startGeneration : null;
+      if (_jamSessionState.requestJoin) _jamSessionState.requestJoin();
+      if (_jamSessionState.joinAccepted) _jamSessionState.joinAccepted();
+      syncJamButtonsFromState();
     }
 
     // Broadcast jam-started via LiveKit data channel
@@ -222,9 +539,11 @@ async function startJam() {
     }
 
     // Host is auto-joined as listener — start audio stream
-    // Small delay to let the bot start capturing
-    setTimeout(function() { startJamAudioStream(); }, 2000);
-    fetchJamState();
+    // The start endpoint does not return the full v2 state contract. Refresh it
+    // before opening audio so the connection never uses stale inactive state.
+    // If this refresh fails, a later successful poll resumes the pending stream.
+    await fetchJamState();
+    startPendingJamAudioIfNeeded();
   } catch (e) {
     showJamError("Start jam error: " + e.message);
     debugLog("[jam] startJam error: " + e);
@@ -233,11 +552,12 @@ async function startJam() {
 
 async function stopJam() {
   try {
+    if (!jamActionAllowed("control")) return;
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
     var stopResp = await fetch(apiUrl("/api/jam/stop"), {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ identity: identity })
+      headers: jamActorHeaders(),
+      body: JSON.stringify({ identity: identity, generation: _jamState && _jamState.generation })
     });
     if (!stopResp.ok) {
       if (stopResp.status === 403) {
@@ -248,6 +568,11 @@ async function stopJam() {
       return;
     }
 
+    if (_jamSessionState && _jamSessionState.leaveSucceeded) {
+      _jamSessionState.leaveSucceeded();
+      syncJamButtonsFromState();
+    }
+    _jamListeningGeneration = null;
     // Stop audio stream
     stopJamAudioStream();
 
@@ -268,10 +593,16 @@ async function stopJam() {
 
 async function skipTrack() {
   try {
-    await fetch(apiUrl("/api/jam/skip"), {
+    if (!jamActionAllowed("control")) return;
+    var resp = await fetch(apiUrl("/api/jam/skip"), {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken }
+      headers: jamActorHeaders(),
+      body: JSON.stringify({ generation: _jamState && _jamState.generation })
     });
+    if (!resp.ok) {
+      showJamError("Skip failed (status " + resp.status + ")");
+      return;
+    }
     fetchJamState();
   } catch (e) {
     showJamError("Skip failed: " + e.message);
@@ -293,6 +624,10 @@ function onSearchInput(e) {
 
 async function searchSpotify(query) {
   if (!query || query.length < 2) {
+    renderSearchResults([]);
+    return;
+  }
+  if (!jamActionAllowed("control")) {
     renderSearchResults([]);
     return;
   }
@@ -330,7 +665,9 @@ function renderSearchResults(tracks) {
         '<div class="jam-result-artist">' + escapeHtml(t.artist) + ' \u00b7 ' + mins + ':' + String(secs).padStart(2, '0') + '</div>' +
       '</div>' +
       '<button class="jam-result-add" title="Add to queue">+</button>';
-    item.querySelector(".jam-result-add").onclick = function() { addToQueue(t); };
+    var addBtn = item.querySelector(".jam-result-add");
+    addBtn.onclick = function() { addToQueue(t); };
+    addBtn.disabled = !_jamContract || !_jamContract.canControl;
     container.appendChild(item);
   });
 }
@@ -341,20 +678,24 @@ function renderSearchResults(tracks) {
 
 async function addToQueue(track) {
   try {
-    var identity = room && room.localParticipant ? room.localParticipant.identity : "";
-    var name = room && room.localParticipant ? (room.localParticipant.name || identity) : "";
-    await fetch(apiUrl("/api/jam/queue"), {
+    if (!jamActionAllowed("control")) return;
+    var resp = await fetch(apiUrl("/api/jam/queue"), {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
+      headers: jamActorHeaders(),
       body: JSON.stringify({
         spotify_uri: track.spotify_uri,
         name: track.name,
         artist: track.artist,
         album_art_url: track.album_art_url,
         duration_ms: track.duration_ms,
-        added_by: name
+        generation: _jamState && _jamState.generation
       })
     });
+    if (!resp.ok) {
+      var errText = await resp.text().catch(function() { return ""; });
+      showJamError("Add to queue failed" + (errText ? ": " + errText : " (status " + resp.status + ")"));
+      return;
+    }
     fetchJamState();
   } catch (e) {
     showJamError("Add to queue failed: " + e.message);
@@ -368,6 +709,8 @@ async function addToQueue(track) {
 
 async function joinJam() {
   try {
+    if (!jamActionAllowed("join")) return;
+    await detectJamSourceHost();
     if (_jamSessionState && _jamSessionState.requestJoin) {
       _jamSessionState.requestJoin();
       syncJamButtonsFromState();
@@ -375,8 +718,8 @@ async function joinJam() {
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
     var resp = await fetch(apiUrl("/api/jam/join"), {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ identity: identity })
+      headers: jamActorHeaders(),
+      body: JSON.stringify({ identity: identity, generation: _jamState && _jamState.generation })
     });
     if (!resp.ok) {
       if (_jamSessionState && _jamSessionState.joinRejected) {
@@ -388,9 +731,14 @@ async function joinJam() {
       return;
     }
     if (_jamSessionState && _jamSessionState.joinAccepted) {
+      var joinedGeneration = Number(_jamState && _jamState.generation);
+      _jamListeningGeneration = Number.isFinite(joinedGeneration) ? joinedGeneration : null;
       _jamSessionState.joinAccepted();
       syncJamButtonsFromState();
     }
+    // The configured source host already hears Spotify directly. This applies
+    // both when it starts the Jam and when it joins a Jam started elsewhere.
+    muteSourceHostRelayIfNeeded(true);
     // Start receiving audio via WebSocket
     startJamAudioStream();
     fetchJamState();
@@ -410,11 +758,20 @@ async function leaveJam() {
       _jamSessionState.requestLeave();
       syncJamButtonsFromState();
     }
+    clearJamReconnectTimer();
+    // Serialize an in-flight idempotent rejoin ahead of leave. Otherwise a slow
+    // rejoin response could recreate server membership after leave succeeded.
+    if (_jamRejoinPromise) await _jamRejoinPromise.catch(function() {});
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
     var resp = await fetch(apiUrl("/api/jam/leave"), {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ identity: identity })
+      headers: jamActorHeaders(),
+      body: JSON.stringify({
+        identity: identity,
+        generation: _jamListeningGeneration === null
+          ? (_jamState && _jamState.generation)
+          : _jamListeningGeneration
+      })
     });
     if (!resp.ok) {
       if (_jamSessionState && _jamSessionState.leaveFailed) {
@@ -429,6 +786,7 @@ async function leaveJam() {
       _jamSessionState.leaveSucceeded();
       syncJamButtonsFromState();
     }
+    _jamListeningGeneration = null;
     clearJamReconnectTimer();
     // Intentionally stop stream after leave API success so a transient server-side
     // leave failure does not silently drop local jam audio while still joined.
@@ -450,21 +808,43 @@ async function leaveJam() {
 // ──────────────────────────────────────────
 
 async function fetchJamState() {
+  var requestId = _jamStateRequestGate.begin();
   try {
     var resp = await fetch(apiUrl("/api/jam/state"), {
       headers: { "Authorization": "Bearer " + adminToken }
     });
-    if (!resp.ok) return;
-    _jamState = await resp.json();
+    if (!_jamStateRequestGate.isCurrent(requestId)) return;
+    if (!resp.ok) {
+      _jamState = null;
+      _jamContract = unavailableJamContract("Jam status is unavailable — controls are paused");
+      renderJamContractStatus();
+      applyJamContractToControls();
+      return;
+    }
+    var nextState = await resp.json();
+    if (!_jamStateRequestGate.isCurrent(requestId)) return;
+    reconcileJamListeningWithServer(nextState);
+    _jamState = nextState;
+    _jamContract = evaluateJamServerContract(_jamState);
+    renderJamContractStatus();
+    applyJamContractToControls();
+    stopJamForCompatibilityFailure();
     renderJamPanel();
     updateNowPlayingBanner(_jamState);
+    startPendingJamAudioIfNeeded();
   } catch (e) {
+    if (!_jamStateRequestGate.isCurrent(requestId)) return;
+    _jamState = null;
+    _jamContract = unavailableJamContract("Jam status is unavailable — controls are paused");
+    renderJamContractStatus();
+    applyJamContractToControls();
     debugLog("[jam] state poll error: " + e);
   }
 }
 
 function renderJamPanel() {
   if (!_jamState) return;
+  var contract = _jamContract || evaluateJamServerContract(_jamState);
   var identity = room && room.localParticipant ? room.localParticipant.identity : "";
 
   // Spotify status
@@ -476,7 +856,10 @@ function renderJamPanel() {
 
   // Connect button visibility
   var connectBtn = document.getElementById("jam-connect-spotify");
-  if (connectBtn) connectBtn.style.display = _jamState.spotify_connected ? "none" : "";
+  if (connectBtn) {
+    connectBtn.style.display = _jamState.spotify_connected ? "none" : "";
+    connectBtn.disabled = !contract.compatible;
+  }
 
   // Host controls visibility (show if spotify is connected)
   var hostControls = document.getElementById("jam-host-controls");
@@ -491,10 +874,16 @@ function renderJamPanel() {
   var startBtn = document.getElementById("jam-start-btn");
   var stopBtn = document.getElementById("jam-stop-btn");
   var skipBtn = document.getElementById("jam-skip-btn");
-  if (startBtn) startBtn.style.display = _jamState.active ? "none" : "";
+  if (startBtn) {
+    startBtn.style.display = _jamState.active ? "none" : "";
+    startBtn.disabled = !contract.canStart;
+  }
   // End Jam is hidden — jam auto-ends when all listeners leave (30s timeout)
   if (stopBtn) stopBtn.style.display = "none";
-  if (skipBtn) skipBtn.style.display = _jamState.active ? "" : "none";
+  if (skipBtn) {
+    skipBtn.style.display = _jamState.active ? "" : "none";
+    skipBtn.disabled = !contract.canControl;
+  }
 
   // Now Playing
   renderNowPlaying(_jamState.now_playing);
@@ -519,19 +908,25 @@ function renderJamPanel() {
     // response callbacks (joinJam/leaveJam) and stream lifecycle handlers.
     syncJamButtonsFromState();
   } else {
-    if (joinBtn) joinBtn.style.display = (!isListening && _jamState.active) ? "" : "none";
+    if (joinBtn) {
+      joinBtn.style.display = (!isListening && _jamState.active) ? "" : "none";
+      joinBtn.disabled = !contract.canJoin;
+    }
     if (leaveBtn) leaveBtn.style.display = (isListening && _jamState.active) ? "" : "none";
   }
 
   // Search + queue sections visible only when spotify connected
   var searchSection = document.getElementById("jam-search-section");
   var queueSection = document.getElementById("jam-queue-section");
-  if (searchSection) searchSection.style.display = _jamState.spotify_connected ? "" : "none";
-  if (queueSection) queueSection.style.display = _jamState.spotify_connected ? "" : "none";
+  if (searchSection) searchSection.style.display = (_jamState.spotify_connected && contract.canControl) ? "" : "none";
+  if (queueSection) queueSection.style.display = (_jamState.spotify_connected && contract.canControl) ? "" : "none";
 
   // Jam actions visible only when jam is active
   var actionsSection = document.getElementById("jam-actions-section");
-  if (actionsSection) actionsSection.style.display = _jamState.active ? "" : "none";
+  if (actionsSection) actionsSection.style.display = (_jamState.active && contract.compatible) ? "" : "none";
+
+  renderJamContractStatus();
+  applyJamContractToControls();
 }
 
 function renderNowPlaying(np) {
@@ -570,7 +965,7 @@ function renderQueue(queue) {
     return;
   }
   container.innerHTML = "";
-  queue.forEach(function(t, i) {
+  queue.forEach(function(t) {
     var item = document.createElement("div");
     item.className = "jam-queue-item";
     item.innerHTML =
@@ -578,25 +973,9 @@ function renderQueue(queue) {
       '<div class="jam-result-info">' +
         '<div class="jam-result-name">' + escapeHtml(t.name) + '</div>' +
         '<div class="jam-result-artist">' + escapeHtml(t.artist) + ' \u00b7 Added by ' + escapeHtml(t.added_by) + '</div>' +
-      '</div>' +
-      '<button class="jam-queue-remove" data-index="' + i + '" title="Remove from queue">\u2715</button>';
-    item.querySelector(".jam-queue-remove").addEventListener("click", function() {
-      var idx = parseInt(this.getAttribute("data-index"), 10);
-      removeFromQueue(idx);
-    });
+      '</div>';
     container.appendChild(item);
   });
-}
-
-function removeFromQueue(index) {
-  fetch(apiUrl("/api/jam/queue-remove"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + adminToken },
-    body: JSON.stringify({ index: index }),
-  }).then(function(r) {
-    if (r.ok) { fetchJamState(); }
-    else { debugLog("[jam] remove failed: " + r.status); }
-  }).catch(function(e) { debugLog("[jam] remove error: " + e); });
 }
 
 // ──────────────────────────────────────────
@@ -605,7 +984,10 @@ function removeFromQueue(index) {
 
 function startJamAudioStream() {
   if (_jamAudioWs) return; // already connected
-  _jamStoppingAudio = false;
+  if (!_jamContract || !_jamContract.canJoin) {
+    debugLog("[jam] blocked audio WebSocket: Jam protocol/source state is not ready");
+    return;
+  }
 
   try {
     // Build WebSocket URL from current API base (wss for https, ws for http)
@@ -620,17 +1002,39 @@ function startJamAudioStream() {
       wsUrl = proto + "//" + window.location.host + base;
     }
 
-    // WebSocket API doesn't support custom headers, so pass token as query param
-    var sep = wsUrl.indexOf("?") >= 0 ? "&" : "?";
-    wsUrl += sep + "token=" + encodeURIComponent(adminToken);
+    // Keep credentials and identity out of URLs, browser history, proxy access
+    // logs, and debug output. Authentication is the first WebSocket text frame.
+    if (!window.EchoJamSessionState ||
+        typeof window.EchoJamSessionState.buildJamAudioSocketQuery !== "function" ||
+        typeof window.EchoJamSessionState.parseJamAudioControlMessage !== "function") {
+      throw new Error("Jam audio protocol helper is unavailable");
+    }
+    var socketQuery = window.EchoJamSessionState.buildJamAudioSocketQuery(
+      JAM_PROTOCOL_VERSION,
+      _jamListeningGeneration
+    );
+    var socketUrl = new URL(wsUrl);
+    socketUrl.search = socketQuery;
+    wsUrl = socketUrl.toString();
+    var participantToken = currentAccessToken;
+    if (!participantToken) throw new Error("Jam participant token is unavailable");
 
-    debugLog("[jam] connecting audio WebSocket: " + wsUrl.split("?")[0] + "?token=...");
+    debugLog(
+      "[jam] opening audio WebSocket protocol=" + JAM_PROTOCOL_VERSION +
+      " generation=" + _jamListeningGeneration
+    );
 
     // Create AudioContext for playback (48 kHz stereo)
     if (!_jamAudioCtx) {
       _jamAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       _jamGainNode = _jamAudioCtx.createGain();
-      _jamGainNode.gain.value = _jamVolume / 100;
+      _jamGainNode.gain.value = window.EchoJamSessionState &&
+        typeof window.EchoJamSessionState.effectiveJamGain === "function"
+        ? window.EchoJamSessionState.effectiveJamGain(
+            _jamVolume,
+            typeof roomAudioMuted !== "undefined" && roomAudioMuted
+          )
+        : ((typeof roomAudioMuted !== "undefined" && roomAudioMuted) ? 0 : (_jamVolume / 100));
 
       var speakerSelect = document.getElementById("speaker-select");
       if (speakerSelect && speakerSelect.value && typeof _jamAudioCtx.setSinkId === "function") {
@@ -649,18 +1053,80 @@ function startJamAudioStream() {
     var ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
     _jamAudioWs = ws;
+    var terminalHandled = false;
+    var protocolReady = false;
+    var readyTimer = null;
+
+    function handleTerminal(reason) {
+      if (terminalHandled) return;
+      terminalHandled = true;
+      if (readyTimer) {
+        clearTimeout(readyTimer);
+        readyTimer = null;
+      }
+      if (_jamAudioWs === ws) _jamAudioWs = null;
+      if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+        var closeState = _jamSessionState.streamClosedTransient(reason);
+        syncJamButtonsFromState();
+        if (closeState.shouldReconnect && (!_jamContract || _jamContract.compatible)) {
+          scheduleJamReconnect(closeState.delayMs);
+        }
+      }
+    }
 
     ws.onopen = function() {
-      debugLog("[jam] audio WebSocket connected");
-      if (_jamSessionState && _jamSessionState.streamOpen) {
-        _jamSessionState.streamOpen();
-        syncJamButtonsFromState();
+      if (_jamAudioWs !== ws) return;
+      try {
+        if (participantToken !== currentAccessToken) {
+          handleTerminal("ws-participant-token-superseded");
+          try { ws.close(); } catch (closeError) {}
+          return;
+        }
+        ws.send(JSON.stringify({ type: "auth", token: currentAccessToken }));
+        debugLog("[jam] audio WebSocket open; authentication sent");
+        readyTimer = setTimeout(function() {
+          if (protocolReady || _jamAudioWs !== ws) return;
+          debugLog("[jam] audio WebSocket ready handshake timed out");
+          handleTerminal("ws-ready-timeout");
+          try { ws.close(); } catch (closeError) {}
+        }, 7000);
+      } catch (e) {
+        handleTerminal("ws-auth-send-failed");
+        try { ws.close(); } catch (closeError) {}
       }
-      clearJamReconnectTimer();
     };
 
     ws.onmessage = function(e) {
+      if (_jamAudioWs !== ws || !_jamAudioCtx) return;
+      if (typeof e.data === "string") {
+        var control = window.EchoJamSessionState.parseJamAudioControlMessage(e.data);
+        if (control.type === "ready") {
+          if (protocolReady) return;
+          protocolReady = true;
+          if (readyTimer) {
+            clearTimeout(readyTimer);
+            readyTimer = null;
+          }
+          debugLog("[jam] audio WebSocket authenticated and ready");
+          if (_jamSessionState && _jamSessionState.streamOpen) {
+            _jamSessionState.streamOpen();
+            syncJamButtonsFromState();
+          }
+          clearJamReconnectTimer();
+          return;
+        }
+        debugLog("[jam] audio WebSocket rejected its control handshake");
+        handleTerminal("ws-auth-rejected");
+        try { ws.close(); } catch (closeError) {}
+        return;
+      }
       if (!(e.data instanceof ArrayBuffer)) return;
+      if (!protocolReady) {
+        debugLog("[jam] audio WebSocket sent PCM before ready; closing");
+        handleTerminal("ws-pcm-before-ready");
+        try { ws.close(); } catch (closeError) {}
+        return;
+      }
 
       var f32 = new Float32Array(e.data);
       var samplesPerChannel = f32.length / 2;
@@ -675,43 +1141,44 @@ function startJamAudioStream() {
       }
 
       var now = _jamAudioCtx.currentTime;
-      if (_jamNextPlayTime < now) {
-        _jamNextPlayTime = now + 0.02;
-      }
+      var schedule = window.EchoJamSessionState && typeof window.EchoJamSessionState.planAudioFrame === "function"
+        ? window.EchoJamSessionState.planAudioFrame(_jamNextPlayTime, now, buffer.duration, 0.5)
+        : {
+            drop: _jamNextPlayTime - now > 0.5,
+            startTime: _jamNextPlayTime < now ? now + 0.02 : _jamNextPlayTime,
+            nextPlayTime: null,
+          };
+      if (schedule.drop) return;
 
       var source = _jamAudioCtx.createBufferSource();
       source.buffer = buffer;
       source.connect(_jamGainNode);
-      source.start(_jamNextPlayTime);
-      _jamNextPlayTime += buffer.duration;
+      source.start(schedule.startTime);
+      _jamNextPlayTime = Number.isFinite(schedule.nextPlayTime)
+        ? schedule.nextPlayTime
+        : schedule.startTime + buffer.duration;
     };
 
     ws.onclose = function() {
       debugLog("[jam] audio WebSocket closed");
-      _jamAudioWs = null;
-      if (_jamSessionState && _jamSessionState.streamClosedTransient) {
-        var closeState = _jamSessionState.streamClosedTransient("ws-close");
-        syncJamButtonsFromState();
-        if (closeState.shouldReconnect) {
-          scheduleJamReconnect(closeState.delayMs);
-        }
-      }
+      handleTerminal("ws-close");
     };
 
     ws.onerror = function(e) {
       debugLog("[jam] audio WebSocket error: " + (e.message || e.type || "unknown"));
-      _jamAudioWs = null;
-      if (_jamSessionState && _jamSessionState.streamClosedTransient) {
-        var errState = _jamSessionState.streamClosedTransient(e.message || e.type || "ws-error");
-        syncJamButtonsFromState();
-        if (errState.shouldReconnect) {
-          scheduleJamReconnect(errState.delayMs);
-        }
-      }
+      handleTerminal(e.message || e.type || "ws-error");
+      try { ws.close(); } catch (closeError) {}
       if (typeof showToast === "function") showToast("Jam audio dropped — retrying");
     };
   } catch (ex) {
     debugLog("[jam] startJamAudioStream exception: " + ex.message);
+    if (_jamSessionState && _jamSessionState.streamClosedTransient) {
+      var failureState = _jamSessionState.streamClosedTransient(ex.message || "stream-start-failed");
+      syncJamButtonsFromState();
+      if (failureState.shouldReconnect && (!_jamContract || _jamContract.compatible)) {
+        scheduleJamReconnect(failureState.delayMs);
+      }
+    }
   }
 }
 
@@ -821,6 +1288,8 @@ function handleJamDataMessage(payload) {
     startBannerPolling();
     fetchJamState();
   } else if (payload.type === "jam-stopped") {
+    resetLocalJamListening();
+    syncJamButtonsFromState();
     stopBannerPolling();
     updateNowPlayingBanner(null);
     fetchJamState();
@@ -834,6 +1303,11 @@ function handleJamDataMessage(payload) {
 function initJam() {
   if (_jamInited) return;
   _jamInited = true;
+  // Full polling owns Jam state once the panel initializes. Cancel the
+  // lightweight banner loop before issuing the first ordered full-state fetch.
+  stopBannerPolling();
+  detectJamSourceHost();
+  _jamContract = unavailableJamContract("Checking Jam server and host source…");
 
   // Wire up event listeners
   var closeBtn = document.getElementById("close-jam");
@@ -863,7 +1337,8 @@ function initJam() {
   var volumeInput = document.getElementById("jam-volume-slider");
   if (volumeInput) volumeInput.oninput = onJamVolumeChange;
 
-  syncJamButtonsFromState();
+  renderJamContractStatus();
+  applyJamContractToControls();
 
   // Start polling
   fetchJamState();
@@ -872,6 +1347,9 @@ function initJam() {
 
 // Cleanup on disconnect (called from app.js if wired up)
 function cleanupJam() {
+  // Invalidate any in-flight banner/full-state response before clearing local
+  // state so a late response cannot resurrect Jam UI after disconnect.
+  _jamStateRequestGate.begin();
   if (_jamPollTimer) {
     clearInterval(_jamPollTimer);
     _jamPollTimer = null;
@@ -883,6 +1361,10 @@ function cleanupJam() {
   stopBannerPolling();
   updateNowPlayingBanner(null);
   _jamState = null;
+  _jamContract = null;
+  _jamListeningGeneration = null;
+  _jamIsSourceHost = null;
+  _jamSourceHostPromise = null;
   _jamInited = false;
   clearJamReconnectTimer();
   if (_jamSessionState && _jamSessionState.leaveSucceeded) {
@@ -901,7 +1383,7 @@ function updateNowPlayingBanner(state) {
   var banner = document.getElementById("jam-banner");
   if (!banner) return;
 
-  if (!state || !state.active || !state.now_playing || !state.now_playing.name || !state.now_playing.is_playing) {
+  if ((_jamContract && !_jamContract.compatible) || !state || !state.active || !state.now_playing || !state.now_playing.name || !state.now_playing.is_playing) {
     banner.classList.add("hidden");
     return;
   }
@@ -930,14 +1412,35 @@ function updateNowPlayingBanner(state) {
 
 // Lightweight poll for banner — runs independently of the Jam panel
 async function fetchBannerState() {
+  // A queued interval callback can still run after clearInterval(). Do not let
+  // that stale banner request supersede an in-flight full-state request.
+  if (_jamPollTimer) return;
+  var requestId = _jamStateRequestGate.begin();
   try {
     var resp = await fetch(apiUrl("/api/jam/state"), {
       headers: { "Authorization": "Bearer " + adminToken }
     });
+    var requestMayApply = window.EchoJamSessionState &&
+      typeof window.EchoJamSessionState.shouldApplyBannerResponse === "function"
+      ? window.EchoJamSessionState.shouldApplyBannerResponse(
+          !!_jamPollTimer,
+          _jamStateRequestGate.isCurrent(requestId)
+        )
+      : !_jamPollTimer && _jamStateRequestGate.isCurrent(requestId);
+    if (!requestMayApply) return;
     if (!resp.ok) return;
     var state = await resp.json();
-    // Keep _jamState in sync if the panel hasn't initialized its own poll
-    if (!_jamPollTimer) _jamState = state;
+    requestMayApply = window.EchoJamSessionState &&
+      typeof window.EchoJamSessionState.shouldApplyBannerResponse === "function"
+      ? window.EchoJamSessionState.shouldApplyBannerResponse(
+          !!_jamPollTimer,
+          _jamStateRequestGate.isCurrent(requestId)
+        )
+      : !_jamPollTimer && _jamStateRequestGate.isCurrent(requestId);
+    if (!requestMayApply) return;
+    _jamContract = evaluateJamServerContract(state);
+    if (!_jamContract.compatible) stopJamForCompatibilityFailure();
+    _jamState = state;
     updateNowPlayingBanner(state);
     // If jam ended, stop polling
     if (!state.active) stopBannerPolling();

@@ -147,6 +147,7 @@ const publishStateReconcile = (window.EchoPublishStateReconcile && window.EchoPu
   : null;
 const IDENTITY_SUFFIX_KEY = "echo-core-identity-suffix";
 const DEVICE_ID_KEY = "echo-core-device-id";
+const PARTICIPANT_AUTH_KEY = "echo-core-participant-auth-key";
 let audioMonitorTimer = null;
 let roomAudioMuted = false;
 let pg13ModeActive = false;

@@ -31,6 +31,10 @@ pub struct Config {
     pub turn_port: u16,
     pub github_pat: Option<String>,
     pub github_repo: Option<String>,
+    pub jam_source_id: Option<String>,
+    pub jam_source_token: Option<String>,
+    pub spotify_device_id: Option<String>,
+    pub spotify_device_name: Option<String>,
 }
 
 pub fn load_dotenv() {
@@ -213,18 +217,6 @@ pub fn urlencoded(s: &str) -> String {
         }
     }
     result
-}
-
-/// Strip the -XXXX numeric suffix from identities like "sam-1234" -> "sam"
-/// Reconnects change the suffix, so compare base identities for host checks.
-pub fn identity_base(identity: &str) -> &str {
-    if let Some(pos) = identity.rfind('-') {
-        let suffix = &identity[pos + 1..];
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return &identity[..pos];
-        }
-    }
-    identity
 }
 
 #[cfg(test)]

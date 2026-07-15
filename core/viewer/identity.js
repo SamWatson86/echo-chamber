@@ -63,6 +63,21 @@ function ensureDeviceId() {
   return uuid;
 }
 
+// Private per-install capability used only when minting participant tokens.
+// Unlike deviceId, this value is never published over LiveKit or used as profile data.
+function ensureParticipantAuthKey() {
+  var existing = echoGet(PARTICIPANT_AUTH_KEY);
+  if (existing && /^[0-9a-f]{64}$/i.test(existing)) return existing;
+  if (typeof crypto === "undefined" || !crypto.getRandomValues) {
+    throw new Error("Secure random generation is unavailable in this browser");
+  }
+  var bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  var key = Array.from(bytes, function(b) { return b.toString(16).padStart(2, "0"); }).join("");
+  echoSet(PARTICIPANT_AUTH_KEY, key);
+  return key;
+}
+
 // Get the device ID for the local user (shorthand used throughout profile code)
 function getLocalDeviceId() {
   return ensureDeviceId();

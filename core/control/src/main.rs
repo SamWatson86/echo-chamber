@@ -1,11 +1,11 @@
 mod admin;
-mod audio_capture;
 mod auth;
 mod chat;
 mod config;
+pub mod file_serving;
 mod jam_bot;
 mod jam_session;
-pub mod file_serving;
+mod jam_source;
 mod rooms;
 pub mod sfu_proxy;
 mod soundboard;
@@ -16,6 +16,7 @@ use chat::*;
 use config::*;
 use file_serving::*;
 use jam_session::*;
+use jam_source::*;
 use rooms::*;
 use sfu_proxy::*;
 use soundboard::*;
@@ -47,6 +48,7 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     pub(crate) rooms: Arc<Mutex<HashMap<String, RoomInfo>>>,
     pub(crate) participants: Arc<Mutex<HashMap<String, ParticipantEntry>>>,
+    pub(crate) participant_bindings: Arc<Mutex<HashMap<String, ParticipantBinding>>>,
     pub(crate) soundboard: Arc<Mutex<SoundboardState>>,
     pub(crate) chat: Arc<Mutex<ChatState>>,
     pub(crate) avatars: Arc<Mutex<HashMap<String, String>>>, // identity_base -> filename
@@ -62,6 +64,9 @@ pub(crate) struct AppState {
     // Jam Session (Spotify)
     pub(crate) jam: Arc<Mutex<JamState>>,
     pub(crate) jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
+    pub(crate) jam_source: jam_source::JamSourceRegistry,
+    pub(crate) jam_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) jam_state_refresh: Arc<tokio::sync::Mutex<()>>,
     pub(crate) spotify_client_id: String,
     pub(crate) spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
     pub(crate) spotify_token_file: PathBuf,
@@ -79,10 +84,68 @@ pub(crate) struct ParticipantEntry {
     pub(crate) viewer_version: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ParticipantBinding {
+    // Private browser-install capability. This registry is memory-only and is
+    // never serialized into participant/status responses or logs.
+    pub(crate) auth_key: String,
+    pub(crate) auth_id: String,
+}
 
+fn remove_stale_participants_exact(
+    participants: &mut HashMap<String, ParticipantEntry>,
+    bindings: &HashMap<String, ParticipantBinding>,
+    jam: &mut JamState,
+    now: u64,
+) -> (Vec<ParticipantEntry>, Option<u64>) {
+    let stale_identities: Vec<String> = participants
+        .iter()
+        .filter(|(_, participant)| now.saturating_sub(participant.last_seen) >= 20)
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    let mut removed = Vec::new();
 
+    for identity in stale_identities {
+        let Some(binding_auth_id) = bindings
+            .get(&identity)
+            .map(|binding| binding.auth_id.clone())
+        else {
+            continue;
+        };
+        let has_current_audio = jam.active
+            && jam.listeners.get(&identity) == Some(&binding_auth_id)
+            && jam
+                .audio_connections
+                .get(&identity)
+                .map(|connection| {
+                    connection.participant_auth_id == binding_auth_id
+                        && connection.generation == jam.generation
+                })
+                .unwrap_or(false);
+        if has_current_audio {
+            continue;
+        }
 
+        if let Some(entry) = participants.remove(&identity) {
+            removed.push(entry);
+        }
+        if jam.listeners.get(&identity) == Some(&binding_auth_id) {
+            jam.listeners.remove(&identity);
+            info!("Jam: removed stale listener {}", identity);
+        }
+        let remove_audio = jam
+            .audio_connections
+            .get(&identity)
+            .map(|connection| connection.participant_auth_id == binding_auth_id)
+            .unwrap_or(false);
+        if remove_audio {
+            jam.audio_connections.remove(&identity);
+        }
+    }
 
+    let auto_end_generation = (jam.active && jam.listeners.is_empty()).then_some(jam.generation);
+    (removed, auto_end_generation)
+}
 
 #[tokio::main]
 async fn main() {
@@ -227,10 +290,17 @@ async fn main() {
             .as_secs()
     );
 
+    let jam_source_configured = config.jam_source_id.is_some() && config.jam_source_token.is_some();
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("build bounded HTTP client");
     let state = AppState {
         config: config.clone(),
         rooms: Arc::new(Mutex::new(HashMap::new())),
         participants: Arc::new(Mutex::new(HashMap::new())),
+        participant_bindings: Arc::new(Mutex::new(HashMap::new())),
         soundboard: Arc::new(Mutex::new(soundboard_state)),
         chat: Arc::new(Mutex::new(chat_state)),
         avatars: Arc::new(Mutex::new(existing_avatars)),
@@ -248,8 +318,11 @@ async fn main() {
         spotify_pending: Arc::new(Mutex::new(None)),
         jam: Arc::new(Mutex::new(initial_jam)),
         jam_bot: Arc::new(tokio::sync::Mutex::new(None)),
+        jam_source: jam_source::JamSourceRegistry::new(jam_source_configured),
+        jam_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+        jam_state_refresh: Arc::new(tokio::sync::Mutex::new(())),
         spotify_token_file,
-        http_client: reqwest::Client::new(),
+        http_client,
         viewer_stamp: Arc::new(RwLock::new(viewer_stamp.clone())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -257,11 +330,14 @@ async fn main() {
     // Background task: clean up stale participants (no heartbeat for 20s)
     {
         let participants = state.participants.clone();
+        let participant_bindings = state.participant_bindings.clone();
         let joined_at = state.joined_at.clone();
         let client_stats = state.client_stats.clone();
         let session_log_dir = state.session_log_dir.clone();
         let jam_for_cleanup = state.jam.clone();
         let jam_bot_for_cleanup = state.jam_bot.clone();
+        let jam_source_for_cleanup = state.jam_source.clone();
+        let jam_lifecycle_for_cleanup = state.jam_lifecycle.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -269,23 +345,19 @@ async fn main() {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let removed_entries: Vec<ParticipantEntry>;
-                {
-                    let mut map = participants.lock().unwrap_or_else(|e| e.into_inner());
-                    let before = map.len();
-                    let mut removed = Vec::new();
-                    map.retain(|_, p| {
-                        if now.saturating_sub(p.last_seen) >= 20 {
-                            removed.push(p.clone());
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    removed_entries = removed;
-                    if before - map.len() > 0 {
-                        info!("cleaned up {} stale participant(s)", before - map.len());
-                    }
+                // Final presence, binding, listener, and audio checks are one
+                // critical section. A live audio socket fences a throttled
+                // browser from stale-heartbeat eviction.
+                let (removed_entries, auto_end_generation) = {
+                    let mut participants = participants.lock().unwrap_or_else(|e| e.into_inner());
+                    let bindings = participant_bindings
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let mut jam = jam_for_cleanup.lock().unwrap_or_else(|e| e.into_inner());
+                    remove_stale_participants_exact(&mut participants, &bindings, &mut jam, now)
+                };
+                if !removed_entries.is_empty() {
+                    info!("cleaned up {} stale participant(s)", removed_entries.len());
                 }
                 // Log leave events for cleaned-up participants
                 for entry in &removed_entries {
@@ -308,29 +380,15 @@ async fn main() {
                     };
                     append_session_event(&session_log_dir, &event);
                 }
-                // Remove stale participants from jam listeners
-                if !removed_entries.is_empty() {
-                    let should_auto_end = {
-                        let mut jam = jam_for_cleanup.lock().unwrap_or_else(|e| e.into_inner());
-                        if jam.active {
-                            for entry in &removed_entries {
-                                let base = identity_base(&entry.identity);
-                                let before = jam.listeners.len();
-                                jam.listeners.retain(|l| identity_base(l) != base);
-                                if jam.listeners.len() < before {
-                                    info!("Jam: removed stale listener {}", entry.identity);
-                                }
-                            }
-                        }
-                        jam.active && jam.listeners.is_empty()
-                    };
-                    if should_auto_end {
-                        schedule_jam_auto_end(
-                            jam_for_cleanup.clone(),
-                            jam_bot_for_cleanup.clone(),
-                            "stale cleanup",
-                        );
-                    }
+                if let Some(generation) = auto_end_generation {
+                    schedule_jam_auto_end(
+                        jam_for_cleanup.clone(),
+                        jam_bot_for_cleanup.clone(),
+                        jam_source_for_cleanup.clone(),
+                        jam_lifecycle_for_cleanup.clone(),
+                        generation,
+                        "stale cleanup",
+                    );
                 }
             }
         });
@@ -353,10 +411,22 @@ async fn main() {
         let vdir = viewer_dir.clone();
         let mut startup = SystemTime::now();
         tokio::spawn(async move {
-            let watched_files = ["app.js", "style.css", "index.html", "connect.js",
-                                 "room-status.js", "participants.js", "audio-routing.js",
-                                 "media-controls.js", "chat.js", "soundboard.js",
-                                 "state.js", "jam.js"];
+            let watched_files = [
+                "app.js",
+                "style.css",
+                "index.html",
+                "connect.js",
+                "room-status.js",
+                "participants.js",
+                "audio-routing.js",
+                "media-controls.js",
+                "chat.js",
+                "soundboard.js",
+                "state.js",
+                "jam.js",
+                "jam-session-state.js",
+                "jam.css",
+            ];
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                 let changed = watched_files.iter().any(|f| {
@@ -449,11 +519,11 @@ async fn main() {
         .route("/api/jam/state", get(jam_state))
         .route("/api/jam/search", post(jam_search))
         .route("/api/jam/queue", post(jam_queue_add))
-        .route("/api/jam/queue-remove", post(jam_queue_remove))
         .route("/api/jam/skip", post(jam_skip))
         .route("/api/jam/join", post(jam_join))
         .route("/api/jam/leave", post(jam_leave))
         .route("/api/jam/audio", get(jam_audio_ws))
+        .route("/api/jam/source", get(jam_source_ws))
         // Admin: participant management
         .route(
             "/v1/rooms/:room_id/kick/:identity",
@@ -505,38 +575,22 @@ async fn main() {
             .unwrap();
     } else {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ── Admin: kick / mute participants via LiveKit SFU REST API ─────────
 
 /// Generate a short-lived LiveKit service JWT for SFU admin API calls.
 
-
 pub(crate) fn is_safe_path_component(s: &str) -> bool {
-    !s.is_empty()
-        && !s.contains('/')
-        && !s.contains('\\')
-        && !s.contains("..")
-        && s != "."
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..") && s != "."
 }
-
-
 
 fn load_config() -> Config {
     let host = std::env::var("CORE_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -583,7 +637,9 @@ fn load_config() -> Config {
 
     let turn_user = std::env::var("TURN_USER").ok().filter(|s| !s.is_empty());
     let turn_pass = std::env::var("TURN_PASS").ok().filter(|s| !s.is_empty());
-    let turn_host = std::env::var("TURN_PUBLIC_IP").ok().filter(|s| !s.is_empty());
+    let turn_host = std::env::var("TURN_PUBLIC_IP")
+        .ok()
+        .filter(|s| !s.is_empty());
     let turn_port = std::env::var("TURN_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -591,6 +647,18 @@ fn load_config() -> Config {
 
     let github_pat = std::env::var("GITHUB_PAT").ok().filter(|s| !s.is_empty());
     let github_repo = std::env::var("GITHUB_REPO").ok().filter(|s| !s.is_empty());
+    let jam_source_id = std::env::var("JAM_SOURCE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let jam_source_token = std::env::var("JAM_SOURCE_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let spotify_device_id = std::env::var("SPOTIFY_DEVICE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let spotify_device_name = std::env::var("SPOTIFY_DEVICE_NAME")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     Config {
         host,
@@ -614,10 +682,94 @@ fn load_config() -> Config {
         turn_port,
         github_pat,
         github_repo,
+        jam_source_id,
+        jam_source_token,
+        spotify_device_id,
+        spotify_device_name,
     }
 }
 
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
 
+    fn participant(identity: &str, last_seen: u64) -> ParticipantEntry {
+        ParticipantEntry {
+            identity: identity.to_string(),
+            name: identity.to_string(),
+            room_id: "main".to_string(),
+            last_seen,
+            viewer_version: None,
+        }
+    }
 
+    fn binding(auth_id: &str) -> ParticipantBinding {
+        ParticipantBinding {
+            auth_key: "a".repeat(64),
+            auth_id: auth_id.to_string(),
+        }
+    }
 
+    #[test]
+    fn active_audio_fences_stale_presence_cleanup() {
+        let mut participants = HashMap::from([
+            ("sam-7475".to_string(), participant("sam-7475", 1)),
+            ("alex-2222".to_string(), participant("alex-2222", 1)),
+        ]);
+        let bindings = HashMap::from([
+            ("sam-7475".to_string(), binding("binding-a")),
+            ("alex-2222".to_string(), binding("binding-b")),
+        ]);
+        let mut jam = JamState {
+            active: true,
+            generation: 9,
+            ..JamState::default()
+        };
+        jam.listeners
+            .insert("sam-7475".to_string(), "binding-a".to_string());
+        jam.listeners
+            .insert("alex-2222".to_string(), "binding-b".to_string());
+        jam.audio_connections.insert(
+            "sam-7475".to_string(),
+            jam_session::JamAudioConnection {
+                participant_auth_id: "binding-a".to_string(),
+                generation: 9,
+                connection_id: 1,
+            },
+        );
 
+        let (removed, auto_end) =
+            remove_stale_participants_exact(&mut participants, &bindings, &mut jam, 30);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].identity, "alex-2222");
+        assert!(participants.contains_key("sam-7475"));
+        assert!(jam.listeners.contains_key("sam-7475"));
+        assert!(!jam.listeners.contains_key("alex-2222"));
+        assert_eq!(auto_end, None);
+    }
+
+    #[test]
+    fn stale_cleanup_never_removes_a_newer_listener_binding() {
+        let mut participants =
+            HashMap::from([("sam-7475".to_string(), participant("sam-7475", 1))]);
+        let bindings = HashMap::from([("sam-7475".to_string(), binding("binding-new"))]);
+        let mut jam = JamState {
+            active: true,
+            generation: 9,
+            ..JamState::default()
+        };
+        jam.listeners
+            .insert("sam-7475".to_string(), "binding-old".to_string());
+
+        let (removed, auto_end) =
+            remove_stale_participants_exact(&mut participants, &bindings, &mut jam, 30);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            jam.listeners.get("sam-7475").map(String::as_str),
+            Some("binding-old")
+        );
+        assert_eq!(auto_end, None);
+    }
+}
