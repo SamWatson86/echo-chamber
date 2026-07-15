@@ -20,11 +20,16 @@ var _jamGainNode = null;       // GainNode for volume control
 var _jamNextPlayTime = 0;      // next scheduled buffer start time
 var _jamReconnectTimer = null;
 var _jamRejoinPromise = null;
-var JAM_PROTOCOL_VERSION = 2;
+var JAM_PROTOCOL_VERSION = 3;
 var _jamContract = null;
 var _jamListeningGeneration = null;
 var _jamIsSourceHost = null;
-var _jamSourceHostPromise = null;
+var _jamSourceLocalControl = null;
+var _jamSourceLocalControlPromise = null;
+var _jamSourceLocalControlPending = false;
+var _jamSourceLocalControlLegacy = false;
+var _jamSourceLocalControlsBound = false;
+var _jamRelayMuteNoticeShown = false;
 var _jamStateRequestGate = (window.EchoJamSessionState && window.EchoJamSessionState.createLatestRequestGate)
   ? window.EchoJamSessionState.createLatestRequestGate()
   : (function() {
@@ -46,41 +51,227 @@ function jamActorHeaders(participantToken) {
   };
 }
 
-async function detectJamSourceHost() {
-  if (_jamIsSourceHost !== null) return _jamIsSourceHost;
-  if (_jamSourceHostPromise) return _jamSourceHostPromise;
-  if (typeof tauriInvoke !== "function" || typeof hasTauriIPC !== "function" || !hasTauriIPC()) {
-    _jamIsSourceHost = false;
-    return false;
+function normalizeJamSourceLocalControl(value) {
+  var input = value && typeof value === "object" ? value : {};
+  return {
+    is_source_host: input.is_source_host === true,
+    takeover_enabled: input.takeover_enabled === true,
+    monitor_enabled: input.monitor_enabled === true,
+    takeover_active: input.takeover_active === true,
+    agent_running: input.agent_running === true,
+    target_device_name: typeof input.target_device_name === "string" ? input.target_device_name.trim() : "",
+    last_error: typeof input.last_error === "string" ? input.last_error.trim() : ""
+  };
+}
+
+function jamSourceLocalErrorMessage(error) {
+  if (error && typeof error.message === "string" && error.message.trim()) return error.message.trim();
+  var message = String(error || "Unknown native control error").trim();
+  return message || "Unknown native control error";
+}
+
+function renderJamSourceLocalControl() {
+  var state = _jamSourceLocalControl;
+  var isSourceHost = !!state && state.is_source_host === true;
+  var status = "Checking this PC…";
+  var tone = "";
+
+  if (isSourceHost) {
+    var device = state.target_device_name || "Spotify on this PC";
+    if (_jamSourceLocalControlPending) {
+      status = "Saving this PC's Jam settings…";
+    } else if (_jamSourceLocalControlLegacy) {
+      status = "Echo update required for local Spotify controls";
+      tone = "warning";
+    } else if (!state.takeover_enabled) {
+      status = "Spotify control is off";
+      tone = "warning";
+    } else if (state.takeover_active) {
+      status = "Echo is using " + device + (state.monitor_enabled ? " · local Jam audio is on" : " · local Jam audio is off");
+      tone = "ready";
+    } else if (!state.agent_running) {
+      status = "Spotify control is starting…";
+    } else {
+      status = "Ready to use " + device + " when the Jam starts";
+      tone = "ready";
+    }
   }
-  _jamSourceHostPromise = tauriInvoke("is_jam_source_host")
-    .then(function(isSourceHost) {
-      _jamIsSourceHost = isSourceHost === true;
-      return _jamIsSourceHost;
+
+  document.querySelectorAll("[data-jam-source-local-card]").forEach(function(card) {
+    card.hidden = !isSourceHost;
+    card.classList.toggle("hidden", !isSourceHost);
+  });
+  document.querySelectorAll("[data-jam-source-local-status]").forEach(function(el) {
+    el.textContent = status;
+    el.className = "jam-source-local-status" + (tone ? " " + tone : "");
+  });
+  document.querySelectorAll("[data-jam-source-takeover-toggle]").forEach(function(input) {
+    input.checked = isSourceHost && state.takeover_enabled === true;
+    input.disabled = !isSourceHost || _jamSourceLocalControlPending || _jamSourceLocalControlLegacy;
+  });
+  document.querySelectorAll("[data-jam-source-monitor-toggle]").forEach(function(input) {
+    input.checked = isSourceHost && state.monitor_enabled === true;
+    input.disabled = !isSourceHost || _jamSourceLocalControlPending || _jamSourceLocalControlLegacy;
+  });
+  document.querySelectorAll("[data-jam-source-local-error]").forEach(function(el) {
+    var error = isSourceHost && state.last_error ? state.last_error : "";
+    el.textContent = error;
+    el.classList.toggle("hidden", !error);
+  });
+}
+
+function currentJamRelayGain() {
+  var roomMuted = typeof roomAudioMuted !== "undefined" && roomAudioMuted;
+  var localControl = _jamSourceLocalControl || {
+    is_source_host: _jamIsSourceHost === true,
+    takeover_active: false,
+    monitor_enabled: false
+  };
+  if (window.EchoJamSessionState &&
+      typeof window.EchoJamSessionState.effectiveJamRelayGain === "function") {
+    return window.EchoJamSessionState.effectiveJamRelayGain(_jamVolume, roomMuted, localControl);
+  }
+  if (localControl.is_source_host === true &&
+      !(localControl.takeover_active === true && localControl.monitor_enabled === true)) {
+    return 0;
+  }
+  return roomMuted ? 0 : (_jamVolume / 100);
+}
+
+function applyJamRelayGain() {
+  if (_jamGainNode) _jamGainNode.gain.value = currentJamRelayGain();
+}
+
+function installJamRelayAudioRoutingHook() {
+  if (typeof setRoomAudioMutedState !== "function" || setRoomAudioMutedState._jamSourceRelayAware) return;
+  var originalSetRoomAudioMutedState = setRoomAudioMutedState;
+  setRoomAudioMutedState = function(next) {
+    var result = originalSetRoomAudioMutedState(next);
+    // audio-routing.js owns the room-wide mute toggle. Re-apply the local
+    // source monitor policy synchronously after it updates the shared gain.
+    applyJamRelayGain();
+    return result;
+  };
+  setRoomAudioMutedState._jamSourceRelayAware = true;
+}
+
+async function refreshJamSourceLocalControl(allowDuringMutation) {
+  if (_jamSourceLocalControlPending && allowDuringMutation !== true) return _jamSourceLocalControl;
+  if (_jamSourceLocalControlPromise) return _jamSourceLocalControlPromise;
+  if (typeof tauriInvoke !== "function" || typeof hasTauriIPC !== "function" || !hasTauriIPC()) {
+    _jamSourceLocalControl = normalizeJamSourceLocalControl(null);
+    _jamIsSourceHost = false;
+    _jamSourceLocalControlLegacy = false;
+    renderJamSourceLocalControl();
+    applyJamRelayGain();
+    return _jamSourceLocalControl;
+  }
+
+  _jamSourceLocalControlPromise = tauriInvoke("get_jam_source_local_control")
+    .then(function(value) {
+      _jamSourceLocalControl = normalizeJamSourceLocalControl(value);
+      _jamIsSourceHost = _jamSourceLocalControl.is_source_host;
+      _jamSourceLocalControlLegacy = false;
+      return _jamSourceLocalControl;
     })
-    .catch(function(e) {
-      _jamIsSourceHost = false;
-      debugLog("[jam] could not determine native Jam source role: " + e);
-      return false;
+    .catch(async function(error) {
+      // A mixed desktop/viewer rollout must retain the old doubled-audio
+      // protection even though the new switches cannot be used yet.
+      var isSourceHost = false;
+      try {
+        isSourceHost = await tauriInvoke("is_jam_source_host") === true;
+      } catch (_) {}
+      _jamSourceLocalControl = normalizeJamSourceLocalControl({
+        is_source_host: isSourceHost,
+        last_error: isSourceHost ? "Update Echo to enable the source-PC Spotify controls." : ""
+      });
+      _jamIsSourceHost = isSourceHost;
+      _jamSourceLocalControlLegacy = true;
+      debugLog("[jam] could not read native source-PC controls: " + jamSourceLocalErrorMessage(error));
+      return _jamSourceLocalControl;
     })
-    .finally(function() { _jamSourceHostPromise = null; });
-  return _jamSourceHostPromise;
+    .finally(function() {
+      _jamSourceLocalControlPromise = null;
+      renderJamSourceLocalControl();
+      applyJamRelayGain();
+    });
+  return _jamSourceLocalControlPromise;
+}
+
+async function setJamSourceLocalControl(setting, enabled) {
+  if (!_jamSourceLocalControl || !_jamSourceLocalControl.is_source_host || _jamSourceLocalControlPending) return;
+  if (_jamSourceLocalControlPromise) await _jamSourceLocalControlPromise;
+  var command = setting === "takeover"
+    ? "set_jam_source_takeover_enabled"
+    : "set_jam_source_monitor_enabled";
+  var field = setting === "takeover" ? "takeover_enabled" : "monitor_enabled";
+  var previous = _jamSourceLocalControl[field] === true;
+  _jamSourceLocalControlPending = true;
+  _jamSourceLocalControl[field] = enabled === true;
+  _jamSourceLocalControl.last_error = "";
+  renderJamSourceLocalControl();
+  applyJamRelayGain();
+
+  try {
+    await tauriInvoke(command, { enabled: enabled === true });
+    await refreshJamSourceLocalControl(true);
+  } catch (error) {
+    _jamSourceLocalControl[field] = previous;
+    _jamSourceLocalControl.last_error = jamSourceLocalErrorMessage(error);
+    debugLog("[jam] source-PC setting failed: " + _jamSourceLocalControl.last_error);
+  } finally {
+    _jamSourceLocalControlPending = false;
+    renderJamSourceLocalControl();
+    applyJamRelayGain();
+  }
+}
+
+function bindJamSourceLocalControls() {
+  if (_jamSourceLocalControlsBound) return;
+  _jamSourceLocalControlsBound = true;
+  document.querySelectorAll("[data-jam-source-takeover-toggle]").forEach(function(input) {
+    input.addEventListener("change", function() {
+      setJamSourceLocalControl("takeover", input.checked);
+    });
+  });
+  document.querySelectorAll("[data-jam-source-monitor-toggle]").forEach(function(input) {
+    input.addEventListener("change", function() {
+      setJamSourceLocalControl("monitor", input.checked);
+    });
+  });
+}
+
+function initJamSourceLocalControlUi() {
+  installJamRelayAudioRoutingHook();
+  bindJamSourceLocalControls();
+  refreshJamSourceLocalControl();
+}
+
+async function detectJamSourceHost() {
+  var state = await refreshJamSourceLocalControl();
+  return !!state && state.is_source_host === true;
 }
 
 function muteSourceHostRelayIfNeeded(listenerJoined) {
   var shouldMute = window.EchoJamSessionState &&
     typeof window.EchoJamSessionState.shouldMuteLocalRelay === "function"
-    ? window.EchoJamSessionState.shouldMuteLocalRelay(_jamIsSourceHost, listenerJoined)
+    ? window.EchoJamSessionState.shouldMuteLocalRelay(
+        _jamIsSourceHost,
+        listenerJoined,
+        !!_jamSourceLocalControl && _jamSourceLocalControl.takeover_active,
+        !!_jamSourceLocalControl && _jamSourceLocalControl.monitor_enabled
+      )
     : _jamIsSourceHost === true && listenerJoined !== false;
-  if (!shouldMute) return;
-
-  _jamVolume = 0;
-  var volumeInput = document.getElementById("jam-volume-slider");
-  var volumeLabel = document.getElementById("jam-volume-value");
-  if (volumeInput) volumeInput.value = "0";
-  if (volumeLabel) volumeLabel.textContent = "0%";
-  if (_jamGainNode) _jamGainNode.gain.value = 0;
-  showJamToast("Local Jam relay muted - Spotify is already playing on this PC");
+  applyJamRelayGain();
+  if (!shouldMute) {
+    _jamRelayMuteNoticeShown = false;
+    return;
+  }
+  if (_jamRelayMuteNoticeShown) return;
+  _jamRelayMuteNoticeShown = true;
+  showJamToast(_jamSourceLocalControl && _jamSourceLocalControl.takeover_active
+    ? "Local Jam audio is off — enable Hear Jam on this PC to listen here"
+    : "Local Jam relay muted — Spotify is already playing on this PC");
 }
 
 function evaluateJamServerContract(state) {
@@ -99,8 +290,11 @@ function evaluateJamServerContract(state) {
     spotifyConnected: false,
     spotifyIsPlaying: false,
     playbackStopSupported: false,
+    sourceEnabled: false,
+    sourceAvailabilityKnown: false,
     sourceStatus: "unknown",
     sourceReady: false,
+    sourceControlReady: false,
     sourceTone: "error",
     sourceMessage: "Host source status is unavailable",
     sourceError: "",
@@ -569,7 +763,7 @@ async function startJam() {
     }
 
     // Host is auto-joined as listener — start audio stream
-    // The start endpoint does not return the full v2 state contract. Refresh it
+    // The start endpoint does not return the full v3 state contract. Refresh it
     // before opening audio so the connection never uses stale inactive state.
     // If this refresh fails, a later successful poll resumes the pending stream.
     await fetchJamState();
@@ -774,8 +968,8 @@ async function joinJam() {
       _jamSessionState.joinAccepted();
       syncJamButtonsFromState();
     }
-    // The configured source host already hears Spotify directly. This applies
-    // both when it starts the Jam and when it joins a Jam started elsewhere.
+    // Keep legacy source hosts from hearing a doubled relay. Native takeover
+    // may explicitly enable this synced relay as the source PC's monitor.
     muteSourceHostRelayIfNeeded(true);
     // Start receiving audio via WebSocket
     startJamAudioStream();
@@ -846,6 +1040,9 @@ async function leaveJam() {
 // ──────────────────────────────────────────
 
 async function fetchJamState() {
+  // Native source state is local to this PC and intentionally independent of
+  // room/login state. Refresh it alongside each server Jam poll.
+  refreshJamSourceLocalControl();
   var requestId = _jamStateRequestGate.begin();
   try {
     var resp = await fetch(apiUrl("/api/jam/state"), {
@@ -1068,13 +1265,7 @@ function startJamAudioStream() {
     if (!_jamAudioCtx) {
       _jamAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       _jamGainNode = _jamAudioCtx.createGain();
-      _jamGainNode.gain.value = window.EchoJamSessionState &&
-        typeof window.EchoJamSessionState.effectiveJamGain === "function"
-        ? window.EchoJamSessionState.effectiveJamGain(
-            _jamVolume,
-            typeof roomAudioMuted !== "undefined" && roomAudioMuted
-          )
-        : ((typeof roomAudioMuted !== "undefined" && roomAudioMuted) ? 0 : (_jamVolume / 100));
+      _jamGainNode.gain.value = currentJamRelayGain();
 
       var speakerSelect = document.getElementById("speaker-select");
       if (speakerSelect && speakerSelect.value && typeof _jamAudioCtx.setSinkId === "function") {
@@ -1244,12 +1435,9 @@ function onJamVolumeChange(e) {
   _jamVolume = parseInt(e.target.value, 10);
   var label = document.getElementById("jam-volume-value");
   if (label) label.textContent = _jamVolume + "%";
-  if (_jamGainNode) {
-    // Preserve global Mute All semantics even when the local jam volume slider moves.
-    _jamGainNode.gain.value = (typeof roomAudioMuted !== "undefined" && roomAudioMuted)
-      ? 0
-      : (_jamVolume / 100);
-  }
+  // Preserve both global Mute All and the source-PC monitor policy while the
+  // user adjusts their independent Jam volume.
+  applyJamRelayGain();
 }
 
 // ──────────────────────────────────────────
@@ -1355,7 +1543,7 @@ function initJam() {
   // Full polling owns Jam state once the panel initializes. Cancel the
   // lightweight banner loop before issuing the first ordered full-state fetch.
   stopBannerPolling();
-  detectJamSourceHost();
+  refreshJamSourceLocalControl();
   _jamContract = unavailableJamContract("Checking Jam server and host source…");
 
   // Wire up event listeners
@@ -1412,8 +1600,6 @@ function cleanupJam() {
   _jamState = null;
   _jamContract = null;
   _jamListeningGeneration = null;
-  _jamIsSourceHost = null;
-  _jamSourceHostPromise = null;
   _jamInited = false;
   clearJamReconnectTimer();
   if (_jamSessionState && _jamSessionState.leaveSucceeded) {
@@ -1510,4 +1696,12 @@ function stopBannerPolling() {
     clearInterval(_bannerPollTimer);
     _bannerPollTimer = null;
   }
+}
+
+// Source-PC settings must be available on the login portal before Echo
+// Connect, so this boot path deliberately does not depend on initJam().
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initJamSourceLocalControlUi, { once: true });
+} else {
+  initJamSourceLocalControlUi();
 }

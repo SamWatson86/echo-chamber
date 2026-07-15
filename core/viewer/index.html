@@ -43,6 +43,38 @@
         <!-- Online users -->
         <div id="online-users" class="online-users"></div>
 
+        <!-- Native source-PC controls are revealed only on the configured Spotify PC. -->
+        <section class="jam-source-local-card jam-source-local-card-portal hidden" data-jam-source-local-card hidden aria-label="Spotify Jam controls for this PC">
+          <div class="jam-source-local-heading">
+            <div>
+              <div class="jam-source-local-title">Spotify Jam on this PC</div>
+              <div class="jam-source-local-status" data-jam-source-local-status role="status" aria-live="polite">Checking this PC…</div>
+            </div>
+            <span class="jam-source-local-badge">Source PC</span>
+          </div>
+          <label class="jam-source-local-switch-row">
+            <span class="jam-source-local-copy">
+              <strong>Allow Echo Jam to use Spotify on this PC</strong>
+              <small>Lets Echo control the configured Spotify desktop device while a Jam is active.</small>
+            </span>
+            <span class="jam-source-local-switch">
+              <input type="checkbox" role="switch" data-jam-source-takeover-toggle aria-label="Allow Echo Jam to use Spotify on this PC" />
+              <span aria-hidden="true"></span>
+            </span>
+          </label>
+          <label class="jam-source-local-switch-row">
+            <span class="jam-source-local-copy">
+              <strong>Hear Jam on this PC</strong>
+              <small>Plays Echo's synced Jam audio here; Jam Volume still controls how loud it is.</small>
+            </span>
+            <span class="jam-source-local-switch">
+              <input type="checkbox" role="switch" data-jam-source-monitor-toggle aria-label="Hear Jam on this PC" />
+              <span aria-hidden="true"></span>
+            </span>
+          </label>
+          <div class="jam-source-local-error hidden" data-jam-source-local-error role="alert"></div>
+        </section>
+
         <!-- Login form -->
         <div class="portal-form">
           <div class="connect-main">
@@ -354,6 +386,36 @@
             <span id="jam-spotify-status" class="jam-spotify-status">Not Connected</span>
             <button id="jam-connect-spotify" type="button" class="jam-connect-btn">Connect Spotify</button>
           </div>
+          <section class="jam-source-local-card hidden" data-jam-source-local-card hidden aria-label="Spotify Jam controls for this PC">
+            <div class="jam-source-local-heading">
+              <div>
+                <div class="jam-source-local-title">Spotify Jam on this PC</div>
+                <div class="jam-source-local-status" data-jam-source-local-status role="status" aria-live="polite">Checking this PC…</div>
+              </div>
+              <span class="jam-source-local-badge">Source PC</span>
+            </div>
+            <label class="jam-source-local-switch-row">
+              <span class="jam-source-local-copy">
+                <strong>Allow Echo Jam to use Spotify on this PC</strong>
+                <small>Lets Echo control the configured Spotify desktop device while a Jam is active.</small>
+              </span>
+              <span class="jam-source-local-switch">
+                <input type="checkbox" role="switch" data-jam-source-takeover-toggle aria-label="Allow Echo Jam to use Spotify on this PC" />
+                <span aria-hidden="true"></span>
+              </span>
+            </label>
+            <label class="jam-source-local-switch-row">
+              <span class="jam-source-local-copy">
+                <strong>Hear Jam on this PC</strong>
+                <small>Plays Echo's synced Jam audio here; Jam Volume still controls how loud it is.</small>
+              </span>
+              <span class="jam-source-local-switch">
+                <input type="checkbox" role="switch" data-jam-source-monitor-toggle aria-label="Hear Jam on this PC" />
+                <span aria-hidden="true"></span>
+              </span>
+            </label>
+            <div class="jam-source-local-error hidden" data-jam-source-local-error role="alert"></div>
+          </section>
           <div id="jam-host-controls" class="jam-host-controls" style="display:none">
             <button id="jam-start-btn" type="button" class="jam-start-btn">Start Jam</button>
             <button id="jam-stop-btn" type="button" class="jam-stop-btn" style="display:none" title="Stops Spotify playback for everyone; the Jam stays open">Stop Music</button>
