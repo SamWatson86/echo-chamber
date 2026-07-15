@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.31
+
+- Experience: The source PC can allow or deny Echo's Spotify takeover, mute Jam monitoring locally, and set an independent local Jam volume without changing what listeners hear.
+- Control: Jam participants can use Stop Music to pause Spotify while keeping the Jam, queue, listeners, and source connection ready to resume; host-only End Jam still performs the full teardown.
+- Reliability: Echo temporarily routes only Spotify into VB-CABLE while a Jam is active and restores Spotify's previous output when the Jam ends, takeover is disabled, or the source recovers from an interruption.
+- Release: Desktop and control package versions are bumped to 0.6.31.
+
 ## 0.6.30
 
 - Fix: Spotify Jam audio now comes from one explicitly provisioned Echo desktop running beside Spotify in the interactive Windows session, eliminating the Windows service/session-0 silence failure and the VB-CABLE routing requirement.
