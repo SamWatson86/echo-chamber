@@ -129,6 +129,7 @@ POST /api/jam/stop                → jam_stop
 GET  /api/jam/state               → jam_state
 POST /api/jam/search              → jam_search
 POST /api/jam/queue               → jam_queue_add
+POST /api/jam/playback/stop       → jam_stop_playback
 POST /api/jam/skip                → jam_skip
 POST /api/jam/join                → jam_join
 POST /api/jam/leave               → jam_leave
@@ -150,6 +151,14 @@ There is one control-plane-wide Echo Jam, not one Jam per user, link, or room. A
 authenticated Echo participant can start it, join it, search, add tracks, and skip through
 Echo's Jam UI. Listener accounts do not need Spotify accounts; the only Spotify login is the
 configured Premium host account used by Echo OAuth and Spotify desktop on the source PC.
+
+`Stop Music` is a shared playback control with the same participant authorization as queue and
+skip. It calls Spotify's pause endpoint for the exact configured source device without
+transferring playback, then marks playback paused while preserving the active Jam generation,
+listeners, queue, source capture, and audio sockets. It remains available when capture health is
+degraded because Spotify playback control is independent of PCM delivery. The older
+`POST /api/jam/stop` lifecycle endpoint remains exact-host-binding-only: it ends the Jam and
+stops capture, but it does not control Spotify playback.
 
 ### Admin API
 ```

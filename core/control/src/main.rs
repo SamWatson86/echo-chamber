@@ -519,6 +519,7 @@ async fn main() {
         .route("/api/jam/state", get(jam_state))
         .route("/api/jam/search", post(jam_search))
         .route("/api/jam/queue", post(jam_queue_add))
+        .route("/api/jam/playback/stop", post(jam_stop_playback))
         .route("/api/jam/skip", post(jam_skip))
         .route("/api/jam/join", post(jam_join))
         .route("/api/jam/leave", post(jam_leave))

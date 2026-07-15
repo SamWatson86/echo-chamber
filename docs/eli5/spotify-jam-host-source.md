@@ -37,11 +37,18 @@ need Spotify accounts, and they add songs through Echo rather than their own
 Spotify apps. The configured source PC's Premium account is the one Spotify
 account and playback device behind the shared Jam.
 
+The red **Stop Music** button is shared like Skip: any authenticated Echo
+participant can stop the sound for everyone. Echo pauses playback on the exact
+configured Spotify desktop device but keeps the Jam, listeners, queue, and
+audio connections open. Adding a song starts playback again. This is separate
+from Echo's host-only Jam teardown, so “Stop Music” never secretly removes
+everyone from the Jam.
+
 ## How we know it works
 
-- Control tests: 50 passed.
+- Control tests: 53 passed.
 - Windows desktop tests: 80 passed.
-- Viewer tests: 123 passed.
+- Viewer tests: 127 passed.
 - Full Cargo workspace check passed.
 - Atomic viewer publish/rollback tests passed.
 - Desktop deploy-config preservation tests passed.

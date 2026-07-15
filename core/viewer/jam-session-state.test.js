@@ -168,6 +168,38 @@ test("an active degraded Jam fails closed while its source recovers", () => {
   assert.equal(contract.canControl, false);
 });
 
+test("Stop Music remains available when capture fails but Spotify is playing", () => {
+  for (const source_status of ["offline", "error", "failed", "stalled"]) {
+    const contract = evaluateJamContract({
+      jam_protocol_version: 2,
+      spotify_connected: true,
+      spotify_is_playing: true,
+      playback_stop_supported: true,
+      active: true,
+      source_status,
+    });
+    assert.equal(contract.canStopPlayback, true, source_status);
+  }
+});
+
+test("Stop Music is capability, generation-state, and playback gated", () => {
+  const base = {
+    jam_protocol_version: 2,
+    spotify_connected: true,
+    spotify_is_playing: true,
+    playback_stop_supported: true,
+    active: true,
+    source_status: "live",
+  };
+
+  assert.equal(evaluateJamContract(base).canStopPlayback, true);
+  assert.equal(evaluateJamContract({ ...base, active: false }).canStopPlayback, false);
+  assert.equal(evaluateJamContract({ ...base, spotify_connected: false }).canStopPlayback, false);
+  assert.equal(evaluateJamContract({ ...base, spotify_is_playing: false }).canStopPlayback, false);
+  assert.equal(evaluateJamContract({ ...base, playback_stop_supported: false }).canStopPlayback, false);
+  assert.equal(evaluateJamContract({ ...base, jam_protocol_version: 1 }).canStopPlayback, false);
+});
+
 test("an active healthy Jam permits join and control actions", () => {
   const contract = evaluateJamContract({
     jam_protocol_version: 2,

@@ -539,6 +539,32 @@ async fn bind_spotify_playback_to_device(
     Ok(was_playing)
 }
 
+fn spotify_pause_url(device_id: &str) -> String {
+    format!(
+        "https://api.spotify.com/v1/me/player/pause?device_id={}",
+        urlencoded(device_id)
+    )
+}
+
+async fn pause_spotify_playback_on_device(
+    state: &AppState,
+    device: &SpotifyDevice,
+) -> Result<(), (StatusCode, String)> {
+    // Stop Music must never transfer playback. Resolve the configured device,
+    // then address Spotify's pause endpoint for that device directly.
+    let response = spotify_api_request(
+        state,
+        reqwest::Method::PUT,
+        &spotify_pause_url(&device.id),
+        None,
+    )
+    .await?;
+    if !response.status().is_success() {
+        return Err(spotify_response_error(response, "Stop Spotify playback").await);
+    }
+    Ok(())
+}
+
 async fn spotify_response_error(
     response: reqwest::Response,
     operation: &str,
@@ -958,6 +984,23 @@ fn observe_spotify_playback(jam: &mut JamState, generation: u64, is_playing: boo
     true
 }
 
+fn apply_spotify_pause_result(jam: &mut JamState, generation: u64, device: &SpotifyDevice) -> bool {
+    if !active_generation_matches(jam, generation) {
+        return false;
+    }
+
+    jam.spotify_device_id = Some(device.id.clone());
+    jam.spotify_device_name = Some(device.name.clone());
+    jam.spotify_is_playing = false;
+    jam.audio_expected_since = None;
+    jam.last_error = None;
+    if let Some(now_playing) = jam.now_playing.as_mut() {
+        now_playing.is_playing = false;
+        now_playing.fetched_at = Some(std::time::Instant::now());
+    }
+    true
+}
+
 fn jam_stop_authorized(jam: &JamState, identity: &str, participant_auth_id: &str) -> bool {
     !identity.trim().is_empty()
         && !jam.host_identity.is_empty()
@@ -1223,6 +1266,8 @@ pub(crate) async fn jam_state(
         "spotify_connected": spotify_connected,
         "spotify_device_id": spotify_device_id,
         "spotify_device_name": spotify_device_name,
+        "spotify_is_playing": spotify_is_playing,
+        "playback_stop_supported": true,
         "bot_connected": bot_connected,
         "last_error": last_error,
         "jam_protocol_version": crate::jam_source::JAM_SOURCE_PROTOCOL_VERSION,
@@ -1393,6 +1438,46 @@ pub(crate) async fn jam_queue_add(
     jam.queue.push(track);
     jam.now_playing = None;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub(crate) async fn jam_stop_playback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamGenerationRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    ensure_admin(&state, &headers).map_err(|status| (status, String::new()))?;
+    ensure_jam_participant(&state, &headers, None).map_err(|status| (status, String::new()))?;
+
+    // Serialize against start/end/queue/skip/leave. Capture health is
+    // deliberately not consulted: Spotify playback can and should be stopped
+    // even when the Jam source is stalled or offline.
+    let _lifecycle = state.jam_lifecycle.lock().await;
+    {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !active_generation_matches(&jam, payload.generation) {
+            return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
+        }
+    }
+
+    let device = resolve_spotify_device(&state).await?;
+    pause_spotify_playback_on_device(&state, &device).await?;
+
+    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+    if !apply_spotify_pause_result(&mut jam, payload.generation, &device) {
+        return Err((
+            StatusCode::CONFLICT,
+            "Jam changed while Spotify playback was stopping".to_string(),
+        ));
+    }
+    info!(
+        "Jam music stopped on configured Spotify device '{}' for generation {}",
+        device.name, payload.generation
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "generation": payload.generation,
+        "spotify_device_name": device.name,
+    })))
 }
 
 pub(crate) async fn jam_skip(
@@ -1862,6 +1947,18 @@ mod tests {
         }
     }
 
+    fn now_playing(is_playing: bool) -> NowPlayingInfo {
+        NowPlayingInfo {
+            name: "Current track".to_string(),
+            artist: "Current artist".to_string(),
+            album_art_url: String::new(),
+            duration_ms: 120_000,
+            progress_ms: 15_000,
+            is_playing,
+            fetched_at: None,
+        }
+    }
+
     #[test]
     fn failed_bot_start_does_not_activate_jam() {
         let mut jam = JamState {
@@ -1923,6 +2020,87 @@ mod tests {
         assert!(!jam_stop_authorized(&jam, "sam-7475", "binding-b"));
         assert!(!jam_stop_authorized(&jam, "", "binding-a"));
         assert!(!jam_stop_authorized(&jam, "other-1234", "binding-a"));
+    }
+
+    #[test]
+    fn spotify_pause_targets_only_the_encoded_device() {
+        assert_eq!(
+            spotify_pause_url("device id/+"),
+            "https://api.spotify.com/v1/me/player/pause?device_id=device%20id%2F%2B"
+        );
+    }
+
+    #[test]
+    fn playback_stop_preserves_the_active_jam_and_marks_music_paused() {
+        let mut listeners = HashMap::new();
+        listeners.insert("sam-7475".to_string(), "binding-a".to_string());
+        let mut jam = JamState {
+            active: true,
+            generation: 42,
+            host_identity: "sam-7475".to_string(),
+            host_participant_auth_id: "binding-a".to_string(),
+            queue: vec![queued_track("spotify:track:one")],
+            now_playing: Some(now_playing(true)),
+            listeners,
+            spotify_is_playing: true,
+            audio_expected_since: Some(std::time::Instant::now()),
+            last_error: Some("old capture warning".to_string()),
+            ..JamState::default()
+        };
+
+        assert!(apply_spotify_pause_result(
+            &mut jam,
+            42,
+            &spotify_device("device-a", "Echo PC")
+        ));
+
+        assert!(jam.active);
+        assert_eq!(jam.generation, 42);
+        assert_eq!(jam.host_identity, "sam-7475");
+        assert_eq!(
+            jam.listeners.get("sam-7475").map(String::as_str),
+            Some("binding-a")
+        );
+        assert_eq!(jam.queue.len(), 1);
+        assert_eq!(jam.queue[0].spotify_uri, "spotify:track:one");
+        assert_eq!(jam.spotify_device_id.as_deref(), Some("device-a"));
+        assert_eq!(jam.spotify_device_name.as_deref(), Some("Echo PC"));
+        assert!(!jam.spotify_is_playing);
+        assert!(jam.audio_expected_since.is_none());
+        assert!(jam.last_error.is_none());
+        assert_eq!(
+            jam.now_playing.as_ref().map(|track| track.is_playing),
+            Some(false)
+        );
+        assert!(jam
+            .now_playing
+            .as_ref()
+            .and_then(|track| track.fetched_at)
+            .is_some());
+    }
+
+    #[test]
+    fn stale_playback_stop_cannot_mutate_a_newer_generation() {
+        let mut jam = JamState {
+            active: true,
+            generation: 43,
+            spotify_is_playing: true,
+            now_playing: Some(now_playing(true)),
+            ..JamState::default()
+        };
+
+        assert!(!apply_spotify_pause_result(
+            &mut jam,
+            42,
+            &spotify_device("stale-device", "Stale Echo PC")
+        ));
+        assert_eq!(jam.generation, 43);
+        assert!(jam.spotify_is_playing);
+        assert!(jam.spotify_device_id.is_none());
+        assert_eq!(
+            jam.now_playing.as_ref().map(|track| track.is_playing),
+            Some(true)
+        );
     }
 
     #[test]

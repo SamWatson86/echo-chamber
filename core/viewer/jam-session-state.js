@@ -149,6 +149,8 @@
       (input.source_ready === true || ["ready", "live", "silent", "stalled"].includes(sourceStatus));
     const active = input.active === true;
     const spotifyConnected = input.spotify_connected === true;
+    const spotifyIsPlaying = input.spotify_is_playing === true;
+    const playbackStopSupported = input.playback_stop_supported === true;
     const sourceError = typeof input.source_error === "string" ? input.source_error.trim() : "";
 
     let sourceTone = "waiting";
@@ -196,6 +198,8 @@
       compatibilityMessage,
       active,
       spotifyConnected,
+      spotifyIsPlaying,
+      playbackStopSupported,
       sourceStatus,
       sourceReady,
       sourceControlReady,
@@ -209,6 +213,11 @@
       // available against the current source so they can recover Spotify playback.
       canJoin: compatible && active && sourceReady,
       canControl: compatible && active && sourceControlReady,
+      // Stopping Spotify playback does not depend on capture health. Keep the
+      // action available during source stalls/errors while music is still
+      // reported as playing on the configured Spotify device.
+      canStopPlayback: compatible && active && spotifyConnected &&
+        playbackStopSupported && spotifyIsPlaying,
       canConfigure: compatible,
     };
   }
