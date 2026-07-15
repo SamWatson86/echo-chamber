@@ -327,6 +327,76 @@ async fn main() {
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
 
+    // Local source consent is authoritative. Turning Jam sharing off on the
+    // source PC pauses the bound Spotify device, ends only the current
+    // generation, and then releases the native per-app output route. A source
+    // disconnect fails closed immediately: the desktop deliberately delays
+    // local route release long enough for this pause-first teardown to run.
+    {
+        let source_event_state = state.clone();
+        let mut source_events = state.jam_source.subscribe();
+        tokio::spawn(async move {
+            let mut health_watchdog = tokio::time::interval(Duration::from_secs(5));
+            health_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    event = source_events.recv() => match event {
+                        Ok(SourceEvent::AvailabilityChanged {
+                            enabled: false,
+                            generation: Some(generation),
+                            error,
+                        }) => {
+                            let reason = error.unwrap_or_else(|| {
+                                "Jam sharing was turned off on the source PC".to_string()
+                            });
+                            end_jam_for_source_unavailable(&source_event_state, generation, reason)
+                                .await;
+                        }
+                        Ok(SourceEvent::Error {
+                            generation,
+                            message,
+                        }) => {
+                            end_jam_for_source_unavailable(
+                                &source_event_state,
+                                generation,
+                                format!("Jam source failed: {message}"),
+                            )
+                            .await;
+                        }
+                        Ok(SourceEvent::Disconnected {
+                            generation: Some(generation),
+                        }) => {
+                            end_jam_for_source_unavailable(
+                                &source_event_state,
+                                generation,
+                                "Jam source disconnected from the source PC".to_string(),
+                            )
+                            .await;
+                        }
+                        Ok(SourceEvent::ConnectionReplaced {
+                            generation: Some(generation),
+                        }) => {
+                            end_jam_for_source_unavailable(
+                                &source_event_state,
+                                generation,
+                                "Jam source connection was replaced".to_string(),
+                            )
+                            .await;
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                            warn!("Jam source lifecycle watcher lagged by {} event(s)", count);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = health_watchdog.tick() => {
+                        end_active_jam_if_source_unhealthy(&source_event_state).await;
+                    }
+                }
+            }
+        });
+    }
+
     // Background task: clean up stale participants (no heartbeat for 20s)
     {
         let participants = state.participants.clone();
@@ -335,9 +405,7 @@ async fn main() {
         let client_stats = state.client_stats.clone();
         let session_log_dir = state.session_log_dir.clone();
         let jam_for_cleanup = state.jam.clone();
-        let jam_bot_for_cleanup = state.jam_bot.clone();
-        let jam_source_for_cleanup = state.jam_source.clone();
-        let jam_lifecycle_for_cleanup = state.jam_lifecycle.clone();
+        let state_for_cleanup = state.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
@@ -381,14 +449,7 @@ async fn main() {
                     append_session_event(&session_log_dir, &event);
                 }
                 if let Some(generation) = auto_end_generation {
-                    schedule_jam_auto_end(
-                        jam_for_cleanup.clone(),
-                        jam_bot_for_cleanup.clone(),
-                        jam_source_for_cleanup.clone(),
-                        jam_lifecycle_for_cleanup.clone(),
-                        generation,
-                        "stale cleanup",
-                    );
+                    schedule_jam_auto_end(state_for_cleanup.clone(), generation, "stale cleanup");
                 }
             }
         });

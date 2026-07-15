@@ -246,11 +246,10 @@
       // available against the current source so they can recover Spotify playback.
       canJoin: compatible && active && sourceReady,
       canControl: compatible && active && sourceControlReady,
-      // Stopping Spotify playback does not depend on capture health. Keep the
-      // action available during source stalls/errors while music is still
-      // reported as playing on the configured Spotify device.
-      canStopPlayback: compatible && active && spotifyConnected &&
-        playbackStopSupported && spotifyIsPlaying,
+      // Stopping Spotify playback does not depend on capture health or a fresh
+      // playback observation. Pause is idempotent and exact-device fenced, so
+      // keep this emergency control available for the whole active Jam.
+      canStopPlayback: compatible && active && spotifyConnected && playbackStopSupported,
       canConfigure: compatible,
     };
   }

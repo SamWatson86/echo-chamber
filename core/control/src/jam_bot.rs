@@ -87,11 +87,28 @@ impl JamBot {
                     source.stop(generation).await;
                     return Err(format!("Jam source error: {}", message));
                 }
-                SourceEvent::Disconnected => {
-                    warn!(
-                        "[jam-bot] source disconnected during startup generation={}; waiting for reconnect",
-                        generation
-                    );
+                SourceEvent::AvailabilityChanged {
+                    enabled: false,
+                    generation: event_generation,
+                    error,
+                } if event_generation.is_none() || event_generation == Some(generation) => {
+                    source.stop(generation).await;
+                    return Err(match error {
+                        Some(error) => format!("Jam source was disabled during startup: {error}"),
+                        None => "Jam source was disabled during startup".to_string(),
+                    });
+                }
+                SourceEvent::Disconnected {
+                    generation: event_generation,
+                } if event_generation.is_none() || event_generation == Some(generation) => {
+                    source.stop(generation).await;
+                    return Err("Jam source disconnected during startup".to_string());
+                }
+                SourceEvent::ConnectionReplaced {
+                    generation: event_generation,
+                } if event_generation.is_none() || event_generation == Some(generation) => {
+                    source.stop(generation).await;
+                    return Err("Jam source connection was replaced during startup".to_string());
                 }
                 _ => {}
             }
@@ -183,13 +200,41 @@ async fn broadcast_loop(
                 healthy.store(false, Ordering::Release);
                 accum.clear();
             }
-            Ok(SourceEvent::Disconnected) => {
+            Ok(SourceEvent::AvailabilityChanged {
+                enabled: false,
+                generation: event_generation,
+                error,
+            }) if event_generation.is_none() || event_generation == Some(generation) => {
+                if let Some(error) = error {
+                    warn!(
+                        "[jam-bot] source disabled generation={}: {}",
+                        generation, error
+                    );
+                } else {
+                    warn!("[jam-bot] source disabled generation={}", generation);
+                }
+                healthy.store(false, Ordering::Release);
+                accum.clear();
+            }
+            Ok(SourceEvent::Disconnected {
+                generation: event_generation,
+            }) if event_generation.is_none() || event_generation == Some(generation) => {
                 warn!("[jam-bot] source disconnected generation={}", generation);
                 healthy.store(false, Ordering::Release);
                 accum.clear();
             }
             Ok(SourceEvent::Connected) => {
                 warn!("[jam-bot] source reconnecting generation={}", generation);
+                healthy.store(false, Ordering::Release);
+                accum.clear();
+            }
+            Ok(SourceEvent::ConnectionReplaced {
+                generation: event_generation,
+            }) if event_generation.is_none() || event_generation == Some(generation) => {
+                warn!(
+                    "[jam-bot] source connection replaced generation={}",
+                    generation
+                );
                 healthy.store(false, Ordering::Release);
                 accum.clear();
             }
@@ -353,10 +398,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_waits_for_reconnect_and_replayed_start() {
+    async fn disabled_source_marks_an_active_relay_unhealthy() {
+        let (source_tx, source_rx) = broadcast::channel(16);
+        let (audio_tx, _audio_rx) = broadcast::channel(16);
+        let healthy = Arc::new(AtomicBool::new(true));
+        let task = tokio::spawn(broadcast_loop(9, audio_tx, source_rx, healthy.clone()));
+
+        source_tx
+            .send(SourceEvent::AvailabilityChanged {
+                enabled: false,
+                generation: Some(9),
+                error: Some("Local Jam source is turned off".to_string()),
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!healthy.load(Ordering::Acquire));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn startup_fails_immediately_if_the_source_becomes_disabled() {
+        let source = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection_id = source.test_register(command_tx).await;
+        source.test_availability(connection_id, true, None).await;
+        let start_source = source.clone();
+        let start_task =
+            tokio::spawn(
+                async move { JamBot::start(30, start_source, Duration::from_secs(30)).await },
+            );
+        command_rx.recv().await.expect("initial start command");
+
+        source
+            .test_availability(connection_id, false, Some("Local Jam source is turned off"))
+            .await;
+        let result = tokio::time::timeout(Duration::from_secs(1), start_task)
+            .await
+            .expect("startup should fail without waiting for its timeout")
+            .expect("startup task");
+        let error = match result {
+            Ok(_) => panic!("disabled source must fail startup"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "Jam source was disabled during startup: Local Jam source is turned off"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_fails_immediately_if_the_source_disconnects() {
         let source = JamSourceRegistry::new(true);
         let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
         let first_connection = source.test_register(first_tx).await;
+        source.test_availability(first_connection, true, None).await;
         let start_source = source.clone();
         let start_task =
             tokio::spawn(
@@ -365,17 +460,10 @@ mod tests {
 
         first_rx.recv().await.expect("initial start command");
         source.test_unregister(first_connection).await;
-
-        let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
-        let second_connection = source.test_register(second_tx).await;
-        second_rx.recv().await.expect("replayed start command");
-        source.test_ready(second_connection, 31).await;
-
-        let bot = start_task
-            .await
-            .expect("startup task")
-            .expect("startup recovered");
-        assert!(bot.is_healthy());
-        bot.stop().await;
+        let error = match start_task.await.expect("startup task") {
+            Ok(_) => panic!("disconnected startup must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "Jam source disconnected during startup");
     }
 }

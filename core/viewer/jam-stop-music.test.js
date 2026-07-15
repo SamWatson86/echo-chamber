@@ -16,12 +16,12 @@ function functionSource(name, nextName) {
 }
 
 test("Stop Music is a distinct red playback control", () => {
-  assert.match(indexSource, /id="jam-stop-btn"[^>]*class="jam-stop-btn"[^>]*>Stop Music<\/button>/);
+  assert.match(indexSource, /id="jam-stop-music-btn"[^>]*class="jam-stop-btn"[^>]*>Stop Music<\/button>/);
   assert.match(indexSource, /Stops Spotify playback for everyone; the Jam stays open/);
 });
 
 test("Stop Music never tears down Jam membership or listener audio", () => {
-  const handler = functionSource("stopJamPlayback", "skipTrack");
+  const handler = functionSource("stopJamPlayback", "endJam");
 
   assert.match(handler, /\/api\/jam\/playback\/stop/);
   assert.match(handler, /jam-playback-stopped/);
@@ -29,4 +29,14 @@ test("Stop Music never tears down Jam membership or listener audio", () => {
   assert.doesNotMatch(handler, /stopJamAudioStream/);
   assert.doesNotMatch(handler, /leaveSucceeded/);
   assert.doesNotMatch(handler, /_jamListeningGeneration\s*=\s*null/);
+});
+
+test("host-only End Jam remains distinct from shared Stop Music", () => {
+  assert.match(indexSource, /id="jam-end-btn"[^>]*class="jam-end-btn"[^>]*>End Jam<\/button>/);
+  const handler = functionSource("endJam", "skipTrack");
+
+  assert.match(handler, /\/api\/jam\/stop/);
+  assert.match(handler, /stopJamAudioStream/);
+  assert.match(handler, /_jamListeningGeneration\s*=\s*null/);
+  assert.match(jamSource, /_jamState\.host_identity\s*===\s*identity/);
 });

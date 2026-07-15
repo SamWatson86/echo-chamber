@@ -65,7 +65,7 @@
           <label class="jam-source-local-switch-row">
             <span class="jam-source-local-copy">
               <strong>Hear Jam on this PC</strong>
-              <small>Plays Echo's synced Jam audio here; Jam Volume still controls how loud it is.</small>
+              <small>When this Echo client joins the Jam, Jam Volume controls how loud it is here.</small>
             </span>
             <span class="jam-source-local-switch">
               <input type="checkbox" role="switch" data-jam-source-monitor-toggle aria-label="Hear Jam on this PC" />
@@ -407,7 +407,7 @@
             <label class="jam-source-local-switch-row">
               <span class="jam-source-local-copy">
                 <strong>Hear Jam on this PC</strong>
-                <small>Plays Echo's synced Jam audio here; Jam Volume still controls how loud it is.</small>
+                <small>When this Echo client joins the Jam, Jam Volume controls how loud it is here.</small>
               </span>
               <span class="jam-source-local-switch">
                 <input type="checkbox" role="switch" data-jam-source-monitor-toggle aria-label="Hear Jam on this PC" />
@@ -418,7 +418,8 @@
           </section>
           <div id="jam-host-controls" class="jam-host-controls" style="display:none">
             <button id="jam-start-btn" type="button" class="jam-start-btn">Start Jam</button>
-            <button id="jam-stop-btn" type="button" class="jam-stop-btn" style="display:none" title="Stops Spotify playback for everyone; the Jam stays open">Stop Music</button>
+            <button id="jam-stop-music-btn" type="button" class="jam-stop-btn" style="display:none" title="Stops Spotify playback for everyone; the Jam stays open">Stop Music</button>
+            <button id="jam-end-btn" type="button" class="jam-end-btn" style="display:none" title="Ends the Jam for everyone and clears its queue">End Jam</button>
             <button id="jam-skip-btn" type="button" class="jam-skip-btn" style="display:none">Skip</button>
           </div>
           <div id="jam-now-playing" class="jam-now-playing">

@@ -29,6 +29,7 @@ var _jamSourceLocalControlPromise = null;
 var _jamSourceLocalControlPending = false;
 var _jamSourceLocalControlLegacy = false;
 var _jamSourceLocalControlsBound = false;
+var _jamSourceLocalPollTimer = null;
 var _jamRelayMuteNoticeShown = false;
 var _jamStateRequestGate = (window.EchoJamSessionState && window.EchoJamSessionState.createLatestRequestGate)
   ? window.EchoJamSessionState.createLatestRequestGate()
@@ -83,11 +84,14 @@ function renderJamSourceLocalControl() {
     } else if (_jamSourceLocalControlLegacy) {
       status = "Echo update required for local Spotify controls";
       tone = "warning";
+    } else if (state.takeover_active && !state.takeover_enabled) {
+      status = "Stopping the Jam and returning Spotify to this PC...";
+      tone = "warning";
     } else if (!state.takeover_enabled) {
       status = "Spotify control is off";
       tone = "warning";
     } else if (state.takeover_active) {
-      status = "Echo is using " + device + (state.monitor_enabled ? " · local Jam audio is on" : " · local Jam audio is off");
+      status = "Echo is using " + device + (state.monitor_enabled ? " · local Jam monitor is enabled" : " · local Jam monitor is off");
       tone = "ready";
     } else if (!state.agent_running) {
       status = "Spotify control is starting…";
@@ -244,7 +248,14 @@ function bindJamSourceLocalControls() {
 function initJamSourceLocalControlUi() {
   installJamRelayAudioRoutingHook();
   bindJamSourceLocalControls();
-  refreshJamSourceLocalControl();
+  var initialControl = refreshJamSourceLocalControl();
+  // This PC can be taken over while the viewer is sitting at the login portal.
+  // Keep the local-only status truthful without depending on Echo room polling.
+  Promise.resolve(initialControl).then(function(state) {
+    if (state && state.is_source_host && !_jamSourceLocalPollTimer) {
+      _jamSourceLocalPollTimer = setInterval(refreshJamSourceLocalControl, 2000);
+    }
+  });
 }
 
 async function detectJamSourceHost() {
@@ -382,8 +393,15 @@ function jamActionAllowed(action) {
           ? "No active Jam is running"
           : !contract.spotifyConnected
             ? "Spotify is not connected"
-            : "Music is already stopped";
+            : "Stop Music is unavailable";
       showJamError(message);
+      return false;
+    }
+    return true;
+  }
+  if (action === "end") {
+    if (!contract.active) {
+      showJamError("No active Jam is running");
       return false;
     }
     return true;
@@ -395,7 +413,8 @@ function applyJamContractToControls() {
   var contract = _jamContract || evaluateJamServerContract(null);
   var connectBtn = document.getElementById("jam-connect-spotify");
   var startBtn = document.getElementById("jam-start-btn");
-  var stopBtn = document.getElementById("jam-stop-btn");
+  var stopBtn = document.getElementById("jam-stop-music-btn");
+  var endBtn = document.getElementById("jam-end-btn");
   var skipBtn = document.getElementById("jam-skip-btn");
   var searchInput = document.getElementById("jam-search-input");
   var searchSection = document.getElementById("jam-search-section");
@@ -422,7 +441,13 @@ function applyJamContractToControls() {
           ? "No active Jam is running"
           : !contract.spotifyConnected
             ? "Spotify is not connected"
-            : "Music is already stopped";
+            : "Stop Music is unavailable";
+  }
+  if (endBtn) {
+    endBtn.disabled = !contract.compatible || !contract.active;
+    endBtn.title = contract.compatible
+      ? "Ends the Jam for everyone and clears its queue"
+      : contract.compatibilityMessage;
   }
   if (skipBtn) skipBtn.disabled = !contract.canControl || !contract.active;
   if (searchInput) searchInput.disabled = !contract.canControl;
@@ -775,7 +800,7 @@ async function startJam() {
 }
 
 async function stopJamPlayback() {
-  var stopBtn = document.getElementById("jam-stop-btn");
+  var stopBtn = document.getElementById("jam-stop-music-btn");
   try {
     if (!jamActionAllowed("stopPlayback")) return;
     if (stopBtn) {
@@ -820,6 +845,50 @@ async function stopJamPlayback() {
   } finally {
     if (stopBtn) stopBtn.textContent = "Stop Music";
     applyJamContractToControls();
+  }
+}
+
+async function endJam() {
+  try {
+    if (!jamActionAllowed("end")) return;
+    var identity = room && room.localParticipant ? room.localParticipant.identity : "";
+    var response = await fetch(apiUrl("/api/jam/stop"), {
+      method: "POST",
+      headers: jamActorHeaders(),
+      body: JSON.stringify({
+        identity: identity,
+        generation: _jamState && _jamState.generation
+      })
+    });
+    if (!response.ok) {
+      if (response.status === 403) {
+        showJamError("Only the participant who started this Jam can end it");
+      } else {
+        var detail = (await response.text()).trim();
+        showJamError("End Jam failed" + (detail
+          ? ": " + detail
+          : " (status " + response.status + ")"));
+      }
+      return;
+    }
+
+    if (_jamSessionState && _jamSessionState.leaveSucceeded) {
+      _jamSessionState.leaveSucceeded();
+      syncJamButtonsFromState();
+    }
+    _jamListeningGeneration = null;
+    stopJamAudioStream();
+    try {
+      var message = JSON.stringify({ type: "jam-stopped" });
+      room.localParticipant.publishData(new TextEncoder().encode(message), { reliable: true });
+    } catch (error) {
+      debugLog("[jam] data broadcast error: " + error);
+    }
+    showJamToast("Jam ended.");
+    await fetchJamState();
+  } catch (error) {
+    showJamError("End Jam failed: " + error.message);
+    debugLog("[jam] endJam error: " + error);
   }
 }
 
@@ -1107,7 +1176,8 @@ function renderJamPanel() {
   var myBase = idBase(identity);
 
   var startBtn = document.getElementById("jam-start-btn");
-  var stopBtn = document.getElementById("jam-stop-btn");
+  var stopBtn = document.getElementById("jam-stop-music-btn");
+  var endBtn = document.getElementById("jam-end-btn");
   var skipBtn = document.getElementById("jam-skip-btn");
   if (startBtn) {
     startBtn.style.display = _jamState.active ? "none" : "";
@@ -1116,6 +1186,11 @@ function renderJamPanel() {
   if (stopBtn) {
     stopBtn.style.display = _jamState.active && contract.playbackStopSupported ? "" : "none";
     stopBtn.disabled = !contract.canStopPlayback;
+  }
+  if (endBtn) {
+    var isExactHost = !!identity && _jamState.host_identity === identity;
+    endBtn.style.display = _jamState.active && isExactHost ? "" : "none";
+    endBtn.disabled = !contract.compatible;
   }
   if (skipBtn) {
     skipBtn.style.display = _jamState.active ? "" : "none";
@@ -1556,8 +1631,11 @@ function initJam() {
   var startBtn = document.getElementById("jam-start-btn");
   if (startBtn) startBtn.onclick = startJam;
 
-  var stopBtn = document.getElementById("jam-stop-btn");
+  var stopBtn = document.getElementById("jam-stop-music-btn");
   if (stopBtn) stopBtn.onclick = stopJamPlayback;
+
+  var endBtn = document.getElementById("jam-end-btn");
+  if (endBtn) endBtn.onclick = endJam;
 
   var skipBtn = document.getElementById("jam-skip-btn");
   if (skipBtn) skipBtn.onclick = skipTrack;

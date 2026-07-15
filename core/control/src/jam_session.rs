@@ -15,9 +15,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
+    future::Future,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
+
+const SPOTIFY_RELEASE_PAUSE_TIMEOUT: Duration = Duration::from_secs(15);
+const SPOTIFY_START_BIND_TIMEOUT: Duration = Duration::from_secs(15);
+const SPOTIFY_RECOVERY_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const SOURCE_START_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 // ── Structs ──────────────────────────────────────────────────────────────
 
@@ -591,17 +597,6 @@ async fn spotify_response_error(
 
 // ── Jam Session endpoints ────────────────────────────────────────────────
 
-/// Stop the jam audio bot if it's running.
-pub(crate) async fn stop_jam_bot(state: &AppState) -> bool {
-    let bot = state.jam_bot.lock().await.take();
-    if let Some(bot) = bot {
-        bot.stop().await;
-        true
-    } else {
-        false
-    }
-}
-
 pub(crate) fn clear_active_jam_state(jam: &mut JamState) {
     jam.active = false;
     jam.starting = false;
@@ -615,6 +610,209 @@ pub(crate) fn clear_active_jam_state(jam: &mut JamState) {
     jam.spotify_device_name = None;
     jam.spotify_is_playing = false;
     jam.audio_expected_since = None;
+}
+
+#[derive(Clone, Copy)]
+enum JamEndCondition {
+    Active,
+    ActiveOrStarting,
+    NoListeners,
+}
+
+fn jam_end_condition_matches(jam: &JamState, generation: u64, condition: JamEndCondition) -> bool {
+    if jam.generation != generation {
+        return false;
+    }
+    match condition {
+        JamEndCondition::Active => jam.active,
+        JamEndCondition::ActiveOrStarting => jam.active || jam.starting,
+        JamEndCondition::NoListeners => jam.active && jam.listeners.is_empty(),
+    }
+}
+
+fn bound_spotify_device(jam: &JamState, generation: u64) -> Option<SpotifyDevice> {
+    if jam.generation != generation {
+        return None;
+    }
+    Some(SpotifyDevice {
+        id: jam.spotify_device_id.clone()?,
+        name: jam.spotify_device_name.clone().unwrap_or_default(),
+    })
+}
+
+async fn pause_bound_spotify_before_release(
+    state: &AppState,
+    generation: u64,
+    device: Option<&SpotifyDevice>,
+) {
+    let Some(device) = device else {
+        return;
+    };
+    match tokio::time::timeout(
+        SPOTIFY_RELEASE_PAUSE_TIMEOUT,
+        pause_spotify_playback_on_device(state, device),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err((_, error))) => {
+            // Teardown must still release a wedged source. This is best-effort,
+            // but the attempt always precedes the source release command.
+            warn!(
+                "Jam generation {} could not pause Spotify before source release: {}",
+                generation, error
+            );
+        }
+        Err(_) => {
+            warn!(
+                "Jam generation {} Spotify pause exceeded the {}s source-release deadline",
+                generation,
+                SPOTIFY_RELEASE_PAUSE_TIMEOUT.as_secs()
+            );
+        }
+    }
+}
+
+/// End one exact Jam generation while the caller holds `jam_lifecycle`.
+/// Spotify is paused before the native source receives Stop, so restoring its
+/// prior per-app output route does not normally make Jam audio erupt locally.
+async fn end_jam_generation_locked(
+    state: &AppState,
+    generation: u64,
+    condition: JamEndCondition,
+    reason: &str,
+    final_error: Option<String>,
+) -> bool {
+    let device = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !jam_end_condition_matches(&jam, generation, condition) {
+            return false;
+        }
+        bound_spotify_device(&jam, generation)
+    };
+
+    pause_bound_spotify_before_release(state, generation, device.as_ref()).await;
+
+    let ended = {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !jam_end_condition_matches(&jam, generation, condition) {
+            false
+        } else {
+            clear_active_jam_state(&mut jam);
+            jam.last_error = final_error;
+            true
+        }
+    };
+    if !ended {
+        return false;
+    }
+
+    let bot = {
+        let mut guard = state.jam_bot.lock().await;
+        if guard.as_ref().map(|bot| bot.generation()) == Some(generation) {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    if let Some(bot) = bot {
+        bot.stop().await;
+    } else {
+        state.jam_source.stop(generation).await;
+    }
+    info!("Jam generation {} ended ({})", generation, reason);
+    true
+}
+
+pub(crate) async fn end_jam_for_source_unavailable(
+    state: &AppState,
+    generation: u64,
+    reason: String,
+) -> bool {
+    let _lifecycle = state.jam_lifecycle.lock().await;
+    end_jam_generation_locked(
+        state,
+        generation,
+        JamEndCondition::ActiveOrStarting,
+        "source unavailable",
+        Some(reason),
+    )
+    .await
+}
+
+fn active_jam_source_watchdog_error(
+    source: &crate::jam_source::JamSourceSnapshot,
+    generation: u64,
+) -> Option<String> {
+    let unavailable = !source.connected
+        || !source.availability_known
+        || !source.enabled
+        || source.status == "error"
+        || source.generation != Some(generation);
+    if !unavailable {
+        return None;
+    }
+
+    source.error.clone().or_else(|| {
+        if source.generation != Some(generation) {
+            Some(format!(
+                "Jam source lost the active generation binding (expected {}, source {:?})",
+                generation, source.generation
+            ))
+        } else {
+            Some(format!(
+                "Jam source became unavailable (status: {})",
+                source.status
+            ))
+        }
+    })
+}
+
+/// Redundant lifecycle reconciliation for a missed source event.
+///
+/// The source registry clears its desired generation when a connection is
+/// replaced, disconnected, or disabled. Therefore the watchdog must derive the
+/// exact teardown generation from the active Jam rather than relying on the
+/// snapshot to retain it. Starting Jams are intentionally excluded: startup has
+/// a normal pre-source binding window and its own source-loss guard.
+pub(crate) async fn end_active_jam_if_source_unhealthy(state: &AppState) -> bool {
+    let _lifecycle = state.jam_lifecycle.lock().await;
+    let generation = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !jam.active {
+            return false;
+        }
+        jam.generation
+    };
+    let source = state.jam_source.snapshot().await;
+    let Some(reason) = active_jam_source_watchdog_error(&source, generation) else {
+        return false;
+    };
+
+    end_jam_generation_locked(
+        state,
+        generation,
+        JamEndCondition::Active,
+        "source watchdog reconciliation",
+        Some(reason),
+    )
+    .await
+}
+
+pub(crate) async fn end_jam_if_still_empty(
+    state: &AppState,
+    generation: u64,
+    reason: &'static str,
+) -> bool {
+    let _lifecycle = state.jam_lifecycle.lock().await;
+    end_jam_generation_locked(
+        state,
+        generation,
+        JamEndCondition::NoListeners,
+        reason,
+        None,
+    )
+    .await
 }
 
 fn apply_revoked_participant_bindings(
@@ -642,7 +840,6 @@ fn apply_revoked_participant_bindings(
 
     if host_revoked {
         let generation = jam.generation;
-        clear_active_jam_state(jam);
         (Some(generation), None)
     } else {
         let auto_end = (jam.active && jam.listeners.is_empty()).then_some(jam.generation);
@@ -670,28 +867,16 @@ pub(crate) async fn reconcile_revoked_participant_bindings(
             "Jam generation {} ended because its host binding was revoked ({})",
             generation, reason
         );
-        let bot = {
-            let mut guard = state.jam_bot.lock().await;
-            if guard.as_ref().map(|bot| bot.generation()) == Some(generation) {
-                guard.take()
-            } else {
-                None
-            }
-        };
-        if let Some(bot) = bot {
-            bot.stop().await;
-        } else {
-            state.jam_source.stop(generation).await;
-        }
-    } else if let Some(generation) = auto_end_generation {
-        schedule_jam_auto_end(
-            state.jam.clone(),
-            state.jam_bot.clone(),
-            state.jam_source.clone(),
-            state.jam_lifecycle.clone(),
+        end_jam_generation_locked(
+            state,
             generation,
+            JamEndCondition::Active,
             reason,
-        );
+            Some("Jam host authorization was revoked".to_string()),
+        )
+        .await;
+    } else if let Some(generation) = auto_end_generation {
+        schedule_jam_auto_end(state.clone(), generation, reason);
     }
 }
 
@@ -725,6 +910,66 @@ fn jam_start_response(generation: u64, device: &SpotifyDevice) -> serde_json::Va
     })
 }
 
+fn jam_source_start_preflight(
+    source: &crate::jam_source::JamSourceSnapshot,
+) -> Result<(), (StatusCode, String)> {
+    let message = if !source.configured {
+        Some("Jam source is not configured".to_string())
+    } else if !source.connected {
+        Some(
+            source
+                .error
+                .clone()
+                .unwrap_or_else(|| "Configured Jam source is offline".to_string()),
+        )
+    } else if !source.availability_known {
+        Some("Jam source availability is still negotiating".to_string())
+    } else if !source.enabled {
+        Some(
+            source
+                .error
+                .clone()
+                .unwrap_or_else(|| "Jam sharing is turned off on the source PC".to_string()),
+        )
+    } else if source.status == "error" {
+        Some(
+            source
+                .error
+                .clone()
+                .unwrap_or_else(|| "Jam source is unavailable".to_string()),
+        )
+    } else {
+        None
+    };
+    match message {
+        Some(message) => Err((StatusCode::SERVICE_UNAVAILABLE, message)),
+        None => Ok(()),
+    }
+}
+
+fn jam_source_ready_for_generation(
+    source: &crate::jam_source::JamSourceSnapshot,
+    generation: u64,
+) -> bool {
+    jam_source_start_preflight(source).is_ok()
+        && source.ready
+        && source.generation == Some(generation)
+}
+
+async fn wait_for_source_start_loss(state: &AppState, generation: u64) -> String {
+    let mut interval = tokio::time::interval(SOURCE_START_RECHECK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let source = state.jam_source.snapshot().await;
+        if !jam_source_ready_for_generation(&source, generation) {
+            return source
+                .error
+                .unwrap_or_else(|| "Jam source changed during Spotify startup".to_string());
+        }
+    }
+}
+
 pub(crate) async fn jam_start(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -741,6 +986,9 @@ pub(crate) async fn jam_start(
         .ok_or((StatusCode::UNAUTHORIZED, String::new()))?;
     let actor_identity = actor.sub;
     let _lifecycle = state.jam_lifecycle.lock().await;
+
+    let source_before_start = state.jam_source.snapshot().await;
+    jam_source_start_preflight(&source_before_start)?;
 
     let generation = {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
@@ -784,14 +1032,62 @@ pub(crate) async fn jam_start(
         }
     };
 
-    let spotify_is_playing = match bind_spotify_playback_to_device(&state, &device).await {
+    // Ready means the source PC has both acquired its silent per-app route and
+    // opened process capture. Recheck immediately before Spotify transfer so a
+    // local Off toggle cannot race playback onto the PC speakers.
+    let source_before_transfer = state.jam_source.snapshot().await;
+    if let Err(error) = jam_source_start_preflight(&source_before_transfer) {
+        bot.stop().await;
+        fail_jam_start(&state, generation, &error.1);
+        return Err(error);
+    }
+    if !jam_source_ready_for_generation(&source_before_transfer, generation) {
+        let error = "Jam source changed before Spotify playback could be transferred".to_string();
+        bot.stop().await;
+        fail_jam_start(&state, generation, &error);
+        return Err((StatusCode::SERVICE_UNAVAILABLE, error));
+    }
+
+    let spotify_bind = tokio::select! {
+        result = tokio::time::timeout(
+            SPOTIFY_START_BIND_TIMEOUT,
+            bind_spotify_playback_to_device(&state, &device),
+        ) => match result {
+            Ok(result) => result,
+            Err(_) => Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "Spotify startup exceeded the {}s safety deadline",
+                    SPOTIFY_START_BIND_TIMEOUT.as_secs()
+                ),
+            )),
+        },
+        reason = wait_for_source_start_loss(&state, generation) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            reason,
+        )),
+    };
+    let spotify_is_playing = match spotify_bind {
         Ok(is_playing) => is_playing,
         Err(error) => {
+            // The transfer request may have reached Spotify before a timeout
+            // or source-loss cancellation. Pause the exact target before the
+            // source route is released.
+            pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
             bot.stop().await;
             fail_jam_start(&state, generation, &error.1);
             return Err(error);
         }
     };
+
+    let source_after_transfer = state.jam_source.snapshot().await;
+    if !jam_source_ready_for_generation(&source_after_transfer, generation) || !bot.is_healthy() {
+        let error = "Jam source changed while Spotify playback was transferring".to_string();
+        pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
+        bot.stop().await;
+        fail_jam_start(&state, generation, &error);
+        return Err((StatusCode::SERVICE_UNAVAILABLE, error));
+    }
     *state.jam_bot.lock().await = Some(bot);
     info!(
         "Jam audio bot started successfully generation={}",
@@ -827,6 +1123,7 @@ pub(crate) async fn jam_start(
         }
     };
     if !activated {
+        pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
         if let Some(bot) = state.jam_bot.lock().await.take() {
             bot.stop().await;
         }
@@ -970,27 +1267,87 @@ async fn ensure_jam_recovery_controls_ready(state: &AppState) -> Result<u64, (St
     Ok(generation)
 }
 
-fn observe_spotify_playback(jam: &mut JamState, generation: u64, is_playing: bool) -> bool {
-    if !jam.active || jam.generation != generation {
-        return false;
+async fn wait_for_jam_recovery_controls_loss(
+    state: &AppState,
+    generation: u64,
+) -> (StatusCode, String) {
+    let mut interval = tokio::time::interval(SOURCE_START_RECHECK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        match ensure_jam_recovery_controls_ready(state).await {
+            Ok(current_generation) if current_generation == generation => {}
+            Ok(_) => {
+                return (
+                    StatusCode::CONFLICT,
+                    "Jam generation changed during Spotify control".to_string(),
+                );
+            }
+            Err(error) => return error,
+        }
     }
-    jam.spotify_is_playing = is_playing;
-    if is_playing {
-        jam.audio_expected_since
-            .get_or_insert_with(std::time::Instant::now);
-    } else {
-        jam.audio_expected_since = None;
+}
+
+/// Run a playback-changing Spotify operation only while the exact Jam source
+/// generation remains safe. Cancellation is ambiguous because Spotify may have
+/// accepted a request before the HTTP future was dropped, so every safety exit
+/// pauses the exact bound device before the desktop may restore its old route.
+async fn run_guarded_spotify_recovery_operation<T, F>(
+    state: &AppState,
+    generation: u64,
+    device: &SpotifyDevice,
+    operation_name: &str,
+    operation: F,
+) -> Result<T, (StatusCode, String)>
+where
+    F: Future<Output = Result<T, (StatusCode, String)>>,
+{
+    let guarded_result: Result<Result<T, (StatusCode, String)>, (StatusCode, String)> = tokio::select! {
+        result = tokio::time::timeout(SPOTIFY_RECOVERY_OPERATION_TIMEOUT, operation) => {
+            match result {
+                Ok(result) => Ok(result),
+                Err(_) => Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "{} exceeded the {}s source-safety deadline",
+                        operation_name,
+                        SPOTIFY_RECOVERY_OPERATION_TIMEOUT.as_secs(),
+                    ),
+                )),
+            }
+        }
+        error = wait_for_jam_recovery_controls_loss(state, generation) => Err(error),
+    };
+
+    match guarded_result {
+        Err(safety_error) => {
+            pause_bound_spotify_before_release(state, generation, Some(device)).await;
+            Err(safety_error)
+        }
+        Ok(operation_result) => match ensure_jam_recovery_controls_ready(state).await {
+            Ok(current_generation) if current_generation == generation => operation_result,
+            Ok(_) => {
+                pause_bound_spotify_before_release(state, generation, Some(device)).await;
+                Err((
+                    StatusCode::CONFLICT,
+                    "Jam generation changed during Spotify control".to_string(),
+                ))
+            }
+            Err(error) => {
+                pause_bound_spotify_before_release(state, generation, Some(device)).await;
+                Err(error)
+            }
+        },
     }
-    true
 }
 
 fn apply_spotify_pause_result(jam: &mut JamState, generation: u64, device: &SpotifyDevice) -> bool {
-    if !active_generation_matches(jam, generation) {
+    if !active_generation_matches(jam, generation)
+        || jam.spotify_device_id.as_deref() != Some(device.id.as_str())
+    {
         return false;
     }
 
-    jam.spotify_device_id = Some(device.id.clone());
-    jam.spotify_device_name = Some(device.name.clone());
     jam.spotify_is_playing = false;
     jam.audio_expected_since = None;
     jam.last_error = None;
@@ -1029,7 +1386,7 @@ pub(crate) async fn jam_stop(
     let _lifecycle = state.jam_lifecycle.lock().await;
 
     let generation = {
-        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
 
         if !active_generation_matches(&jam, payload.generation) {
             return Err(StatusCode::CONFLICT);
@@ -1044,14 +1401,20 @@ pub(crate) async fn jam_stop(
             return Err(StatusCode::FORBIDDEN);
         }
 
-        clear_active_jam_state(&mut jam);
         info!("Jam session stopped by {}", &actor_identity);
         payload.generation
     };
 
-    // Stop the audio bot
-    if !stop_jam_bot(&state).await {
-        state.jam_source.stop(generation).await;
+    if !end_jam_generation_locked(
+        &state,
+        generation,
+        JamEndCondition::Active,
+        "host ended Jam",
+        None,
+    )
+    .await
+    {
+        return Err(StatusCode::CONFLICT);
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -1273,6 +1636,8 @@ pub(crate) async fn jam_state(
         "jam_protocol_version": crate::jam_source::JAM_SOURCE_PROTOCOL_VERSION,
         "source_status": source_status,
         "source_error": source_error,
+        "source_availability_known": source.availability_known,
+        "source_enabled": source.enabled,
         "source_last_frame_ms": source.last_frame_ms,
         "source_peak": source.peak,
         "source_ready": source.ready,
@@ -1356,70 +1721,81 @@ pub(crate) async fn jam_queue_add(
     if generation != payload.generation {
         return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
     }
-    let device = resolve_spotify_device(&state).await?;
+    let device = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        bound_spotify_device(&jam, generation).ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The active Jam has no bound Spotify device".to_string(),
+        ))?
+    };
 
-    let playback_response = spotify_api_request(
+    run_guarded_spotify_recovery_operation(
         &state,
-        reqwest::Method::GET,
-        "https://api.spotify.com/v1/me/player",
-        None,
+        generation,
+        &device,
+        "Queueing a Spotify track",
+        async {
+            let playback_response = spotify_api_request(
+                &state,
+                reqwest::Method::GET,
+                "https://api.spotify.com/v1/me/player",
+                None,
+            )
+            .await?;
+            let should_queue = if playback_response.status() == reqwest::StatusCode::NO_CONTENT {
+                false
+            } else if playback_response.status().is_success() {
+                let playback: serde_json::Value =
+                    playback_response.json().await.map_err(|error| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!("Spotify playback response was invalid: {}", error),
+                        )
+                    })?;
+                playback["is_playing"].as_bool().unwrap_or(false)
+                    && playback["device"]["id"].as_str() == Some(device.id.as_str())
+            } else {
+                return Err(
+                    spotify_response_error(playback_response, "Read Spotify playback").await,
+                );
+            };
+
+            if should_queue {
+                let queue_url = format!(
+                    "https://api.spotify.com/v1/me/player/queue?uri={}&device_id={}",
+                    urlencoded(&payload.spotify_uri),
+                    urlencoded(&device.id),
+                );
+                let response =
+                    spotify_api_request(&state, reqwest::Method::POST, &queue_url, None).await?;
+                if !response.status().is_success() {
+                    return Err(spotify_response_error(response, "Queue Spotify track").await);
+                }
+                info!(
+                    "Track queued on configured Spotify device: {}",
+                    payload.spotify_uri
+                );
+            } else {
+                let play_url = format!(
+                    "https://api.spotify.com/v1/me/player/play?device_id={}",
+                    urlencoded(&device.id)
+                );
+                let play_body = serde_json::json!({ "uris": [payload.spotify_uri] });
+                let response =
+                    spotify_api_request(&state, reqwest::Method::PUT, &play_url, Some(play_body))
+                        .await?;
+                if !response.status().is_success() {
+                    return Err(spotify_response_error(response, "Start Spotify track").await);
+                }
+                info!(
+                    "Track started on configured Spotify device: {}",
+                    payload.spotify_uri
+                );
+            }
+            Ok(())
+        },
     )
     .await?;
-    let should_queue = if playback_response.status() == reqwest::StatusCode::NO_CONTENT {
-        false
-    } else if playback_response.status().is_success() {
-        let playback: serde_json::Value = playback_response.json().await.map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Spotify playback response was invalid: {}", error),
-            )
-        })?;
-        playback["is_playing"].as_bool().unwrap_or(false)
-            && playback["device"]["id"].as_str() == Some(device.id.as_str())
-    } else {
-        return Err(spotify_response_error(playback_response, "Read Spotify playback").await);
-    };
-    {
-        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        if !observe_spotify_playback(&mut jam, generation, should_queue) {
-            return Err((
-                StatusCode::CONFLICT,
-                "Jam changed during Spotify request".to_string(),
-            ));
-        }
-    }
-    ensure_jam_recovery_controls_ready(&state).await?;
-
-    if should_queue {
-        let queue_url = format!(
-            "https://api.spotify.com/v1/me/player/queue?uri={}&device_id={}",
-            urlencoded(&payload.spotify_uri),
-            urlencoded(&device.id),
-        );
-        let response = spotify_api_request(&state, reqwest::Method::POST, &queue_url, None).await?;
-        if !response.status().is_success() {
-            return Err(spotify_response_error(response, "Queue Spotify track").await);
-        }
-        info!(
-            "Track queued on configured Spotify device: {}",
-            payload.spotify_uri
-        );
-    } else {
-        let play_url = format!(
-            "https://api.spotify.com/v1/me/player/play?device_id={}",
-            urlencoded(&device.id)
-        );
-        let play_body = serde_json::json!({ "uris": [payload.spotify_uri] });
-        let response =
-            spotify_api_request(&state, reqwest::Method::PUT, &play_url, Some(play_body)).await?;
-        if !response.status().is_success() {
-            return Err(spotify_response_error(response, "Start Spotify track").await);
-        }
-        info!(
-            "Track started on configured Spotify device: {}",
-            payload.spotify_uri
-        );
-    }
 
     let track = QueuedTrack {
         spotify_uri: payload.spotify_uri,
@@ -1429,14 +1805,29 @@ pub(crate) async fn jam_queue_add(
         duration_ms: payload.duration_ms,
         added_by,
     };
-    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    jam.spotify_device_id = Some(device.id);
-    jam.spotify_device_name = Some(device.name);
-    jam.spotify_is_playing = true;
-    jam.audio_expected_since = Some(std::time::Instant::now());
-    jam.last_error = None;
-    jam.queue.push(track);
-    jam.now_playing = None;
+    let applied = {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !active_generation_matches(&jam, generation)
+            || jam.spotify_device_id.as_deref() != Some(device.id.as_str())
+        {
+            false
+        } else {
+            jam.spotify_device_name = Some(device.name.clone());
+            jam.spotify_is_playing = true;
+            jam.audio_expected_since = Some(std::time::Instant::now());
+            jam.last_error = None;
+            jam.queue.push(track);
+            jam.now_playing = None;
+            true
+        }
+    };
+    if !applied {
+        pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
+        return Err((
+            StatusCode::CONFLICT,
+            "Jam changed while queueing the Spotify track".to_string(),
+        ));
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1448,18 +1839,25 @@ pub(crate) async fn jam_stop_playback(
     ensure_admin(&state, &headers).map_err(|status| (status, String::new()))?;
     ensure_jam_participant(&state, &headers, None).map_err(|status| (status, String::new()))?;
 
+    // Fence the Spotify observation used by /api/jam/state. Otherwise an
+    // older in-flight GET can arrive after this pause and incorrectly mark
+    // playback as running again for the same generation and device.
+    let _refresh = state.jam_state_refresh.lock().await;
+
     // Serialize against start/end/queue/skip/leave. Capture health is
     // deliberately not consulted: Spotify playback can and should be stopped
     // even when the Jam source is stalled or offline.
     let _lifecycle = state.jam_lifecycle.lock().await;
-    {
+    let device = {
         let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
         if !active_generation_matches(&jam, payload.generation) {
             return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
         }
-    }
-
-    let device = resolve_spotify_device(&state).await?;
+        bound_spotify_device(&jam, payload.generation).ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The active Jam has no bound Spotify device".to_string(),
+        ))?
+    };
     pause_spotify_playback_on_device(&state, &device).await?;
 
     let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
@@ -1492,34 +1890,56 @@ pub(crate) async fn jam_skip(
     if generation != payload.generation {
         return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
     }
-    let device = resolve_spotify_device(&state).await?;
-    let spotify_is_playing = bind_spotify_playback_to_device(&state, &device).await?;
-    {
-        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        if !observe_spotify_playback(&mut jam, generation, spotify_is_playing) {
-            return Err((
-                StatusCode::CONFLICT,
-                "Jam changed during Spotify request".to_string(),
-            ));
-        }
-    }
-    ensure_jam_recovery_controls_ready(&state).await?;
-    let next_url = format!(
-        "https://api.spotify.com/v1/me/player/next?device_id={}",
-        urlencoded(&device.id)
-    );
-    let response = spotify_api_request(&state, reqwest::Method::POST, &next_url, None).await?;
-    if !response.status().is_success() {
-        return Err(spotify_response_error(response, "Skip Spotify track").await);
-    }
+    let device = {
+        let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        bound_spotify_device(&jam, generation).ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The active Jam has no bound Spotify device".to_string(),
+        ))?
+    };
+    let spotify_is_playing = run_guarded_spotify_recovery_operation(
+        &state,
+        generation,
+        &device,
+        "Skipping a Spotify track",
+        async {
+            let spotify_is_playing = bind_spotify_playback_to_device(&state, &device).await?;
+            let next_url = format!(
+                "https://api.spotify.com/v1/me/player/next?device_id={}",
+                urlencoded(&device.id)
+            );
+            let response =
+                spotify_api_request(&state, reqwest::Method::POST, &next_url, None).await?;
+            if !response.status().is_success() {
+                return Err(spotify_response_error(response, "Skip Spotify track").await);
+            }
+            Ok(spotify_is_playing)
+        },
+    )
+    .await?;
 
-    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    jam.spotify_device_id = Some(device.id);
-    jam.spotify_device_name = Some(device.name);
-    jam.spotify_is_playing = spotify_is_playing;
-    jam.audio_expected_since = spotify_is_playing.then(std::time::Instant::now);
-    jam.last_error = None;
-    jam.now_playing = None;
+    let applied = {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        if !active_generation_matches(&jam, generation)
+            || jam.spotify_device_id.as_deref() != Some(device.id.as_str())
+        {
+            false
+        } else {
+            jam.spotify_device_name = Some(device.name.clone());
+            jam.spotify_is_playing = spotify_is_playing;
+            jam.audio_expected_since = spotify_is_playing.then(std::time::Instant::now);
+            jam.last_error = None;
+            jam.now_playing = None;
+            true
+        }
+    };
+    if !applied {
+        pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
+        return Err((
+            StatusCode::CONFLICT,
+            "Jam changed while skipping the Spotify track".to_string(),
+        ));
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1600,14 +2020,7 @@ pub(crate) async fn jam_leave(
     };
 
     if let Some(generation) = auto_end_generation {
-        schedule_jam_auto_end(
-            state.jam.clone(),
-            state.jam_bot.clone(),
-            state.jam_source.clone(),
-            state.jam_lifecycle.clone(),
-            generation,
-            "listener left",
-        );
+        schedule_jam_auto_end(state.clone(), generation, "listener left");
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -1636,7 +2049,10 @@ pub(crate) async fn jam_audio_ws(
 
 fn listener_protocol_is_current(params: &std::collections::HashMap<String, String>) -> bool {
     params.len() == 2
-        && params.get("jam_protocol_version").map(String::as_str) == Some("2")
+        && params
+            .get("jam_protocol_version")
+            .and_then(|value| value.parse::<u8>().ok())
+            == Some(crate::jam_source::JAM_SOURCE_PROTOCOL_VERSION)
         && params.contains_key("generation")
 }
 
@@ -1947,6 +2363,29 @@ mod tests {
         }
     }
 
+    fn source_snapshot(
+        connected: bool,
+        availability_known: bool,
+        enabled: bool,
+        status: &str,
+    ) -> crate::jam_source::JamSourceSnapshot {
+        crate::jam_source::JamSourceSnapshot {
+            configured: true,
+            connected,
+            availability_known,
+            enabled,
+            status: status.to_string(),
+            error: None,
+            generation: None,
+            ready: false,
+            pid: None,
+            sample_rate: None,
+            channels: None,
+            last_frame_ms: None,
+            peak: 0.0,
+        }
+    }
+
     fn now_playing(is_playing: bool) -> NowPlayingInfo {
         NowPlayingInfo {
             name: "Current track".to_string(),
@@ -1977,6 +2416,89 @@ mod tests {
         assert!(!jam.active);
         assert!(jam.host_identity.is_empty());
         assert!(jam.listeners.is_empty());
+    }
+
+    #[test]
+    fn jam_start_fails_closed_until_the_source_pc_is_explicitly_armed() {
+        let negotiating = source_snapshot(true, false, false, "negotiating");
+        assert_eq!(
+            jam_source_start_preflight(&negotiating).unwrap_err().1,
+            "Jam source availability is still negotiating"
+        );
+
+        let disabled = source_snapshot(true, true, false, "disabled");
+        assert_eq!(
+            jam_source_start_preflight(&disabled).unwrap_err().1,
+            "Jam sharing is turned off on the source PC"
+        );
+
+        let armed = source_snapshot(true, true, true, "ready");
+        assert!(jam_source_start_preflight(&armed).is_ok());
+        assert!(!jam_source_ready_for_generation(&armed, 12));
+
+        let mut exact_ready = armed.clone();
+        exact_ready.ready = true;
+        exact_ready.generation = Some(12);
+        assert!(jam_source_ready_for_generation(&exact_ready, 12));
+        assert!(!jam_source_ready_for_generation(&exact_ready, 13));
+
+        exact_ready.connected = false;
+        assert!(!jam_source_ready_for_generation(&exact_ready, 12));
+    }
+
+    #[test]
+    fn source_watchdog_recovers_when_registry_generation_was_cleared() {
+        let source = source_snapshot(true, true, true, "ready");
+        let error = active_jam_source_watchdog_error(&source, 42)
+            .expect("an active Jam cannot survive a cleared source generation");
+        assert!(error.contains("expected 42"));
+    }
+
+    #[test]
+    fn source_watchdog_allows_exact_generation_restart_but_rejects_terminal_error() {
+        let mut source = source_snapshot(true, true, true, "starting");
+        source.generation = Some(42);
+        assert!(active_jam_source_watchdog_error(&source, 42).is_none());
+
+        source.status = "error".to_string();
+        source.error = Some("capture failed".to_string());
+        assert_eq!(
+            active_jam_source_watchdog_error(&source, 42).as_deref(),
+            Some("capture failed")
+        );
+    }
+
+    #[test]
+    fn jam_teardown_conditions_are_generation_fenced() {
+        let mut jam = JamState {
+            active: true,
+            generation: 12,
+            ..JamState::default()
+        };
+        assert!(jam_end_condition_matches(&jam, 12, JamEndCondition::Active));
+        assert!(!jam_end_condition_matches(
+            &jam,
+            11,
+            JamEndCondition::Active
+        ));
+        assert!(jam_end_condition_matches(
+            &jam,
+            12,
+            JamEndCondition::NoListeners
+        ));
+        jam.listeners.insert("sam".into(), "binding".into());
+        assert!(!jam_end_condition_matches(
+            &jam,
+            12,
+            JamEndCondition::NoListeners
+        ));
+        jam.active = false;
+        jam.starting = true;
+        assert!(jam_end_condition_matches(
+            &jam,
+            12,
+            JamEndCondition::ActiveOrStarting
+        ));
     }
 
     #[test]
@@ -2042,12 +2564,20 @@ mod tests {
             queue: vec![queued_track("spotify:track:one")],
             now_playing: Some(now_playing(true)),
             listeners,
+            spotify_device_id: Some("device-a".to_string()),
+            spotify_device_name: Some("Echo PC".to_string()),
             spotify_is_playing: true,
             audio_expected_since: Some(std::time::Instant::now()),
             last_error: Some("old capture warning".to_string()),
             ..JamState::default()
         };
 
+        assert!(!apply_spotify_pause_result(
+            &mut jam,
+            42,
+            &spotify_device("different-device", "Other PC")
+        ));
+        assert!(jam.spotify_is_playing);
         assert!(apply_spotify_pause_result(
             &mut jam,
             42,
@@ -2146,13 +2676,16 @@ mod tests {
     }
 
     #[test]
-    fn listener_audio_requires_protocol_v2() {
+    fn listener_audio_requires_current_protocol() {
         let mut params = std::collections::HashMap::new();
         assert!(!listener_protocol_is_current(&params));
         params.insert("generation".to_string(), "9".to_string());
         params.insert("jam_protocol_version".to_string(), "1".to_string());
         assert!(!listener_protocol_is_current(&params));
-        params.insert("jam_protocol_version".to_string(), "2".to_string());
+        params.insert(
+            "jam_protocol_version".to_string(),
+            crate::jam_source::JAM_SOURCE_PROTOCOL_VERSION.to_string(),
+        );
         assert!(listener_protocol_is_current(&params));
         params.insert("identity".to_string(), "must-not-be-in-url".to_string());
         assert!(!listener_protocol_is_current(&params));
@@ -2286,7 +2819,7 @@ mod tests {
     }
 
     #[test]
-    fn revoking_the_exact_host_binding_ends_the_generation() {
+    fn revoking_the_exact_host_binding_requests_generation_teardown() {
         let mut jam = JamState {
             active: true,
             generation: 9,
@@ -2306,8 +2839,10 @@ mod tests {
         );
 
         assert_eq!(result, (Some(9), None));
-        assert!(!jam.active);
-        assert!(jam.host_identity.is_empty());
+        // Session teardown is asynchronous because Spotify must be paused
+        // before the source PC restores its output route.
+        assert!(jam.active);
+        assert_eq!(jam.host_identity, "host-1111");
         assert!(jam.listeners.is_empty());
         assert!(jam.audio_connections.is_empty());
     }

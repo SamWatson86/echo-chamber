@@ -262,7 +262,7 @@ test("Stop Music remains available when capture fails but Spotify is playing", (
   }
 });
 
-test("Stop Music is capability, generation-state, and playback gated", () => {
+test("Stop Music is capability and generation-state gated, not observation gated", () => {
   const base = {
     jam_protocol_version: 3,
     spotify_connected: true,
@@ -275,7 +275,7 @@ test("Stop Music is capability, generation-state, and playback gated", () => {
   assert.equal(evaluateJamContract(base).canStopPlayback, true);
   assert.equal(evaluateJamContract({ ...base, active: false }).canStopPlayback, false);
   assert.equal(evaluateJamContract({ ...base, spotify_connected: false }).canStopPlayback, false);
-  assert.equal(evaluateJamContract({ ...base, spotify_is_playing: false }).canStopPlayback, false);
+  assert.equal(evaluateJamContract({ ...base, spotify_is_playing: false }).canStopPlayback, true);
   assert.equal(evaluateJamContract({ ...base, playback_stop_supported: false }).canStopPlayback, false);
   assert.equal(evaluateJamContract({ ...base, jam_protocol_version: 1 }).canStopPlayback, false);
 });

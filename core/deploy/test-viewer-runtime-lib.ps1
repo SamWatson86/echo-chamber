@@ -29,8 +29,8 @@ try {
     foreach ($requiredFile in $requiredFiles) {
         Set-Content -LiteralPath (Join-Path $source $requiredFile) -Value ("fixture-" + $requiredFile) -NoNewline
     }
-    Set-Content -LiteralPath (Join-Path $source "jam.js") -Value 'var JAM_PROTOCOL_VERSION = 2;' -NoNewline
-    Set-Content -LiteralPath (Join-Path $source "jam-session-state.js") -Value 'state-v2' -NoNewline
+    Set-Content -LiteralPath (Join-Path $source "jam.js") -Value 'var JAM_PROTOCOL_VERSION = 3;' -NoNewline
+    Set-Content -LiteralPath (Join-Path $source "jam-session-state.js") -Value 'state-v3' -NoNewline
     New-Item -ItemType Directory -Path (Join-Path $source "assets") | Out-Null
     Set-Content -LiteralPath (Join-Path $source "assets\tone.bin") -Value 'audio' -NoNewline
 

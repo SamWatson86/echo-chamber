@@ -40,6 +40,9 @@ test("source-PC controls boot before login and refresh with Jam polling", () => 
 
   const poll = functionSource("fetchJamState", "renderJamPanel");
   assert.match(poll, /refreshJamSourceLocalControl\(\)/);
+
+  const init = functionSource("initJamSourceLocalControlUi", "detectJamSourceHost");
+  assert.match(init, /setInterval\(refreshJamSourceLocalControl, 2000\)/);
 });
 
 test("both source-PC settings use their native IPC setters", () => {
