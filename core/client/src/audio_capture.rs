@@ -33,7 +33,6 @@ const LOOPBACK_MODE_EXCLUDE_TREE: u32 = 1;
 const VT_BLOB: u16 = 65;
 const BITS_PER_BYTE: u16 = 8;
 const OWNED_CAPTURE_CHANNEL_CAPACITY: usize = 64;
-const KNOWN_ECHO_PROCESS_NAMES: [&str; 2] = ["Echo Chamber.exe", "echo-core-client.exe"];
 
 /// Manual repr(C) structs for process loopback activation params.
 /// These may not be available in all versions of the windows crate.
@@ -361,41 +360,16 @@ fn validate_selected_spotify_root_pid(
     }
 }
 
-fn select_preferred_playback_exclusion_process<'a>(
-    candidates: &'a [(&'a str, Vec<(u32, u32)>)],
-) -> Option<(&'a str, u32)> {
-    candidates
-        .iter()
-        .find_map(|(name, processes)| select_root_process_pid(processes).map(|pid| (*name, pid)))
-}
-
-fn playback_exclusion_process_names() -> Vec<String> {
-    let mut names = Vec::new();
-    if let Ok(path) = std::env::current_exe() {
-        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
-            names.push(file_name.to_string());
-        }
-    }
-    for name in KNOWN_ECHO_PROCESS_NAMES {
-        if !names
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(name))
-        {
-            names.push(name.to_string());
-        }
-    }
-    names
-}
-
-fn find_playback_feedback_exclusion_pid() -> Option<(String, u32)> {
-    let names = playback_exclusion_process_names();
-    let candidates = names
-        .iter()
-        .map(|name| (name.as_str(), find_processes_by_name(name)))
-        .collect::<Vec<_>>();
-
-    select_preferred_playback_exclusion_process(&candidates)
-        .map(|(name, pid)| (name.to_string(), pid))
+fn current_playback_feedback_exclusion_target() -> (String, u32) {
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "Echo desktop".to_string());
+    let pid = unsafe { GetCurrentProcessId() };
+    (exe_name, pid)
 }
 
 fn system_audio_feedback_capture_loopback_mode() -> u32 {
@@ -617,12 +591,10 @@ pub fn start_system_capture_excluding_echo(app: AppHandle) -> Result<()> {
         return Err(Error::new(E_FAIL, msg));
     }
 
-    let Some((exe_name, exclude_pid)) = find_playback_feedback_exclusion_pid() else {
-        let msg =
-            "Cannot find Echo playback process to exclude; refusing unsafe system audio capture";
-        log_audio_capture(&format!("[audio-capture] {}", msg));
-        return Err(Error::new(E_FAIL, msg));
-    };
+    // Echo's WebView2 playback processes are children of this Tauri process.
+    // Target the current process tree directly so a stale or second Echo
+    // instance can never be selected for exclusion instead of this one.
+    let (exe_name, exclude_pid) = current_playback_feedback_exclusion_target();
 
     log_audio_capture(&format!(
         "[audio-capture] start_system_capture_excluding_echo requested exclude={} pid={}",
@@ -1068,8 +1040,8 @@ fn capture_loop(
 mod tests {
     use super::{
         audio_capture_frame_diagnostic, audio_capture_peak_from_f32_bytes,
-        process_loopback_fallback_format, process_loopback_initialize_flags,
-        select_preferred_playback_exclusion_process, select_root_process_pid,
+        current_playback_feedback_exclusion_target, process_loopback_fallback_format,
+        process_loopback_initialize_flags, select_root_process_pid,
         select_root_process_pid_for_session, system_audio_feedback_capture_loopback_mode,
         system_loopback_initialize_flags, try_send_owned_capture_event,
         validate_selected_spotify_root_pid, ProcessCaptureEvent, LOOPBACK_MODE_EXCLUDE_TREE,
@@ -1078,6 +1050,7 @@ mod tests {
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         AUDCLNT_STREAMFLAGS_LOOPBACK,
     };
+    use windows::Win32::System::Threading::GetCurrentProcessId;
 
     #[test]
     fn process_loopback_fallback_uses_pcm16_format() {
@@ -1125,29 +1098,10 @@ mod tests {
     }
 
     #[test]
-    fn selects_echo_client_root_for_feedback_exclusion() {
-        let candidates = vec![
-            ("Echo Chamber.exe", vec![(50, 10), (51, 50)]),
-            ("echo-core-client.exe", vec![(80, 12)]),
-        ];
+    fn feedback_exclusion_targets_this_echo_process() {
+        let (_exe_name, selected_pid) = current_playback_feedback_exclusion_target();
 
-        assert_eq!(
-            select_preferred_playback_exclusion_process(&candidates),
-            Some(("Echo Chamber.exe", 50))
-        );
-    }
-
-    #[test]
-    fn falls_back_to_known_client_name_for_feedback_exclusion() {
-        let candidates = vec![
-            ("Echo Chamber.exe", vec![]),
-            ("echo-core-client.exe", vec![(80, 12)]),
-        ];
-
-        assert_eq!(
-            select_preferred_playback_exclusion_process(&candidates),
-            Some(("echo-core-client.exe", 80))
-        );
+        assert_eq!(selected_pid, unsafe { GetCurrentProcessId() });
     }
 
     #[test]
