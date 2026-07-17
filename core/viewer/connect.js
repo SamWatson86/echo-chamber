@@ -950,8 +950,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       const cardRef = participantCards.get(participant.identity);
       if (!cardRef) return;
       const label = participant.name || "Guest";
-      const nameEl = cardRef.card.querySelector(".user-name");
-      if (nameEl) nameEl.textContent = label;
+      if (cardRef.setParticipantDisplayName) cardRef.setParticipantDisplayName(label);
       if (!cardRef.avatar.querySelector("video")) {
         cardRef.avatar.textContent = getInitials(label);
         updateAvatarDisplay(participant.identity);

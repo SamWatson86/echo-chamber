@@ -70,6 +70,7 @@
   --club-shell-gap: 16px;
   --club-header-size: 56px;
   --club-dock-size: 64px;
+  --club-people-rail-size: clamp(300px, 21vw, 328px);
   --club-layer-region: 0;
   --club-layer-sticky: 20;
   --club-layer-utility-scrim: 25;
@@ -431,6 +432,10 @@
   grid-template-columns: minmax(0, 1fr) clamp(320px, 24vw, 360px);
 }
 
+:root[data-ui-shell="v2"][data-ui-mode="theater"] .room-layout[data-active-utility="people"]:not(.utility-collapsed) {
+  grid-template-columns: minmax(0, 1fr) var(--club-people-rail-size);
+}
+
 :root[data-ui-shell="v2"] .room-main {
   position: relative;
   padding: 12px;
@@ -519,9 +524,10 @@
 :root[data-ui-shell="v2"] .screens-grid:empty::before {
   content: "No one is sharing\A Use Share Screen when you are ready to take the stage.";
   width: min(440px, calc(100% - 32px));
-  min-height: 150px;
+  min-height: min(240px, calc(100% - 16px));
   margin: auto;
-  padding: 88px 24px 22px;
+  padding: 142px 24px 24px;
+  box-sizing: border-box;
   display: grid;
   place-items: center;
   align-self: center;
@@ -534,7 +540,7 @@
   border: 1px dashed rgba(201, 168, 106, 0.2);
   border-radius: var(--club-radius-panel);
   background:
-    url("badge.jpg") center 18px / 58px 58px no-repeat,
+    url("badge.jpg") center 22px / min(208px, 64%) auto no-repeat,
     linear-gradient(145deg, rgba(201, 168, 106, 0.045), rgba(255, 255, 255, 0.012));
   opacity: 0.78;
 }
@@ -735,8 +741,8 @@
 :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-name {
   position: absolute;
   top: 10px;
-  left: 64px;
-  right: 10px;
+  left: 74px;
+  right: 58px;
   min-width: 0;
   overflow: hidden;
   color: var(--club-text);
@@ -746,13 +752,13 @@
 }
 
 :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-header {
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 54px minmax(0, 1fr);
   gap: 10px;
 }
 
 :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-avatar {
-  width: 44px;
-  height: 44px;
+  width: 54px;
+  height: 54px;
   border-radius: 10px;
   color: var(--club-brass);
   font-size: 13px;
@@ -761,8 +767,7 @@
 }
 
 :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-meta {
-  padding-top: 22px;
-  gap: 6px;
+  display: none;
 }
 
 :root[data-ui-shell="v2"] .user-indicators {
@@ -811,6 +816,174 @@
   display: grid;
 }
 
+:root[data-ui-shell="v2"] .participant-settings-toggle {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  display: inline-grid !important;
+  place-items: center;
+  color: var(--club-text-muted);
+  border: 1px solid var(--club-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-toggle svg {
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-toggle:hover,
+:root[data-ui-shell="v2"] .participant-settings-toggle:focus-visible,
+:root[data-ui-shell="v2"] .participant-settings-toggle[aria-expanded="true"] {
+  color: var(--club-brass-bright);
+  border-color: rgba(201, 168, 106, 0.38);
+  background: rgba(201, 168, 106, 0.1);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-popover {
+  position: relative;
+  z-index: 6;
+  width: 100%;
+  min-width: 0;
+  margin-top: 8px;
+  padding: 10px;
+  display: none !important;
+  gap: 8px;
+  color: var(--club-text);
+  border: 1px solid var(--club-border-strong);
+  border-radius: 12px;
+  background: rgba(12, 16, 22, 0.985);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.42);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-popover.is-open {
+  display: grid !important;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-heading,
+:root[data-ui-shell="v2"] .participant-settings-section-header,
+:root[data-ui-shell="v2"] .participant-settings-slider-row,
+:root[data-ui-shell="v2"] .participant-settings-footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-heading {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-heading strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-heading span {
+  color: var(--club-text-faint);
+  font-size: 10px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-close {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  color: var(--club-text-muted);
+  font-size: 20px;
+  line-height: 1;
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-section {
+  min-width: 0;
+  padding: 8px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--club-border);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-section-header {
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--club-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-mute,
+:root[data-ui-shell="v2"] .participant-settings-watch,
+:root[data-ui-shell="v2"] .participant-settings-footer button {
+  min-height: 30px;
+  padding: 4px 9px;
+  color: var(--club-text-muted);
+  font-size: 10px;
+  border-color: var(--club-border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-mute.is-muted {
+  color: #ff9aa1;
+  border-color: rgba(229, 106, 106, 0.38);
+  background: rgba(229, 106, 106, 0.12);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-slider-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-slider-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--club-brass);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-slider-row .vol-pct {
+  color: var(--club-text-faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-footer {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-footer:not(:has(button:not(.hidden))) {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-footer .danger {
+  color: #ff9aa1;
+  border-color: rgba(229, 106, 106, 0.28);
+}
+
 :root[data-ui-shell="v2"] .user-card.has-camera {
   min-height: 140px;
   aspect-ratio: 16 / 9;
@@ -834,7 +1007,7 @@
 
 :root[data-ui-shell="v2"] .user-card.has-camera .cam-overlay {
   min-width: 0;
-  padding: 28px 9px 8px;
+  padding: 28px 56px 8px 9px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   opacity: 1;
@@ -852,8 +1025,66 @@
 }
 
 :root[data-ui-shell="v2"] .user-card.has-camera .cam-overlay-controls {
-  min-width: 0;
-  gap: 3px;
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera > .participant-settings-toggle {
+  top: auto;
+  right: 8px;
+  bottom: 8px;
+  color: var(--club-text);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(5, 7, 10, 0.68);
+  backdrop-filter: blur(8px);
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera > .participant-settings-popover {
+  position: relative;
+  inset: auto;
+  width: calc(100% - 16px);
+  max-height: none;
+  margin: 8px;
+  overflow: visible;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera:has(> .participant-settings-popover.is-open) {
+  min-height: 0;
+  aspect-ratio: auto;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera:has(> .participant-settings-popover.is-open) .user-header {
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera > .participant-settings-toggle[aria-expanded="true"] {
+  display: none !important;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .participant-settings-popover,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .participant-settings-popover,
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .user-card.has-camera > .participant-settings-popover,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .user-card.has-camera > .participant-settings-popover {
+  position: fixed;
+  inset: auto auto calc(var(--club-dock-size) + var(--club-shell-padding) + 12px) 50%;
+  z-index: var(--club-layer-modal);
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(360px, calc(100dvh - var(--club-header-size) - var(--club-dock-size) - 48px));
+  margin: 0;
+  overflow-y: auto;
+  transform: translateX(-50%);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .user-card.has-camera:has(> .participant-settings-popover.is-open),
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .user-card.has-camera:has(> .participant-settings-popover.is-open) {
+  min-height: 140px;
+  aspect-ratio: 16 / 9;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .user-card.has-camera:has(> .participant-settings-popover.is-open) .user-header,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .user-card.has-camera:has(> .participant-settings-popover.is-open) .user-header {
+  height: 100%;
+  aspect-ratio: auto;
 }
 
 :root[data-ui-shell="v2"] .cam-overlay-controls .icon-button,
@@ -1206,20 +1437,6 @@
 }
 
 @container (max-width: 303px) {
-  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-name {
-    left: 58px;
-  }
-
-  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-header {
-    grid-template-columns: 38px minmax(0, 1fr);
-    gap: 9px;
-  }
-
-  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-avatar {
-    width: 38px;
-    height: 38px;
-  }
-
   :root[data-ui-shell="v2"] .participant-chime-toggle {
     width: 30px;
     padding: 0;
@@ -1369,6 +1586,10 @@
   width: clamp(320px, 42vw, 380px);
   height: 100%;
   z-index: var(--club-layer-utility);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .utility-host[data-active-tool="people"] {
+  width: clamp(300px, 40vw, 360px);
 }
 
 :root[data-ui-shell="v2"][data-ui-mode="compact"] .utility-host,

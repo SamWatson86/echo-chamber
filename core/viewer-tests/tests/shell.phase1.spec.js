@@ -714,7 +714,7 @@ for (const stageCase of [
   });
 }
 
-test("V2 ellipsizes a 60-character unbroken name without overlapping camera controls", async ({ page }) => {
+test("V2 ellipsizes a 60-character unbroken name without overlapping camera settings", async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 480 });
   await openPhaseOneViewer(page, {
     participants: 4,
@@ -734,8 +734,7 @@ test("V2 ellipsizes a 60-character unbroken name without overlapping camera cont
   const cameraCard = page.locator(".user-card.has-camera").first();
   const overlay = cameraCard.locator(".cam-overlay");
   const overlayName = overlay.locator(".cam-overlay-name");
-  const overlayControls = overlay.locator(".cam-overlay-controls");
-  const focusTarget = overlayControls.locator("button:visible").first();
+  const focusTarget = cameraCard.locator(":scope > .participant-settings-toggle");
   await focusTarget.focus();
   await expect(focusTarget).toBeFocused();
 
@@ -756,28 +755,8 @@ test("V2 ellipsizes a 60-character unbroken name without overlapping camera cont
   await expect(overlayName).toHaveAttribute("title", longName);
   await expectSingleLineEllipsis(overlayName);
   await expectContained(overlayName, overlay);
-  await expectContained(overlayControls, overlay);
-  await expectNoOverlap(overlayName, overlayControls);
-
-  const controlRects = await overlayControls.locator(":scope > button:visible").evaluateAll((buttons) => (
-    buttons.map((button) => {
-      const rect = button.getBoundingClientRect();
-      return {
-        bottom: rect.bottom,
-        height: rect.height,
-        left: rect.left,
-        right: rect.right,
-        top: rect.top,
-        width: rect.width,
-      };
-    })
-  ));
-  expect(controlRects.length).toBeGreaterThan(0);
-  for (let first = 0; first < controlRects.length; first += 1) {
-    for (let second = first + 1; second < controlRects.length; second += 1) {
-      expect(intersectionArea(controlRects[first], controlRects[second])).toBeLessThanOrEqual(1);
-    }
-  }
+  await expectContained(focusTarget, cameraCard);
+  await expectNoOverlap(overlayName, focusTarget);
   await expectNoDocumentOverflow(page);
 });
 
@@ -852,15 +831,15 @@ for (const viewport of [
   { width: 800, height: 600, mode: "compact" },
   { width: 600, height: 900, mode: "mini" },
 ]) {
-  test(`${viewport.mode} camera volume popup stays contained and all sliders are hittable`, async ({ page }) => {
+  test(`${viewport.mode} camera audio settings stay contained and all sliders are hittable`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await openPhaseOneViewer(page, { participants: 3, cameras: 1, screenShares: 0 });
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", viewport.mode);
 
     const card = page.locator(".user-card.is-remote.has-camera").first();
     await card.evaluate((element) => element.scrollIntoView({ block: "nearest" }));
-    await card.locator(".cam-overlay-controls .icon-button").first().click();
-    const popup = card.locator(".vol-popup");
+    await card.locator(".participant-settings-toggle").click();
+    const popup = card.locator(".participant-settings-popover");
     await expect(popup).toHaveClass(/is-open/);
     await expect(popup).toBeVisible();
 
@@ -869,11 +848,12 @@ for (const viewport of [
         const rect = node.getBoundingClientRect();
         return { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top };
       };
-      const popupElement = element.querySelector(".vol-popup");
+      const popupElement = element.querySelector(".participant-settings-popover");
       const sliders = Array.from(popupElement.querySelectorAll('input[type="range"]'));
       return {
         card: toRect(element),
         popup: toRect(popupElement),
+        viewport: { height: window.innerHeight, width: window.innerWidth },
         sliders: sliders.map((slider) => {
           const rect = slider.getBoundingClientRect();
           const hit = document.elementFromPoint(rect.left + (rect.width / 2), rect.top + (rect.height / 2));
@@ -882,10 +862,10 @@ for (const viewport of [
       };
     });
     expect(geometry.sliders).toHaveLength(3);
-    expect(geometry.popup.left).toBeGreaterThanOrEqual(geometry.card.left - 1);
-    expect(geometry.popup.right).toBeLessThanOrEqual(geometry.card.right + 1);
-    expect(geometry.popup.top).toBeGreaterThanOrEqual(geometry.card.top - 1);
-    expect(geometry.popup.bottom).toBeLessThanOrEqual(geometry.card.bottom + 1);
+    expect(geometry.popup.left).toBeGreaterThanOrEqual(0);
+    expect(geometry.popup.right).toBeLessThanOrEqual(geometry.viewport.width);
+    expect(geometry.popup.top).toBeGreaterThanOrEqual(0);
+    expect(geometry.popup.bottom).toBeLessThanOrEqual(geometry.viewport.height);
     expect(geometry.sliders.every((slider) => slider.hittable)).toBe(true);
   });
 }
@@ -1223,7 +1203,7 @@ test("screen volume becomes visible and interactive on keyboard focus", async ({
   expect(await tile.evaluate((element) => element.matches(":focus-within"))).toBe(true);
 });
 
-test("participant chime and mute controls expose participant-specific accessible names", async ({ page }) => {
+test("one participant audio menu owns voice, shared-audio, and chime controls", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await openPhaseOneViewer(page, { participants: 3, cameras: 1, screenShares: 0 });
 
@@ -1234,28 +1214,82 @@ test("participant chime and mute controls expose participant-specific accessible
     const participantName = (await card.locator(".user-name").textContent()).trim();
     const escapedName = participantName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const namedForParticipant = new RegExp(escapedName, "i");
-    const chimeToggle = card.locator(".participant-chime-toggle");
-    const chimeSlider = card.locator(".chime-volume-row input[type=range]");
-    await expect(chimeToggle).toHaveAttribute("aria-label", namedForParticipant);
-    await expect(chimeSlider).toHaveAttribute("aria-label", namedForParticipant);
+    const settingsToggle = card.locator(".participant-settings-toggle");
+    await expect(settingsToggle).toHaveCount(1);
+    await expect(settingsToggle).toBeVisible();
+    await expect(settingsToggle).toHaveAccessibleName(namedForParticipant);
+
+    await settingsToggle.click();
+    const popup = card.locator(".participant-settings-popover");
+    await expect(popup).toBeVisible();
+    await expect(popup).toHaveAttribute("role", "dialog");
+    await expect(popup).toHaveAccessibleName(namedForParticipant);
+    await expect(popup.locator('input[type="range"]')).toHaveCount(3);
+    await expect(popup.getByLabel(new RegExp(`Microphone volume.*${escapedName}`, "i"))).toBeVisible();
+    await expect(popup.getByLabel(new RegExp(`Screen volume.*${escapedName}`, "i"))).toBeVisible();
+    await expect(popup.getByLabel(new RegExp(`Chime volume.*${escapedName}`, "i"))).toBeVisible();
+    await expect(popup.getByRole("button", { name: new RegExp(`Mute microphone audio.*${escapedName}`, "i") })).toBeVisible();
+    await expect(popup.getByRole("button", { name: new RegExp(`Mute screen audio.*${escapedName}`, "i") })).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(popup).toBeHidden();
+    await expect(settingsToggle).toBeFocused();
+
     const baseMuteButtons = card.locator(".user-indicators .mute-button");
     await expect(baseMuteButtons).toHaveCount(2);
     for (let muteIndex = 0; muteIndex < 2; muteIndex += 1) {
       await expect(baseMuteButtons.nth(muteIndex)).toHaveAttribute("aria-label", namedForParticipant);
-    }
-    if (await card.evaluate((element) => !element.classList.contains("has-camera"))) {
-      await expect(chimeToggle).toHaveAccessibleName(namedForParticipant);
-      for (let muteIndex = 0; muteIndex < 2; muteIndex += 1) {
-        await expect(baseMuteButtons.nth(muteIndex)).toHaveAccessibleName(namedForParticipant);
-      }
+      await expect(baseMuteButtons.nth(muteIndex)).toBeHidden();
     }
   }
 
-  const cameraCard = page.locator(".user-card.is-remote.has-camera").first();
-  const cameraName = (await cameraCard.locator(".user-name").textContent()).trim();
-  const cameraNamePattern = new RegExp(cameraName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-  const overlayMutes = cameraCard.locator(".cam-overlay .mute-button");
-  await expect(overlayMutes).toHaveCount(2);
-  await expect(overlayMutes.nth(0)).toHaveAccessibleName(cameraNamePattern);
-  await expect(overlayMutes.nth(1)).toHaveAccessibleName(cameraNamePattern);
+  const firstCard = remoteCards.nth(0);
+  const secondCard = remoteCards.nth(1);
+  const firstToggle = firstCard.locator(".participant-settings-toggle");
+  const secondToggle = secondCard.locator(".participant-settings-toggle");
+  await firstToggle.click();
+  await secondToggle.click();
+  await expect(firstCard.locator(".participant-settings-popover")).toBeHidden();
+  await expect(firstToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(secondCard.locator(".participant-settings-popover")).toBeVisible();
+
+  const secondPopup = secondCard.locator(".participant-settings-popover");
+  const voiceMute = secondPopup.locator(".participant-settings-mute").nth(0);
+  const screenMute = secondPopup.locator(".participant-settings-mute").nth(1);
+  await secondCard.evaluate((card) => {
+    participantCards.get(card.dataset.identity).setParticipantDisplayName("Renamed member");
+  });
+  await expect(secondToggle).toHaveAccessibleName(/Renamed member/i);
+  await expect(secondPopup).toHaveAccessibleName(/Renamed member/i);
+  await expect(secondPopup.getByLabel(/Microphone volume.*Renamed member/i)).toBeVisible();
+  await voiceMute.click();
+  await expect(voiceMute).toHaveAccessibleName(/Unmute microphone audio.*Renamed member/i);
+  await expect(screenMute).toHaveAccessibleName(/Mute screen audio/i);
+
+  const settingsChime = secondPopup.getByLabel(/Chime volume/i);
+  await settingsChime.evaluate((slider) => {
+    slider.value = "0.72";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(secondCard.locator(".chime-volume-row input[type=range]")).toHaveValue("0.72");
+
+  await page.locator("#room-sidebar .sidebar-title-row h2").click();
+  await expect(secondPopup).toBeHidden();
+
+  const nonCameraCard = page.locator(".user-card.is-remote:not(.has-camera)").first();
+  const nonCameraGeometry = await nonCameraCard.evaluate((element) => {
+    const avatar = element.querySelector(".user-avatar").getBoundingClientRect();
+    const toggle = element.querySelector(".participant-settings-toggle").getBoundingClientRect();
+    const card = element.getBoundingClientRect();
+    return { avatarWidth: avatar.width, cardRight: card.right, toggleRight: toggle.right };
+  });
+  expect(nonCameraGeometry.avatarWidth).toBeGreaterThanOrEqual(53.5);
+  expect(nonCameraGeometry.toggleRight).toBeLessThanOrEqual(nonCameraGeometry.cardRight + 1);
+
+  await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
+  await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
+  await expect(nonCameraCard.locator(".participant-settings-toggle")).toBeHidden();
+  for (let muteIndex = 0; muteIndex < 2; muteIndex += 1) {
+    await expect(nonCameraCard.locator(".user-indicators .mute-button").nth(muteIndex)).toBeVisible();
+  }
 });

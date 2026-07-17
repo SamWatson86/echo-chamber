@@ -410,6 +410,51 @@ test("Ultra Instinct keeps the Goku GIF visible through the Phase 2 stage", asyn
   expect(await page.evaluate(() => getComputedStyle(document.body).backgroundImage)).toContain("ultrainstinct.gif");
 });
 
+test("empty Stage crest is large, naturally proportioned, and contained", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page, { screenShares: 0 });
+
+  for (const [viewport, expectedMode] of [
+    [{ width: 1280, height: 720 }, "theater"],
+    [{ width: 360, height: 640 }, "mini"],
+  ]) {
+    await resizeTo(page, viewport, expectedMode);
+    const presentation = await page.locator("#screen-grid").evaluate((grid) => {
+      const gridRect = grid.getBoundingClientRect();
+      const stageRect = grid.closest(".room-main").getBoundingClientRect();
+      const pseudo = getComputedStyle(grid, "::before");
+      return {
+        backgroundImage: pseudo.backgroundImage,
+        backgroundSize: pseudo.backgroundSize,
+        content: pseudo.content,
+        grid: { bottom: gridRect.bottom, left: gridRect.left, right: gridRect.right, top: gridRect.top },
+        paddingTop: Number.parseFloat(pseudo.paddingTop),
+        stage: { bottom: stageRect.bottom, left: stageRect.left, right: stageRect.right, top: stageRect.top },
+        tiles: grid.querySelectorAll(":scope > .tile").length,
+      };
+    });
+    expect(presentation.tiles).toBe(0);
+    expect(presentation.content).toContain("No one is sharing");
+    expect(presentation.backgroundImage).toContain("badge.jpg");
+    expect(presentation.backgroundSize).toContain("auto");
+    expect(presentation.backgroundSize).not.toContain("58px 58px");
+    expect(presentation.paddingTop).toBeGreaterThanOrEqual(135);
+    expect(presentation.grid.left).toBeGreaterThanOrEqual(presentation.stage.left - 1);
+    expect(presentation.grid.right).toBeLessThanOrEqual(presentation.stage.right + 1);
+    expect(presentation.grid.top).toBeGreaterThanOrEqual(presentation.stage.top - 1);
+    expect(presentation.grid.bottom).toBeLessThanOrEqual(presentation.stage.bottom + 1);
+  }
+
+  const badge = await page.evaluate(() => new Promise((resolve) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve({ height: image.naturalHeight, width: image.naturalWidth }), { once: true });
+    image.addEventListener("error", () => resolve({ height: 0, width: 0 }), { once: true });
+    image.src = `badge.jpg?empty-stage-test=${Date.now()}`;
+  }));
+  expect(badge.width / badge.height).toBeGreaterThan(1.8);
+  expect(badge.width / badge.height).toBeLessThan(2);
+});
+
 test("People actions stay visible and contained in the theater rail and mini sheet", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await openPhaseTwoViewer(page);
@@ -423,6 +468,7 @@ test("People actions stay visible and contained in the theater rail and mini she
     const geometry = await page.evaluate(() => {
       const sidebar = document.getElementById("room-sidebar").getBoundingClientRect();
       const titleRow = document.querySelector("#room-sidebar .sidebar-title-row");
+      const participantAvatar = document.querySelector("#room-sidebar .user-card:not(.has-camera) .user-avatar");
       const actions = Array.from(document.querySelectorAll("#room-sidebar .sidebar-actions button"))
         .filter((button) => getComputedStyle(button).display !== "none")
         .map((button) => {
@@ -449,12 +495,18 @@ test("People actions stay visible and contained in the theater rail and mini she
             fontSize: getComputedStyle(button).fontSize,
           };
         }),
-        sidebar: { bottom: sidebar.bottom, left: sidebar.left, right: sidebar.right, top: sidebar.top },
+        participantAvatarWidth: participantAvatar?.getBoundingClientRect().width || 0,
+        sidebar: { bottom: sidebar.bottom, left: sidebar.left, right: sidebar.right, top: sidebar.top, width: sidebar.width },
         titleOverflow: titleRow.scrollWidth - titleRow.clientWidth,
       };
     });
 
     expect(geometry.actions).toHaveLength(7);
+    if (expectedMode === "theater") {
+      expect(geometry.sidebar.width).toBeGreaterThanOrEqual(299.5);
+      expect(geometry.sidebar.width).toBeLessThanOrEqual(328.5);
+    }
+    expect(geometry.participantAvatarWidth).toBeGreaterThanOrEqual(53.5);
     expect(geometry.titleOverflow).toBeLessThanOrEqual(1);
     expect(geometry.compactLabels).toEqual([
       { after: "none", before: '"Sounds"', fontSize: "0px" },
