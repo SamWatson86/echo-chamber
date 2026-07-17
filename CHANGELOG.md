@@ -1,11 +1,14 @@
 # Changelog
 
-## 0.6.31
+## 0.6.33
 
 - Experience: The source PC can allow or deny Echo's Spotify takeover, mute Jam monitoring locally, and set an independent local Jam volume without changing what listeners hear.
 - Control: Jam participants can use Stop Music to pause Spotify while keeping the Jam, queue, listeners, and source connection ready to resume; host-only End Jam still performs the full teardown.
 - Reliability: Echo temporarily routes only Spotify into VB-CABLE while a Jam is active and restores Spotify's previous output when the Jam ends, takeover is disabled, or the source recovers from an interruption.
-- Release: Desktop and control package versions are bumped to 0.6.31.
+- Interface: The Private Clubhouse shell now gives the shared stage priority, keeps People, Chat, and Jam responsive from theater down to mini layouts, and consolidates each participant's voice, shared-audio, and join-chime controls into one menu.
+- Media: The Camera Lobby fills and stacks its available space, the capture picker rejects Windows shell surfaces that only produce black frames, and the empty stage uses the full-proportion clubhouse crest.
+- Fix: Entire-monitor audio capture now excludes the active Echo desktop process tree, preventing Echo playback from being recaptured when a stale or second Echo process exists.
+- Release: Desktop and control package versions are aligned at 0.6.33.
 
 ## 0.6.30
 
