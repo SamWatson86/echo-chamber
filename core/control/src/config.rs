@@ -168,7 +168,7 @@ pub fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
                 "chat.js", "soundboard.js", "admin-panel.js",
                 "screen-share-state.js", "screen-share-config.js", "screen-share-quality.js",
                 "screen-share-adaptive.js", "screen-share-native.js",
-                "participants-grid.js", "grid-layout.js", "participants-avatar.js", "participants-fullscreen.js",
+                "participants-grid.js", "grid-layout.js", "camera-lobby-layout.js", "participants-avatar.js", "participants-fullscreen.js",
                 "participants.js",
                 "audio-routing.js", "media-controls.js", "admin.js", "connect.js",
                 "app.js", "jam.js", "changelog.js",
@@ -241,6 +241,7 @@ mod tests {
             <script src="layout-policy.js?v=old"></script>
             <script src="ui-shell.js?v=old"></script>
             <script src="grid-layout.js?v=old"></script>
+            <script src="camera-lobby-layout.js?v=old"></script>
             <script src="display-status.js?v=old"></script>
             <script src="native-presenter.js?v=old"></script>
             <script src="admin-panel.js?v=old"></script>
@@ -256,6 +257,7 @@ mod tests {
         assert!(stamped.contains("layout-policy.js?v=0.6.12.test"));
         assert!(stamped.contains("ui-shell.js?v=0.6.12.test"));
         assert!(stamped.contains("grid-layout.js?v=0.6.12.test"));
+        assert!(stamped.contains("camera-lobby-layout.js?v=0.6.12.test"));
         assert!(stamped.contains("display-status.js?v=0.6.12.test"));
         assert!(stamped.contains("native-presenter.js?v=0.6.12.test"));
         assert!(stamped.contains("admin-panel.js?v=0.6.12.test"));

@@ -29,6 +29,8 @@
     document.getElementById("chat-panel").classList.add("hidden");
     document.getElementById("user-list").replaceChildren();
     document.getElementById("screen-grid").replaceChildren();
+    document.getElementById("camera-lobby-grid").replaceChildren();
+    document.getElementById("camera-lobby").classList.add("hidden");
 
     if (typeof participantCards !== "undefined") participantCards.clear();
     if (typeof participantState !== "undefined") participantState.clear();
@@ -182,6 +184,100 @@
     };
   }
 
+  async function installCameraLobby(options) {
+    const scenario = Object.assign({ count: 1 }, options || {});
+    const count = Math.max(0, Math.floor(Number(scenario.count) || 0));
+    resetRoom();
+
+    const LK = getLiveKitClient();
+    const participants = [];
+    for (let index = 0; index < count; index += 1) {
+      const media = createVideoTrackStub(`fixture-lobby-camera-${index + 1}`, 16 / 9);
+      const publication = {
+        kind: LK.Track.Kind.Video,
+        source: LK.Track.Source.Camera,
+        track: media.track,
+        trackSid: media.track.sid,
+      };
+      participants.push({
+        identity: `lobby-fixture-${index + 1}`,
+        name: `Lobby Friend ${index + 1}`,
+        trackPublications: new Map([[publication.trackSid, publication]]),
+      });
+    }
+
+    room = {
+      localParticipant: participants[0] || {
+        identity: "lobby-fixture-empty",
+        name: "Lobby Friend",
+        trackPublications: new Map(),
+      },
+      remoteParticipants: new Map(
+        participants.slice(1).map(function (participant) {
+          return [participant.identity, participant];
+        })
+      ),
+    };
+
+    openCameraLobby();
+    if (typeof window._echoRecalcCameraLobby === "function") {
+      window._echoRecalcCameraLobby();
+    }
+    await nextFrame();
+    await nextFrame();
+
+    return {
+      count: document.querySelectorAll("#camera-lobby-grid > .camera-lobby-tile").length,
+      panelVisible: !document.getElementById("camera-lobby").classList.contains("hidden"),
+    };
+  }
+
+  function captureCameraLobbySnapshot() {
+    const tiles = Array.from(document.querySelectorAll("#camera-lobby-grid > .camera-lobby-tile"));
+    const videos = tiles.map(function (tile) { return tile.querySelector("video"); });
+    if (tiles.length === 0 || videos.some(function (video) { return !video; })) {
+      throw new Error("camera lobby snapshot requires rendered camera tiles");
+    }
+
+    window.__echoCameraLobbySnapshot = {
+      tiles: tiles,
+      videos: videos,
+      streams: videos.map(function (video) { return video.srcObject; }),
+      tracks: videos.map(function (video) {
+        return video.srcObject && video.srcObject.getVideoTracks()[0];
+      }),
+    };
+    return inspectCameraLobbySnapshot();
+  }
+
+  function inspectCameraLobbySnapshot() {
+    const saved = window.__echoCameraLobbySnapshot;
+    if (!saved) throw new Error("captureCameraLobbySnapshot must be called first");
+    const tiles = Array.from(document.querySelectorAll("#camera-lobby-grid > .camera-lobby-tile"));
+    const videos = tiles.map(function (tile) { return tile.querySelector("video"); });
+
+    return {
+      count: tiles.length,
+      streams: saved.streams.every(function (stream, index) {
+        return stream === (videos[index] && videos[index].srcObject);
+      }),
+      tiles: saved.tiles.every(function (tile, index) {
+        return tile === tiles[index] && tile.isConnected;
+      }),
+      trackStates: saved.tracks.map(function (track) { return track && track.readyState; }),
+      tracks: saved.tracks.every(function (track, index) {
+        return track === (
+          videos[index] &&
+          videos[index].srcObject &&
+          videos[index].srcObject.getVideoTracks()[0]
+        );
+      }),
+      videos: saved.videos.every(function (video, index) {
+        return video === videos[index] && video.isConnected;
+      }),
+    };
+  }
+
   function captureIdentitySnapshot() {
     const participantCard = document.querySelector(".user-card.has-camera");
     const cameraVideo = participantCard && participantCard.querySelector("video");
@@ -263,9 +359,12 @@
   }
 
   window.EchoLayoutTestScenario = Object.freeze({
+    captureCameraLobbySnapshot: captureCameraLobbySnapshot,
     captureIdentitySnapshot: captureIdentitySnapshot,
+    inspectCameraLobbySnapshot: inspectCameraLobbySnapshot,
     inspectIdentitySnapshot: inspectIdentitySnapshot,
     install: install,
+    installCameraLobby: installCameraLobby,
     unbrokenDisplayName: unbrokenDisplayName,
   });
 })();

@@ -160,7 +160,7 @@ interactive surface, they do not have independent hysteresis.
 | Width/height mode selection and hysteresis | One JavaScript mode controller |
 | Active utility tool, panel open state, and return focus | JavaScript UI state |
 | Modal focus containment and background inertness | JavaScript behavior plus CSS presentation |
-| Media tile allocation inside the stage | Existing media-grid layout owner |
+| Media tile allocation inside the stage or Camera Lobby | Existing media-grid layout owners |
 | Room, publication, subscription, Jam, and participant truth | Existing feature state owners |
 
 JavaScript must not write per-breakpoint pixel widths, move feature nodes between
@@ -173,6 +173,10 @@ breakpoints or control utility-panel behavior. A single visible share owns the
 full grid independently of the currently decoded media resolution. Two or more
 shares use the canonical grid policy, and every video preserves its source with
 `object-fit: contain`.
+
+The Camera Lobby uses the same canonical grid policy against the lobby's own
+available rectangle. Resizing may change only grid tracks and tile geometry; it
+must preserve each mounted camera tile, video element, stream, and track.
 
 A no-JavaScript/failure fallback may use media queries at the canonical
 thresholds. The supported runtime, however, uses the named root mode so behavior

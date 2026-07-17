@@ -2914,6 +2914,111 @@ video {
   color: rgba(226, 232, 240, 0.9);
 }
 
+/* Phase 2 Camera Lobby: let the shared layout policy size the existing camera
+   tiles against both available axes. The inline tracks are presentation only;
+   camera videos remain attached to their original tiles. */
+:root[data-ui-shell="v2"] .camera-lobby {
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+:root[data-ui-shell="v2"] .camera-lobby-header,
+:root[data-ui-shell="v2"] .camera-lobby-actions {
+  min-width: 0;
+}
+
+:root[data-ui-shell="v2"] .camera-lobby-grid {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  align-content: center;
+  justify-content: center;
+  grid-auto-flow: row;
+}
+
+:root[data-ui-shell="v2"] .camera-lobby-tile {
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
+  justify-self: center;
+  align-self: center;
+}
+
+:root[data-ui-shell="v2"] .camera-lobby-tile.enlarged {
+  width: auto !important;
+  height: auto !important;
+  max-width: none;
+  max-height: none;
+  justify-self: stretch;
+  align-self: stretch;
+}
+
+@media (max-width: 639px) {
+  :root[data-ui-shell="v2"] .camera-lobby {
+    inset: 8px;
+    padding: 10px;
+    gap: 8px;
+    border-radius: 14px;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 7px;
+    padding-bottom: 8px;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-header h3 {
+    flex: 1 0 100%;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 5px;
+  }
+
+  :root[data-ui-shell="v2"] .lobby-control-btn,
+  :root[data-ui-shell="v2"] #close-camera-lobby {
+    min-width: 0;
+    padding: 7px 6px;
+    justify-content: center;
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-grid {
+    gap: 8px;
+    padding: 2px;
+  }
+}
+
+@media (max-height: 519px) {
+  :root[data-ui-shell="v2"] .camera-lobby {
+    inset: 6px;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-header {
+    gap: 6px;
+    padding-bottom: 6px;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-header h3 {
+    font-size: 12px;
+  }
+
+  :root[data-ui-shell="v2"] .camera-lobby-grid {
+    gap: 6px;
+    padding: 2px;
+  }
+}
+
 /* ─── Room Selector ─── */
 
 
