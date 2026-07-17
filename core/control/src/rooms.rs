@@ -1,6 +1,5 @@
 use crate::auth::*;
 use crate::config::*;
-use crate::jam_bot;
 use crate::{epoch_days_to_date, AppState, JamState, ParticipantEntry};
 
 use axum::{
@@ -13,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, info};
@@ -291,14 +289,7 @@ pub(crate) async fn participant_leave(
         (jam.active && jam.listeners.is_empty()).then_some(jam.generation)
     };
     if let Some(generation) = auto_end_generation {
-        schedule_jam_auto_end(
-            state.jam.clone(),
-            state.jam_bot.clone(),
-            state.jam_source.clone(),
-            state.jam_lifecycle.clone(),
-            generation,
-            "participant left",
-        );
+        schedule_jam_auto_end(state.clone(), generation, "participant left");
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -725,46 +716,20 @@ fn jam_auto_end_matches(jam: &JamState, generation: u64) -> bool {
     jam.active && jam.generation == generation && jam.listeners.is_empty()
 }
 
-pub(crate) fn schedule_jam_auto_end(
-    jam_state: Arc<Mutex<JamState>>,
-    jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
-    jam_source: crate::jam_source::JamSourceRegistry,
-    jam_lifecycle: Arc<tokio::sync::Mutex<()>>,
-    generation: u64,
-    reason: &'static str,
-) {
+pub(crate) fn schedule_jam_auto_end(state: AppState, generation: u64, reason: &'static str) {
     tokio::spawn(async move {
         info!("Jam auto-end ({}): no listeners, waiting 30s...", reason);
         tokio::time::sleep(Duration::from_secs(30)).await;
-        let _lifecycle = jam_lifecycle.lock().await;
-        let should_stop = {
-            let mut jam = jam_state.lock().unwrap_or_else(|e| e.into_inner());
-            if jam_auto_end_matches(&jam, generation) {
-                crate::jam_session::clear_active_jam_state(&mut jam);
-                info!("Jam auto-ended ({}): no listeners for 30s", reason);
-                true
-            } else {
-                info!(
-                    "Jam auto-end cancelled: {} listeners now",
-                    jam.listeners.len()
-                );
-                false
-            }
-        };
-        if should_stop {
-            let bot = {
-                let mut guard = jam_bot.lock().await;
-                if guard.as_ref().map(|bot| bot.generation()) == Some(generation) {
-                    guard.take()
-                } else {
-                    None
-                }
-            };
-            if let Some(bot) = bot {
-                bot.stop().await;
-            } else {
-                jam_source.stop(generation).await;
-            }
+        if crate::jam_session::end_jam_if_still_empty(&state, generation, reason).await {
+            info!("Jam auto-ended ({}): no listeners for 30s", reason);
+        } else {
+            let listener_count = state
+                .jam
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .listeners
+                .len();
+            info!("Jam auto-end cancelled: {} listeners now", listener_count);
         }
     });
 }
