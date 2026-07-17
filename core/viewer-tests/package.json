@@ -8,7 +8,7 @@
   },
   "scripts": {
     "browser:install": "playwright install chromium",
-    "test": "playwright test tests/layout.geometry.spec.js",
+    "test": "playwright test",
     "test:all": "playwright test",
     "test:headed": "playwright test --headed"
   },

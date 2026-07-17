@@ -32,6 +32,35 @@ export async function expectHorizontallyContained(child, parent, tolerance = 1) 
   expect(childRect.right).toBeLessThanOrEqual(parentRect.right + tolerance);
 }
 
+export async function expectContained(child, parent, tolerance = 1) {
+  const [childRect, parentRect] = await Promise.all([visibleRect(child), visibleRect(parent)]);
+  expect(childRect.left).toBeGreaterThanOrEqual(parentRect.left - tolerance);
+  expect(childRect.right).toBeLessThanOrEqual(parentRect.right + tolerance);
+  expect(childRect.top).toBeGreaterThanOrEqual(parentRect.top - tolerance);
+  expect(childRect.bottom).toBeLessThanOrEqual(parentRect.bottom + tolerance);
+}
+
+export async function expectSingleLineEllipsis(locator) {
+  await expect(locator).toBeVisible();
+  const result = await locator.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return {
+      clientWidth: element.clientWidth,
+      overflow: style.overflowX,
+      scrollWidth: element.scrollWidth,
+      textOverflow: style.textOverflow,
+      whiteSpace: style.whiteSpace,
+    };
+  });
+
+  expect(result.clientWidth).toBeGreaterThan(0);
+  expect(result.scrollWidth).toBeGreaterThan(result.clientWidth);
+  expect(result.whiteSpace).toBe("nowrap");
+  expect(result.overflow).toBe("hidden");
+  expect(result.textOverflow).toBe("ellipsis");
+  return result;
+}
+
 export async function expectMinimumUsableRegion(locator, minimums) {
   await expect(locator).toBeVisible();
   const geometry = await locator.evaluate((element) => ({

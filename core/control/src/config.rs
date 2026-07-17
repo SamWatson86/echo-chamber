@@ -159,7 +159,8 @@ pub fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
     match fs::read_to_string(&index_path) {
         Ok(html) => {
             let assets = [
-                "style.css", "jam.css",
+                "style.css", "jam.css", "clubhouse-shell.css",
+                "layout-policy.js", "ui-shell.js",
                 "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
                 "state.js", "debug.js", "urls.js", "settings.js", "display-status.js",
                 "native-presenter.js", "identity.js",
@@ -236,6 +237,9 @@ mod tests {
             dir.join("index.html"),
             r#"
             <link rel="stylesheet" href="capture-picker.css?v=old" />
+            <link rel="stylesheet" href="clubhouse-shell.css?v=old" />
+            <script src="layout-policy.js?v=old"></script>
+            <script src="ui-shell.js?v=old"></script>
             <script src="display-status.js?v=old"></script>
             <script src="native-presenter.js?v=old"></script>
             <script src="admin-panel.js?v=old"></script>
@@ -247,6 +251,9 @@ mod tests {
 
         let stamped = fs::read_to_string(dir.join("index.html")).unwrap();
         assert!(stamped.contains("capture-picker.css?v=0.6.12.test"));
+        assert!(stamped.contains("clubhouse-shell.css?v=0.6.12.test"));
+        assert!(stamped.contains("layout-policy.js?v=0.6.12.test"));
+        assert!(stamped.contains("ui-shell.js?v=0.6.12.test"));
         assert!(stamped.contains("display-status.js?v=0.6.12.test"));
         assert!(stamped.contains("native-presenter.js?v=0.6.12.test"));
         assert!(stamped.contains("admin-panel.js?v=0.6.12.test"));

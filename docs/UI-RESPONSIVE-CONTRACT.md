@@ -1,6 +1,6 @@
 # Echo Chamber Responsive UI Contract
 
-Status: proposed contract for the Clubhouse UI foundation
+Status: Phase 0 contract landed; Phase 1 Clubhouse shell is implemented behind an off-by-default flag
 
 Applies to: `core/viewer/` in the browser and Windows desktop shell
 
@@ -487,6 +487,13 @@ but production default changes require an explicit release decision.
 - Preserve current feature placement unless moving it is required to establish
   a single stable region.
 - Verify that toggling the flag never duplicates media or feature listeners.
+
+The Phase 1 implementation also establishes the first real connected-shell
+presentation for the existing primary controls and People/Chat surfaces. It
+reuses the original buttons, panels, participant cards, media elements, and
+state owners; resize and live flag changes only alter CSS presentation. Jam
+continues to use its existing panel and is migrated into the shared utility
+host in Phase 2.
 
 ### Phase 2 - Dock and Utility Host
 

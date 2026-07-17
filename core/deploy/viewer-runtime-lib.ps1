@@ -94,6 +94,9 @@ function Assert-ViewerSource([string]$SourceDirectory) {
         "jam.js",
         "style.css",
         "jam.css",
+        "clubhouse-shell.css",
+        "layout-policy.js",
+        "ui-shell.js",
         "livekit-client.umd.js",
         # Loaded dynamically by rnnoise.js, so index.html reference scanning
         # cannot discover these release-critical assets.

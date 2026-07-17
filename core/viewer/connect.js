@@ -159,6 +159,13 @@ function setPublishButtonsEnabled(enabled) {
   micBtn.disabled = !enabled;
   camBtn.disabled = !enabled;
   screenBtn.disabled = !enabled;
+  var dockOutput = document.getElementById("dock-output");
+  var dockLeave = document.getElementById("dock-leave");
+  if (dockOutput) {
+    dockOutput.disabled = !enabled;
+    if (!enabled) dockOutput.setAttribute("aria-expanded", "false");
+  }
+  if (dockLeave) dockLeave.disabled = !enabled;
   if (flipCamBtn) {
     flipCamBtn.disabled = !enabled;
     // Show flip button only on mobile devices
@@ -171,6 +178,12 @@ function renderPublishButtons() {
   micBtn.textContent = micEnabled ? "Disable Mic" : "Enable Mic";
   camBtn.textContent = camEnabled ? "Disable Camera" : "Enable Camera";
   screenBtn.textContent = screenEnabled ? "Stop Sharing" : "Share Screen";
+  micBtn.title = micEnabled ? "Disable microphone" : "Enable microphone";
+  camBtn.title = camEnabled ? "Disable camera" : "Enable camera";
+  screenBtn.title = screenEnabled ? "Stop sharing screen" : "Share screen";
+  micBtn.setAttribute("aria-pressed", micEnabled ? "true" : "false");
+  camBtn.setAttribute("aria-pressed", camEnabled ? "true" : "false");
+  screenBtn.setAttribute("aria-pressed", screenEnabled ? "true" : "false");
   micBtn.classList.toggle("is-on", micEnabled);
   camBtn.classList.toggle("is-on", camEnabled);
   screenBtn.classList.toggle("is-on", screenEnabled);
@@ -1741,7 +1754,8 @@ async function disconnect() {
   if (deviceStatusEl && deviceStatusHome) {
     deviceStatusHome.appendChild(deviceStatusEl);
   }
-  if (settingsPanel) settingsPanel.classList.add("hidden");
+  if (typeof setSettingsPanelOpen === "function") setSettingsPanelOpen(false);
+  else if (settingsPanel) settingsPanel.classList.add("hidden");
   connectBtn.disabled = false;
   disconnectBtn.disabled = true;
   disconnectTopBtn.disabled = true;

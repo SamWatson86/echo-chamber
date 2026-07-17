@@ -44,11 +44,12 @@ The browser suite remains separate from `verify:quick` so the dependency-free
 PR baseline stays fast. The path-filtered `PR Viewer Layout` workflow runs it
 for production viewer and layout-test changes.
 
-Phase 0 records known legacy narrow-layout failures as narrowly scoped
-sentinels that assert the exact current bad geometry. Unrelated runtime failures
-still fail normally, and a corrected layout makes the sentinel fail until it is
-replaced by the positive contract assertion. That conversion is required before
-default-on rollout.
+Known legacy narrow-layout failures remain as narrowly scoped sentinels under
+the forced legacy presentation. Phase 1 adds positive V2 assertions at the same
+viewports, plus rollout-flag, hysteresis, canonical-node identity, media-track
+identity, Chat draft/focus, long-name, and control-overlap coverage. Unrelated
+runtime failures still fail normally. Both rollback and corrected geometry must
+remain green before default-on rollout.
 
 ### Layer 3 — Release confidence checks (as needed)
 - Smoke tests on release candidate builds

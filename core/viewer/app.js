@@ -103,6 +103,223 @@ if (debugCopyBtn) {
   });
 }
 
+// Clubhouse presentation controls are static DOM nodes. They proxy existing
+// state owners instead of creating a second media/control implementation.
+var dockOutputButton = document.getElementById("dock-output");
+var dockLeaveButton = document.getElementById("dock-leave");
+var shellUtilityButton = document.getElementById("shell-toggle-utility");
+var shellMoreButton = document.getElementById("shell-more-actions");
+var shellOverflowMenu = document.getElementById("shell-overflow-menu");
+var shellHeader = document.querySelector('[data-ui-region="shell-header"]');
+var shellLayout = document.querySelector('[data-ui-region="workspace"]');
+var shellStage = document.querySelector('[data-ui-region="primary-stage"]');
+var clubhouseShell = document.getElementById("clubhouse-shell");
+var settingsScrim = document.getElementById("settings-scrim");
+var settingsReturnFocus = null;
+var settingsModalActive = false;
+
+function setShellOverflowOpen(open, options) {
+  if (!shellHeader || !shellMoreButton) return;
+  shellHeader.classList.toggle("shell-overflow-open", !!open);
+  shellMoreButton.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open && (!options || options.focus !== false) && shellOverflowMenu) {
+    var firstCommand = Array.from(shellOverflowMenu.querySelectorAll("button:not(.hidden):not(:disabled)"))
+      .find(function(command) { return command.getClientRects().length > 0; });
+    if (firstCommand) firstCommand.focus();
+  } else if (!open && options && options.restoreFocus) {
+    shellMoreButton.focus();
+  }
+}
+
+function settingsFocusableElements() {
+  if (!settingsPanel) return [];
+  return Array.from(settingsPanel.querySelectorAll(
+    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+  )).filter(function(element) {
+    return element.getClientRects().length > 0;
+  });
+}
+
+function isRenderedFocusable(element) {
+  return !!(element
+    && element.isConnected
+    && !element.disabled
+    && element.getClientRects().length > 0
+    && !element.closest("[inert]"));
+}
+
+function setSettingsModalPresentation(modal) {
+  settingsModalActive = !!modal;
+  settingsPanel?.toggleAttribute("aria-modal", settingsModalActive);
+  if (settingsScrim) settingsScrim.classList.toggle("hidden", !settingsModalActive);
+  if (connectPanel) connectPanel.inert = settingsModalActive;
+  if (clubhouseShell) clubhouseShell.inert = settingsModalActive;
+}
+
+function focusSettingsReturnTarget(preferred) {
+  var isV2 = document.documentElement.dataset.uiShell === "v2";
+  var candidates = isV2
+    ? [preferred, shellMoreButton, openSettingsButton, shellUtilityButton, connectBtn]
+    : [preferred, openSettingsButton, connectBtn];
+  var target = candidates.find(isRenderedFocusable);
+  if (target) target.focus();
+}
+
+function syncSettingsModalPresentation() {
+  if (!settingsPanel) return;
+  var panelOpen = !settingsPanel.classList.contains("hidden");
+  var shouldBeModal = panelOpen && document.documentElement.dataset.uiShell === "v2";
+  var becomingModal = shouldBeModal && !settingsModalActive;
+  if (becomingModal && !settingsReturnFocus) {
+    settingsReturnFocus = isRenderedFocusable(shellMoreButton) ? shellMoreButton : openSettingsButton;
+  }
+  setSettingsModalPresentation(shouldBeModal);
+  if (becomingModal) {
+    requestAnimationFrame(function() {
+      var focusTarget = closeSettingsButton || settingsFocusableElements()[0];
+      if (focusTarget) focusTarget.focus();
+    });
+  }
+}
+
+function setSettingsPanelOpen(open, returnFocusTarget) {
+  if (!settingsPanel) return;
+  var modal = !!open && document.documentElement.dataset.uiShell === "v2";
+  if (open) {
+    settingsReturnFocus = modal ? (returnFocusTarget || document.activeElement) : null;
+    settingsPanel.classList.remove("hidden");
+  } else {
+    settingsPanel.classList.add("hidden");
+  }
+  setSettingsModalPresentation(modal);
+  if (dockOutputButton) dockOutputButton.setAttribute("aria-expanded", open ? "true" : "false");
+  if (openSettingsButton) openSettingsButton.setAttribute("aria-expanded", open ? "true" : "false");
+  if (modal) {
+    requestAnimationFrame(function() {
+      var focusTarget = closeSettingsButton || settingsFocusableElements()[0];
+      if (focusTarget) focusTarget.focus();
+    });
+  } else {
+    var focusReturn = settingsReturnFocus;
+    settingsReturnFocus = null;
+    if (!open && focusReturn) focusSettingsReturnTarget(focusReturn);
+  }
+}
+
+function syncClubhouseUtilityPresentation() {
+  if (!shellLayout || !shellStage) return;
+  var isV2 = document.documentElement.dataset.uiShell === "v2";
+  var mode = document.documentElement.dataset.uiMode;
+  var collapsed = shellLayout.classList.contains("utility-collapsed");
+  var chatOpen = shellLayout.classList.contains("chat-open") && chatPanel && !chatPanel.classList.contains("hidden");
+  var overlaysStage = mode === "lounge" || mode === "compact" || mode === "mini";
+  shellStage.inert = !!(isV2 && overlaysStage && !collapsed);
+  if (shellUtilityButton) {
+    shellUtilityButton.textContent = chatOpen ? "Chat" : "People";
+    shellUtilityButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    shellUtilityButton.setAttribute(
+      "aria-label",
+      (collapsed ? "Show " : "Hide ") + (chatOpen ? "Chat" : "People and tools")
+    );
+  }
+}
+
+if (dockOutputButton && settingsPanel) {
+  dockOutputButton.addEventListener("click", function() {
+    if (!dockOutputButton.disabled) setSettingsPanelOpen(true, dockOutputButton);
+  });
+}
+
+if (settingsScrim) {
+  settingsScrim.addEventListener("click", function() {
+    setSettingsPanelOpen(false);
+  });
+}
+
+if (dockLeaveButton && disconnectTopBtn) {
+  dockLeaveButton.addEventListener("click", function() {
+    if (!disconnectTopBtn.disabled) disconnectTopBtn.click();
+  });
+}
+
+if (shellMoreButton) {
+  shellMoreButton.addEventListener("click", function(event) {
+    event.stopPropagation();
+    var open = !shellHeader.classList.contains("shell-overflow-open");
+    setShellOverflowOpen(open, { focus: open });
+  });
+}
+
+if (shellOverflowMenu) {
+  shellOverflowMenu.addEventListener("click", function(event) {
+    var command = event.target.closest("button");
+    if (!command) return;
+    setShellOverflowOpen(false);
+    requestAnimationFrame(function() {
+      if (document.activeElement === command) shellMoreButton?.focus();
+    });
+  });
+}
+
+if (shellUtilityButton && shellLayout) {
+  shellUtilityButton.addEventListener("click", function() {
+    shellLayout.classList.toggle("utility-collapsed");
+    syncClubhouseUtilityPresentation();
+  });
+}
+
+if (openChatButton) openChatButton.addEventListener("click", syncClubhouseUtilityPresentation);
+if (closeChatButton) closeChatButton.addEventListener("click", syncClubhouseUtilityPresentation);
+window.addEventListener("echo:ui-shell-change", function() {
+  syncClubhouseUtilityPresentation();
+  syncSettingsModalPresentation();
+  if (!shellHeader?.classList.contains("shell-overflow-open")) return;
+  var canRestoreMoreFocus = document.documentElement.dataset.uiShell === "v2"
+    && shellMoreButton
+    && shellMoreButton.getClientRects().length > 0;
+  setShellOverflowOpen(false, { restoreFocus: canRestoreMoreFocus });
+});
+if (shellLayout && typeof MutationObserver === "function") {
+  var shellLayoutObserver = new MutationObserver(syncClubhouseUtilityPresentation);
+  shellLayoutObserver.observe(shellLayout, { attributes: true, attributeFilter: ["class"] });
+}
+
+document.addEventListener("click", function(event) {
+  if (shellHeader && !shellHeader.contains(event.target)) setShellOverflowOpen(false);
+});
+
+document.addEventListener("keydown", function(event) {
+  if (settingsModalActive && settingsPanel && !settingsPanel.classList.contains("hidden")) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSettingsPanelOpen(false);
+      return;
+    }
+    if (event.key === "Tab") {
+      var focusable = settingsFocusableElements();
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    return;
+  }
+  if (event.key !== "Escape" || !shellHeader?.classList.contains("shell-overflow-open")) return;
+  event.preventDefault();
+  setShellOverflowOpen(false, { restoreFocus: true });
+});
+
+syncClubhouseUtilityPresentation();
+
 // Connection lifecycle (hookPublication, switchRoom, connectToRoom, connect, disconnect,
 // setPublishButtonsEnabled, renderPublishButtons, reconcileLocalPublishIndicators,
 // buildChimeSettingsUI) are in connect.js
@@ -217,14 +434,17 @@ if (toggleRoomAudioButton) {
 }
 
 if (openSettingsButton && settingsPanel) {
-  openSettingsButton.addEventListener("click", () => {
-    settingsPanel.classList.toggle("hidden");
+  openSettingsButton.addEventListener("click", function() {
+    var returnTarget = document.documentElement.dataset.uiShell === "v2" && shellMoreButton
+      ? shellMoreButton
+      : openSettingsButton;
+    setSettingsPanelOpen(settingsPanel.classList.contains("hidden"), returnTarget);
   });
 }
 
 if (closeSettingsButton && settingsPanel) {
-  closeSettingsButton.addEventListener("click", () => {
-    settingsPanel.classList.add("hidden");
+  closeSettingsButton.addEventListener("click", function() {
+    setSettingsPanelOpen(false);
   });
 }
 

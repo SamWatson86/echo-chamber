@@ -1,0 +1,1141 @@
+/*
+ * Echo Chamber — Private Clubhouse shell
+ *
+ * The production default remains legacy. Every visual override is scoped to
+ * data-ui-shell="v2" so the presentation can be enabled or rolled back without
+ * changing room, participant, media, Chat, or Jam state ownership.
+ */
+
+.shell-v2-only {
+  display: none !important;
+}
+
+:root:not([data-ui-shell="v2"]) .clubhouse-popup-chime {
+  display: none !important;
+}
+
+.shell-overflow-menu,
+.shell-overlay-root {
+  display: contents;
+}
+
+.shell-notification-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"] .settings-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: rgba(5, 7, 10, 0.58);
+  backdrop-filter: blur(2px);
+}
+
+:root[data-ui-shell="v2"] {
+  color-scheme: dark;
+  --club-bg: #080a0e;
+  --club-workspace: #0d1117;
+  --club-surface: #131820;
+  --club-surface-raised: #19202a;
+  --club-surface-hover: #202936;
+  --club-text: #f1f0ec;
+  --club-text-muted: #a7adb6;
+  --club-text-faint: #747c88;
+  --club-brass: #c9a86a;
+  --club-brass-bright: #e1c488;
+  --club-oxblood: #79343b;
+  --club-live: #4fc3c8;
+  --club-success: #4cc38a;
+  --club-warning: #e2a84a;
+  --club-danger: #e56a6a;
+  --club-border: rgba(241, 240, 236, 0.09);
+  --club-border-strong: rgba(241, 240, 236, 0.17);
+  --club-shadow: 0 20px 55px rgba(0, 0, 0, 0.38);
+  --club-space-1: 4px;
+  --club-space-2: 8px;
+  --club-space-3: 12px;
+  --club-space-4: 16px;
+  --club-space-6: 24px;
+  --club-radius-control: 10px;
+  --club-radius-card: 12px;
+  --club-radius-panel: 16px;
+  --club-radius-pill: 999px;
+  --club-motion-fast: 120ms;
+  --club-motion-normal: 180ms;
+  --club-motion-panel: 240ms;
+  --club-shell-padding: 24px;
+  --club-shell-gap: 16px;
+  --club-header-size: 56px;
+  --club-dock-size: 64px;
+  --club-layer-region: 0;
+  --club-layer-sticky: 20;
+  --club-layer-utility-scrim: 25;
+  --club-layer-utility: 30;
+  --club-layer-modal-scrim: 40;
+  --club-layer-modal: 50;
+  --club-layer-notification: 60;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] {
+  --club-shell-padding: 16px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] {
+  --club-shell-padding: 12px;
+  --club-shell-gap: 12px;
+  --club-header-size: 52px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] {
+  --club-shell-padding: 8px;
+  --club-shell-gap: 8px;
+  --club-header-size: 48px;
+}
+
+:root[data-ui-shell="v2"] body {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  color: var(--club-text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  background:
+    radial-gradient(circle at 12% -12%, rgba(201, 168, 106, 0.13), transparent 34%),
+    radial-gradient(circle at 88% 112%, rgba(79, 195, 200, 0.07), transparent 38%),
+    linear-gradient(145deg, #0b0c10 0%, var(--club-bg) 48%, #090d12 100%);
+}
+
+:root[data-ui-shell="v2"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.22;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.01) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+
+:root[data-ui-shell="v2"] .shell-v2-only {
+  display: inline-flex !important;
+}
+
+:root[data-ui-shell="v2"] .app {
+  width: 100%;
+  max-width: none;
+  height: 100vh;
+  height: 100dvh;
+  padding:
+    max(var(--club-shell-padding), env(safe-area-inset-top))
+    max(var(--club-shell-padding), env(safe-area-inset-right))
+    max(var(--club-shell-padding), env(safe-area-inset-bottom))
+    max(var(--club-shell-padding), env(safe-area-inset-left));
+  gap: 0;
+  overflow: hidden;
+}
+
+:root[data-ui-shell="v2"] .app > .legacy-brand-header {
+  display: none !important;
+}
+
+:root[data-ui-shell="v2"] .settings-scrim {
+  z-index: var(--club-layer-modal-scrim);
+}
+
+:root[data-ui-shell="v2"] .settings-panel {
+  z-index: var(--club-layer-modal);
+}
+
+:root[data-ui-shell="v2"] .app:has(#connect-panel:not(.hidden)) {
+  display: block;
+  overflow-y: auto;
+}
+
+:root[data-ui-shell="v2"] .app:has(#connect-panel:not(.hidden)) #clubhouse-shell {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .app:has(#connect-panel.hidden) {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+:root[data-ui-shell="v2"] #clubhouse-shell {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  display: grid;
+  grid-template-rows: var(--club-header-size) minmax(0, 1fr) var(--club-dock-size);
+  gap: var(--club-shell-gap);
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+/* Club header */
+:root[data-ui-shell="v2"] .room-top {
+  position: relative;
+  z-index: var(--club-layer-sticky);
+  min-width: 0;
+  min-height: var(--club-header-size);
+  height: var(--club-header-size);
+  margin: 0;
+  padding: 7px 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--club-space-3);
+  flex-wrap: nowrap;
+  border: 1px solid var(--club-border);
+  border-radius: var(--club-radius-panel);
+  background: linear-gradient(110deg, rgba(25, 32, 42, 0.98), rgba(15, 19, 25, 0.96));
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.24), inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+:root[data-ui-shell="v2"] .clubhouse-brand {
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+:root[data-ui-shell="v2"] .clubhouse-crest {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 1px solid rgba(225, 196, 136, 0.58);
+  box-shadow: 0 0 0 3px rgba(201, 168, 106, 0.08), 0 5px 16px rgba(0, 0, 0, 0.42);
+}
+
+:root[data-ui-shell="v2"] .clubhouse-wordmark {
+  min-width: 0;
+  display: grid;
+  line-height: 1.05;
+}
+
+:root[data-ui-shell="v2"] .clubhouse-wordmark strong {
+  overflow: hidden;
+  color: var(--club-text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-ui-shell="v2"] .clubhouse-wordmark span {
+  margin-top: 3px;
+  color: var(--club-brass);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 10px;
+  font-style: italic;
+  letter-spacing: 0.035em;
+  white-space: nowrap;
+}
+
+:root[data-ui-shell="v2"] .room-switcher {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  overflow: hidden;
+}
+
+:root[data-ui-shell="v2"] .room-title {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--club-text-faint);
+  font-size: 10px;
+  letter-spacing: 0.11em;
+}
+
+:root[data-ui-shell="v2"] .room-list {
+  min-width: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 5px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+:root[data-ui-shell="v2"] .room-list::-webkit-scrollbar {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .room-status-btn {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding: 6px 11px;
+  border-color: var(--club-border);
+  border-radius: var(--club-radius-pill);
+  color: var(--club-text-muted);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-ui-shell="v2"] .room-status-btn.is-active {
+  border-color: rgba(201, 168, 106, 0.46);
+  color: var(--club-brass-bright);
+  background: rgba(201, 168, 106, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(201, 168, 106, 0.08);
+}
+
+:root[data-ui-shell="v2"] .jam-banner {
+  min-width: 0;
+  max-width: 280px;
+}
+
+:root[data-ui-shell="v2"] .room-actions {
+  position: relative;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+:root[data-ui-shell="v2"] .room-actions #disconnect-top {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .shell-overflow-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: var(--club-layer-utility);
+  width: min(220px, calc(100vw - 24px));
+  padding: 7px;
+  display: none;
+  gap: 4px;
+  border: 1px solid var(--club-border-strong);
+  border-radius: 13px;
+  background: rgba(19, 24, 32, 0.985);
+  box-shadow: var(--club-shadow);
+}
+
+:root[data-ui-shell="v2"] .room-top.shell-overflow-open .shell-overflow-menu {
+  display: grid;
+}
+
+:root[data-ui-shell="v2"] .shell-overflow-menu > button:not(.hidden) {
+  width: 100%;
+  min-height: 38px;
+  justify-content: flex-start;
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-ui-shell="v2"] .shell-overflow-menu > button:hover:not(:disabled) {
+  border-color: var(--club-border);
+  color: var(--club-brass-bright);
+  background: rgba(201, 168, 106, 0.08);
+}
+
+:root[data-ui-shell="v2"] #shell-toggle-utility,
+:root[data-ui-shell="v2"] #shell-more-actions {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 11px;
+  align-items: center;
+  justify-content: center;
+  border-color: var(--club-border);
+  border-radius: var(--club-radius-control);
+  color: var(--club-text-muted);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+:root[data-ui-shell="v2"] #shell-toggle-utility[aria-expanded="true"] {
+  border-color: rgba(201, 168, 106, 0.34);
+  color: var(--club-brass-bright);
+  background: rgba(201, 168, 106, 0.08);
+}
+
+:root[data-ui-shell="v2"] #shell-more-actions::before {
+  content: "•••";
+  font-size: 17px;
+  line-height: 1;
+  letter-spacing: 2px;
+}
+
+:root[data-ui-shell="v2"] #shell-more-actions {
+  font-size: 0;
+}
+
+:root[data-ui-shell="v2"]:not([data-ui-mode="mini"]) .shell-overflow-menu #open-settings {
+  display: none;
+}
+
+/* Workspace and stage */
+:root[data-ui-shell="v2"] .room-layout,
+:root[data-ui-shell="v2"] .room-main,
+:root[data-ui-shell="v2"] .room-sidebar,
+:root[data-ui-shell="v2"] .chat-panel,
+:root[data-ui-shell="v2"] .screens-grid,
+:root[data-ui-shell="v2"] .user-list {
+  min-width: 0;
+  min-height: 0;
+}
+
+:root[data-ui-shell="v2"] .room-layout {
+  position: relative;
+  z-index: var(--club-layer-region);
+  width: 100%;
+  height: 100%;
+  gap: var(--club-shell-gap);
+  overflow: hidden;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="theater"] .room-layout {
+  grid-template-columns: minmax(0, 1fr) clamp(320px, 24vw, 360px);
+}
+
+:root[data-ui-shell="v2"] .room-main {
+  position: relative;
+  padding: 12px;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--club-border);
+  border-radius: var(--club-radius-panel);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(201, 168, 106, 0.035), transparent 42%),
+    var(--club-workspace);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 16px 42px rgba(0, 0, 0, 0.22);
+}
+
+:root[data-ui-shell="v2"] .grid-header h2,
+:root[data-ui-shell="v2"] .sidebar-title-row h2,
+:root[data-ui-shell="v2"] .chat-header h3 {
+  color: var(--club-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+}
+
+:root[data-ui-shell="v2"] .grid-header h2 {
+  font-size: 0;
+}
+
+:root[data-ui-shell="v2"] .grid-header h2::before {
+  content: "THE STAGE";
+  font-size: 11px;
+}
+
+:root[data-ui-shell="v2"] .screens-grid {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+:root[data-ui-shell="v2"] .screens-grid:empty::before {
+  content: "No one is sharing\A Use Share Screen when you are ready to take the stage.";
+  width: min(440px, calc(100% - 32px));
+  min-height: 150px;
+  margin: auto;
+  padding: 88px 24px 22px;
+  display: grid;
+  place-items: center;
+  align-self: center;
+  justify-self: center;
+  color: var(--club-text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+  white-space: pre-line;
+  border: 1px dashed rgba(201, 168, 106, 0.2);
+  border-radius: var(--club-radius-panel);
+  background:
+    url("badge.jpg") center 18px / 58px 58px no-repeat,
+    linear-gradient(145deg, rgba(201, 168, 106, 0.045), rgba(255, 255, 255, 0.012));
+  opacity: 0.78;
+}
+
+:root[data-ui-shell="v2"] .screens-grid .tile {
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-color: var(--club-border);
+  border-radius: var(--club-radius-card);
+  background: #05070a;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.34);
+}
+
+:root[data-ui-shell="v2"] .screens-grid .tile h3 {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: auto;
+  z-index: 6;
+  width: max-content;
+  max-width: calc(100% - 60px);
+  min-width: 0;
+  padding: 5px 9px;
+  overflow: hidden;
+  color: rgba(241, 240, 236, 0.88);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 7px;
+  background: rgba(5, 7, 10, 0.68);
+  backdrop-filter: blur(8px);
+}
+
+:root[data-ui-shell="v2"] .tile-fullscreen-btn {
+  opacity: 1;
+}
+
+:root[data-ui-shell="v2"] .tile-volume-wrap,
+:root[data-ui-shell="v2"] .screens-grid .tile:focus-within .tile-volume-wrap:not(.hidden),
+:root[data-ui-shell="v2"] .tile-volume-wrap:focus-within:not(.hidden) {
+  transition-duration: var(--club-motion-fast);
+}
+
+:root[data-ui-shell="v2"] .screens-grid .tile:focus-within .tile-volume-wrap:not(.hidden),
+:root[data-ui-shell="v2"] .tile-volume-wrap:focus-within:not(.hidden) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Utility rail: People and Chat share the same visual slot. */
+:root[data-ui-shell="v2"] .room-sidebar,
+:root[data-ui-shell="v2"] .chat-panel {
+  min-width: 0;
+  padding: 12px;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--club-border);
+  border-radius: var(--club-radius-panel);
+  background: linear-gradient(160deg, rgba(25, 32, 42, 0.99), rgba(13, 17, 23, 0.985));
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.28), inset 0 1px rgba(255, 255, 255, 0.03);
+  backdrop-filter: none;
+}
+
+:root[data-ui-shell="v2"] .room-layout.chat-open {
+  grid-template-columns: minmax(0, 1fr) clamp(320px, 24vw, 360px);
+}
+
+:root[data-ui-shell="v2"] .room-layout.chat-open .room-sidebar {
+  grid-column: 2;
+  grid-row: 1;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"] .room-layout.chat-open .chat-panel {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+:root[data-ui-shell="v2"] .sidebar-header {
+  min-width: 0;
+  padding-bottom: 8px;
+  border-color: var(--club-border);
+}
+
+:root[data-ui-shell="v2"] .sidebar-title-row {
+  min-width: 0;
+  gap: 7px;
+}
+
+:root[data-ui-shell="v2"] .sidebar-title-row h2 {
+  font-size: 0;
+}
+
+:root[data-ui-shell="v2"] .sidebar-title-row h2::before {
+  content: "PEOPLE";
+  font-size: 11px;
+}
+
+:root[data-ui-shell="v2"] .sidebar-actions {
+  min-width: 0;
+  gap: 5px;
+}
+
+:root[data-ui-shell="v2"] .sidebar-actions button {
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 6px;
+  overflow: hidden;
+  color: var(--club-text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  border-color: var(--club-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-ui-shell="v2"] .sidebar-actions button:hover:not(:disabled),
+:root[data-ui-shell="v2"] .sidebar-actions button:focus-visible:not(:disabled) {
+  border-color: rgba(201, 168, 106, 0.34);
+  color: var(--club-brass-bright);
+  background: rgba(201, 168, 106, 0.08);
+}
+
+:root[data-ui-shell="v2"] .user-list {
+  min-width: 0;
+  max-width: 100%;
+  container-type: inline-size;
+  padding: 1px 3px 8px 1px;
+  gap: 8px;
+  grid-auto-rows: max-content;
+  align-items: start;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+/* Participant cards */
+:root[data-ui-shell="v2"] .user-card {
+  container-type: inline-size;
+  min-width: 0;
+  border-color: var(--club-border);
+  border-radius: var(--club-radius-card);
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: none;
+}
+
+:root[data-ui-shell="v2"] .user-card:hover {
+  border-color: var(--club-border-strong);
+  background: rgba(255, 255, 255, 0.042);
+  box-shadow: none;
+}
+
+:root[data-ui-shell="v2"] .user-card:has(.icon-button.is-active) {
+  border-color: rgba(79, 195, 200, 0.72);
+  box-shadow: 0 0 0 2px rgba(79, 195, 200, 0.1), 0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) {
+  padding: 10px;
+  gap: 0;
+}
+
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-name {
+  position: absolute;
+  top: 10px;
+  left: 64px;
+  right: 10px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--club-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-header {
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px;
+}
+
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  color: var(--club-brass);
+  font-size: 13px;
+  border-color: rgba(201, 168, 106, 0.15);
+  background: linear-gradient(145deg, #232831, #11151c);
+}
+
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-meta {
+  padding-top: 22px;
+  gap: 6px;
+}
+
+:root[data-ui-shell="v2"] .user-indicators {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+:root[data-ui-shell="v2"] .indicator-row {
+  width: auto;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+:root[data-ui-shell="v2"] .indicator-only {
+  width: 30px;
+  height: 30px;
+}
+
+:root[data-ui-shell="v2"] .participant-chime-toggle {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 4px 8px;
+  align-items: center;
+  border: 1px solid var(--club-border);
+  border-radius: 7px;
+  color: var(--club-text-faint);
+  font-size: 10px;
+  background: transparent;
+}
+
+:root[data-ui-shell="v2"] .participant-chime-toggle:hover,
+:root[data-ui-shell="v2"] .participant-chime-toggle[aria-expanded="true"] {
+  color: var(--club-brass-bright);
+  border-color: rgba(201, 168, 106, 0.3);
+  background: rgba(201, 168, 106, 0.07);
+}
+
+:root[data-ui-shell="v2"] .chime-volume-row {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .chime-volume-row.is-open {
+  display: grid;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera {
+  min-height: 140px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: var(--club-radius-card);
+  background: #06080b;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera .user-header,
+:root[data-ui-shell="v2"] .user-card.has-camera .user-avatar,
+:root[data-ui-shell="v2"] .user-card.has-camera .user-avatar video {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border-radius: var(--club-radius-card);
+}
+
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .cam-overlay {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera .cam-overlay {
+  min-width: 0;
+  padding: 28px 9px 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  opacity: 1;
+  pointer-events: auto;
+  border-radius: 0 0 var(--club-radius-card) var(--club-radius-card);
+  background: linear-gradient(transparent, rgba(3, 5, 8, 0.92));
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera .cam-overlay-name {
+  align-self: center;
+  overflow: hidden;
+  color: var(--club-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera .cam-overlay-controls {
+  min-width: 0;
+  gap: 3px;
+}
+
+:root[data-ui-shell="v2"] .cam-overlay-controls .icon-button,
+:root[data-ui-shell="v2"] .cam-overlay-controls .mute-button,
+:root[data-ui-shell="v2"] .cam-overlay-controls .watch-toggle-btn {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  overflow: hidden;
+  font-size: 0;
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--club-text);
+  background: rgba(5, 7, 10, 0.58);
+}
+
+:root[data-ui-shell="v2"] .cam-overlay-controls .mute-button::before {
+  content: "×";
+  font-size: 16px;
+  line-height: 1;
+}
+
+:root[data-ui-shell="v2"] .cam-overlay-controls .watch-toggle-btn::before {
+  content: "◉";
+  font-size: 13px;
+}
+
+:root[data-ui-shell="v2"] .cam-overlay .vol-popup {
+  left: auto;
+  right: 0;
+  bottom: 54px;
+  width: min(260px, calc(100cqw - 18px));
+  min-width: min(230px, calc(100cqw - 18px));
+  margin-bottom: 0;
+  transform: none;
+  border-color: var(--club-border-strong);
+  background: rgba(19, 24, 32, 0.985);
+}
+
+:root[data-ui-shell="v2"] .user-card.is-local .user-controls {
+  display: none;
+}
+
+/* Persistent call dock */
+:root[data-ui-shell="v2"] #call-controls.publish-actions.hidden {
+  display: flex !important;
+}
+
+:root[data-ui-shell="v2"] #call-controls {
+  position: relative;
+  z-index: var(--club-layer-sticky);
+  width: max-content;
+  max-width: 100%;
+  min-height: var(--club-dock-size);
+  margin: 0 auto;
+  padding: 8px;
+  align-self: center;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  border: 1px solid var(--club-border-strong);
+  border-radius: 18px;
+  background: rgba(19, 24, 32, 0.97);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36), inset 0 1px rgba(255, 255, 255, 0.045);
+  backdrop-filter: blur(14px);
+}
+
+:root[data-ui-shell="v2"] #call-controls button {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  color: var(--club-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: var(--club-radius-control);
+  background: transparent;
+}
+
+:root[data-ui-shell="v2"] #call-controls button::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  background: currentColor;
+  -webkit-mask: var(--club-control-icon) center / contain no-repeat;
+  mask: var(--club-control-icon) center / contain no-repeat;
+}
+
+:root[data-ui-shell="v2"] #call-controls #toggle-mic {
+  --club-control-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z'/%3E%3Cpath d='M19 10v2a7 7 0 0 1-14 0v-2M12 19v3'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+:root[data-ui-shell="v2"] #call-controls #toggle-cam {
+  --club-control-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Crect x='3' y='6' width='13' height='12' rx='2'/%3E%3Cpath d='m16 10 5-3v10l-5-3Z'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+:root[data-ui-shell="v2"] #call-controls #toggle-screen {
+  --club-control-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='13' rx='2'/%3E%3Cpath d='M8 21h8M12 17v4M9 10l3-3 3 3M12 7v6'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+:root[data-ui-shell="v2"] #call-controls #dock-output {
+  --club-control-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M11 5 6 9H3v6h3l5 4Z'/%3E%3Cpath d='M15.5 8.5a5 5 0 0 1 0 7M18 6a8 8 0 0 1 0 12'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+:root[data-ui-shell="v2"] #call-controls #dock-leave {
+  --club-control-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 14.5c4.8-3.4 11.2-3.4 16 0'/%3E%3Cpath d='m7 13-2 5 4 2 2-4M17 13l2 5-4 2-2-4'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+:root[data-ui-shell="v2"] #call-controls button:hover:not(:disabled),
+:root[data-ui-shell="v2"] #call-controls button:focus-visible:not(:disabled) {
+  color: var(--club-text);
+  border-color: var(--club-border);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+:root[data-ui-shell="v2"] #call-controls button.is-on {
+  color: var(--club-live);
+  border-color: rgba(79, 195, 200, 0.34);
+  background: rgba(79, 195, 200, 0.09);
+}
+
+:root[data-ui-shell="v2"] #call-controls #dock-leave {
+  margin-left: 6px;
+  color: var(--club-danger);
+  border-color: rgba(229, 106, 106, 0.2);
+  background: rgba(121, 52, 59, 0.11);
+}
+
+:root[data-ui-shell="v2"] #call-controls button:disabled {
+  opacity: 0.56;
+}
+
+/* Lounge: stage remains full-size while the persistent People/Chat surface overlays it. */
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout,
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .room-layout,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-layout {
+  display: block;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:not(.utility-collapsed)::after,
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .room-layout:not(.utility-collapsed)::after,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-layout:not(.utility-collapsed)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--club-layer-utility-scrim);
+  pointer-events: auto;
+  background: rgba(5, 7, 10, 0.34);
+}
+
+:root[data-ui-shell="v2"] .room-layout.utility-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+:root[data-ui-shell="v2"] .room-layout.utility-collapsed .room-sidebar,
+:root[data-ui-shell="v2"] .room-layout.utility-collapsed .chat-panel {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-main,
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .room-main,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-main {
+  width: 100%;
+  height: 100%;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-sidebar,
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .chat-panel {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  z-index: var(--club-layer-utility);
+  width: clamp(320px, 42vw, 380px);
+  height: 100%;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout.chat-open .chat-panel {
+  grid-column: auto;
+  grid-row: auto;
+}
+
+/* Compact and mini: People/Chat becomes a dock-safe bottom sheet. */
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .room-sidebar,
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .chat-panel,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-sidebar,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .chat-panel {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: var(--club-layer-utility);
+  width: 100%;
+  height: min(240px, 78%);
+  border-radius: 16px 16px 12px 12px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .room-sidebar::before,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-sidebar::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 38px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: var(--club-radius-pill);
+  background: var(--club-border-strong);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-sidebar,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .chat-panel {
+  height: min(220px, 78%);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .room-layout.chat-open .chat-panel,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-layout.chat-open .chat-panel {
+  top: 0;
+  bottom: 0;
+  height: 100%;
+  grid-column: auto;
+  grid-row: auto;
+  border-radius: var(--club-radius-panel);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .sidebar-header,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .sidebar-header {
+  padding-bottom: 6px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .sidebar-title-row,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .sidebar-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .sidebar-title-row h2,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .sidebar-title-row h2 {
+  flex: 0 0 auto;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .sidebar-actions,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .sidebar-actions {
+  flex: 0 0 auto;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .sidebar-actions button,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .sidebar-actions button {
+  width: auto;
+  min-width: 38px;
+  flex: 0 0 auto;
+  padding-inline: 8px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .user-list,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .user-list {
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  grid-auto-flow: row;
+  align-items: start;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] #call-controls button,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] #call-controls button {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  font-size: 0;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] #call-controls button::before,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] #call-controls button::before {
+  width: 19px;
+  height: 19px;
+  flex-basis: 19px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] #call-controls #dock-output {
+  display: none;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .clubhouse-wordmark span,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-title,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .jam-banner {
+  display: none !important;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .clubhouse-wordmark strong {
+  max-width: 96px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-top {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 5px 7px;
+  gap: 7px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .clubhouse-crest {
+  width: 34px;
+  height: 34px;
+  flex-basis: 34px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] #call-controls {
+  padding-inline: 6px;
+  gap: 4px;
+}
+
+@container (max-width: 303px) {
+  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-name {
+    left: 58px;
+  }
+
+  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-header {
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 9px;
+  }
+
+  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-avatar {
+    width: 38px;
+    height: 38px;
+  }
+
+  :root[data-ui-shell="v2"] .participant-chime-toggle {
+    width: 30px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 0;
+  }
+
+  :root[data-ui-shell="v2"] .participant-chime-toggle::before {
+    content: "♪";
+    font-size: 13px;
+  }
+}
+
+@container (max-width: 239px) {
+  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .mute-button,
+  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .watch-toggle-btn {
+    max-width: 30px;
+    padding-inline: 4px;
+    overflow: hidden;
+    font-size: 0;
+  }
+
+  :root[data-ui-shell="v2"] .user-card:not(.has-camera) .mute-button::before {
+    content: "×";
+    font-size: 14px;
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  :root[data-ui-shell="v2"] button,
+  :root[data-ui-shell="v2"] .icon-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  :root[data-ui-shell="v2"] .cam-overlay,
+  :root[data-ui-shell="v2"] .tile-volume-wrap:not(.hidden) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-ui-shell="v2"] *,
+  :root[data-ui-shell="v2"] *::before,
+  :root[data-ui-shell="v2"] *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
