@@ -310,6 +310,68 @@ test("one logical utility owns stable People, Chat, and portaled Jam tools witho
   expect(await page.evaluate(() => window.__phase2JamNode === document.getElementById("jam-panel"))).toBe(true);
 });
 
+test("People actions stay visible and contained in the theater rail and mini sheet", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page);
+
+  for (const [viewport, expectedMode] of [
+    [{ width: 1280, height: 720 }, "theater"],
+    [{ width: 360, height: 640 }, "mini"],
+  ]) {
+    await resizeTo(page, viewport, expectedMode);
+    await expectActiveTool(page, "people");
+    const geometry = await page.evaluate(() => {
+      const sidebar = document.getElementById("room-sidebar").getBoundingClientRect();
+      const titleRow = document.querySelector("#room-sidebar .sidebar-title-row");
+      const actions = Array.from(document.querySelectorAll("#room-sidebar .sidebar-actions button"))
+        .filter((button) => getComputedStyle(button).display !== "none")
+        .map((button) => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+          return {
+            bottom: rect.bottom,
+            height: rect.height,
+            hit: hit === button || button.contains(hit),
+            id: button.id,
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            width: rect.width,
+          };
+        });
+      return {
+        actions,
+        compactLabels: ["open-soundboard", "open-camera-lobby"].map((id) => {
+          const button = document.getElementById(id);
+          return {
+            after: getComputedStyle(button, "::after").content,
+            before: getComputedStyle(button, "::before").content,
+            fontSize: getComputedStyle(button).fontSize,
+          };
+        }),
+        sidebar: { bottom: sidebar.bottom, left: sidebar.left, right: sidebar.right, top: sidebar.top },
+        titleOverflow: titleRow.scrollWidth - titleRow.clientWidth,
+      };
+    });
+
+    expect(geometry.actions).toHaveLength(7);
+    expect(geometry.titleOverflow).toBeLessThanOrEqual(1);
+    expect(geometry.compactLabels).toEqual([
+      { after: "none", before: '"Sounds"', fontSize: "0px" },
+      { after: "none", before: '"Cameras"', fontSize: "0px" },
+    ]);
+    for (const action of geometry.actions) {
+      expect(action.left, `${action.id} left at ${viewport.width}px`).toBeGreaterThanOrEqual(geometry.sidebar.left - 1);
+      expect(action.right, `${action.id} right at ${viewport.width}px`).toBeLessThanOrEqual(geometry.sidebar.right + 1);
+      expect(action.top, `${action.id} top at ${viewport.width}px`).toBeGreaterThanOrEqual(geometry.sidebar.top - 1);
+      expect(action.bottom, `${action.id} bottom at ${viewport.width}px`).toBeLessThanOrEqual(geometry.sidebar.bottom + 1);
+      expect(action.width, `${action.id} width at ${viewport.width}px`).toBeGreaterThanOrEqual(39.5);
+      expect(action.height, `${action.id} height at ${viewport.width}px`).toBeGreaterThanOrEqual(39.5);
+      expect(action.hit, `${action.id} center hit at ${viewport.width}px`).toBe(true);
+    }
+  }
+});
+
 test("responsive modes and live legacy rollback retain the same centered Jam node and state", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await openPhaseTwoViewer(page);
