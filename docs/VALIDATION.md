@@ -37,15 +37,19 @@ npm run verify:viewer:layout
 
 The tests load the production `core/viewer/index.html`, inject deterministic
 room scenarios through production participant/screen renderers, and establish
-desktop geometry and resize-state baselines. Known narrow-layout failures run
-as exact bad-geometry sentinels during Phase 0; Clubhouse implementation PRs
-must replace them with positive contract assertions. The suite is deliberately
-outside `core/viewer/`, so its dependencies and fixtures are never copied into
-the served viewer snapshot.
+desktop geometry and resize-state baselines. Legacy narrow-layout failures run
+as exact bad-geometry sentinels under `?echo-ui-shell-v2=0`; separate positive
+V2 assertions prove that the Clubhouse shell fixes the same geometry without
+removing rollback coverage. The suite is deliberately outside `core/viewer/`,
+so its dependencies and fixtures are never copied into the served viewer
+snapshot.
 
-During Phase 0 the pure layout policy is injected by the test and is not yet
-loaded by production `index.html`. Phase 1 must replace that check with live
-mode-controller coverage before the new shell can be enabled.
+Phase 1 exercises the production-loaded layout policy and mode controller. Its
+browser coverage verifies rollout-flag precedence and first-frame selection,
+hysteresis, canonical region uniqueness, media/track/state identity across
+resize and live variant changes, usable geometry down to `360x640`, long-name
+ellipsis, non-overlapping camera cards, popup hit testing, keyboard focus
+restoration, accessible control names, and legacy rollback behavior.
 
 CI equivalent:
 

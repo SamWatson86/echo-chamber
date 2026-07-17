@@ -9,6 +9,7 @@ function addTile(label, element) {
   tile.className = "tile";
   const title = document.createElement("h3");
   title.textContent = label;
+  title.title = label;
   tile.appendChild(title);
   tile.appendChild(element);
   screenGridEl.appendChild(tile);
@@ -69,6 +70,7 @@ function addScreenTile(label, element, trackSid) {
   var fsBtn = document.createElement("button");
   fsBtn.className = "tile-fullscreen-btn";
   fsBtn.title = "Fullscreen";
+  fsBtn.setAttribute("aria-label", "Open shared screen fullscreen");
   fsBtn.innerHTML = "&#x26F6;"; // ⛶ fullscreen icon
   fsBtn.addEventListener("click", function(e) {
     e.stopPropagation(); // don't trigger tile focus toggle

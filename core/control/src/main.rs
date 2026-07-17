@@ -414,6 +414,9 @@ async fn main() {
             let watched_files = [
                 "app.js",
                 "style.css",
+                "clubhouse-shell.css",
+                "layout-policy.js",
+                "ui-shell.js",
                 "index.html",
                 "connect.js",
                 "room-status.js",

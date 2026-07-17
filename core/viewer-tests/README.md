@@ -16,10 +16,10 @@ The harness:
 It does not use `core/viewer-next/` and does not clone the production viewer
 markup into a second test-only page.
 
-Phase 0 injects `layout-policy.js` explicitly because the production
-`index.html` does not load a mode controller yet. Phase 1 must wire the policy
-before first paint and replace that injected-policy check with an assertion on
-the production root's live `data-ui-mode` value.
+Phase 1 exercises `layout-policy.js` and the shell controller through the real
+production `index.html`. The suite verifies the pre-paint rollout flag,
+production `data-ui-mode` wiring and hysteresis, stable media/feature nodes,
+and positive V2 geometry without importing the policy out of band.
 
 ## Setup
 
@@ -37,8 +37,6 @@ npm test
 From the repository root, use `npm run verify:viewer:layout` after setup.
 
 Known legacy failures at `960x540`, `640x480`, and narrow Chat execute on every
-run as narrowly scoped sentinels. They assert the exact current bad geometry
-(collapsed participant viewport or zero-width stage), so unrelated runtime or
-browser failures still fail the suite. When Clubhouse corrects that geometry,
-the sentinel fails and must be replaced by the corresponding positive contract
-assertion. That conversion is a rollout gate, not an optional cleanup.
+run under the explicit `?echo-ui-shell-v2=0` override. They retain the legacy
+rollback baseline while separate V2 tests assert a usable participant region
+and nonzero Chat-stage geometry at the same viewports.

@@ -27,6 +27,8 @@ function iconSvg(name) {
 
 // ── Participant card ──
 
+var participantControlIdSequence = 0;
+
 function getRemoteParticipantsForScreenIdentity(identity) {
   var matches = [];
   if (!identity || !room || !room.remoteParticipants) return matches;
@@ -176,13 +178,16 @@ function ensureParticipantCard(participant, isLocal = false) {
     return participantCards.get(key);
   }
   debugLog(`creating NEW participant card for ${key}, isLocal=${isLocal}`);
+  var participantControlId = ++participantControlIdSequence;
+  var participantDisplayName = participant.name || "Guest";
   const card = document.createElement("div");
-  card.className = "user-card";
+  card.className = "user-card " + (isLocal ? "is-local" : "is-remote");
   card.dataset.identity = key;
 
   const title = document.createElement("div");
   title.className = "user-name";
   title.textContent = participant.name || "Guest";
+  title.title = title.textContent;
   card.append(title);
 
   const header = document.createElement("div");
@@ -248,6 +253,9 @@ function ensureParticipantCard(participant, isLocal = false) {
   let popMicPct = null;
   let popScreenSlider = null;
   let popScreenPct = null;
+  let popChimeSlider = null;
+  let popChimePct = null;
+  let chimeToggleButton = null;
   if (!isLocal) {
     const indicators = document.createElement("div");
     indicators.className = "user-indicators";
@@ -259,18 +267,22 @@ function ensureParticipantCard(participant, isLocal = false) {
     micIndicator.type = "button";
     micIndicator.className = "icon-button indicator-only";
     micIndicator.innerHTML = iconSvg("mic");
+    micIndicator.setAttribute("aria-label", "Microphone audio settings for " + (participant.name || "Guest"));
     micMuteButton = document.createElement("button");
     micMuteButton.type = "button";
     micMuteButton.className = "mute-button";
     micMuteButton.textContent = "Mute";
+    micMuteButton.setAttribute("aria-label", "Mute microphone audio from " + participantDisplayName);
     screenIndicator = document.createElement("button");
     screenIndicator.type = "button";
     screenIndicator.className = "icon-button indicator-only";
     screenIndicator.innerHTML = iconSvg("screen");
+    screenIndicator.setAttribute("aria-label", "Screen audio settings for " + (participant.name || "Guest"));
     screenMuteButton = document.createElement("button");
     screenMuteButton.type = "button";
     screenMuteButton.className = "mute-button";
     screenMuteButton.textContent = "Mute";
+    screenMuteButton.setAttribute("aria-label", "Mute screen audio from " + participantDisplayName);
     micIndicatorRow.append(micIndicator, micMuteButton);
     screenIndicatorRow.append(screenIndicator, screenMuteButton);
     var watchToggleBtn = document.createElement("button");
@@ -449,6 +461,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     micSlider.max = "3";
     micSlider.step = "0.01";
     micSlider.value = "1";
+    micSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
     micPct = document.createElement("span");
     micPct.className = "vol-pct";
     micPct.textContent = "100%";
@@ -463,12 +476,14 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenSlider.max = "3";
     screenSlider.step = "0.01";
     screenSlider.value = "1";
+    screenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
     screenPct = document.createElement("span");
     screenPct.className = "vol-pct";
     screenPct.textContent = "100%";
     screenRow.append(screenLabel, screenSlider, screenPct);
     var chimeRow = document.createElement("div");
-    chimeRow.className = "audio-row";
+    chimeRow.className = "audio-row chime-volume-row";
+    chimeRow.id = "chime-volume-" + participantControlId;
     const chimeLabel = document.createElement("span");
     chimeLabel.textContent = "Chime";
     chimeSlider = document.createElement("input");
@@ -477,10 +492,24 @@ function ensureParticipantCard(participant, isLocal = false) {
     chimeSlider.max = "1";
     chimeSlider.step = "0.01";
     chimeSlider.value = "0.5";
+    chimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
     chimePct = document.createElement("span");
     chimePct.className = "vol-pct";
     chimePct.textContent = "50%";
     chimeRow.append(chimeLabel, chimeSlider, chimePct);
+    chimeToggleButton = document.createElement("button");
+    chimeToggleButton.type = "button";
+    chimeToggleButton.className = "participant-chime-toggle shell-v2-only";
+    chimeToggleButton.textContent = "Chime volume";
+    chimeToggleButton.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
+    chimeToggleButton.setAttribute("aria-controls", chimeRow.id);
+    chimeToggleButton.setAttribute("aria-expanded", "false");
+    chimeToggleButton.addEventListener("click", function() {
+      const open = !chimeRow.classList.contains("is-open");
+      chimeRow.classList.toggle("is-open", open);
+      chimeToggleButton.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    indicators.append(chimeToggleButton);
     audioControls.append(micRow, screenRow, chimeRow);
     meta.append(indicators, audioControls);
 
@@ -492,6 +521,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     var overlayName = document.createElement("span");
     overlayName.className = "cam-overlay-name";
     overlayName.textContent = participant.name || "Guest";
+    overlayName.title = overlayName.textContent;
 
     var overlayControls = document.createElement("div");
     overlayControls.className = "cam-overlay-controls";
@@ -501,6 +531,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     ovMicBtn.type = "button";
     ovMicBtn.className = "icon-button indicator-only";
     ovMicBtn.innerHTML = iconSvg("mic");
+    ovMicBtn.setAttribute("aria-label", "Microphone volume for " + overlayName.textContent);
     ovMicBtn.addEventListener("click", function(e) {
       e.stopPropagation();
       var popup = camOverlay.querySelector(".vol-popup");
@@ -512,6 +543,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     ovMicMute.type = "button";
     ovMicMute.className = "mute-button";
     ovMicMute.textContent = "Mute";
+    ovMicMute.setAttribute("aria-label", "Mute microphone audio from " + participantDisplayName);
     ovMicMute.addEventListener("click", function(e) {
       e.stopPropagation();
       micMuteButton.click();
@@ -522,6 +554,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     ovScreenBtn.type = "button";
     ovScreenBtn.className = "icon-button indicator-only";
     ovScreenBtn.innerHTML = iconSvg("screen");
+    ovScreenBtn.setAttribute("aria-label", "Screen volume for " + overlayName.textContent);
     ovScreenBtn.addEventListener("click", function(e) {
       e.stopPropagation();
       var popup = camOverlay.querySelector(".vol-popup");
@@ -533,6 +566,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     ovScreenMute.type = "button";
     ovScreenMute.className = "mute-button";
     ovScreenMute.textContent = "Mute";
+    ovScreenMute.setAttribute("aria-label", "Mute screen audio from " + participantDisplayName);
     ovScreenMute.addEventListener("click", function(e) {
       e.stopPropagation();
       screenMuteButton.click();
@@ -589,6 +623,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     popMicSlider.max = "3";
     popMicSlider.step = "0.01";
     popMicSlider.value = micSlider.value;
+    popMicSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
     popMicPct = document.createElement("span");
     popMicPct.className = "vol-pct";
     popMicPct.textContent = micPct.textContent;
@@ -605,13 +640,30 @@ function ensureParticipantCard(participant, isLocal = false) {
     popScreenSlider.max = "3";
     popScreenSlider.step = "0.01";
     popScreenSlider.value = screenSlider.value;
+    popScreenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
     popScreenPct = document.createElement("span");
     popScreenPct.className = "vol-pct";
     popScreenPct.textContent = screenPct.textContent;
     if (Number(screenSlider.value) > 1) popScreenPct.classList.add("boosted");
     popScreenRow.append(popScreenLabel, popScreenSlider, popScreenPct);
 
-    volPopup.append(popMicRow, popScreenRow);
+    var popChimeRow = document.createElement("div");
+    popChimeRow.className = "audio-row clubhouse-popup-chime";
+    var popChimeLabel = document.createElement("span");
+    popChimeLabel.textContent = "Chime";
+    popChimeSlider = document.createElement("input");
+    popChimeSlider.type = "range";
+    popChimeSlider.min = "0";
+    popChimeSlider.max = "1";
+    popChimeSlider.step = "0.01";
+    popChimeSlider.value = chimeSlider.value;
+    popChimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
+    popChimePct = document.createElement("span");
+    popChimePct.className = "vol-pct";
+    popChimePct.textContent = chimePct.textContent;
+    popChimeRow.append(popChimeLabel, popChimeSlider, popChimePct);
+
+    volPopup.append(popMicRow, popScreenRow, popChimeRow);
     camOverlay.append(overlayName, overlayControls, volPopup);
 
     // Close popup when clicking outside
@@ -647,16 +699,19 @@ function ensureParticipantCard(participant, isLocal = false) {
     micControl.type = "button";
     micControl.className = "icon-button";
     micControl.innerHTML = iconSvg("mic");
+    micControl.setAttribute("aria-label", "Toggle microphone");
     micControl.addEventListener("click", () => toggleMic().catch(() => {}));
     const camControl = document.createElement("button");
     camControl.type = "button";
     camControl.className = "icon-button";
     camControl.innerHTML = iconSvg("camera");
+    camControl.setAttribute("aria-label", "Toggle camera");
     camControl.addEventListener("click", () => toggleCam().catch(() => {}));
     const screenControl = document.createElement("button");
     screenControl.type = "button";
     screenControl.className = "icon-button";
     screenControl.innerHTML = iconSvg("screen");
+    screenControl.setAttribute("aria-label", "Toggle screen share");
     screenControl.addEventListener("click", () => toggleScreen().catch(() => {}));
     row.append(micControl, camControl, screenControl);
     controls.append(enableAll, row);
@@ -755,10 +810,12 @@ function ensureParticipantCard(participant, isLocal = false) {
     micMuteButton.addEventListener("click", () => {
       state.micUserMuted = !state.micUserMuted;
       micMuteButton.textContent = state.micUserMuted ? "Unmute" : "Mute";
+      micMuteButton.setAttribute("aria-label", (state.micUserMuted ? "Unmute" : "Mute") + " microphone audio from " + participantDisplayName);
       micMuteButton.classList.toggle("is-muted", state.micUserMuted);
       // Sync overlay mute button
       if (ovMicMute) {
         ovMicMute.textContent = state.micUserMuted ? "Unmute" : "Mute";
+        ovMicMute.setAttribute("aria-label", (state.micUserMuted ? "Unmute" : "Mute") + " microphone audio from " + participantDisplayName);
         ovMicMute.classList.toggle("is-muted", state.micUserMuted);
       }
       applyParticipantAudioVolumes(state);
@@ -769,10 +826,12 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenMuteButton.addEventListener("click", () => {
       state.screenUserMuted = !state.screenUserMuted;
       screenMuteButton.textContent = state.screenUserMuted ? "Unmute" : "Mute";
+      screenMuteButton.setAttribute("aria-label", (state.screenUserMuted ? "Unmute" : "Mute") + " screen audio from " + participantDisplayName);
       screenMuteButton.classList.toggle("is-muted", state.screenUserMuted);
       // Sync overlay mute button
       if (ovScreenMute) {
         ovScreenMute.textContent = state.screenUserMuted ? "Unmute" : "Mute";
+        ovScreenMute.setAttribute("aria-label", (state.screenUserMuted ? "Unmute" : "Mute") + " screen audio from " + participantDisplayName);
         ovScreenMute.classList.toggle("is-muted", state.screenUserMuted);
       }
       applyParticipantAudioVolumes(state);
@@ -806,6 +865,8 @@ function ensureParticipantCard(participant, isLocal = false) {
     chimeSlider.addEventListener("input", () => {
       state.chimeVolume = Number(chimeSlider.value);
       if (chimePct) chimePct.textContent = Math.round(state.chimeVolume * 100) + "%";
+      if (popChimeSlider) popChimeSlider.value = state.chimeVolume;
+      if (popChimePct) popChimePct.textContent = Math.round(state.chimeVolume * 100) + "%";
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
@@ -831,6 +892,17 @@ function ensureParticipantCard(participant, isLocal = false) {
       if (popScreenPct) { popScreenPct.textContent = pctText; popScreenPct.classList.toggle("boosted", val > 1); }
       if (screenPct) { screenPct.textContent = pctText; screenPct.classList.toggle("boosted", val > 1); }
       applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
+    });
+  }
+  if (popChimeSlider) {
+    popChimeSlider.addEventListener("input", function() {
+      var val = Number(popChimeSlider.value);
+      state.chimeVolume = val;
+      if (chimeSlider) chimeSlider.value = val;
+      var pctText = Math.round(val * 100) + "%";
+      if (popChimePct) popChimePct.textContent = pctText;
+      if (chimePct) chimePct.textContent = pctText;
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
@@ -860,6 +932,8 @@ function ensureParticipantCard(participant, isLocal = false) {
         state.chimeVolume = savedVol.chime;
         chimeSlider.value = savedVol.chime;
         if (chimePct) chimePct.textContent = Math.round(savedVol.chime * 100) + "%";
+        if (popChimeSlider) popChimeSlider.value = savedVol.chime;
+        if (popChimePct) popChimePct.textContent = Math.round(savedVol.chime * 100) + "%";
       }
       applyParticipantAudioVolumes(state);
       debugLog("[vol-prefs] restored " + key + " mic=" + (savedVol.mic || 1) + " screen=" + (savedVol.screen || 1) + " chime=" + (savedVol.chime != null ? savedVol.chime : 0.5));
@@ -890,7 +964,10 @@ function ensureParticipantCard(participant, isLocal = false) {
     popMicSlider,
     popMicPct,
     popScreenSlider,
-    popScreenPct
+    popScreenPct,
+    popChimeSlider,
+    popChimePct,
+    chimeToggleButton
   });
   participantState.set(key, state);
   debugLog(`participant card created and added to DOM for ${key}, card.isConnected=${card.isConnected}, avatar exists=${!!avatar}`);

@@ -72,7 +72,15 @@
     });
   }
 
-  function makeParticipant(index, longNames) {
+  const unbrokenDisplayName = "W".repeat(60);
+
+  function makeParticipant(index, longNames, unbrokenNames) {
+    if (unbrokenNames) {
+      return {
+        identity: `layout-fixture-${index}`,
+        name: unbrokenDisplayName,
+      };
+    }
     const suffix = longNames
       ? " — The Fellowship Member With An Intentionally Long Display Name"
       : "";
@@ -82,7 +90,7 @@
     };
   }
 
-  function addParticipants(count, cameraCount, longNames) {
+  function addParticipants(count, cameraCount, longNames, unbrokenNames) {
     if (typeof ensureParticipantCard !== "function") {
       throw new Error("production ensureParticipantCard renderer is unavailable");
     }
@@ -93,7 +101,10 @@
     let attachedCameras = 0;
     for (let index = 1; index <= count; index += 1) {
       const isLocal = index === 1;
-      const cardRef = ensureParticipantCard(makeParticipant(index, longNames), isLocal);
+      const cardRef = ensureParticipantCard(
+        makeParticipant(index, longNames, unbrokenNames),
+        isLocal,
+      );
       if (!cardRef || isLocal || attachedCameras >= cameraCount) continue;
 
       const media = createVideoTrackStub(`fixture-camera-${index}`, 16 / 9);
@@ -149,10 +160,16 @@
       shareAspects: [16 / 9],
       chatOpen: false,
       longNames: false,
+      unbrokenNames: false,
     }, options || {});
 
     resetRoom();
-    addParticipants(scenario.participants, scenario.cameras, scenario.longNames);
+    addParticipants(
+      scenario.participants,
+      scenario.cameras,
+      scenario.longNames,
+      scenario.unbrokenNames,
+    );
     addScreenShares(scenario.screenShares, scenario.shareAspects);
     populateChat(scenario.chatOpen);
     await nextFrame();
@@ -165,5 +182,90 @@
     };
   }
 
-  window.EchoLayoutTestScenario = Object.freeze({ install: install });
+  function captureIdentitySnapshot() {
+    const participantCard = document.querySelector(".user-card.has-camera");
+    const cameraVideo = participantCard && participantCard.querySelector("video");
+    const screenTile = document.querySelector("#screen-grid > .tile");
+    const screenVideo = screenTile && screenTile.querySelector("video");
+    const chatInput = document.getElementById("chat-input");
+    const participantIdentity = participantCard && participantCard.dataset.identity;
+
+    if (!participantCard || !cameraVideo || !screenTile || !screenVideo || !chatInput) {
+      throw new Error("identity fixture requires a camera, screen share, and Chat input");
+    }
+
+    const cameraTrack = cameraVideo.srcObject && cameraVideo.srcObject.getVideoTracks()[0];
+    const screenTrack = screenVideo.srcObject && screenVideo.srcObject.getVideoTracks()[0];
+    if (!cameraTrack || !screenTrack) {
+      throw new Error("production media renderers did not preserve fixture tracks");
+    }
+
+    window.__echoLayoutIdentitySnapshot = {
+      cameraStream: cameraVideo.srcObject,
+      cameraSdkTrack: cameraVideo._lkTrack,
+      cameraTrack: cameraTrack,
+      cameraVideo: cameraVideo,
+      chatInput: chatInput,
+      chatPanel: document.getElementById("chat-panel"),
+      participantCard: participantCard,
+      participantState: participantState.get(participantIdentity),
+      screenStream: screenVideo.srcObject,
+      screenSdkTrack: screenVideo._lkTrack,
+      screenTile: screenTile,
+      screenTrack: screenTrack,
+      screenVideo: screenVideo,
+    };
+
+    return inspectIdentitySnapshot();
+  }
+
+  function inspectIdentitySnapshot() {
+    const saved = window.__echoLayoutIdentitySnapshot;
+    if (!saved) throw new Error("captureIdentitySnapshot must be called first");
+    const currentCard = document.querySelector(".user-card.has-camera");
+    const currentCameraVideo = currentCard && currentCard.querySelector("video");
+    const currentTile = document.querySelector("#screen-grid > .tile");
+    const currentScreenVideo = currentTile && currentTile.querySelector("video");
+    const participantIdentity = currentCard && currentCard.dataset.identity;
+
+    return {
+      cameraStream: saved.cameraStream === (currentCameraVideo && currentCameraVideo.srcObject),
+      cameraSdkTrack: saved.cameraSdkTrack === (currentCameraVideo && currentCameraVideo._lkTrack),
+      cameraTrack: saved.cameraTrack === (
+        currentCameraVideo &&
+        currentCameraVideo.srcObject &&
+        currentCameraVideo.srcObject.getVideoTracks()[0]
+      ),
+      cameraTrackState: saved.cameraTrack.readyState,
+      cameraVideo: saved.cameraVideo === currentCameraVideo && saved.cameraVideo.isConnected,
+      chatFocused: document.activeElement === saved.chatInput,
+      chatInput: saved.chatInput === document.getElementById("chat-input") && saved.chatInput.isConnected,
+      chatPanel: saved.chatPanel === document.getElementById("chat-panel") && saved.chatPanel.isConnected,
+      chatOpen: document.querySelector(".room-layout").classList.contains("chat-open"),
+      draft: saved.chatInput.value,
+      participantCard: saved.participantCard === currentCard && saved.participantCard.isConnected,
+      participantMarker: saved.participantState && saved.participantState.__layoutFixtureMarker,
+      participantState: saved.participantState === participantState.get(participantIdentity),
+      selectionEnd: saved.chatInput.selectionEnd,
+      selectionStart: saved.chatInput.selectionStart,
+      screenStream: saved.screenStream === (currentScreenVideo && currentScreenVideo.srcObject),
+      screenSdkTrack: saved.screenSdkTrack === (currentScreenVideo && currentScreenVideo._lkTrack),
+      screenTile: saved.screenTile === currentTile && saved.screenTile.isConnected,
+      screenTrack: saved.screenTrack === (
+        currentScreenVideo &&
+        currentScreenVideo.srcObject &&
+        currentScreenVideo.srcObject.getVideoTracks()[0]
+      ),
+      screenTrackState: saved.screenTrack.readyState,
+      screenVideo: saved.screenVideo === currentScreenVideo && saved.screenVideo.isConnected,
+      shareFocused: saved.screenTile.classList.contains("is-focused"),
+    };
+  }
+
+  window.EchoLayoutTestScenario = Object.freeze({
+    captureIdentitySnapshot: captureIdentitySnapshot,
+    inspectIdentitySnapshot: inspectIdentitySnapshot,
+    install: install,
+    unbrokenDisplayName: unbrokenDisplayName,
+  });
 })();

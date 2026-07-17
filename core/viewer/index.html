@@ -4,13 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Echo Chamber</title>
+    <script src="layout-policy.js?v=0.6.11.1777930912"></script>
+    <script src="ui-shell.js?v=0.6.11.1777930912"></script>
     <link rel="stylesheet" href="style.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="jam.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="capture-picker.css?v=0.6.11.1777930912" />
+    <link rel="stylesheet" href="clubhouse-shell.css?v=0.6.11.1777930912" />
   </head>
   <body>
-    <main class="app">
-      <header>
+    <main id="ui-root" class="app">
+      <header class="legacy-brand-header">
         <div class="header-brand">
           <img src="badge.jpg" alt="Fellowship Badge" class="header-badge" />
           <div>
@@ -82,12 +85,6 @@
           </div>
         </div>
 
-        <div class="actions publish-actions hidden">
-          <button id="toggle-mic" disabled>Enable Mic</button>
-          <button id="toggle-cam" disabled>Enable Camera</button>
-          <button id="flip-cam" class="flip-cam-btn hidden" disabled>Flip</button>
-          <button id="toggle-screen" disabled>Share Screen</button>
-        </div>
         <div id="status" class="status">Idle</div>
         <button id="advanced-toggle" type="button" class="advanced-toggle">Advanced</button>
         <div id="advanced-section" class="advanced-section hidden">
@@ -105,32 +102,43 @@
         </div>
       </section>
 
-      <section class="panel room-panel">
-        <div class="room-top">
-          <div>
+      <section id="clubhouse-shell" class="panel room-panel" data-ui-region="connected-shell">
+        <div class="room-top" data-ui-region="shell-header">
+          <div class="clubhouse-brand shell-v2-only" aria-label="Echo Chamber private clubhouse">
+            <img src="badge.jpg" alt="" class="clubhouse-crest" />
+            <div class="clubhouse-wordmark">
+              <strong>Echo Chamber</strong>
+              <span>Private Clubhouse</span>
+            </div>
+          </div>
+          <div class="room-switcher">
             <div class="room-title">Rooms</div>
             <div id="room-list" class="room-list hidden"></div>
           </div>
           <div id="jam-banner" class="jam-banner hidden"></div>
           <div class="room-actions">
-            <button id="open-admin-dash" type="button" class="hidden" onclick="toggleAdminDash()">Dashboard</button>
-            <button id="open-settings" type="button" disabled>Settings</button>
-            <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Feedback</button>
-            <button id="open-updates" type="button">Updates</button>
-            <button id="debug-toggle" type="button">Debug</button>
+            <div id="shell-overflow-menu" class="shell-overflow-menu">
+              <button id="open-admin-dash" type="button" class="hidden" onclick="toggleAdminDash()">Dashboard</button>
+              <button id="open-settings" type="button" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false" disabled>Settings</button>
+              <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Feedback</button>
+              <button id="open-updates" type="button">Updates</button>
+              <button id="debug-toggle" type="button">Debug</button>
+            </div>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
+            <button id="shell-toggle-utility" type="button" class="shell-v2-only" aria-controls="room-sidebar chat-panel" aria-expanded="true" aria-label="Hide People and tools">People</button>
+            <button id="shell-more-actions" type="button" class="shell-v2-only" aria-controls="shell-overflow-menu" aria-expanded="false" aria-label="More clubhouse actions">More</button>
           </div>
         </div>
         <div id="pg13-banner" class="pg13-banner hidden">PG-13 Mode</div>
-        <div class="room-layout">
-          <div class="room-main">
+        <div class="room-layout" data-ui-region="workspace">
+          <div class="room-main" data-ui-region="primary-stage">
             <div class="grid-header">
               <h2>Screens</h2>
               <button id="echo-display-status" type="button" class="echo-display-status hidden"></button>
             </div>
             <div id="screen-grid" class="media-grid screens-grid"></div>
           </div>
-          <aside class="room-sidebar">
+          <aside id="room-sidebar" class="room-sidebar" data-ui-region="utility-host" data-ui-tool="people">
             <div class="sidebar-header">
               <div class="sidebar-title-row">
                 <h2>Active Users</h2>
@@ -150,7 +158,7 @@
             </div>
             <div id="user-list" class="user-list"></div>
           </aside>
-          <div id="chat-panel" class="chat-panel hidden" role="dialog" aria-label="Chat">
+          <div id="chat-panel" class="chat-panel hidden" data-ui-tool="chat" role="dialog" aria-label="Chat">
             <div class="chat-header">
               <h3>Chat</h3>
               <div class="chat-actions">
@@ -168,8 +176,18 @@
             </div>
           </div>
         </div>
+        <nav id="call-controls" class="actions publish-actions hidden shell-control-dock" data-ui-region="control-dock" aria-label="Call controls">
+          <button id="toggle-mic" type="button" data-control="microphone" aria-pressed="false" title="Enable microphone" disabled>Enable Mic</button>
+          <button id="toggle-cam" type="button" data-control="camera" aria-pressed="false" title="Enable camera" disabled>Enable Camera</button>
+          <button id="flip-cam" type="button" class="flip-cam-btn hidden" title="Flip camera" disabled>Flip</button>
+          <button id="toggle-screen" type="button" data-control="screen-share" aria-pressed="false" title="Share screen" disabled>Share Screen</button>
+          <button id="dock-output" type="button" data-control="output" aria-controls="settings-panel" aria-haspopup="dialog" aria-expanded="false" title="Output settings" disabled>Output</button>
+          <button id="dock-leave" type="button" data-control="leave" title="Leave room" disabled>Leave</button>
+        </nav>
         <div id="audio-bucket" class="audio-bucket"></div>
       </section>
+      <div id="shell-overlay-root" class="shell-overlay-root" data-ui-region="overlay-root">
+      <div id="settings-scrim" class="settings-scrim hidden" aria-hidden="true"></div>
       <div id="settings-panel" class="settings-panel hidden" role="dialog" aria-label="Settings">
         <div class="settings-header">
           <h3>Settings</h3>
@@ -408,6 +426,8 @@
         <div id="admin-dash-bugs" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
         <div id="admin-dash-deploys" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
       </div>
+      </div>
+      <div id="shell-notification-layer" class="shell-notification-layer" data-ui-region="notification-layer" aria-live="polite"></div>
     </main>
     <div id="debug-panel" class="debug-panel hidden">
       <div class="debug-panel-header">

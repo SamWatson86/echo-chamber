@@ -22,10 +22,11 @@ try {
         "identity.js", "auth.js", "connect.js", "room-status.js",
         "audio-routing.js", "media-controls.js", "participants.js", "chat.js",
         "soundboard.js", "jam-session-state.js", "jam.js", "style.css",
-        "jam.css", "livekit-client.umd.js", "rnnoise-processor.js",
+        "jam.css", "clubhouse-shell.css", "layout-policy.js", "ui-shell.js",
+        "livekit-client.umd.js", "rnnoise-processor.js",
         "rnnoise.wasm", "rnnoise_simd.wasm", "ultrainstinct.gif"
     )
-    Set-Content -LiteralPath (Join-Path $source "index.html") -Value '<link rel="stylesheet" href="style.css?v=source"><script src="jam.js?v=source"></script>' -NoNewline
+    Set-Content -LiteralPath (Join-Path $source "index.html") -Value '<link rel="stylesheet" href="style.css?v=source"><link rel="stylesheet" href="clubhouse-shell.css?v=source"><script src="layout-policy.js?v=source"></script><script src="ui-shell.js?v=source"></script><script src="jam.js?v=source"></script>' -NoNewline
     foreach ($requiredFile in $requiredFiles) {
         Set-Content -LiteralPath (Join-Path $source $requiredFile) -Value ("fixture-" + $requiredFile) -NoNewline
     }
@@ -90,7 +91,7 @@ try {
     Assert-ViewerSnapshot -SourceDirectory $source -CandidateDirectory $runtime | Out-Null
 
     # Runtime cache stamping is expected and must not create a false parity failure.
-    Set-Content -LiteralPath (Join-Path $runtime "index.html") -Value '<link rel="stylesheet" href="style.css?v=0.6.29.12345"><script src="jam.js?v=0.6.29.12345"></script>' -NoNewline
+    Set-Content -LiteralPath (Join-Path $runtime "index.html") -Value '<link rel="stylesheet" href="style.css?v=0.6.29.12345"><link rel="stylesheet" href="clubhouse-shell.css?v=0.6.29.12345"><script src="layout-policy.js?v=0.6.29.12345"></script><script src="ui-shell.js?v=0.6.29.12345"></script><script src="jam.js?v=0.6.29.12345"></script>' -NoNewline
     Assert-ViewerSnapshot -SourceDirectory $source -CandidateDirectory $runtime | Out-Null
     & (Join-Path $scriptDir "publish-viewer-runtime.ps1") `
         -SourceDirectory $source `

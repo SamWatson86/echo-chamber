@@ -10,7 +10,6 @@ import {
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.resolve(testDirectory, "..", "fixtures", "install-scenario.js");
-const policyPath = path.resolve(testDirectory, "..", "..", "viewer", "layout-policy.js");
 const runtimeErrors = new WeakMap();
 const transparentPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -58,7 +57,7 @@ test.afterEach(async ({ page }) => {
 });
 
 async function openProductionViewer(page, scenario) {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.goto("/?echo-ui-shell-v2=0", { waitUntil: "domcontentloaded" });
   await page.addScriptTag({ path: fixturePath });
   return page.evaluate((options) => window.EchoLayoutTestScenario.install(options), scenario);
 }
@@ -191,47 +190,6 @@ for (const viewport of [
     expect(collapsed.firstCardVisibleRatio).toBeLessThan(0.25);
   });
 }
-
-test("browser policy classifies the supported viewport matrix without loading production wiring", async ({ page }) => {
-  await page.goto("/", { waitUntil: "domcontentloaded" });
-  await page.addScriptTag({ path: policyPath });
-
-  const matrix = [
-    { width: 1920, height: 1080, expected: "theater" },
-    { width: 1440, height: 900, expected: "theater" },
-    { width: 1280, height: 720, expected: "theater" },
-    { width: 1024, height: 768, expected: "lounge" },
-    { width: 960, height: 540, expected: "compact" },
-    { width: 800, height: 600, expected: "compact" },
-    { width: 640, height: 480, expected: "compact" },
-    { width: 639, height: 479, expected: "mini" },
-  ];
-
-  for (const sample of matrix) {
-    const mode = await page.evaluate(
-      ({ width, height }) => window.EchoLayoutPolicy.classifyLayoutMode(width, height),
-      sample,
-    );
-    expect(mode, `${sample.width}x${sample.height}`).toBe(sample.expected);
-  }
-
-  const transition = await page.evaluate(() => {
-    const policy = window.EchoLayoutPolicy;
-    const initial = policy.resolveLayoutMode({ width: 768, height: 1024 });
-    const retained = policy.resolveLayoutMode({
-      width: 600,
-      height: 900,
-      previousMode: initial,
-    });
-    const downgraded = policy.resolveLayoutMode({
-      width: 591,
-      height: 900,
-      previousMode: retained,
-    });
-    return [initial, retained, downgraded];
-  });
-  expect(transition).toEqual(["compact", "compact", "mini"]);
-});
 
 test(
   "records the legacy narrow-Chat stage collapse",
