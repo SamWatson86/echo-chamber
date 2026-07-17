@@ -194,6 +194,28 @@ async function openJam(page) {
   await expect(page.locator("#jam-search-section")).toBeVisible();
 }
 
+async function showSourcePcControls(page) {
+  await page.evaluate(() => {
+    if (_jamPollTimer) {
+      clearInterval(_jamPollTimer);
+      _jamPollTimer = null;
+    }
+    _jamSourceLocalControlPending = false;
+    _jamSourceLocalControlLegacy = false;
+    _jamSourceLocalControl = {
+      is_source_host: true,
+      takeover_enabled: true,
+      monitor_enabled: true,
+      takeover_active: true,
+      agent_running: true,
+      target_device_name: "Phase 2 Spotify fixture",
+      last_error: "",
+    };
+    renderJamSourceLocalControl();
+  });
+  await expect(page.locator("#jam-panel [data-jam-source-local-card]")).toBeVisible();
+}
+
 async function searchJam(page, query = "clubhouse") {
   const input = page.locator("#jam-search-input");
   await input.fill(query);
@@ -308,6 +330,84 @@ test("one logical utility owns stable People, Chat, and portaled Jam tools witho
   await expect(page.locator("#jam-volume-slider")).toHaveValue("73");
   expect(await page.locator(".jam-body").evaluate((body) => body.scrollTop)).toBe(jamScrollTop);
   expect(await page.evaluate(() => window.__phase2JamNode === document.getElementById("jam-panel"))).toBe(true);
+});
+
+test("utility navigation uses stable Tools labels instead of changing meanings", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openPhaseTwoViewer(page);
+
+  const utilityToggle = page.locator("#shell-toggle-utility");
+  await expect(utilityToggle).toHaveText("Tools");
+  await expect(utilityToggle).toHaveAttribute("aria-label", "Hide clubhouse tools");
+  await expect(page.locator("#room-sidebar h2")).toHaveText("People & tools");
+  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "People and tools");
+
+  await page.locator("#open-chat").click();
+  await expectActiveTool(page, "chat");
+  await expect(utilityToggle).toHaveText("Tools");
+  await expect(page.locator("#close-chat")).toHaveText("All tools");
+  await expect(page.locator("#close-chat")).toHaveAttribute("aria-label", "Back to People and tools");
+  await page.locator("#close-chat").click();
+
+  await openJam(page);
+  await expectActiveTool(page, "jam");
+  await expect(utilityToggle).toHaveText("Tools");
+  await expect(page.locator("#close-jam")).toHaveText("All tools");
+  await expect(page.locator("#close-jam")).toHaveAttribute("aria-label", "Back to People and tools");
+
+  await utilityToggle.click();
+  await expect(utilityToggle).toHaveText("Tools");
+  await expect(utilityToggle).toHaveAttribute("aria-label", "Show clubhouse tools");
+  await utilityToggle.click();
+  await expectActiveTool(page, "jam");
+  await expect(utilityToggle).toHaveAttribute("aria-label", "Hide clubhouse tools");
+
+  await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
+  await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
+  await expect(page.locator("#room-sidebar h2")).toHaveText("Active Users");
+  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "People");
+  await expect(page.locator("#close-chat")).toHaveText("Close");
+  await expect(page.locator("#close-chat")).not.toHaveAttribute("aria-label", /.+/);
+  await expect(page.locator("#close-jam")).toHaveText("Close");
+  await expect(page.locator("#close-jam")).not.toHaveAttribute("aria-label", /.+/);
+
+  await page.evaluate(() => window.EchoUiShell.applyVariant("v2"));
+  await expect(page.locator("#room-sidebar h2")).toHaveText("People & tools");
+  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "People and tools");
+});
+
+test("Ultra Instinct keeps the Goku GIF visible through the Phase 2 stage", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page, { screenShares: 0 });
+  await page.evaluate(() => applyTheme("ultra-instinct"));
+
+  const presentation = await page.evaluate(() => {
+    const bodyStyle = getComputedStyle(document.body);
+    const stageStyle = getComputedStyle(document.querySelector(".room-main"));
+    const alphaMatch = stageStyle.backgroundColor.match(/rgba\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)/);
+    return {
+      bodyBackground: bodyStyle.backgroundImage,
+      particleCanvases: document.querySelectorAll("#ui-particles").length,
+      stageAlpha: alphaMatch ? Number(alphaMatch[1]) : 1,
+    };
+  });
+  expect(presentation.bodyBackground).toContain("ultrainstinct.gif");
+  expect(presentation.particleCanvases).toBe(1);
+  expect(presentation.stageAlpha).toBeGreaterThan(0);
+  expect(presentation.stageAlpha).toBeLessThan(1);
+
+  const gif = await page.evaluate(() => new Promise((resolve) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve({ height: image.naturalHeight, width: image.naturalWidth }), { once: true });
+    image.addEventListener("error", () => resolve({ height: 0, width: 0 }), { once: true });
+    image.src = `ultrainstinct.gif?phase2-test=${Date.now()}`;
+  }));
+  expect(gif.width).toBeGreaterThan(0);
+  expect(gif.height).toBeGreaterThan(0);
+
+  await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
+  await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundImage)).toContain("ultrainstinct.gif");
 });
 
 test("People actions stay visible and contained in the theater rail and mini sheet", async ({ page }) => {
@@ -477,6 +577,96 @@ test("collapsed Chat records unread messages and a top overlay owns the first Es
 
   await page.keyboard.press("Escape");
   await expectActiveTool(page, "people");
+});
+
+test("source-PC settings stay collapsed while playback controls remain reachable", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  await showSourcePcControls(page);
+
+  const disclosure = page.locator("#jam-panel .jam-source-local-details");
+  const summary = page.locator("#jam-panel .jam-source-local-summary");
+  const switches = page.locator("#jam-panel .jam-source-local-switch input");
+  await expect(disclosure).not.toHaveAttribute("open", "");
+  await expect(summary).toBeVisible();
+  await expect(switches).toHaveCount(2);
+  await expect(switches.first()).toBeHidden();
+  expect(await page.evaluate(() => {
+    const controls = document.getElementById("jam-host-controls");
+    const card = document.querySelector("#jam-panel [data-jam-source-local-card]");
+    return !!(controls.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING);
+  })).toBe(true);
+
+  for (const [viewport, expectedMode] of [
+    [{ width: 1280, height: 720 }, "theater"],
+    [{ width: 900, height: 700 }, "lounge"],
+    [{ width: 600, height: 900 }, "compact"],
+    [{ width: 360, height: 640 }, "mini"],
+  ]) {
+    await resizeTo(page, viewport, expectedMode);
+    const body = page.locator("#jam-panel .jam-body");
+    await body.evaluate((element) => { element.scrollTop = 0; });
+    await nextPaint(page);
+
+    const initial = await page.evaluate(() => {
+      function verticalBounds(element) {
+        const rect = element.getBoundingClientRect();
+        return { bottom: rect.bottom, top: rect.top };
+      }
+      const buttonTops = Array.from(document.querySelectorAll("#jam-host-controls button"))
+        .filter((button) => getComputedStyle(button).display !== "none")
+        .map((button) => Math.round(button.getBoundingClientRect().top));
+      return {
+        bodyRect: verticalBounds(document.querySelector("#jam-panel .jam-body")),
+        buttonTops,
+        toolbarRect: verticalBounds(document.getElementById("jam-host-controls")),
+      };
+    });
+    expect(initial.toolbarRect.top).toBeGreaterThanOrEqual(initial.bodyRect.top - 1);
+    expect(initial.toolbarRect.bottom).toBeLessThanOrEqual(initial.bodyRect.bottom + 1);
+    expect(new Set(initial.buttonTops).size, `one playback row at ${viewport.width}x${viewport.height}`).toBe(1);
+
+    await body.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await nextPaint(page);
+    const sticky = await page.evaluate(() => {
+      function verticalBounds(element) {
+        const rect = element.getBoundingClientRect();
+        return { bottom: rect.bottom, top: rect.top };
+      }
+      return {
+        bodyRect: verticalBounds(document.querySelector("#jam-panel .jam-body")),
+        toolbarRect: verticalBounds(document.getElementById("jam-host-controls")),
+      };
+    });
+    expect(sticky.toolbarRect.top, `sticky toolbar top at ${viewport.width}x${viewport.height}`)
+      .toBeGreaterThanOrEqual(sticky.bodyRect.top - 1);
+    expect(sticky.toolbarRect.bottom, `sticky toolbar bottom at ${viewport.width}x${viewport.height}`)
+      .toBeLessThanOrEqual(sticky.bodyRect.bottom + 1);
+  }
+
+  await page.locator("#jam-panel .jam-body").evaluate((element) => { element.scrollTop = 0; });
+  await summary.click();
+  await expect(disclosure).toHaveAttribute("open", "");
+  await expect(switches.first()).toBeVisible();
+  const expanded = await page.evaluate(() => {
+    const card = document.querySelector("#jam-panel [data-jam-source-local-card]");
+    const cardRect = card.getBoundingClientRect();
+    const rows = Array.from(card.querySelectorAll(".jam-source-local-switch-row")).map((row) => {
+      const rect = row.getBoundingClientRect();
+      return { left: rect.left, right: rect.right };
+    });
+    return {
+      card: { left: cardRect.left, right: cardRect.right },
+      overflow: card.scrollWidth - card.clientWidth,
+      rows,
+    };
+  });
+  expect(expanded.overflow).toBeLessThanOrEqual(1);
+  for (const row of expanded.rows) {
+    expect(row.left).toBeGreaterThanOrEqual(expanded.card.left - 1);
+    expect(row.right).toBeLessThanOrEqual(expanded.card.right + 1);
+  }
 });
 
 test("populated Jam remains inside the workspace and above the dock at representative sizes", async ({ page }) => {

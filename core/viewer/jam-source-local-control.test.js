@@ -31,6 +31,28 @@ test("source-PC switches appear in synchronized portal and Jam cards", () => {
   );
 });
 
+test("Jam prioritizes playback controls and collapses source-PC settings by default", () => {
+  const jamStart = indexSource.indexOf('id="jam-panel"');
+  const jamEnd = indexSource.indexOf("<!-- Dashboard Panel", jamStart);
+  const jamPanelSource = indexSource.slice(jamStart, jamEnd);
+  const portalSource = indexSource.slice(0, indexSource.indexOf('<div class="portal-form">'));
+
+  assert.notEqual(jamStart, -1, "Jam panel is present");
+  assert.notEqual(jamEnd, -1, "Jam panel boundary is present");
+  assert.match(jamPanelSource, /<details class="jam-source-local-details">/);
+  assert.doesNotMatch(jamPanelSource, /<details class="jam-source-local-details"[^>]*\sopen(?:\s|>)/);
+  assert.ok(
+    jamPanelSource.indexOf('id="jam-host-controls"') < jamPanelSource.indexOf("data-jam-source-local-card"),
+    "playback controls precede the source-PC disclosure",
+  );
+  assert.doesNotMatch(portalSource, /jam-source-local-details/);
+});
+
+test("the collapsed source-PC summary surfaces local control errors", () => {
+  const render = functionSource("renderJamSourceLocalControl", "currentJamRelayGain");
+  assert.match(render, /else if \(state\.last_error\)\s*{\s*status = state\.last_error;\s*tone = "warning";/);
+});
+
 test("source-PC controls boot before login and refresh with Jam polling", () => {
   assert.match(jamSource, /DOMContentLoaded", initJamSourceLocalControlUi/);
   assert.match(jamSource, /else\s*{\s*initJamSourceLocalControlUi\(\);\s*}/);

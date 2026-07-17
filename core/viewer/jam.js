@@ -84,6 +84,9 @@ function renderJamSourceLocalControl() {
     } else if (_jamSourceLocalControlLegacy) {
       status = "Echo update required for local Spotify controls";
       tone = "warning";
+    } else if (state.last_error) {
+      status = state.last_error;
+      tone = "warning";
     } else if (state.takeover_active && !state.takeover_enabled) {
       status = "Stopping the Jam and returning Spotify to this PC...";
       tone = "warning";
