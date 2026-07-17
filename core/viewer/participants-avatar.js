@@ -17,6 +17,12 @@ function iconSvg(name) {
         <path d="M17 10.5V6c0-1.1-.9-2-2-2H4C2.9 4 2 4.9 2 6v12c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-4.5l5 4v-11l-5 4z"/>
       </svg>`;
   }
+  if (name === "settings") {
+    return `
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h10.2a3 3 0 1 0 0-2H4v2zm0 6h3.2a3 3 0 1 0 0-2H4v2zm0 6h10.2a3 3 0 1 0 0-2H4v2zm13-14a1 1 0 1 1 0 2 1 1 0 0 1 0-2zM10 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2zm7 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+      </svg>`;
+  }
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 5h18v14H3zM5 7v10h14V7H5zm2 12h10v2H7z"/>
@@ -28,6 +34,42 @@ function iconSvg(name) {
 // ── Participant card ──
 
 var participantControlIdSequence = 0;
+var activeParticipantSettings = null;
+
+function closeParticipantSettings(restoreFocus) {
+  if (!activeParticipantSettings) return;
+  var current = activeParticipantSettings;
+  activeParticipantSettings = null;
+  current.popup.classList.remove("is-open");
+  current.button.setAttribute("aria-expanded", "false");
+  if (restoreFocus && current.button.isConnected) current.button.focus();
+}
+
+function toggleParticipantSettings(button, popup) {
+  var opening = !popup.classList.contains("is-open");
+  if (activeParticipantSettings && activeParticipantSettings.popup !== popup) {
+    closeParticipantSettings(false);
+  }
+  popup.classList.toggle("is-open", opening);
+  button.setAttribute("aria-expanded", opening ? "true" : "false");
+  activeParticipantSettings = opening ? { button: button, popup: popup } : null;
+}
+
+if (typeof document.addEventListener === "function") {
+  document.addEventListener("click", function(event) {
+    if (!activeParticipantSettings) return;
+    if (activeParticipantSettings.button.contains(event.target) ||
+        activeParticipantSettings.popup.contains(event.target)) return;
+    closeParticipantSettings(false);
+  });
+
+  document.addEventListener("keydown", function(event) {
+    if (event.key !== "Escape" || !activeParticipantSettings) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeParticipantSettings(true);
+  });
+}
 
 function getRemoteParticipantsForScreenIdentity(identity) {
   var matches = [];
@@ -255,7 +297,17 @@ function ensureParticipantCard(participant, isLocal = false) {
   let popScreenPct = null;
   let popChimeSlider = null;
   let popChimePct = null;
-  let chimeToggleButton = null;
+  let participantSettingsButton = null;
+  let participantSettingsPopup = null;
+  let settingsMicMute = null;
+  let settingsScreenMute = null;
+  let settingsMicSlider = null;
+  let settingsMicPct = null;
+  let settingsScreenSlider = null;
+  let settingsScreenPct = null;
+  let settingsChimeSlider = null;
+  let settingsChimePct = null;
+  let settingsWatchButton = null;
   if (!isLocal) {
     const indicators = document.createElement("div");
     indicators.className = "user-indicators";
@@ -497,19 +549,6 @@ function ensureParticipantCard(participant, isLocal = false) {
     chimePct.className = "vol-pct";
     chimePct.textContent = "50%";
     chimeRow.append(chimeLabel, chimeSlider, chimePct);
-    chimeToggleButton = document.createElement("button");
-    chimeToggleButton.type = "button";
-    chimeToggleButton.className = "participant-chime-toggle shell-v2-only";
-    chimeToggleButton.textContent = "Chime volume";
-    chimeToggleButton.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
-    chimeToggleButton.setAttribute("aria-controls", chimeRow.id);
-    chimeToggleButton.setAttribute("aria-expanded", "false");
-    chimeToggleButton.addEventListener("click", function() {
-      const open = !chimeRow.classList.contains("is-open");
-      chimeRow.classList.toggle("is-open", open);
-      chimeToggleButton.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    indicators.append(chimeToggleButton);
     audioControls.append(micRow, screenRow, chimeRow);
     meta.append(indicators, audioControls);
 
@@ -678,9 +717,155 @@ function ensureParticipantCard(participant, isLocal = false) {
       debugLog("[cam-overlay] ERROR creating overlay for " + key + ": " + overlayErr.message);
       camOverlay = null;
     }
+
+    participantSettingsButton = document.createElement("button");
+    participantSettingsButton.type = "button";
+    participantSettingsButton.className = "participant-settings-toggle shell-v2-only";
+    participantSettingsButton.innerHTML = iconSvg("settings");
+    participantSettingsButton.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+    participantSettingsButton.setAttribute("aria-haspopup", "dialog");
+    participantSettingsButton.setAttribute("aria-expanded", "false");
+    participantSettingsButton.title = "Audio settings for " + participantDisplayName;
+
+    participantSettingsPopup = document.createElement("div");
+    participantSettingsPopup.id = "participant-settings-" + participantControlId;
+    participantSettingsPopup.className = "participant-settings-popover shell-v2-only";
+    participantSettingsPopup.setAttribute("role", "dialog");
+    participantSettingsPopup.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+    participantSettingsButton.setAttribute("aria-controls", participantSettingsPopup.id);
+
+    var settingsHeading = document.createElement("div");
+    settingsHeading.className = "participant-settings-heading";
+    var settingsHeadingCopy = document.createElement("div");
+    var settingsHeadingTitle = document.createElement("strong");
+    settingsHeadingTitle.textContent = participantDisplayName;
+    var settingsHeadingHint = document.createElement("span");
+    settingsHeadingHint.textContent = "Adjust what you hear";
+    settingsHeadingCopy.append(settingsHeadingTitle, settingsHeadingHint);
+    var settingsClose = document.createElement("button");
+    settingsClose.type = "button";
+    settingsClose.className = "participant-settings-close";
+    settingsClose.textContent = "\u00d7";
+    settingsClose.setAttribute("aria-label", "Close audio settings for " + participantDisplayName);
+    settingsClose.addEventListener("click", function(event) {
+      event.stopPropagation();
+      closeParticipantSettings(true);
+    });
+    settingsHeading.append(settingsHeadingCopy, settingsClose);
+
+    function createParticipantSettingsSection(labelText, sliderLabel, min, max, step, value, includeMute) {
+      var section = document.createElement("div");
+      section.className = "participant-settings-section";
+      var sectionHeader = document.createElement("div");
+      sectionHeader.className = "participant-settings-section-header";
+      var label = document.createElement("span");
+      label.textContent = labelText;
+      var mute = null;
+      if (includeMute) {
+        mute = document.createElement("button");
+        mute.type = "button";
+        mute.className = "participant-settings-mute";
+        mute.textContent = "Mute";
+        mute.setAttribute("aria-label", "Mute " + sliderLabel.toLowerCase() + " from " + participantDisplayName);
+        sectionHeader.append(label, mute);
+      } else {
+        sectionHeader.append(label);
+      }
+      var sliderRow = document.createElement("div");
+      sliderRow.className = "participant-settings-slider-row";
+      var slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = min;
+      slider.max = max;
+      slider.step = step;
+      slider.value = value;
+      slider.setAttribute("aria-label", sliderLabel + " for " + participantDisplayName);
+      var pct = document.createElement("span");
+      pct.className = "vol-pct";
+      pct.textContent = Math.round(Number(value) * 100) + "%";
+      sliderRow.append(slider, pct);
+      section.append(sectionHeader, sliderRow);
+      return { section: section, slider: slider, pct: pct, mute: mute };
+    }
+
+    var settingsMic = createParticipantSettingsSection(
+      "Voice", "Microphone volume", "0", "3", "0.01", micSlider.value, true
+    );
+    settingsMicSlider = settingsMic.slider;
+    settingsMicPct = settingsMic.pct;
+    settingsMicMute = settingsMic.mute;
+    settingsMicMute.setAttribute("aria-label", "Mute microphone audio from " + participantDisplayName);
+    var settingsScreen = createParticipantSettingsSection(
+      "Shared audio", "Screen volume", "0", "3", "0.01", screenSlider.value, true
+    );
+    settingsScreenSlider = settingsScreen.slider;
+    settingsScreenPct = settingsScreen.pct;
+    settingsScreenMute = settingsScreen.mute;
+    settingsScreenMute.setAttribute("aria-label", "Mute screen audio from " + participantDisplayName);
+    var settingsChime = createParticipantSettingsSection(
+      "Join chime", "Chime volume", "0", "1", "0.01", chimeSlider.value, false
+    );
+    settingsChimeSlider = settingsChime.slider;
+    settingsChimePct = settingsChime.pct;
+
+    settingsWatchButton = document.createElement("button");
+    settingsWatchButton.type = "button";
+    settingsWatchButton.className = "participant-settings-watch hidden";
+    settingsWatchButton.textContent = watchToggleBtn.textContent;
+    settingsWatchButton.addEventListener("click", function(event) {
+      event.stopPropagation();
+      watchToggleBtn.click();
+    });
+    function syncSettingsWatchButton() {
+      settingsWatchButton.textContent = watchToggleBtn.textContent;
+      settingsWatchButton.classList.toggle("hidden", watchToggleBtn.style.display === "none");
+    }
+    if (typeof MutationObserver !== "undefined") {
+      new MutationObserver(syncSettingsWatchButton).observe(watchToggleBtn, {
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+    }
+    syncSettingsWatchButton();
+
+    var settingsFooter = document.createElement("div");
+    settingsFooter.className = "participant-settings-footer";
+    settingsFooter.append(settingsWatchButton);
+    if (isAdminMode()) {
+      var settingsServerMute = document.createElement("button");
+      settingsServerMute.type = "button";
+      settingsServerMute.textContent = "Server mute";
+      settingsServerMute.addEventListener("click", function() {
+        adminMuteParticipant(participant.identity);
+      });
+      var settingsKick = document.createElement("button");
+      settingsKick.type = "button";
+      settingsKick.className = "danger";
+      settingsKick.textContent = "Remove";
+      settingsKick.addEventListener("click", function() {
+        adminKickParticipant(participant.identity);
+      });
+      settingsFooter.append(settingsServerMute, settingsKick);
+    }
+
+    participantSettingsPopup.append(
+      settingsHeading,
+      settingsMic.section,
+      settingsScreen.section,
+      settingsChime.section,
+      settingsFooter
+    );
+    participantSettingsButton.addEventListener("click", function(event) {
+      event.stopPropagation();
+      toggleParticipantSettings(participantSettingsButton, participantSettingsPopup);
+    });
   }
   header.append(avatar, meta);
   card.append(header);
+  if (participantSettingsButton && participantSettingsPopup) {
+    card.append(participantSettingsButton, participantSettingsPopup);
+  }
 
   let controls = null;
   let micStatusEl = micIndicator;
@@ -807,7 +992,8 @@ function ensureParticipantCard(participant, isLocal = false) {
     });
   }
   if (micMuteButton) {
-    micMuteButton.addEventListener("click", () => {
+    micMuteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
       state.micUserMuted = !state.micUserMuted;
       micMuteButton.textContent = state.micUserMuted ? "Unmute" : "Mute";
       micMuteButton.setAttribute("aria-label", (state.micUserMuted ? "Unmute" : "Mute") + " microphone audio from " + participantDisplayName);
@@ -818,12 +1004,18 @@ function ensureParticipantCard(participant, isLocal = false) {
         ovMicMute.setAttribute("aria-label", (state.micUserMuted ? "Unmute" : "Mute") + " microphone audio from " + participantDisplayName);
         ovMicMute.classList.toggle("is-muted", state.micUserMuted);
       }
+      if (settingsMicMute) {
+        settingsMicMute.textContent = state.micUserMuted ? "Unmute" : "Mute";
+        settingsMicMute.setAttribute("aria-label", (state.micUserMuted ? "Unmute" : "Mute") + " microphone audio from " + participantDisplayName);
+        settingsMicMute.classList.toggle("is-muted", state.micUserMuted);
+      }
       applyParticipantAudioVolumes(state);
       updateActiveSpeakerUi();
     });
   }
   if (screenMuteButton) {
-    screenMuteButton.addEventListener("click", () => {
+    screenMuteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
       state.screenUserMuted = !state.screenUserMuted;
       screenMuteButton.textContent = state.screenUserMuted ? "Unmute" : "Mute";
       screenMuteButton.setAttribute("aria-label", (state.screenUserMuted ? "Unmute" : "Mute") + " screen audio from " + participantDisplayName);
@@ -833,6 +1025,11 @@ function ensureParticipantCard(participant, isLocal = false) {
         ovScreenMute.textContent = state.screenUserMuted ? "Unmute" : "Mute";
         ovScreenMute.setAttribute("aria-label", (state.screenUserMuted ? "Unmute" : "Mute") + " screen audio from " + participantDisplayName);
         ovScreenMute.classList.toggle("is-muted", state.screenUserMuted);
+      }
+      if (settingsScreenMute) {
+        settingsScreenMute.textContent = state.screenUserMuted ? "Unmute" : "Mute";
+        settingsScreenMute.setAttribute("aria-label", (state.screenUserMuted ? "Unmute" : "Mute") + " screen audio from " + participantDisplayName);
+        settingsScreenMute.classList.toggle("is-muted", state.screenUserMuted);
       }
       applyParticipantAudioVolumes(state);
     });
@@ -845,6 +1042,8 @@ function ensureParticipantCard(participant, isLocal = false) {
       // Sync popup slider
       if (popMicSlider) popMicSlider.value = state.micVolume;
       if (popMicPct) { popMicPct.textContent = Math.round(state.micVolume * 100) + "%"; popMicPct.classList.toggle("boosted", state.micVolume > 1); }
+      if (settingsMicSlider) settingsMicSlider.value = state.micVolume;
+      if (settingsMicPct) { settingsMicPct.textContent = Math.round(state.micVolume * 100) + "%"; settingsMicPct.classList.toggle("boosted", state.micVolume > 1); }
       applyParticipantAudioVolumes(state);
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
@@ -857,6 +1056,8 @@ function ensureParticipantCard(participant, isLocal = false) {
       // Sync popup slider
       if (popScreenSlider) popScreenSlider.value = state.screenVolume;
       if (popScreenPct) { popScreenPct.textContent = Math.round(state.screenVolume * 100) + "%"; popScreenPct.classList.toggle("boosted", state.screenVolume > 1); }
+      if (settingsScreenSlider) settingsScreenSlider.value = state.screenVolume;
+      if (settingsScreenPct) { settingsScreenPct.textContent = Math.round(state.screenVolume * 100) + "%"; settingsScreenPct.classList.toggle("boosted", state.screenVolume > 1); }
       applyParticipantAudioVolumes(state);
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
@@ -867,6 +1068,61 @@ function ensureParticipantCard(participant, isLocal = false) {
       if (chimePct) chimePct.textContent = Math.round(state.chimeVolume * 100) + "%";
       if (popChimeSlider) popChimeSlider.value = state.chimeVolume;
       if (popChimePct) popChimePct.textContent = Math.round(state.chimeVolume * 100) + "%";
+      if (settingsChimeSlider) settingsChimeSlider.value = state.chimeVolume;
+      if (settingsChimePct) settingsChimePct.textContent = Math.round(state.chimeVolume * 100) + "%";
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
+    });
+  }
+  if (settingsMicMute) {
+    settingsMicMute.addEventListener("click", function(event) {
+      event.stopPropagation();
+      micMuteButton.click();
+    });
+  }
+  if (settingsScreenMute) {
+    settingsScreenMute.addEventListener("click", function(event) {
+      event.stopPropagation();
+      screenMuteButton.click();
+    });
+  }
+  if (settingsMicSlider) {
+    settingsMicSlider.addEventListener("input", function() {
+      var val = Number(settingsMicSlider.value);
+      state.micVolume = val;
+      if (micSlider) micSlider.value = val;
+      if (popMicSlider) popMicSlider.value = val;
+      var pctText = Math.round(val * 100) + "%";
+      if (settingsMicPct) { settingsMicPct.textContent = pctText; settingsMicPct.classList.toggle("boosted", val > 1); }
+      if (micPct) { micPct.textContent = pctText; micPct.classList.toggle("boosted", val > 1); }
+      if (popMicPct) { popMicPct.textContent = pctText; popMicPct.classList.toggle("boosted", val > 1); }
+      applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
+    });
+  }
+  if (settingsScreenSlider) {
+    settingsScreenSlider.addEventListener("input", function() {
+      var val = Number(settingsScreenSlider.value);
+      state.screenVolume = val;
+      if (screenSlider) screenSlider.value = val;
+      if (popScreenSlider) popScreenSlider.value = val;
+      var pctText = Math.round(val * 100) + "%";
+      if (settingsScreenPct) { settingsScreenPct.textContent = pctText; settingsScreenPct.classList.toggle("boosted", val > 1); }
+      if (screenPct) { screenPct.textContent = pctText; screenPct.classList.toggle("boosted", val > 1); }
+      if (popScreenPct) { popScreenPct.textContent = pctText; popScreenPct.classList.toggle("boosted", val > 1); }
+      applyParticipantAudioVolumes(state);
+      saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
+    });
+  }
+  if (settingsChimeSlider) {
+    settingsChimeSlider.addEventListener("input", function() {
+      var val = Number(settingsChimeSlider.value);
+      state.chimeVolume = val;
+      if (chimeSlider) chimeSlider.value = val;
+      if (popChimeSlider) popChimeSlider.value = val;
+      var pctText = Math.round(val * 100) + "%";
+      if (settingsChimePct) settingsChimePct.textContent = pctText;
+      if (chimePct) chimePct.textContent = pctText;
+      if (popChimePct) popChimePct.textContent = pctText;
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
@@ -879,6 +1135,8 @@ function ensureParticipantCard(participant, isLocal = false) {
       var pctText = Math.round(val * 100) + "%";
       if (popMicPct) { popMicPct.textContent = pctText; popMicPct.classList.toggle("boosted", val > 1); }
       if (micPct) { micPct.textContent = pctText; micPct.classList.toggle("boosted", val > 1); }
+      if (settingsMicSlider) settingsMicSlider.value = val;
+      if (settingsMicPct) { settingsMicPct.textContent = pctText; settingsMicPct.classList.toggle("boosted", val > 1); }
       applyParticipantAudioVolumes(state);
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
@@ -891,6 +1149,8 @@ function ensureParticipantCard(participant, isLocal = false) {
       var pctText = Math.round(val * 100) + "%";
       if (popScreenPct) { popScreenPct.textContent = pctText; popScreenPct.classList.toggle("boosted", val > 1); }
       if (screenPct) { screenPct.textContent = pctText; screenPct.classList.toggle("boosted", val > 1); }
+      if (settingsScreenSlider) settingsScreenSlider.value = val;
+      if (settingsScreenPct) { settingsScreenPct.textContent = pctText; settingsScreenPct.classList.toggle("boosted", val > 1); }
       applyParticipantAudioVolumes(state);
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
@@ -903,6 +1163,8 @@ function ensureParticipantCard(participant, isLocal = false) {
       var pctText = Math.round(val * 100) + "%";
       if (popChimePct) popChimePct.textContent = pctText;
       if (chimePct) chimePct.textContent = pctText;
+      if (settingsChimeSlider) settingsChimeSlider.value = val;
+      if (settingsChimePct) settingsChimePct.textContent = pctText;
       saveParticipantVolume(key, state.micVolume, state.screenVolume, state.chimeVolume);
     });
   }
@@ -918,6 +1180,8 @@ function ensureParticipantCard(participant, isLocal = false) {
         // Sync popup slider
         if (popMicSlider) popMicSlider.value = savedVol.mic;
         if (popMicPct) { popMicPct.textContent = Math.round(savedVol.mic * 100) + "%"; popMicPct.classList.toggle("boosted", savedVol.mic > 1); }
+        if (settingsMicSlider) settingsMicSlider.value = savedVol.mic;
+        if (settingsMicPct) { settingsMicPct.textContent = Math.round(savedVol.mic * 100) + "%"; settingsMicPct.classList.toggle("boosted", savedVol.mic > 1); }
       }
       if (savedVol.screen != null && screenSlider) {
         state.screenVolume = savedVol.screen;
@@ -927,6 +1191,8 @@ function ensureParticipantCard(participant, isLocal = false) {
         // Sync popup slider
         if (popScreenSlider) popScreenSlider.value = savedVol.screen;
         if (popScreenPct) { popScreenPct.textContent = Math.round(savedVol.screen * 100) + "%"; popScreenPct.classList.toggle("boosted", savedVol.screen > 1); }
+        if (settingsScreenSlider) settingsScreenSlider.value = savedVol.screen;
+        if (settingsScreenPct) { settingsScreenPct.textContent = Math.round(savedVol.screen * 100) + "%"; settingsScreenPct.classList.toggle("boosted", savedVol.screen > 1); }
       }
       if (savedVol.chime != null && chimeSlider) {
         state.chimeVolume = savedVol.chime;
@@ -934,10 +1200,53 @@ function ensureParticipantCard(participant, isLocal = false) {
         if (chimePct) chimePct.textContent = Math.round(savedVol.chime * 100) + "%";
         if (popChimeSlider) popChimeSlider.value = savedVol.chime;
         if (popChimePct) popChimePct.textContent = Math.round(savedVol.chime * 100) + "%";
+        if (settingsChimeSlider) settingsChimeSlider.value = savedVol.chime;
+        if (settingsChimePct) settingsChimePct.textContent = Math.round(savedVol.chime * 100) + "%";
       }
       applyParticipantAudioVolumes(state);
       debugLog("[vol-prefs] restored " + key + " mic=" + (savedVol.mic || 1) + " screen=" + (savedVol.screen || 1) + " chime=" + (savedVol.chime != null ? savedVol.chime : 0.5));
     }
+  }
+
+  function setParticipantDisplayName(nextName) {
+    participantDisplayName = nextName || "Guest";
+    title.textContent = participantDisplayName;
+    title.title = participantDisplayName;
+
+    if (overlayName) {
+      overlayName.textContent = participantDisplayName;
+      overlayName.title = participantDisplayName;
+    }
+    if (micIndicator) micIndicator.setAttribute("aria-label", "Microphone audio settings for " + participantDisplayName);
+    if (screenIndicator) screenIndicator.setAttribute("aria-label", "Screen audio settings for " + participantDisplayName);
+    if (micSlider) micSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
+    if (screenSlider) screenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
+    if (chimeSlider) chimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
+    if (ovMicBtn) ovMicBtn.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
+    if (ovScreenBtn) ovScreenBtn.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
+    if (popMicSlider) popMicSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
+    if (popScreenSlider) popScreenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
+    if (popChimeSlider) popChimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
+
+    var micAction = state.micUserMuted ? "Unmute" : "Mute";
+    var screenAction = state.screenUserMuted ? "Unmute" : "Mute";
+    [micMuteButton, ovMicMute, settingsMicMute].forEach(function(button) {
+      if (button) button.setAttribute("aria-label", micAction + " microphone audio from " + participantDisplayName);
+    });
+    [screenMuteButton, ovScreenMute, settingsScreenMute].forEach(function(button) {
+      if (button) button.setAttribute("aria-label", screenAction + " screen audio from " + participantDisplayName);
+    });
+
+    if (participantSettingsButton) {
+      participantSettingsButton.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+      participantSettingsButton.title = "Audio settings for " + participantDisplayName;
+    }
+    if (participantSettingsPopup) participantSettingsPopup.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+    if (settingsHeadingTitle) settingsHeadingTitle.textContent = participantDisplayName;
+    if (settingsClose) settingsClose.setAttribute("aria-label", "Close audio settings for " + participantDisplayName);
+    if (settingsMicSlider) settingsMicSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
+    if (settingsScreenSlider) settingsScreenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
+    if (settingsChimeSlider) settingsChimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
   }
 
   participantCards.set(key, {
@@ -967,7 +1276,15 @@ function ensureParticipantCard(participant, isLocal = false) {
     popScreenPct,
     popChimeSlider,
     popChimePct,
-    chimeToggleButton
+    participantSettingsButton,
+    participantSettingsPopup,
+    settingsMicMute,
+    settingsScreenMute,
+    settingsMicSlider,
+    settingsScreenSlider,
+    settingsChimeSlider,
+    settingsWatchButton,
+    setParticipantDisplayName
   });
   participantState.set(key, state);
   debugLog(`participant card created and added to DOM for ${key}, card.isConnected=${card.isConnected}, avatar exists=${!!avatar}`);

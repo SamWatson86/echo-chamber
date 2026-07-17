@@ -271,6 +271,9 @@ function populateCameraLobby() {
   });
 
   cameraLobbyGrid.dataset.count = Math.min(count, 6);
+  if (typeof window._echoRecalcCameraLobby === "function") {
+    window._echoRecalcCameraLobby();
+  }
 }
 
 function createCameraTile(participant) {

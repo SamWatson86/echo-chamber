@@ -1,102 +1,150 @@
-// ─── Optimal Screen Grid Layout Engine ───
-// Calculates the best column/row arrangement to maximize tile size
-// while filling available space. Uses both width AND height to decide.
+// Production screen-grid layout wiring.
+// EchoLayoutPolicy owns the grid-selection algorithm; this module only measures
+// the rendered grid, applies the selected multi-share geometry, and keeps it in
+// sync as the viewer changes size or visible screen tiles change.
 
 (function () {
   "use strict";
 
-  var ASPECT = 16 / 9;
-  var GAP = 12; // matches CSS gap
   var _resizeObserver = null;
+  var _mutationObserver = null;
   var _rafPending = false;
+  var _managedTiles = new Set();
 
-  /**
-   * Given a container and N tiles, find the column count (1..N)
-   * that maximizes the tile area, biased toward balanced (square-ish)
-   * grids. The bias prevents the visually-bad case where 3 tiles end up
-   * in a single horizontal row just because the container is wide and
-   * short — with the bias, 3 tiles default to 2x2 (2 top + 1 bottom)
-   * like every modern video conferencing app does.
-   */
-  function computeOptimalColumns(containerW, containerH, tileCount) {
-    if (tileCount <= 0) return 1;
-    if (tileCount === 1) return 1;
+  function setStyleValue(element, property, value) {
+    if (!element || element.style[property] === value) return;
+    element.style[property] = value;
+  }
 
-    var bestCols = 1;
-    var bestScore = 0;
+  function clearManagedTileSizing() {
+    _managedTiles.forEach(function (tile) {
+      setStyleValue(tile, "width", "");
+      setStyleValue(tile, "height", "");
+    });
+    _managedTiles.clear();
+  }
 
-    for (var cols = 1; cols <= tileCount; cols++) {
-      var rows = Math.ceil(tileCount / cols);
+  function clearManagedGridSizing(grid) {
+    setStyleValue(grid, "gridTemplateColumns", "");
+    setStyleValue(grid, "gridTemplateRows", "");
+    clearManagedTileSizing();
+  }
 
-      // Available space after gaps
-      var availW = containerW - GAP * (cols - 1);
-      var availH = containerH - GAP * (rows - 1);
-      if (availW <= 0 || availH <= 0) continue;
+  function directTiles(grid) {
+    return Array.from(grid.querySelectorAll(":scope > .tile"));
+  }
 
-      // Max tile dimensions constrained by both axes
-      var tileW = availW / cols;
-      var tileH = availH / rows;
+  function visibleTiles(grid) {
+    return directTiles(grid).filter(function (tile) {
+      return tile.offsetParent !== null && getComputedStyle(tile).visibility !== "hidden";
+    });
+  }
 
-      // Constrain to 16:9 aspect ratio
-      var fitW, fitH;
-      if (tileW / tileH > ASPECT) {
-        // Container cell is wider than 16:9 — height is the constraint
-        fitH = tileH;
-        fitW = fitH * ASPECT;
-      } else {
-        // Container cell is taller than 16:9 — width is the constraint
-        fitW = tileW;
-        fitH = fitW / ASPECT;
-      }
+  function clearVisibleTileState(grid) {
+    grid.removeAttribute("data-visible-tiles");
+    directTiles(grid).forEach(function (tile) {
+      tile.removeAttribute("data-grid-visible");
+    });
+  }
 
-      var area = fitW * fitH;
-      // Balance bias: prefer near-square grids when areas are comparable.
-      // For 2x2 (3 tiles): aspectBalance = 1.0 → multiplier = 1.0
-      // For 3x1 (3 tiles): aspectBalance = 0.333 → multiplier = 0.8
-      // Area still dominates but balanced grids win ties and near-ties.
-      var aspectBalance = Math.min(cols, rows) / Math.max(cols, rows);
-      var score = area * (0.7 + 0.3 * aspectBalance);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestCols = cols;
-      }
+  function publishVisibleTileState(grid, tiles) {
+    var count = String(tiles.length);
+    if (grid.getAttribute("data-visible-tiles") !== count) {
+      grid.setAttribute("data-visible-tiles", count);
     }
 
-    return bestCols;
+    var visibleSet = new Set(tiles);
+    directTiles(grid).forEach(function (tile) {
+      var isVisible = visibleSet.has(tile);
+      if (isVisible && !tile.hasAttribute("data-grid-visible")) {
+        tile.setAttribute("data-grid-visible", "");
+      } else if (!isVisible && tile.hasAttribute("data-grid-visible")) {
+        tile.removeAttribute("data-grid-visible");
+      }
+    });
+  }
+
+  function numericGap(grid, policy) {
+    var style = getComputedStyle(grid);
+    var measured = Number.parseFloat(style.columnGap || style.gap);
+    if (Number.isFinite(measured) && measured >= 0) return measured;
+    return Number(policy.DEFAULT_GRID_GAP) || 12;
+  }
+
+  function pixelTrack(value) {
+    return Math.max(0, Number(value) || 0).toFixed(3).replace(/\.?0+$/, "") + "px";
   }
 
   function updateGridLayout() {
     var grid = document.getElementById("screen-grid");
     if (!grid) return;
 
-    // Don't override focused mode — it has its own layout
-    if (grid.classList.contains("is-focused")) return;
-
-    // Count visible tiles
-    var tiles = grid.querySelectorAll(".tile");
-    var visibleCount = 0;
-    for (var i = 0; i < tiles.length; i++) {
-      if (tiles[i].offsetParent !== null) visibleCount++;
-    }
-
-    if (visibleCount === 0) {
-      grid.style.gridTemplateColumns = "";
-      grid.style.gridTemplateRows = "";
+    // Phase 2 must remain a live presentation-only variant. Rolling back to
+    // legacy removes every inline grid decision made here.
+    if (document.documentElement.dataset.uiShell !== "v2") {
+      clearVisibleTileState(grid);
+      clearManagedGridSizing(grid);
       return;
     }
 
-    var containerW = grid.clientWidth;
-    var containerH = grid.clientHeight;
+    // Single-share immersion and focused mode have purpose-built CSS layouts.
+    // Remove our multi-share inline geometry so those rules retain ownership.
+    var tiles = visibleTiles(grid);
+    publishVisibleTileState(grid, tiles);
+    if (grid.classList.contains("is-focused") || tiles.length <= 1) {
+      clearManagedGridSizing(grid);
+      return;
+    }
 
-    // If container isn't measured yet, bail and retry
-    if (containerW < 10 || containerH < 10) return;
+    var policy = window.EchoLayoutPolicy;
+    if (!policy || typeof policy.chooseOptimalGrid !== "function") {
+      clearManagedGridSizing(grid);
+      return;
+    }
 
-    var cols = computeOptimalColumns(containerW, containerH, visibleCount);
-    var rows = Math.ceil(visibleCount / cols);
+    var width = grid.clientWidth;
+    var height = grid.clientHeight;
+    if (width < 10 || height < 10) return;
 
-    grid.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
-    grid.style.gridTemplateRows = "repeat(" + rows + ", 1fr)";
+    var layout = policy.chooseOptimalGrid({
+      width: width,
+      height: height,
+      tileCount: tiles.length,
+      gap: numericGap(grid, policy),
+      aspectRatio: policy.DEFAULT_TILE_ASPECT_RATIO,
+    });
+    if (!layout || !layout.valid || layout.columns < 1 || layout.rows < 1 ||
+        layout.tileWidth <= 0 || layout.tileHeight <= 0) {
+      clearManagedGridSizing(grid);
+      return;
+    }
+
+    setStyleValue(
+      grid,
+      "gridTemplateColumns",
+      "repeat(" + layout.columns + ", " + pixelTrack(layout.tileWidth) + ")"
+    );
+    setStyleValue(
+      grid,
+      "gridTemplateRows",
+      "repeat(" + layout.rows + ", " + pixelTrack(layout.tileHeight) + ")"
+    );
+
+    // The selected tracks are the canonical tile bounds. Filling those tracks
+    // prevents decoded WebRTC resolution changes from resizing the UI.
+    var visibleSet = new Set(tiles);
+    _managedTiles.forEach(function (tile) {
+      if (!visibleSet.has(tile)) {
+        setStyleValue(tile, "width", "");
+        setStyleValue(tile, "height", "");
+        _managedTiles.delete(tile);
+      }
+    });
+    tiles.forEach(function (tile) {
+      setStyleValue(tile, "width", "100%");
+      setStyleValue(tile, "height", "100%");
+      _managedTiles.add(tile);
+    });
   }
 
   function scheduleUpdate() {
@@ -108,37 +156,53 @@
     });
   }
 
-  // Watch the grid container for size changes
   function initGridObserver() {
     var grid = document.getElementById("screen-grid");
     if (!grid || _resizeObserver) return;
 
-    _resizeObserver = new ResizeObserver(function () {
-      scheduleUpdate();
-    });
-    _resizeObserver.observe(grid);
+    if (typeof ResizeObserver === "function") {
+      _resizeObserver = new ResizeObserver(scheduleUpdate);
+      _resizeObserver.observe(grid);
+    } else {
+      _resizeObserver = { disconnect: function () {} };
+      window.addEventListener("resize", scheduleUpdate, { passive: true });
+    }
 
-    // Also watch for child additions/removals (tiles being added/removed).
-    // Some tiles are added invisibly (e.g. before subscription completes)
-    // and become visible later without firing a mutation. We schedule
-    // delayed recalcs as well to catch the deferred-visibility case.
-    var mutObs = new MutationObserver(function () {
-      scheduleUpdate();
-      setTimeout(scheduleUpdate, 250);
-      setTimeout(scheduleUpdate, 1000);
-    });
-    mutObs.observe(grid, { childList: true, subtree: false });
+    if (typeof MutationObserver === "function") {
+      _mutationObserver = new MutationObserver(function (records) {
+        var childListChanged = false;
+        var relevant = records.some(function (record) {
+          if (record.type === "childList" && record.target === grid) {
+            childListChanged = true;
+            return true;
+          }
+          return record.type === "attributes" &&
+            (record.target === grid || record.target.parentElement === grid);
+        });
+        if (!relevant) return;
+        scheduleUpdate();
+        if (childListChanged) {
+          // A tile can be inserted before its subscription becomes visible.
+          setTimeout(scheduleUpdate, 250);
+          setTimeout(scheduleUpdate, 1000);
+        }
+      });
+      _mutationObserver.observe(grid, {
+        attributes: true,
+        attributeFilter: ["class", "hidden", "style"],
+        childList: true,
+        subtree: true,
+      });
+    }
 
-    // Initial layout
+    window.addEventListener("echo:ui-shell-change", scheduleUpdate);
     scheduleUpdate();
   }
 
-  // Expose for external triggers (focus/unfocus, window resize, etc.)
   window._echoRecalcGrid = scheduleUpdate;
 
-  // Init on DOM ready
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initGridObserver);
+    document.addEventListener("DOMContentLoaded", initGridObserver, { once: true });
   } else {
     initGridObserver();
   }

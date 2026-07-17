@@ -1,6 +1,7 @@
 # Echo Chamber Responsive UI Contract
 
-Status: Phase 0 contract landed; Phase 1 Clubhouse shell is implemented behind an off-by-default flag
+Status: Phase 0 contract landed; Phase 1 Clubhouse shell and Phase 2 utility
+host are implemented and verified behind the off-by-default flag
 
 Applies to: `core/viewer/` in the browser and Windows desktop shell
 
@@ -159,16 +160,23 @@ interactive surface, they do not have independent hysteresis.
 | Width/height mode selection and hysteresis | One JavaScript mode controller |
 | Active utility tool, panel open state, and return focus | JavaScript UI state |
 | Modal focus containment and background inertness | JavaScript behavior plus CSS presentation |
-| Media tile allocation inside the stage | Existing media-grid layout owner |
+| Media tile allocation inside the stage or Camera Lobby | Existing media-grid layout owners |
 | Room, publication, subscription, Jam, and participant truth | Existing feature state owners |
 
 JavaScript must not write per-breakpoint pixel widths, move feature nodes between
 alternate parents, or decide which text happens to fit. A component that needs
 local adaptation declares a containment boundary and uses container queries.
 
-The existing screen-grid allocator may continue calculating media tile geometry
-inside the stage. It receives the stage's available rectangle; it must not
-duplicate shell breakpoints or control utility-panel behavior.
+The screen-grid allocator calculates media tile geometry inside the stage. It
+receives the stage's available rectangle; it must not duplicate shell
+breakpoints or control utility-panel behavior. A single visible share owns the
+full grid independently of the currently decoded media resolution. Two or more
+shares use the canonical grid policy, and every video preserves its source with
+`object-fit: contain`.
+
+The Camera Lobby uses the same canonical grid policy against the lobby's own
+available rectangle. Resizing may change only grid tracks and tile geometry; it
+must preserve each mounted camera tile, video element, stream, and track.
 
 A no-JavaScript/failure fallback may use media queries at the canonical
 thresholds. The supported runtime, however, uses the named root mode so behavior
@@ -189,6 +197,12 @@ and geometry change together.
   the viewport.
 - Shell padding is `24px` in `theater`, `16px` in `lounge`, `12px` in
   `compact`, and `8px` in `mini`, before safe-area additions.
+- While exactly one share is visible, Stage-First presentation may tighten the
+  shell padding and inter-region gap for immersion. The empty Stage and
+  multi-share layouts retain their normal mode spacing.
+- Solo-share labels and media controls overlay the tile instead of
+  consuming grid tracks. Overlay controls remain keyboard focusable and must
+  not change the video's fitted geometry.
 - The ordinary region gap is `16px`. Components may use smaller values from the
   shared spacing scale; they must not introduce arbitrary shell gaps.
 
@@ -497,10 +511,27 @@ host in Phase 2.
 
 ### Phase 2 - Dock and Utility Host
 
-- Move existing primary call controls into the stable dock without changing
-  their state owners.
-- Migrate People first, then Chat and Jam, into the single utility host.
-- Ship each migration independently under the same flag with legacy fallback.
+- People, Chat, and Jam are presented as one logical utility host with exactly
+  one active tool. People and Chat are physical descendants of the host. Jam
+  intentionally remains the single portaled feature node under
+  `shell-overlay-root`, linked to the host with `aria-owns`, because nesting its
+  fixed legacy panel inside the filtered shell changes its containing block and
+  breaks legacy positioning.
+- One shell controller owns active-tool presentation, open/collapsed state,
+  inertness, Escape behavior, and focus restoration. The People, Chat, and Jam
+  feature modules retain ownership of their participants, drafts, search,
+  queue, playback, and other feature state.
+- The same utility nodes present as a pinned rail in `theater`, a
+  workspace-bounded drawer in `lounge`, and a sheet or full-workspace surface
+  above the dock in `compact` and `mini`.
+- Resize and live flag changes must restyle the mounted nodes in place. The
+  legacy fallback must remain a one-switch rollback with tool-local state and
+  node identity preserved; it must not duplicate IDs, listeners, or feature
+  state machines.
+- Phase 2 verification covers node and input-state preservation across modes
+  and flag rollback, populated utility geometry and overflow, pointer-target
+  sizing, keyboard/Escape/focus behavior, modal inertness for the portaled Jam,
+  and the distinction between Jam Stop Music and End Jam actions.
 
 ### Phase 3 - Canary Default-On
 
