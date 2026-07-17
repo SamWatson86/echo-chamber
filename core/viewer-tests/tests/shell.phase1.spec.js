@@ -22,7 +22,7 @@ const shellSelectors = Object.freeze([
   '.room-top[data-ui-region="shell-header"]',
   '.room-layout[data-ui-region="workspace"]',
   '.room-main[data-ui-region="primary-stage"]',
-  '.room-sidebar[data-ui-region="utility-host"]',
+  '.utility-host[data-ui-region="utility-host"]',
   '#call-controls[data-ui-region="control-dock"]',
   "#shell-overlay-root",
   "#shell-notification-layer",
@@ -111,7 +111,7 @@ async function expectCanonicalStructure(page) {
     const header = document.querySelector('.room-top[data-ui-region="shell-header"]');
     const workspace = document.querySelector('.room-layout[data-ui-region="workspace"]');
     const stage = document.querySelector('.room-main[data-ui-region="primary-stage"]');
-    const utility = document.querySelector('.room-sidebar[data-ui-region="utility-host"]');
+    const utility = document.querySelector('.utility-host[data-ui-region="utility-host"]');
     const dock = document.querySelector('#call-controls[data-ui-region="control-dock"]');
     const idCounts = new Map();
     document.querySelectorAll("[id]").forEach((element) => {
@@ -782,7 +782,7 @@ for (const viewport of [
 
     const stage = page.locator('.room-main[data-ui-region="primary-stage"]');
     const layout = page.locator('.room-layout[data-ui-region="workspace"]');
-    const utility = page.locator('.room-sidebar[data-ui-region="utility-host"]');
+    const utility = page.locator('.utility-host[data-ui-region="utility-host"]');
     const toggle = page.locator("#shell-toggle-utility");
     await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(true);
 

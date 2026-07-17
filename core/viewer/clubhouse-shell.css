@@ -1139,3 +1139,328 @@
     transition-duration: 0.001ms !important;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Phase 2 — one logical People / Chat / Jam utility host
+
+   Jam remains portaled under #shell-overlay-root while the legacy rollback is
+   available. The legacy .panel backdrop filter creates a fixed-position
+   containing block, so physically nesting Jam under the room panel would move
+   the centered legacy dialog offscreen. V2 gives that same node the exact
+   geometry of the active utility region without recreating or reparenting it.
+   -------------------------------------------------------------------------- */
+
+.utility-host {
+  display: contents;
+}
+
+:root[data-ui-shell="v2"] {
+  --club-safe-top: max(var(--club-shell-padding), env(safe-area-inset-top));
+  --club-safe-right: max(var(--club-shell-padding), env(safe-area-inset-right));
+  --club-safe-bottom: max(var(--club-shell-padding), env(safe-area-inset-bottom));
+  --club-safe-left: max(var(--club-shell-padding), env(safe-area-inset-left));
+  --club-workspace-top: calc(var(--club-safe-top) + var(--club-header-size) + var(--club-shell-gap));
+  --club-workspace-bottom: calc(var(--club-safe-bottom) + var(--club-dock-size) + var(--club-shell-gap));
+}
+
+:root[data-ui-shell="v2"] :where(button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--club-brass-bright);
+  outline-offset: 2px;
+}
+
+:root[data-ui-shell="v2"] .room-layout::after {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .utility-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--club-layer-utility-scrim);
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  display: block !important;
+  border: 0;
+  border-radius: 0;
+  background: rgba(5, 7, 10, 0.42);
+  cursor: default;
+}
+
+:root[data-ui-shell="v2"] .utility-scrim.hidden {
+  display: none !important;
+}
+
+:root[data-ui-shell="v2"] .utility-host {
+  position: relative;
+  z-index: var(--club-layer-region);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-column: 2;
+  grid-row: 1;
+  container-type: inline-size;
+}
+
+:root[data-ui-shell="v2"] .utility-host > [data-ui-tool] {
+  min-width: 0;
+  min-height: 0;
+  grid-area: 1 / 1;
+}
+
+:root[data-ui-shell="v2"] .utility-host > .room-sidebar,
+:root[data-ui-shell="v2"] .utility-host > .chat-panel {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  grid-column: auto;
+  grid-row: auto;
+  visibility: visible;
+}
+
+:root[data-ui-shell="v2"] .room-layout.utility-collapsed .utility-host {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"] .utility-host[data-active-tool="jam"] {
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .utility-host {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  width: clamp(320px, 42vw, 380px);
+  height: 100%;
+  z-index: var(--club-layer-utility);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .utility-host,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .utility-host {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: min(240px, 78%);
+  z-index: var(--club-layer-utility);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .utility-host {
+  height: min(220px, 78%);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .utility-host[data-active-tool="chat"],
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .utility-host[data-active-tool="chat"] {
+  top: 0;
+  height: 100%;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .utility-host > .room-sidebar,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .utility-host > .room-sidebar {
+  border-radius: 16px 16px 12px 12px;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .utility-host > .chat-panel,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .utility-host > .chat-panel {
+  border-radius: var(--club-radius-panel);
+}
+
+/* Portaled Jam follows the same rail / drawer / full-workspace geometry. */
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool {
+  position: fixed;
+  top: var(--club-workspace-top);
+  right: var(--club-safe-right);
+  bottom: var(--club-workspace-bottom);
+  left: auto;
+  z-index: var(--club-layer-utility);
+  width: clamp(320px, 24vw, 360px);
+  height: auto;
+  max-height: none;
+  margin: 0;
+  padding: 12px;
+  gap: 10px;
+  transform: none;
+  container-type: inline-size;
+  overflow: hidden;
+  border: 1px solid var(--club-border-strong);
+  border-radius: var(--club-radius-panel);
+  color: var(--club-text);
+  background: linear-gradient(160deg, rgba(25, 32, 42, 0.995), rgba(13, 17, 23, 0.99));
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.42), inset 0 1px rgba(255, 255, 255, 0.035);
+  backdrop-filter: none;
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .jam-panel.clubhouse-utility-tool {
+  width: clamp(320px, 42vw, 380px);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="compact"] .jam-panel.clubhouse-utility-tool,
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .jam-panel.clubhouse-utility-tool {
+  right: var(--club-safe-right);
+  left: var(--club-safe-left);
+  width: auto;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-header {
+  min-width: 0;
+  min-height: 40px;
+  padding-bottom: 10px;
+  border-color: var(--club-border);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-header h3 {
+  margin: 0;
+  color: var(--club-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-header button,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-host-controls button,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-actions button,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-connect-btn,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-body {
+  min-width: 0;
+  min-height: 0;
+  padding: 1px 4px 8px 1px;
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+:root[data-ui-shell="v2"] .utility-host :where(button, input, textarea, select),
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool :where(button, input, textarea, select) {
+  scroll-margin-block: 12px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-card {
+  min-width: 0;
+  padding: 11px;
+  gap: 9px;
+  border-color: rgba(76, 195, 138, 0.28);
+  border-radius: var(--club-radius-card);
+  background: rgba(76, 195, 138, 0.055);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-heading,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-switch-row,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-spotify-row,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-heading > div,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-copy,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-now-playing-info,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-info {
+  min-width: 0;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-host-controls {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-host-controls button {
+  flex: 1 1 112px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-stop-btn {
+  color: #fff4f4;
+  border: 1px solid rgba(229, 106, 106, 0.42);
+  background: rgba(121, 52, 59, 0.88);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-end-btn {
+  color: var(--club-danger);
+  border-color: rgba(229, 106, 106, 0.5);
+  background: transparent;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-now-playing {
+  min-width: 0;
+  padding: 11px;
+  border-color: var(--club-border);
+  border-radius: var(--club-radius-card);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-search-queue-row {
+  min-width: 0;
+  flex-direction: column;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-results,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-queue-list {
+  max-height: none;
+  overflow: visible;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-item,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-queue-item {
+  min-width: 0;
+  padding: 8px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-name,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-artist,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-now-playing-name,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-now-playing-artist {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+}
+
+:root[data-ui-shell="v2"] .jam-toast {
+  bottom: calc(var(--club-workspace-bottom) + 8px);
+  z-index: var(--club-layer-notification);
+}
+
+:root[data-ui-shell="v2"][data-ui-short] .jam-panel.clubhouse-utility-tool,
+:root[data-ui-shell="v2"][data-ui-short] .room-sidebar,
+:root[data-ui-shell="v2"][data-ui-short] .chat-panel {
+  padding: 9px;
+}
+
+:root[data-ui-shell="v2"][data-ui-very-short] .jam-panel.clubhouse-utility-tool .jam-body {
+  gap: 8px;
+}
+
+@container (min-width: 620px) {
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-search-queue-row {
+    flex-direction: row;
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-header button,
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-host-controls button,
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-actions button,
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-connect-btn,
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

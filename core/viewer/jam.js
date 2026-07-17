@@ -617,17 +617,22 @@ function escapeHtml(str) {
 // Panel Open / Close
 // ──────────────────────────────────────────
 
-function openJamPanel() {
+function openJamPanel(opener) {
   var panel = document.getElementById("jam-panel");
   if (panel) {
-    panel.classList.remove("hidden");
+    var handledByClubhouse = window.EchoClubhouseUtility &&
+      window.EchoClubhouseUtility.open("jam", opener || document.activeElement);
+    if (!handledByClubhouse) panel.classList.remove("hidden");
     initJam();
   }
 }
 
-function closeJamPanel() {
+function closeJamPanel(options) {
   var panel = document.getElementById("jam-panel");
-  if (panel) panel.classList.add("hidden");
+  if (!panel) return;
+  var handledByClubhouse = window.EchoClubhouseUtility &&
+    window.EchoClubhouseUtility.close("jam", options);
+  if (!handledByClubhouse) panel.classList.add("hidden");
 }
 
 // ──────────────────────────────────────────
@@ -967,6 +972,11 @@ function renderSearchResults(tracks) {
       '</div>' +
       '<button class="jam-result-add" title="Add to queue">+</button>';
     var addBtn = item.querySelector(".jam-result-add");
+    var resultName = item.querySelector(".jam-result-name");
+    var resultArtist = item.querySelector(".jam-result-artist");
+    if (resultName) resultName.title = t.name || "";
+    if (resultArtist) resultArtist.title = t.artist || "";
+    addBtn.setAttribute("aria-label", "Add " + (t.name || "track") + " by " + (t.artist || "unknown artist") + " to queue");
     addBtn.onclick = function() { addToQueue(t); };
     addBtn.disabled = !_jamContract || !_jamContract.canControl;
     container.appendChild(item);
@@ -1246,6 +1256,13 @@ function renderNowPlaying(np) {
   if (!container) return;
   if (!np || !np.name || !np.is_playing) {
     container.innerHTML = '<div class="jam-now-playing-empty">No music playing</div>';
+    container.removeAttribute("role");
+    container.removeAttribute("tabindex");
+    container.removeAttribute("aria-label");
+    container.style.cursor = "";
+    container.title = "";
+    container.onclick = null;
+    container.onkeydown = null;
     return;
   }
   var progress = np.duration_ms > 0 ? Math.min(100, (np.progress_ms / np.duration_ms) * 100) : 0;
@@ -1256,16 +1273,32 @@ function renderNowPlaying(np) {
       '<div class="jam-now-playing-artist">' + escapeHtml(np.artist) + '</div>' +
     '</div>' +
     '<div class="jam-progress"><div class="jam-progress-bar" style="width:' + progress.toFixed(1) + '%"></div></div>';
+  var nowPlayingName = container.querySelector(".jam-now-playing-name");
+  var nowPlayingArtist = container.querySelector(".jam-now-playing-artist");
+  if (nowPlayingName) nowPlayingName.title = np.name || "";
+  if (nowPlayingArtist) nowPlayingArtist.title = np.artist || "";
 
   // Click now-playing card to join jam if not already listening
   if (!_jamAudioWs && _jamState && _jamState.active) {
     container.style.cursor = "pointer";
-    container.title = "Click to join the Jam";
+    container.title = "Join the Jam";
+    container.setAttribute("role", "button");
+    container.setAttribute("tabindex", "0");
+    container.setAttribute("aria-label", "Join Jam — " + np.name + " by " + np.artist + " is playing");
     container.onclick = function() { joinJam(); };
+    container.onkeydown = function(event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      joinJam();
+    };
   } else {
     container.style.cursor = "";
     container.title = "";
+    container.removeAttribute("role");
+    container.removeAttribute("tabindex");
+    container.removeAttribute("aria-label");
     container.onclick = null;
+    container.onkeydown = null;
   }
 }
 
@@ -1286,6 +1319,10 @@ function renderQueue(queue) {
         '<div class="jam-result-name">' + escapeHtml(t.name) + '</div>' +
         '<div class="jam-result-artist">' + escapeHtml(t.artist) + ' \u00b7 Added by ' + escapeHtml(t.added_by) + '</div>' +
       '</div>';
+    var queueName = item.querySelector(".jam-result-name");
+    var queueArtist = item.querySelector(".jam-result-artist");
+    if (queueName) queueName.title = t.name || "";
+    if (queueArtist) queueArtist.title = (t.artist || "") + (t.added_by ? " · Added by " + t.added_by : "");
     container.appendChild(item);
   });
 }
@@ -1685,7 +1722,7 @@ function cleanupJam() {
     syncJamButtonsFromState();
   }
   stopJamAudioStream();
-  closeJamPanel();
+  closeJamPanel({ restoreFocus: false });
 }
 
 // ──────────────────────────────────────────
@@ -1698,6 +1735,9 @@ function updateNowPlayingBanner(state) {
 
   if ((_jamContract && !_jamContract.compatible) || !state || !state.active || !state.now_playing || !state.now_playing.name || !state.now_playing.is_playing) {
     banner.classList.add("hidden");
+    banner.removeAttribute("role");
+    banner.removeAttribute("tabindex");
+    banner.removeAttribute("aria-label");
     return;
   }
 
@@ -1710,14 +1750,22 @@ function updateNowPlayingBanner(state) {
     '</div>' +
     '<span class="jam-banner-live">JAM</span>';
   banner.classList.remove("hidden");
+  banner.setAttribute("role", "button");
+  banner.setAttribute("tabindex", "0");
+  banner.setAttribute("aria-label", "Open Jam — now playing " + np.name + " by " + np.artist);
 
   // Click banner to open jam panel and auto-join
   if (!banner._jamClickBound) {
     banner.style.cursor = "pointer";
     banner.addEventListener("click", function() {
-      openJamPanel();
+      openJamPanel(banner);
       // Auto-join if not already listening
       if (_jamState && _jamState.active && !_jamAudioWs) joinJam();
+    });
+    banner.addEventListener("keydown", function(event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      banner.click();
     });
     banner._jamClickBound = true;
   }

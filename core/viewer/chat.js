@@ -440,8 +440,14 @@ function updateChatBadge() {
 }
 
 function incrementUnreadChat() {
-  // Only increment if chat is closed
-  if (chatPanel && chatPanel.classList.contains("hidden")) {
+  // A collapsed V2 utility keeps the active Chat node mounted so drafts and
+  // scroll state survive. Treat inert/aria-hidden Chat as closed to the user.
+  var chatIsClosed = chatPanel && (
+    chatPanel.classList.contains("hidden") ||
+    chatPanel.inert ||
+    chatPanel.getAttribute("aria-hidden") === "true"
+  );
+  if (chatIsClosed) {
     unreadChatCount++;
     updateChatBadge();
 
@@ -465,8 +471,12 @@ function clearUnreadChat() {
 
 function openChat() {
   if (!chatPanel) return;
-  chatPanel.classList.remove("hidden");
-  document.querySelector(".room-layout")?.classList.add("chat-open");
+  var handledByClubhouse = window.EchoClubhouseUtility &&
+    window.EchoClubhouseUtility.open("chat", openChatButton, { focus: false });
+  if (!handledByClubhouse) {
+    chatPanel.classList.remove("hidden");
+    document.querySelector(".room-layout")?.classList.add("chat-open");
+  }
   chatMessages.scrollTop = chatMessages.scrollHeight;
   chatInput.focus();
   clearUnreadChat();
@@ -474,6 +484,7 @@ function openChat() {
 
 function closeChat() {
   if (!chatPanel) return;
+  if (window.EchoClubhouseUtility && window.EchoClubhouseUtility.close("chat")) return;
   chatPanel.classList.add("hidden");
   document.querySelector(".room-layout")?.classList.remove("chat-open");
 }

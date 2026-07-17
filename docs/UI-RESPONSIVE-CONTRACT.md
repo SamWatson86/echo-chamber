@@ -1,6 +1,7 @@
 # Echo Chamber Responsive UI Contract
 
-Status: Phase 0 contract landed; Phase 1 Clubhouse shell is implemented behind an off-by-default flag
+Status: Phase 0 contract landed; Phase 1 Clubhouse shell and Phase 2 utility
+host are implemented and verified behind the off-by-default flag
 
 Applies to: `core/viewer/` in the browser and Windows desktop shell
 
@@ -497,10 +498,27 @@ host in Phase 2.
 
 ### Phase 2 - Dock and Utility Host
 
-- Move existing primary call controls into the stable dock without changing
-  their state owners.
-- Migrate People first, then Chat and Jam, into the single utility host.
-- Ship each migration independently under the same flag with legacy fallback.
+- People, Chat, and Jam are presented as one logical utility host with exactly
+  one active tool. People and Chat are physical descendants of the host. Jam
+  intentionally remains the single portaled feature node under
+  `shell-overlay-root`, linked to the host with `aria-owns`, because nesting its
+  fixed legacy panel inside the filtered shell changes its containing block and
+  breaks legacy positioning.
+- One shell controller owns active-tool presentation, open/collapsed state,
+  inertness, Escape behavior, and focus restoration. The People, Chat, and Jam
+  feature modules retain ownership of their participants, drafts, search,
+  queue, playback, and other feature state.
+- The same utility nodes present as a pinned rail in `theater`, a
+  workspace-bounded drawer in `lounge`, and a sheet or full-workspace surface
+  above the dock in `compact` and `mini`.
+- Resize and live flag changes must restyle the mounted nodes in place. The
+  legacy fallback must remain a one-switch rollback with tool-local state and
+  node identity preserved; it must not duplicate IDs, listeners, or feature
+  state machines.
+- Phase 2 verification covers node and input-state preservation across modes
+  and flag rollback, populated utility geometry and overflow, pointer-target
+  sizing, keyboard/Escape/focus behavior, modal inertness for the portaled Jam,
+  and the distinction between Jam Stop Music and End Jam actions.
 
 ### Phase 3 - Canary Default-On
 

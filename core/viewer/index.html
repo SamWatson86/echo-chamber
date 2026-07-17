@@ -157,7 +157,7 @@
               <button id="debug-toggle" type="button">Debug</button>
             </div>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
-            <button id="shell-toggle-utility" type="button" class="shell-v2-only" aria-controls="room-sidebar chat-panel" aria-expanded="true" aria-label="Hide People and tools">People</button>
+            <button id="shell-toggle-utility" type="button" class="shell-v2-only" aria-controls="utility-host" aria-expanded="true" aria-label="Hide People and tools">People</button>
             <button id="shell-more-actions" type="button" class="shell-v2-only" aria-controls="shell-overflow-menu" aria-expanded="false" aria-label="More clubhouse actions">More</button>
           </div>
         </div>
@@ -170,7 +170,9 @@
             </div>
             <div id="screen-grid" class="media-grid screens-grid"></div>
           </div>
-          <aside id="room-sidebar" class="room-sidebar" data-ui-region="utility-host" data-ui-tool="people">
+          <button id="utility-scrim" type="button" class="utility-scrim shell-v2-only" aria-label="Close utility panel" tabindex="-1"></button>
+          <aside id="utility-host" class="utility-host" data-ui-region="utility-host" data-active-tool="people" aria-label="Clubhouse tools" aria-owns="jam-panel">
+            <section id="room-sidebar" class="room-sidebar" data-ui-tool="people" aria-label="People">
             <div class="sidebar-header">
               <div class="sidebar-title-row">
                 <h2>Active Users</h2>
@@ -189,8 +191,8 @@
               </div>
             </div>
             <div id="user-list" class="user-list"></div>
-          </aside>
-          <div id="chat-panel" class="chat-panel hidden" data-ui-tool="chat" role="dialog" aria-label="Chat">
+            </section>
+            <div id="chat-panel" class="chat-panel hidden" data-ui-tool="chat" role="dialog" aria-label="Chat">
             <div class="chat-header">
               <h3>Chat</h3>
               <div class="chat-actions">
@@ -203,10 +205,11 @@
               <button id="chat-emoji-btn" type="button" class="chat-emoji-btn" title="Add emoji">😊</button>
               <input type="file" id="chat-file-input" class="hidden" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt" />
               <div id="chat-emoji-picker" class="chat-emoji-picker hidden"></div>
-              <textarea id="chat-input" class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for new line)" rows="2"></textarea>
+              <textarea id="chat-input" class="chat-input" placeholder="Message the clubhouse…" aria-label="Chat message. Enter to send; Shift+Enter for a new line." rows="2"></textarea>
               <button id="chat-send-btn" type="button" class="chat-send-btn">Send</button>
             </div>
-          </div>
+            </div>
+          </aside>
         </div>
         <nav id="call-controls" class="actions publish-actions hidden shell-control-dock" data-ui-region="control-dock" aria-label="Call controls">
           <button id="toggle-mic" type="button" data-control="microphone" aria-pressed="false" title="Enable microphone" disabled>Enable Mic</button>
@@ -394,7 +397,7 @@
       </div>
     </div>
   </div>
-      <div id="jam-panel" class="jam-panel hidden" role="dialog" aria-label="Jam Session">
+      <div id="jam-panel" class="jam-panel hidden" data-ui-tool="jam" role="dialog" aria-label="Jam Session">
         <div class="jam-header">
           <h3>Jam Session</h3>
           <button id="close-jam" type="button">Close</button>
@@ -425,7 +428,7 @@
             <label class="jam-source-local-switch-row">
               <span class="jam-source-local-copy">
                 <strong>Hear Jam on this PC</strong>
-                <small>When this Echo client joins the Jam, Jam Volume controls how loud it is here.</small>
+                <small>When this Echo client joins the Jam, your Jam volume controls how loud it is here.</small>
               </span>
               <span class="jam-source-local-switch">
                 <input type="checkbox" role="switch" data-jam-source-monitor-toggle aria-label="Hear Jam on this PC" />
@@ -449,7 +452,7 @@
             <span id="jam-listener-count" class="jam-listener-count">0 listening</span>
           </div>
           <div class="jam-volume-section">
-            <label class="jam-volume-label">Jam Volume</label>
+            <label class="jam-volume-label" for="jam-volume-slider">Your Jam volume</label>
             <div class="jam-volume-row">
               <input id="jam-volume-slider" type="range" min="0" max="100" value="50" />
               <span id="jam-volume-value" class="jam-volume-value">50%</span>
