@@ -57,7 +57,7 @@
 
     const storedOverride = parseFlagValue(input.storedValue);
     if (storedOverride != null) return storedOverride ? V2_VARIANT : LEGACY_VARIANT;
-    return LEGACY_VARIANT;
+    return V2_VARIANT;
   }
 
   function normalizeVariant(value) {

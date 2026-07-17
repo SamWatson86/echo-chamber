@@ -135,10 +135,10 @@ async function expectCanonicalStructure(page) {
 
 const flagCases = [
   {
-    title: "defaults to legacy when neither storage nor query overrides the shell",
+    title: "defaults to V2 when neither storage nor query overrides the shell",
     persisted: null,
     query: "",
-    expected: "legacy",
+    expected: "v2",
   },
   {
     title: "uses the persisted V2 shell when the query is absent",

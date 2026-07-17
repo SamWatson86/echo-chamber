@@ -548,6 +548,10 @@ host in Phase 2.
 - Remove legacy layout CSS, the flag, and dual-path tests in a focused cleanup
   PR after the rollback window closes.
 
+The general rollout now defaults clients with no stored preference to the V2
+shell. Explicit query or stored `0` values continue to select the legacy shell
+for rollback validation during the normal-release safety window.
+
 ## Foundation PR Non-Goals
 
 The foundation PR must not:
