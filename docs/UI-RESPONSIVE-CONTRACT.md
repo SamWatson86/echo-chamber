@@ -167,9 +167,12 @@ JavaScript must not write per-breakpoint pixel widths, move feature nodes betwee
 alternate parents, or decide which text happens to fit. A component that needs
 local adaptation declares a containment boundary and uses container queries.
 
-The existing screen-grid allocator may continue calculating media tile geometry
-inside the stage. It receives the stage's available rectangle; it must not
-duplicate shell breakpoints or control utility-panel behavior.
+The screen-grid allocator calculates media tile geometry inside the stage. It
+receives the stage's available rectangle; it must not duplicate shell
+breakpoints or control utility-panel behavior. A single visible share owns the
+full grid independently of the currently decoded media resolution. Two or more
+shares use the canonical grid policy, and every video preserves its source with
+`object-fit: contain`.
 
 A no-JavaScript/failure fallback may use media queries at the canonical
 thresholds. The supported runtime, however, uses the named root mode so behavior
@@ -190,6 +193,12 @@ and geometry change together.
   the viewport.
 - Shell padding is `24px` in `theater`, `16px` in `lounge`, `12px` in
   `compact`, and `8px` in `mini`, before safe-area additions.
+- While exactly one share is visible, Stage-First presentation may tighten the
+  shell padding and inter-region gap for immersion. The empty Stage and
+  multi-share layouts retain their normal mode spacing.
+- Solo-share labels and media controls overlay the tile instead of
+  consuming grid tracks. Overlay controls remain keyboard focusable and must
+  not change the video's fitted geometry.
 - The ordinary region gap is `16px`. Components may use smaller values from the
   shared spacing scale; they must not introduce arbitrary shell gaps.
 

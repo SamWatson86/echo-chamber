@@ -397,6 +397,323 @@ test("V2 keeps a nonzero usable stage when Chat is open at 800x600", async ({ pa
   await expectNoDocumentOverflow(page);
 });
 
+test("single-share presentation fills the grid independently of decoded resolution", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseOneViewer(page, {
+    participants: 2,
+    cameras: 0,
+    screenShares: 1,
+    shareAspects: [16 / 9],
+  });
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "theater");
+
+  const grid = page.locator("#screen-grid");
+  const tile = grid.locator(":scope > .tile");
+  const video = tile.locator("video.screen-video-surface");
+  const fullscreen = tile.locator(".tile-fullscreen-btn");
+  const stageHeading = page.locator(".room-main .grid-header h2");
+  await expect(tile).toHaveCount(1);
+  await expect(video).toHaveCount(1);
+  await expect(fullscreen).toBeVisible();
+  await expect(stageHeading).not.toHaveCSS("display", "none");
+  await expect(stageHeading).toHaveCSS("position", "absolute");
+  await expect(page.getByRole("heading", { name: "The Stage" })).toHaveCount(1);
+
+  let baselineTile = null;
+  for (const decoded of [
+    { width: 320, height: 180 },
+    { width: 640, height: 360 },
+    { width: 1280, height: 720 },
+    { width: 1920, height: 1080 },
+  ]) {
+    await video.evaluate((element, dimensions) => {
+      Object.defineProperties(element, {
+        videoHeight: { configurable: true, get: () => dimensions.height },
+        videoWidth: { configurable: true, get: () => dimensions.width },
+      });
+      element.dispatchEvent(new Event("resize"));
+    }, decoded);
+    await page.evaluate(() => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }));
+
+    const presentation = await page.evaluate(() => {
+      function rect(element) {
+        const bounds = element.getBoundingClientRect();
+        return {
+          bottom: bounds.bottom,
+          height: bounds.height,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          width: bounds.width,
+        };
+      }
+      const gridElement = document.getElementById("screen-grid");
+      const tileElement = gridElement.querySelector(":scope > .tile");
+      const videoElement = tileElement.querySelector("video.screen-video-surface");
+      const fullscreenElement = tileElement.querySelector(".tile-fullscreen-btn");
+      const fullscreenStyle = getComputedStyle(fullscreenElement);
+      const gridRect = rect(gridElement);
+      const tileRect = rect(tileElement);
+      return {
+        decoded: { height: videoElement.videoHeight, width: videoElement.videoWidth },
+        fillRatio: (tileRect.width * tileRect.height) / (gridRect.width * gridRect.height),
+        fullscreen: rect(fullscreenElement),
+        fullscreenPosition: fullscreenStyle.position,
+        grid: gridRect,
+        objectFit: getComputedStyle(videoElement).objectFit,
+        tile: tileRect,
+        video: rect(videoElement),
+      };
+    });
+
+    expect(presentation.decoded, `${decoded.width}x${decoded.height} decoded size`).toEqual(decoded);
+    expect(presentation.fillRatio, `${decoded.width}px decoded width`).toBeGreaterThanOrEqual(0.95);
+    expect(presentation.objectFit).toBe("contain");
+    expect(presentation.fullscreenPosition).toBe("absolute");
+    expect(presentation.fullscreen.width).toBeGreaterThanOrEqual(39.5);
+    expect(presentation.fullscreen.width).toBeLessThanOrEqual(40.5);
+    expect(presentation.fullscreen.height).toBeGreaterThanOrEqual(39.5);
+    expect(presentation.fullscreen.height).toBeLessThanOrEqual(40.5);
+
+    for (const region of [presentation.tile, presentation.video, presentation.fullscreen]) {
+      expect(region.left).toBeGreaterThanOrEqual(presentation.grid.left - 1);
+      expect(region.right).toBeLessThanOrEqual(presentation.grid.right + 1);
+      expect(region.top).toBeGreaterThanOrEqual(presentation.grid.top - 1);
+      expect(region.bottom).toBeLessThanOrEqual(presentation.grid.bottom + 1);
+    }
+    expect(intersectionArea(presentation.fullscreen, presentation.video))
+      .toBeGreaterThanOrEqual(presentation.fullscreen.width * presentation.fullscreen.height * 0.95);
+
+    if (baselineTile) {
+      expect(Math.abs(presentation.tile.left - baselineTile.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs(presentation.tile.top - baselineTile.top)).toBeLessThanOrEqual(1);
+      expect(Math.abs(presentation.tile.width - baselineTile.width)).toBeLessThanOrEqual(1);
+      expect(Math.abs(presentation.tile.height - baselineTile.height)).toBeLessThanOrEqual(1);
+    } else {
+      baselineTile = presentation.tile;
+    }
+  }
+
+  await expectContained(tile, grid);
+  await expectNoDocumentOverflow(page);
+});
+
+test("a retained hidden share enters solo presentation and restores the multi-share grid", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseOneViewer(page, {
+    participants: 3,
+    cameras: 0,
+    screenShares: 2,
+    shareAspects: [16 / 9, 4 / 3],
+  });
+
+  const root = page.locator("html");
+  const grid = page.locator("#screen-grid");
+  const tiles = grid.locator(":scope > .tile");
+  const firstTile = tiles.nth(0);
+  const secondTile = tiles.nth(1);
+
+  await expect(tiles).toHaveCount(2);
+  await expect(grid).toHaveAttribute("data-visible-tiles", "2");
+  await expect(grid.locator(":scope > .tile[data-grid-visible]")).toHaveCount(2);
+  await expect.poll(() => grid.evaluate((element) => element.style.gridTemplateColumns)).not.toBe("");
+
+  // Production retains unpublished share tiles and hides them with display:none.
+  // The remaining visible tile must still receive the immersive solo treatment.
+  await secondTile.evaluate((element) => { element.style.display = "none"; });
+  await expect(grid).toHaveAttribute("data-visible-tiles", "1");
+  await expect(firstTile).toHaveAttribute("data-grid-visible", "");
+  await expect(secondTile).not.toHaveAttribute("data-grid-visible", "");
+  await expect(grid.locator(":scope > .tile[data-grid-visible]")).toHaveCount(1);
+
+  const solo = await page.evaluate(() => {
+    const gridElement = document.getElementById("screen-grid");
+    const tileElements = Array.from(gridElement.querySelectorAll(":scope > .tile"));
+    const gridRect = gridElement.getBoundingClientRect();
+    const visibleRect = tileElements[0].getBoundingClientRect();
+    return {
+      fillRatio: (visibleRect.width * visibleRect.height) / (gridRect.width * gridRect.height),
+      hiddenDisplay: getComputedStyle(tileElements[1]).display,
+      hiddenHeight: tileElements[1].getBoundingClientRect().height,
+      inlineColumns: gridElement.style.gridTemplateColumns,
+      inlineRows: gridElement.style.gridTemplateRows,
+    };
+  });
+  expect(solo.fillRatio).toBeGreaterThanOrEqual(0.95);
+  expect(solo.hiddenDisplay).toBe("none");
+  expect(solo.hiddenHeight).toBe(0);
+  expect(solo.inlineColumns).toBe("");
+  expect(solo.inlineRows).toBe("");
+  await expectContained(firstTile, grid);
+
+  await secondTile.evaluate((element) => { element.style.display = ""; });
+  await expect(grid).toHaveAttribute("data-visible-tiles", "2");
+  await expect(grid.locator(":scope > .tile[data-grid-visible]")).toHaveCount(2);
+  await expect.poll(() => grid.evaluate((element) => element.style.gridTemplateColumns)).not.toBe("");
+
+  const restored = await page.evaluate(() => {
+    function rect(element) {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        height: bounds.height,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        width: bounds.width,
+      };
+    }
+    const gridElement = document.getElementById("screen-grid");
+    return {
+      grid: rect(gridElement),
+      tiles: Array.from(gridElement.querySelectorAll(":scope > .tile")).map(rect),
+    };
+  });
+  for (const tileRect of restored.tiles) {
+    expect(tileRect.left).toBeGreaterThanOrEqual(restored.grid.left - 1);
+    expect(tileRect.right).toBeLessThanOrEqual(restored.grid.right + 1);
+    expect(tileRect.top).toBeGreaterThanOrEqual(restored.grid.top - 1);
+    expect(tileRect.bottom).toBeLessThanOrEqual(restored.grid.bottom + 1);
+  }
+  expect(intersectionArea(restored.tiles[0], restored.tiles[1])).toBeLessThanOrEqual(1);
+
+  // Focused mode keeps ownership of its tracks while visibility state remains available.
+  await grid.evaluate((element) => { element.classList.add("is-focused"); });
+  await expect.poll(() => grid.evaluate((element) => element.style.gridTemplateColumns)).toBe("");
+  await expect(grid).toHaveAttribute("data-visible-tiles", "2");
+  await grid.evaluate((element) => { element.classList.remove("is-focused"); });
+  await expect.poll(() => grid.evaluate((element) => element.style.gridTemplateColumns)).not.toBe("");
+
+  // The published state is V2-only and must not leak into the legacy rollback.
+  await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
+  await expect(root).toHaveAttribute("data-ui-shell", "legacy");
+  await expect.poll(() => grid.evaluate((element) => ({
+    columns: element.style.gridTemplateColumns,
+    rows: element.style.gridTemplateRows,
+    visibleMarkers: element.querySelectorAll(":scope > .tile[data-grid-visible]").length,
+    visibleTiles: element.getAttribute("data-visible-tiles"),
+  }))).toEqual({ columns: "", rows: "", visibleMarkers: 0, visibleTiles: null });
+});
+
+for (const stageCase of [
+  {
+    title: "theater",
+    viewport: { width: 1920, height: 1080 },
+    mode: "theater",
+    shellGap: 16,
+    screenShares: 4,
+  },
+  {
+    title: "lounge",
+    viewport: { width: 1024, height: 768 },
+    mode: "lounge",
+    shellGap: 16,
+    screenShares: 2,
+  },
+  {
+    title: "compact",
+    viewport: { width: 900, height: 540 },
+    mode: "compact",
+    shellGap: 12,
+    screenShares: 3,
+  },
+  {
+    title: "mini",
+    viewport: { width: 360, height: 640 },
+    mode: "mini",
+    shellGap: 8,
+    screenShares: 4,
+  },
+]) {
+  test(`${stageCase.title} active-share stage stays inside shell tracks without tile overlap`, async ({ page }) => {
+    await page.setViewportSize(stageCase.viewport);
+    await openPhaseOneViewer(page, {
+      participants: 4,
+      cameras: 0,
+      screenShares: stageCase.screenShares,
+      shareAspects: [16 / 9, 32 / 9, 4 / 3, 9 / 16].slice(0, stageCase.screenShares),
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", stageCase.mode);
+
+    const header = page.locator('.room-top[data-ui-region="shell-header"]');
+    const workspace = page.locator('.room-layout[data-ui-region="workspace"]');
+    const stage = page.locator('.room-main[data-ui-region="primary-stage"]');
+    const gridHeader = stage.locator(".grid-header");
+    const grid = stage.locator("#screen-grid");
+    const dock = page.locator('#call-controls[data-ui-region="control-dock"]');
+    const tiles = grid.locator(":scope > .tile");
+
+    await expect(tiles).toHaveCount(stageCase.screenShares);
+    await expectContained(stage, workspace);
+    await expectContained(gridHeader, stage);
+    await expectContained(grid, stage);
+
+    const geometry = await page.evaluate(() => {
+      function rect(element) {
+        const bounds = element.getBoundingClientRect();
+        return {
+          bottom: bounds.bottom,
+          height: bounds.height,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          width: bounds.width,
+        };
+      }
+      const gridElement = document.getElementById("screen-grid");
+      return {
+        dock: rect(document.getElementById("call-controls")),
+        grid: rect(gridElement),
+        gridClientHeight: gridElement.clientHeight,
+        gridClientWidth: gridElement.clientWidth,
+        gridHeader: rect(document.querySelector(".room-main .grid-header")),
+        gridScrollHeight: gridElement.scrollHeight,
+        gridScrollWidth: gridElement.scrollWidth,
+        header: rect(document.querySelector('.room-top[data-ui-region="shell-header"]')),
+        stage: rect(document.querySelector('.room-main[data-ui-region="primary-stage"]')),
+        tiles: Array.from(gridElement.querySelectorAll(":scope > .tile")).map(rect),
+      };
+    });
+
+    expect(geometry.stage.top).toBeGreaterThanOrEqual(geometry.header.bottom + stageCase.shellGap - 1);
+    expect(geometry.stage.bottom).toBeLessThanOrEqual(geometry.dock.top - stageCase.shellGap + 1);
+    expect(geometry.gridHeader.bottom).toBeLessThanOrEqual(geometry.grid.top + 1);
+    expect(geometry.gridScrollWidth).toBeLessThanOrEqual(geometry.gridClientWidth + 1);
+    expect(geometry.gridScrollHeight).toBeLessThanOrEqual(geometry.gridClientHeight + 1);
+
+    for (const tileRect of geometry.tiles) {
+      expect(tileRect.width).toBeGreaterThan(1);
+      expect(tileRect.height).toBeGreaterThan(1);
+      expect(tileRect.left).toBeGreaterThanOrEqual(geometry.grid.left - 1);
+      expect(tileRect.right).toBeLessThanOrEqual(geometry.grid.right + 1);
+      expect(tileRect.top).toBeGreaterThanOrEqual(geometry.grid.top - 1);
+      expect(tileRect.bottom).toBeLessThanOrEqual(geometry.grid.bottom + 1);
+    }
+    for (let first = 0; first < geometry.tiles.length; first += 1) {
+      for (let second = first + 1; second < geometry.tiles.length; second += 1) {
+        expect(
+          intersectionArea(geometry.tiles[first], geometry.tiles[second]),
+          `${stageCase.title} tiles ${first + 1} and ${second + 1}`,
+        ).toBeLessThanOrEqual(1);
+      }
+    }
+
+    if (stageCase.mode === "theater") {
+      const utility = page.locator('.utility-host[data-ui-region="utility-host"]');
+      await expectNoOverlap(stage, utility);
+      const utilityRect = await utility.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return { left: bounds.left };
+      });
+      expect(geometry.stage.right).toBeLessThanOrEqual(utilityRect.left - stageCase.shellGap + 1);
+    }
+
+    await expectNoDocumentOverflow(page);
+  });
+}
+
 test("V2 ellipsizes a 60-character unbroken name without overlapping camera controls", async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 480 });
   await openPhaseOneViewer(page, {
@@ -768,7 +1085,9 @@ test("utility collapse reclaims theater stage width", async ({ page }) => {
   await expect(layout).toHaveClass(/utility-collapsed/);
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
   const widthAfter = (await stage.boundingBox()).width;
+  const layoutWidth = (await layout.boundingBox()).width;
   expect(widthAfter).toBeGreaterThan(widthBefore + 200);
+  expect(widthAfter).toBeGreaterThanOrEqual(layoutWidth - 2);
 });
 
 for (const viewport of [
