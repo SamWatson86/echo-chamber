@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.31",
+    title: "Jam Source Controls",
+    notes: [
+      "The Spotify source PC can allow or deny Jam takeover, mute its own Jam monitoring, and set a local volume without changing what listeners hear.",
+      "Stop Music now pauses Spotify while keeping the Jam and queue ready to resume; End Jam still closes the session completely.",
+      "Echo restores Spotify's previous Windows output when the Jam ends or takeover is turned off."
+    ]
+  },
+  {
     version: "v0.6.28",
     title: "Stable Game Streaming",
     notes: [

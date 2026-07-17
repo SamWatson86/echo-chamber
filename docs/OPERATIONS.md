@@ -54,9 +54,11 @@ powershell -ExecutionPolicy Bypass -File .\core\stop-core.ps1
 ## Spotify Jam source
 
 Jam audio comes from one explicitly provisioned Echo desktop client, not from
-the Windows service. The source client and `Spotify.exe` must stay open in the
-same interactive Windows session. Echo's Spotify OAuth connection must use the
-same Premium account signed into that Spotify desktop app.
+the Windows service. The source client and the Microsoft Store build of
+`Spotify.exe` must stay open in the same interactive Windows session. Echo's
+Spotify OAuth connection must use the same Premium account signed into that
+Spotify desktop app. VB-CABLE must expose the exact playback endpoint
+`CABLE Input (VB-Audio Virtual Cable)`.
 
 Configure the control environment with a unique source ID, a long random source
 token, and an exact unique Spotify Connect device name. The name is the stable
@@ -77,22 +79,24 @@ credentials to listener clients. Set its `server` URL to the normal Echo
 hostname that matches a Windows-trusted TLS certificate; a raw IP or
 `127.0.0.1` will not work with a certificate issued only for the public
 hostname. After starting Spotify and Echo, `/api/jam/state`
-should report protocol 2 and source status `ready` while the source is idle.
+should report protocol 3, `source_availability_known: true`,
+`source_enabled: true`, and source status `ready` while the source is idle.
 Once the Jam is active, source status should be `ready` while Spotify is paused
 or warming up and `live` while audible playback is flowing.
 
 Echo exposes one global shared Jam at a time. Any authenticated Echo user can
-start it, join it, search, add songs, and skip from Echo's Jam panel. Those users
+start it, join it, search, add songs, skip, and use **Stop Music** from Echo's Jam panel. Those users
 do not need Spotify accounts and should add their songs through Echo, not through
 their own Spotify apps. Spotify playback is always targeted back to the one
 configured desktop device and Premium host account. Echo does
 not offer a fake queue-removal control because Spotify's API cannot remove an
-individual queued item. When the source-host user starts or joins a Jam from
-that same Echo desktop client, Echo automatically sets its local Jam relay to
-0% so the PC does not play Spotify directly and then play the delayed relay on
-top of it. The user can still change the Jam volume slider explicitly.
+individual queued item. The configured source PC has local-only **Allow Echo
+Jam to use Spotify on this PC** and **Hear Jam on this PC** switches before Echo
+login and in the Jam panel. Hear Jam uses the independent Jam Volume without
+changing anyone else's level. Stop Music pauses playback for everyone but
+preserves the active Jam, queue, listeners, capture route, and audio sockets.
 
-Listener audio uses `/api/jam/audio?jam_protocol_version=2&generation=...`.
+Listener audio uses `/api/jam/audio?jam_protocol_version=3&generation=...`.
 Credentials are not placed in that URL: the listener's first WebSocket frame is
 an auth message containing its bound LiveKit token, and the server replies
 `{"type":"ready"}` only after validating its identity and current Jam membership.
@@ -151,8 +155,12 @@ the manual full-snapshot outage procedure above. Do not let the already-running
 old watcher perform that first release. Subsequent watcher processes publish and
 roll back the control binary and full viewer snapshot as one unit.
 
-For Jam v2, an authenticated `/api/jam/state` response must report
-`jam_protocol_version: 2`; verify `source_status` is `ready` before Start and
+Jam v3 is a coordinated control-plane/viewer and Windows source-desktop release.
+Do not deploy the server side while the configured source PC still runs a v2
+desktop binary: the v3 server deliberately rejects that source. After both
+sides are updated, an authenticated `/api/jam/state` response must report
+`jam_protocol_version: 3`, `source_availability_known: true`, and
+`source_enabled: true`; verify `source_status` is `ready` before Start and
 `live` while audible playback is expected before declaring the full Jam audio
 path operational. `silent` is a short playback/capture warmup state; `stalled`
 means Echo expected audible playback but did not receive it.

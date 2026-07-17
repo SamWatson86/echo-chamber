@@ -5,7 +5,7 @@
     root.EchoJamSessionState = factory();
   }
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  const JAM_PROTOCOL_VERSION = 2;
+  const JAM_PROTOCOL_VERSION = 3;
 
   function normalizeSourceStatus(value) {
     const status = String(value || "unknown").trim().toLowerCase();
@@ -61,8 +61,12 @@
     };
   }
 
-  function shouldMuteLocalRelay(isSourceHost, listenerJoined) {
-    return isSourceHost === true && listenerJoined !== false;
+  function shouldMuteLocalRelay(isSourceHost, listenerJoined, takeoverActive, monitorEnabled) {
+    if (isSourceHost !== true || listenerJoined === false) return false;
+    // The legacy source-host path remains muted to prevent a doubled local
+    // Spotify + Echo relay. Native takeover may explicitly opt into the relay
+    // as the source PC's monitor without changing the user's Jam volume.
+    return takeoverActive !== true || monitorEnabled !== true;
   }
 
   function effectiveJamGain(volumePercent, roomAudioMuted) {
@@ -70,6 +74,19 @@
     const volume = Number(volumePercent);
     if (!Number.isFinite(volume)) return 0;
     return Math.max(0, Math.min(100, volume)) / 100;
+  }
+
+  function effectiveJamRelayGain(volumePercent, roomAudioMuted, localControl) {
+    const local = localControl && typeof localControl === "object" ? localControl : {};
+    if (shouldMuteLocalRelay(
+      local.is_source_host === true,
+      true,
+      local.takeover_active === true,
+      local.monitor_enabled === true
+    )) {
+      return 0;
+    }
+    return effectiveJamGain(volumePercent, roomAudioMuted);
   }
 
   function buildJamAudioSocketQuery(protocolVersion, generation) {
@@ -139,21 +156,37 @@
       : Number(rawProtocol);
     const compatible = Number.isFinite(actualProtocol) && actualProtocol === JAM_PROTOCOL_VERSION;
     const sourceStatus = normalizeSourceStatus(input.source_status);
-    const sourceUnavailable = ["offline", "unconfigured", "error", "failed"].includes(sourceStatus);
-    const sourceReady = sourceStatus !== "stalled" && !sourceUnavailable &&
+    const sourceEnabled = input.source_enabled === true;
+    const sourceAvailabilityKnown = input.source_availability_known === true;
+    const sourceUnavailable = ["disabled", "offline", "unconfigured", "error", "failed"].includes(sourceStatus);
+    const sourceReady = sourceAvailabilityKnown && sourceEnabled &&
+      sourceStatus !== "negotiating" && sourceStatus !== "stalled" && !sourceUnavailable &&
       (input.source_ready === true || ["ready", "live", "silent"].includes(sourceStatus));
     // A stalled source is still the configured, generation-current source. Keep
     // queue/skip available so users can recover Spotify playback, while joining
     // and opening new audio sockets remain fail-closed until PCM is healthy.
-    const sourceControlReady = !sourceUnavailable &&
+    const sourceControlReady = sourceAvailabilityKnown && sourceEnabled &&
+      sourceStatus !== "negotiating" && !sourceUnavailable &&
       (input.source_ready === true || ["ready", "live", "silent", "stalled"].includes(sourceStatus));
     const active = input.active === true;
     const spotifyConnected = input.spotify_connected === true;
+    const spotifyIsPlaying = input.spotify_is_playing === true;
+    const playbackStopSupported = input.playback_stop_supported === true;
     const sourceError = typeof input.source_error === "string" ? input.source_error.trim() : "";
 
     let sourceTone = "waiting";
     let sourceMessage = "Host source status is unavailable";
-    if (sourceStatus === "ready" || (sourceReady && sourceStatus === "unknown")) {
+    if (sourceStatus === "disabled") {
+      sourceTone = "warning";
+      sourceMessage = "Echo Jam is disabled on the Spotify PC";
+    } else if (sourceStatus === "negotiating") {
+      sourceMessage = "Echo is preparing Spotify control on the source PC…";
+    } else if (!sourceAvailabilityKnown) {
+      sourceMessage = "Checking Spotify control on the source PC…";
+    } else if (!sourceEnabled) {
+      sourceTone = "warning";
+      sourceMessage = "Echo Jam is disabled on the Spotify PC";
+    } else if (sourceStatus === "ready" || (sourceReady && sourceStatus === "unknown")) {
       sourceTone = "ready";
       sourceMessage = "Host source is online";
     } else if (sourceStatus === "live") {
@@ -196,6 +229,10 @@
       compatibilityMessage,
       active,
       spotifyConnected,
+      spotifyIsPlaying,
+      playbackStopSupported,
+      sourceEnabled,
+      sourceAvailabilityKnown,
       sourceStatus,
       sourceReady,
       sourceControlReady,
@@ -209,6 +246,10 @@
       // available against the current source so they can recover Spotify playback.
       canJoin: compatible && active && sourceReady,
       canControl: compatible && active && sourceControlReady,
+      // Stopping Spotify playback does not depend on capture health or a fresh
+      // playback observation. Pause is idempotent and exact-device fenced, so
+      // keep this emergency control available for the whole active Jam.
+      canStopPlayback: compatible && active && spotifyConnected && playbackStopSupported,
       canConfigure: compatible,
     };
   }
@@ -371,6 +412,7 @@
     buildJamAudioSocketQuery,
     evaluateJamContract,
     effectiveJamGain,
+    effectiveJamRelayGain,
     parseJamAudioControlMessage,
     planAudioFrame,
     shouldApplyBannerResponse,

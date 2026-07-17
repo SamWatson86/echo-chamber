@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use crate::AppState;
 
-pub(crate) const JAM_SOURCE_PROTOCOL_VERSION: u8 = 2;
+pub(crate) const JAM_SOURCE_PROTOCOL_VERSION: u8 = 3;
 pub(crate) const AUDIBLE_PEAK_THRESHOLD: f32 = 0.0005;
 const MAX_AUDIO_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_ACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -26,7 +26,17 @@ const CAPTURE_RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_
 #[derive(Clone, Debug)]
 pub(crate) enum SourceEvent {
     Connected,
-    Disconnected,
+    ConnectionReplaced {
+        generation: Option<u64>,
+    },
+    Disconnected {
+        generation: Option<u64>,
+    },
+    AvailabilityChanged {
+        enabled: bool,
+        generation: Option<u64>,
+        error: Option<String>,
+    },
     Format {
         generation: u64,
         sample_rate: u32,
@@ -55,6 +65,8 @@ pub(crate) enum SourceEvent {
 pub(crate) struct JamSourceSnapshot {
     pub(crate) configured: bool,
     pub(crate) connected: bool,
+    pub(crate) availability_known: bool,
+    pub(crate) enabled: bool,
     pub(crate) status: String,
     pub(crate) error: Option<String>,
     pub(crate) generation: Option<u64>,
@@ -73,6 +85,8 @@ struct ConnectedSource {
 
 struct SourceInner {
     connection: Option<ConnectedSource>,
+    availability_known: bool,
+    enabled: bool,
     desired_generation: Option<u64>,
     ready_generation: Option<u64>,
     format_generation: Option<u64>,
@@ -94,6 +108,8 @@ impl Default for SourceInner {
     fn default() -> Self {
         Self {
             connection: None,
+            availability_known: false,
+            enabled: false,
             desired_generation: None,
             ready_generation: None,
             format_generation: None,
@@ -162,6 +178,12 @@ impl JamSourceRegistry {
         {
             return Err("Configured Jam source heartbeat is stale".to_string());
         }
+        if !inner.availability_known {
+            return Err("Jam source availability is still negotiating".to_string());
+        }
+        if !inner.enabled {
+            return Err("Jam source is disabled on the source PC".to_string());
+        }
         command_tx
             .send(Message::Text(message))
             .map_err(|_| "Configured Jam source disconnected".to_string())?;
@@ -199,12 +221,17 @@ impl JamSourceRegistry {
             inner.sample_rate = None;
             inner.channels = None;
             inner.pid = None;
-            inner.status = if inner.connection.is_some() {
-                "ready".to_string()
-            } else if self.configured {
-                "offline".to_string()
-            } else {
+            inner.error = None;
+            inner.status = if !self.configured {
                 "unconfigured".to_string()
+            } else if inner.connection.is_none() {
+                "offline".to_string()
+            } else if !inner.availability_known {
+                "negotiating".to_string()
+            } else if inner.enabled {
+                "ready".to_string()
+            } else {
+                "disabled".to_string()
             };
             inner.ready_at = None;
             inner.last_frame_at = None;
@@ -223,6 +250,8 @@ impl JamSourceRegistry {
         let mut inner = self.inner.lock().await;
         if inner.desired_generation != Some(generation)
             || inner.ready_generation != Some(generation)
+            || !inner.availability_known
+            || !inner.enabled
             || !capture_packets_stalled(&inner)
             || inner
                 .last_activity_at
@@ -273,6 +302,10 @@ impl JamSourceRegistry {
             "unconfigured".to_string()
         } else if inner.connection.is_none() || activity_stale {
             "offline".to_string()
+        } else if !inner.availability_known {
+            "negotiating".to_string()
+        } else if !inner.enabled {
+            "disabled".to_string()
         } else if inner.error.is_some() {
             "error".to_string()
         } else if inner.desired_generation.is_some()
@@ -302,6 +335,8 @@ impl JamSourceRegistry {
         JamSourceSnapshot {
             configured: self.configured,
             connected: inner.connection.is_some() && !activity_stale,
+            availability_known: inner.availability_known,
+            enabled: inner.enabled,
             status,
             error: if activity_stale {
                 Some("Jam source heartbeat timed out".to_string())
@@ -310,6 +345,8 @@ impl JamSourceRegistry {
             },
             generation: inner.desired_generation,
             ready: !activity_stale
+                && inner.availability_known
+                && inner.enabled
                 && inner.desired_generation.is_some()
                 && inner.ready_generation == inner.desired_generation,
             pid: inner.pid,
@@ -322,18 +359,22 @@ impl JamSourceRegistry {
 
     async fn register(&self, command_tx: mpsc::UnboundedSender<Message>) -> u64 {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let replay_tx = command_tx.clone();
-        let (old, desired_generation) = {
+        let (old, replaced_generation) = {
             let mut inner = self.inner.lock().await;
             let old = inner.connection.replace(ConnectedSource {
                 connection_id,
                 command_tx,
             });
-            let desired_generation = inner.desired_generation;
-            inner.status = if desired_generation.is_some() {
-                "starting".to_string()
+            let replaced_generation = old.as_ref().and(inner.desired_generation);
+            if replaced_generation.is_some() {
+                inner.desired_generation = None;
+            }
+            inner.availability_known = false;
+            inner.enabled = false;
+            inner.status = if self.configured {
+                "negotiating".to_string()
             } else {
-                "ready".to_string()
+                "unconfigured".to_string()
             };
             inner.error = None;
             inner.ready_generation = None;
@@ -347,22 +388,23 @@ impl JamSourceRegistry {
             inner.last_audible_at = None;
             inner.restart_pending_generation = None;
             inner.last_restart = None;
-            (old, desired_generation)
+            inner.peak = 0.0;
+            (old, replaced_generation)
         };
-        if let Some(old) = old {
+        let event = if let Some(old) = old {
             let _ = old.command_tx.send(Message::Close(None));
-        }
-        if let Some(generation) = desired_generation {
-            let _ = replay_tx.send(Message::Text(
-                serde_json::json!({ "type": "start", "generation": generation }).to_string(),
-            ));
-        }
-        let _ = self.events.send(SourceEvent::Connected);
+            SourceEvent::ConnectionReplaced {
+                generation: replaced_generation,
+            }
+        } else {
+            SourceEvent::Connected
+        };
+        let _ = self.events.send(event);
         connection_id
     }
 
     async fn unregister(&self, connection_id: u64) {
-        let removed = {
+        let (removed, generation) = {
             let mut inner = self.inner.lock().await;
             if inner
                 .connection
@@ -370,24 +412,35 @@ impl JamSourceRegistry {
                 .map(|connection| connection.connection_id)
                 == Some(connection_id)
             {
+                let generation = inner.desired_generation;
                 inner.connection = None;
+                inner.desired_generation = None;
+                inner.availability_known = false;
+                inner.enabled = false;
                 inner.ready_generation = None;
+                inner.format_generation = None;
+                inner.sample_rate = None;
+                inner.channels = None;
+                inner.pid = None;
                 inner.ready_at = None;
                 inner.last_activity_at = None;
+                inner.last_frame_at = None;
+                inner.last_audible_at = None;
                 inner.restart_pending_generation = None;
                 inner.last_restart = None;
+                inner.peak = 0.0;
                 inner.status = if self.configured {
                     "offline".to_string()
                 } else {
                     "unconfigured".to_string()
                 };
-                true
+                (true, generation)
             } else {
-                false
+                (false, None)
             }
         };
         if removed {
-            let _ = self.events.send(SourceEvent::Disconnected);
+            let _ = self.events.send(SourceEvent::Disconnected { generation });
         }
     }
 
@@ -402,14 +455,19 @@ impl JamSourceRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) async fn test_ready(&self, connection_id: u64, generation: u64) {
+    pub(crate) async fn test_availability(
+        &self,
+        connection_id: u64,
+        enabled: bool,
+        error: Option<&str>,
+    ) {
         handle_text(
             self,
             connection_id,
             &serde_json::json!({
-                "type": "ready",
-                "generation": generation,
-                "pid": 123,
+                "type": "availability",
+                "enabled": enabled,
+                "error": error,
             })
             .to_string(),
         )
@@ -437,6 +495,10 @@ pub(crate) struct JamSourceQuery {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum SourceTextMessage {
+    Availability {
+        enabled: bool,
+        error: Option<String>,
+    },
     Format {
         generation: u64,
         sample_rate: u32,
@@ -494,7 +556,7 @@ async fn source_socket(socket: WebSocket, registry: JamSourceRegistry) {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let connection_id = registry.register(command_tx).await;
     info!(
-        "[jam-source] protocol v2 source connected id={}",
+        "[jam-source] protocol v3 source connected id={}",
         connection_id
     );
 
@@ -539,12 +601,72 @@ async fn handle_text(registry: &JamSourceRegistry, connection_id: u64, text: &st
         return;
     }
     match message {
+        SourceTextMessage::Availability { enabled, error } => {
+            inner.last_activity_at = Some(Instant::now());
+            inner.availability_known = true;
+            inner.enabled = enabled;
+            let error = error
+                .map(|message| message.chars().take(500).collect::<String>())
+                .filter(|message| !message.trim().is_empty());
+            if enabled {
+                inner.error = None;
+                inner.status = if inner.desired_generation.is_some() {
+                    "starting".to_string()
+                } else {
+                    "ready".to_string()
+                };
+                if let Some(generation) = inner.desired_generation {
+                    if let Some(command_tx) = inner
+                        .connection
+                        .as_ref()
+                        .map(|connection| connection.command_tx.clone())
+                    {
+                        let _ = command_tx.send(Message::Text(
+                            serde_json::json!({
+                                "type": "start",
+                                "generation": generation,
+                            })
+                            .to_string(),
+                        ));
+                    }
+                }
+            } else {
+                let prior_generation = inner.desired_generation;
+                inner.desired_generation = None;
+                inner.ready_generation = None;
+                inner.format_generation = None;
+                inner.sample_rate = None;
+                inner.channels = None;
+                inner.pid = None;
+                inner.status = "disabled".to_string();
+                inner.error = error.clone();
+                inner.ready_at = None;
+                inner.last_frame_at = None;
+                inner.last_audible_at = None;
+                inner.restart_pending_generation = None;
+                inner.last_restart = None;
+                inner.peak = 0.0;
+                let _ = registry.events.send(SourceEvent::AvailabilityChanged {
+                    enabled,
+                    generation: prior_generation,
+                    error,
+                });
+                return;
+            }
+            let _ = registry.events.send(SourceEvent::AvailabilityChanged {
+                enabled,
+                generation: inner.desired_generation,
+                error: None,
+            });
+        }
         SourceTextMessage::Format {
             generation,
             sample_rate,
             channels,
         } => {
-            if inner.desired_generation != Some(generation)
+            if !inner.availability_known
+                || !inner.enabled
+                || inner.desired_generation != Some(generation)
                 || !(8_000..=192_000).contains(&sample_rate)
                 || !(1..=8).contains(&channels)
             {
@@ -561,7 +683,10 @@ async fn handle_text(registry: &JamSourceRegistry, connection_id: u64, text: &st
             });
         }
         SourceTextMessage::Ready { generation, pid } => {
-            if inner.desired_generation != Some(generation) {
+            if !inner.availability_known
+                || !inner.enabled
+                || inner.desired_generation != Some(generation)
+            {
                 return;
             }
             inner.last_activity_at = Some(Instant::now());
@@ -579,7 +704,10 @@ async fn handle_text(registry: &JamSourceRegistry, connection_id: u64, text: &st
             generation,
             message,
         } => {
-            if inner.desired_generation != Some(generation) {
+            if !inner.availability_known
+                || !inner.enabled
+                || inner.desired_generation != Some(generation)
+            {
                 return;
             }
             inner.last_activity_at = Some(Instant::now());
@@ -604,7 +732,9 @@ async fn handle_text(registry: &JamSourceRegistry, connection_id: u64, text: &st
             inner.last_activity_at = Some(Instant::now());
         }
         SourceTextMessage::Restarting { generation } => {
-            if inner.desired_generation != Some(generation)
+            if !inner.availability_known
+                || !inner.enabled
+                || inner.desired_generation != Some(generation)
                 || inner.restart_pending_generation != Some(generation)
             {
                 return;
@@ -644,7 +774,9 @@ async fn handle_audio(registry: &JamSourceRegistry, connection_id: u64, bytes: &
     {
         return;
     }
-    if inner.desired_generation != Some(generation)
+    if !inner.availability_known
+        || !inner.enabled
+        || inner.desired_generation != Some(generation)
         || inner.ready_generation != Some(generation)
         || inner.format_generation != Some(generation)
     {
@@ -701,6 +833,15 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    async fn arm(registry: &JamSourceRegistry, connection_id: u64) {
+        handle_text(
+            registry,
+            connection_id,
+            r#"{"type":"availability","enabled":true}"#,
+        )
+        .await;
+    }
+
     #[test]
     fn source_token_comparison_requires_exact_match() {
         assert!(constant_time_eq(b"source-secret", b"source-secret"));
@@ -709,10 +850,225 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_connection_fails_closed_while_availability_is_negotiating() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        registry.register(command_tx).await;
+
+        let snapshot = registry.snapshot().await;
+        assert!(snapshot.connected);
+        assert!(!snapshot.availability_known);
+        assert!(!snapshot.enabled);
+        assert_eq!(snapshot.status, "negotiating");
+        assert_eq!(
+            registry.start(1).await.unwrap_err(),
+            "Jam source availability is still negotiating"
+        );
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_source_rejects_start_with_a_clear_diagnostic() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        handle_text(
+            &registry,
+            connection_id,
+            r#"{"type":"availability","enabled":false,"error":"Local Jam source is turned off"}"#,
+        )
+        .await;
+
+        let snapshot = registry.snapshot().await;
+        assert!(snapshot.availability_known);
+        assert!(!snapshot.enabled);
+        assert_eq!(snapshot.status, "disabled");
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("Local Jam source is turned off")
+        );
+        assert_eq!(
+            registry.start(2).await.unwrap_err(),
+            "Jam source is disabled on the source PC"
+        );
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn availability_true_arms_an_idle_source() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
+
+        let snapshot = registry.snapshot().await;
+        assert!(snapshot.availability_known);
+        assert!(snapshot.enabled);
+        assert_eq!(snapshot.status, "ready");
+        registry.start(3).await.expect("enabled source starts");
+        let Message::Text(command) = command_rx.recv().await.expect("start command") else {
+            panic!("expected start text command");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&command).unwrap(),
+            serde_json::json!({ "type": "start", "generation": 3 })
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_clears_capture_state_and_emits_the_prior_generation() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
+        registry.start(4).await.expect("enabled source starts");
+        command_rx.recv().await.expect("start command");
+        {
+            let mut inner = registry.inner.lock().await;
+            inner.ready_generation = Some(4);
+            inner.format_generation = Some(4);
+            inner.sample_rate = Some(48_000);
+            inner.channels = Some(2);
+            inner.pid = Some(123);
+            inner.ready_at = Some(Instant::now());
+            inner.last_frame_at = Some(Instant::now());
+            inner.last_audible_at = Some(Instant::now());
+            inner.restart_pending_generation = Some(4);
+            inner.last_restart = Some((4, Instant::now()));
+            inner.peak = 0.75;
+        }
+        let mut events = registry.subscribe();
+
+        handle_text(
+            &registry,
+            connection_id,
+            r#"{"type":"availability","enabled":false,"error":"Local source disabled"}"#,
+        )
+        .await;
+
+        let event = events.recv().await.expect("availability event");
+        match event {
+            SourceEvent::AvailabilityChanged {
+                enabled,
+                generation,
+                error,
+            } => {
+                assert!(!enabled);
+                assert_eq!(generation, Some(4));
+                assert_eq!(error.as_deref(), Some("Local source disabled"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let snapshot = registry.snapshot().await;
+        assert_eq!(snapshot.status, "disabled");
+        assert_eq!(snapshot.generation, None);
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.pid, None);
+        assert_eq!(snapshot.sample_rate, None);
+        assert_eq!(snapshot.channels, None);
+        assert_eq!(snapshot.last_frame_ms, None);
+        assert_eq!(snapshot.peak, 0.0);
+    }
+
+    #[tokio::test]
+    async fn superseded_connection_cannot_arm_or_replay_capture() {
+        let registry = JamSourceRegistry::new(true);
+        let (old_tx, mut old_rx) = mpsc::unbounded_channel();
+        let old_connection_id = registry.register(old_tx).await;
+        arm(&registry, old_connection_id).await;
+        registry.start(5).await.expect("enabled source starts");
+        old_rx.recv().await.expect("initial start command");
+
+        let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+        let new_connection_id = registry.register(new_tx).await;
+        assert!(new_rx.try_recv().is_err());
+        handle_text(
+            &registry,
+            old_connection_id,
+            r#"{"type":"availability","enabled":true}"#,
+        )
+        .await;
+        let snapshot = registry.snapshot().await;
+        assert_eq!(snapshot.status, "negotiating");
+        assert!(!snapshot.availability_known);
+        assert!(!snapshot.enabled);
+        assert!(new_rx.try_recv().is_err());
+
+        arm(&registry, new_connection_id).await;
+        assert!(new_rx.try_recv().is_err());
+
+        handle_text(
+            &registry,
+            old_connection_id,
+            r#"{"type":"availability","enabled":false,"error":"stale disable"}"#,
+        )
+        .await;
+        let snapshot = registry.snapshot().await;
+        assert!(snapshot.enabled);
+        assert_eq!(snapshot.generation, None);
+        assert_eq!(snapshot.status, "ready");
+        assert!(snapshot.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn capture_reports_cannot_bypass_availability_negotiation() {
+        let registry = JamSourceRegistry::new(true);
+        registry.inner.lock().await.desired_generation = Some(8);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+
+        handle_text(
+            &registry,
+            connection_id,
+            r#"{"type":"format","generation":8,"sample_rate":48000,"channels":2}"#,
+        )
+        .await;
+        handle_text(
+            &registry,
+            connection_id,
+            r#"{"type":"ready","generation":8,"pid":123}"#,
+        )
+        .await;
+
+        let snapshot = registry.snapshot().await;
+        assert_eq!(snapshot.status, "negotiating");
+        assert!(!snapshot.ready);
+        assert_eq!(snapshot.pid, None);
+        assert_eq!(snapshot.sample_rate, None);
+        assert_eq!(snapshot.channels, None);
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_returns_to_ready_only_while_the_source_is_enabled() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
+        registry.start(6).await.expect("enabled source starts");
+        command_rx.recv().await.expect("start command");
+        registry.stop(6).await;
+        command_rx.recv().await.expect("stop command");
+        assert_eq!(registry.snapshot().await.status, "ready");
+
+        registry.start(7).await.expect("enabled source restarts");
+        command_rx.recv().await.expect("second start command");
+        handle_text(
+            &registry,
+            connection_id,
+            r#"{"type":"availability","enabled":false}"#,
+        )
+        .await;
+        registry.stop(7).await;
+        assert_eq!(registry.snapshot().await.status, "disabled");
+    }
+
+    #[tokio::test]
     async fn stale_generation_audio_is_ignored() {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(8);
@@ -735,6 +1091,7 @@ mod tests {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(9);
@@ -754,17 +1111,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_replays_current_generation_start() {
+    async fn reconnect_does_not_replay_a_disconnected_generation() {
         let registry = JamSourceRegistry::new(true);
-        registry.inner.lock().await.desired_generation = Some(44);
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        let first_connection = registry.register(first_tx).await;
+        arm(&registry, first_connection).await;
+        registry.start(44).await.expect("source starts");
+        first_rx.recv().await.expect("start command");
+        registry.unregister(first_connection).await;
+
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-        registry.register(command_tx).await;
-        let message = command_rx.recv().await.expect("replayed start command");
-        let Message::Text(text) = message else {
-            panic!("expected text command");
-        };
-        assert!(text.contains("\"type\":\"start\""));
-        assert!(text.contains("\"generation\":44"));
+        let connection_id = registry.register(command_tx).await;
+
+        arm(&registry, connection_id).await;
+        assert!(command_rx.try_recv().is_err());
+        let snapshot = registry.snapshot().await;
+        assert_eq!(snapshot.generation, None);
+        assert_eq!(snapshot.status, "ready");
+    }
+
+    #[tokio::test]
+    async fn disconnect_event_is_fenced_to_the_connection_generation() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
+        registry.start(45).await.expect("source starts");
+        command_rx.recv().await.expect("start command");
+        let mut events = registry.subscribe();
+
+        registry.unregister(connection_id).await;
+
+        match events.recv().await.expect("disconnect event") {
+            SourceEvent::Disconnected { generation } => {
+                assert_eq!(generation, Some(45));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replacement_event_is_fenced_to_the_superseded_generation() {
+        let registry = JamSourceRegistry::new(true);
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        let first_connection = registry.register(first_tx).await;
+        arm(&registry, first_connection).await;
+        registry.start(46).await.expect("source starts");
+        first_rx.recv().await.expect("start command");
+        let mut events = registry.subscribe();
+        let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
+
+        registry.register(replacement_tx).await;
+
+        match events.recv().await.expect("replacement event") {
+            SourceEvent::ConnectionReplaced { generation } => {
+                assert_eq!(generation, Some(46));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -772,6 +1176,7 @@ mod tests {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(45);
@@ -835,7 +1240,8 @@ mod tests {
     async fn ready_capture_without_any_packets_eventually_becomes_stalled() {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
-        registry.register(command_tx).await;
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(46);
@@ -852,7 +1258,8 @@ mod tests {
     async fn old_frame_health_becomes_stalled() {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
-        registry.register(command_tx).await;
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(3);
@@ -867,7 +1274,8 @@ mod tests {
     async fn recent_frames_without_recent_audible_signal_are_silent() {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
-        registry.register(command_tx).await;
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(4);
@@ -882,7 +1290,8 @@ mod tests {
     async fn stale_heartbeat_is_offline_and_start_is_rejected() {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
-        registry.register(command_tx).await;
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         registry.inner.lock().await.last_activity_at =
             Some(Instant::now() - SOURCE_ACTIVITY_TIMEOUT - std::time::Duration::from_secs(1));
 
@@ -901,6 +1310,7 @@ mod tests {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         {
             let mut inner = registry.inner.lock().await;
             inner.desired_generation = Some(12);
@@ -934,7 +1344,8 @@ mod tests {
         let (old_tx, _old_rx) = mpsc::unbounded_channel();
         let old_connection_id = registry.register(old_tx).await;
         let (new_tx, _new_rx) = mpsc::unbounded_channel();
-        registry.register(new_tx).await;
+        let new_connection_id = registry.register(new_tx).await;
+        arm(&registry, new_connection_id).await;
         registry.inner.lock().await.desired_generation = Some(17);
 
         handle_text(
@@ -952,6 +1363,7 @@ mod tests {
         let registry = JamSourceRegistry::new(true);
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
         registry.inner.lock().await.desired_generation = Some(21);
 
         handle_text(

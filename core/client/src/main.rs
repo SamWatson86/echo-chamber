@@ -12,6 +12,8 @@ use audio_capture_stub as audio_capture;
 
 #[cfg(target_os = "windows")]
 mod screen_capture;
+#[cfg(target_os = "windows")]
+mod spotify_output_route;
 
 #[cfg(target_os = "windows")]
 mod audio_output;
@@ -38,7 +40,6 @@ use audio_output_stub as audio_output;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
@@ -59,37 +60,6 @@ struct Config {
     #[cfg(target_os = "windows")]
     #[serde(default)]
     jam_source: Option<jam_source::JamSourceConfig>,
-}
-
-struct JamSourceHost(AtomicBool);
-
-impl JamSourceHost {
-    fn new() -> Self {
-        Self(AtomicBool::new(false))
-    }
-
-    fn is_active(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-
-    fn set_active(&self, active: bool) {
-        self.0.store(active, Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-mod jam_source_host_role_tests {
-    use super::JamSourceHost;
-
-    #[test]
-    fn source_host_role_is_false_until_agent_start_is_confirmed() {
-        let role = JamSourceHost::new();
-        assert!(!role.is_active());
-        role.set_active(true);
-        assert!(role.is_active());
-        role.set_active(false);
-        assert!(!role.is_active());
-    }
 }
 
 #[derive(Serialize)]
@@ -158,10 +128,7 @@ fn detect_windows_build_number() -> u32 {
 /// Load config.json from next to the executable.
 /// Falls back to defaults if missing or invalid.
 fn load_config() -> Config {
-    let config_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("config.json")))
-        .unwrap_or_else(|| PathBuf::from("config.json"));
+    let config_path = executable_sibling_path("config.json");
 
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
@@ -228,6 +195,13 @@ fn load_config() -> Config {
     }
 }
 
+fn executable_sibling_path(file_name: &str) -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|directory| directory.join(file_name)))
+        .unwrap_or_else(|| PathBuf::from(file_name))
+}
+
 /// Clear webview cache when the app version changes (prevents stale content after update)
 fn clear_cache_on_upgrade(app: &tauri::App) {
     let version = env!("CARGO_PKG_VERSION");
@@ -287,9 +261,49 @@ fn get_control_url(server: tauri::State<'_, String>) -> String {
     server.to_string()
 }
 
+#[cfg(target_os = "windows")]
 #[tauri::command]
-fn is_jam_source_host(role: tauri::State<'_, JamSourceHost>) -> bool {
-    role.is_active()
+fn is_jam_source_host(control: tauri::State<'_, jam_source::JamSourceLocalControl>) -> bool {
+    control.is_source_host()
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn is_jam_source_host() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_jam_source_local_control(
+    control: tauri::State<'_, jam_source::JamSourceLocalControl>,
+) -> jam_source::JamSourceLocalControlSnapshot {
+    control.snapshot()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_jam_source_takeover_enabled(
+    enabled: bool,
+    control: tauri::State<'_, jam_source::JamSourceLocalControl>,
+) -> Result<jam_source::JamSourceLocalControlSnapshot, String> {
+    control.set_takeover_enabled(enabled)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_jam_source_monitor_enabled(
+    enabled: bool,
+    control: tauri::State<'_, jam_source::JamSourceLocalControl>,
+) -> Result<jam_source::JamSourceLocalControlSnapshot, String> {
+    control.set_monitor_enabled(enabled)
+}
+
+#[cfg(target_os = "windows")]
+async fn shutdown_jam_source_agent(app: &tauri::AppHandle) {
+    if let Some(agent) = app.try_state::<jam_source::JamSourceAgent>() {
+        agent.begin_shutdown().wait().await;
+    }
 }
 
 #[tauri::command]
@@ -311,6 +325,8 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<String, String> {
             match update.download_and_install(|_, _| {}, || {}).await {
                 Ok(_) => {
                     eprintln!("[updater] manual update installed, restarting...");
+                    #[cfg(target_os = "windows")]
+                    shutdown_jam_source_agent(&app).await;
                     app.restart();
                     #[allow(unreachable_code)]
                     Ok(format!("Updated to v{}", version))
@@ -706,8 +722,7 @@ fn main() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(server)
-        .manage(JamSourceHost::new());
+        .manage(server);
 
     // capture_health module is Windows-only (DXGI + WGC capture paths).
     // Gate the state management so macOS builds compile.
@@ -721,6 +736,12 @@ fn main() {
             get_app_info,
             get_control_url,
             is_jam_source_host,
+            #[cfg(target_os = "windows")]
+            get_jam_source_local_control,
+            #[cfg(target_os = "windows")]
+            set_jam_source_takeover_enabled,
+            #[cfg(target_os = "windows")]
+            set_jam_source_monitor_enabled,
             toggle_fullscreen,
             set_always_on_top,
             open_external_url,
@@ -827,21 +848,62 @@ fn main() {
             // deliberately independent of viewer login/panels and owns a
             // separate WASAPI handle from screen-share audio.
             #[cfg(target_os = "windows")]
-            if let Some(source_config) = jam_source_config.clone() {
-                let source_server = app.state::<String>().inner().clone();
-                match jam_source::JamSourceAgent::start(source_server, source_config) {
-                    Ok(agent) => {
-                        app.manage(agent);
-                        app.state::<JamSourceHost>().set_active(true);
-                        eprintln!("[jam-source] native source agent started");
-                        file_debug_log::append("[jam-source] native source agent started");
+            {
+                let source_data_dir = match app.path().app_data_dir() {
+                    Ok(directory) => directory,
+                    Err(app_data_error) => {
+                        let fallback = std::env::var_os("LOCALAPPDATA")
+                            .filter(|path| !path.is_empty())
+                            .map(PathBuf::from)
+                            .map(|directory| directory.join("Echo Chamber"));
+                        match fallback {
+                            Some(directory) => {
+                                eprintln!(
+                                    "[jam-source] app data directory unavailable ({}); using durable fallback '{}'",
+                                    app_data_error,
+                                    directory.display()
+                                );
+                                directory
+                            }
+                            None if jam_source_config.is_some() => {
+                                let error = format!(
+                                    "Configured Jam source cannot resolve a durable settings/journal directory: {}",
+                                    app_data_error
+                                );
+                                eprintln!("[jam-source] {}", error);
+                                file_debug_log::append(&format!("[jam-source] {}", error));
+                                return Err(std::io::Error::other(error).into());
+                            }
+                            None => PathBuf::new(),
+                        }
                     }
-                    Err(error) => {
-                        eprintln!("[jam-source] source agent disabled: {}", error);
-                        file_debug_log::append(&format!(
-                            "[jam-source] source agent disabled: {}",
-                            error
-                        ));
+                };
+                let source_settings_path = source_data_dir.join("jam-source-local.json");
+                let source_control = jam_source::JamSourceLocalControl::load(
+                    jam_source_config.as_ref(),
+                    source_settings_path,
+                );
+                app.manage(source_control.clone());
+
+                if let Some(source_config) = jam_source_config.clone() {
+                    let source_server = app.state::<String>().inner().clone();
+                    match jam_source::JamSourceAgent::start(
+                        source_server,
+                        source_config,
+                        source_control,
+                    ) {
+                        Ok(agent) => {
+                            app.manage(agent);
+                            eprintln!("[jam-source] native source agent started");
+                            file_debug_log::append("[jam-source] native source agent started");
+                        }
+                        Err(error) => {
+                            eprintln!("[jam-source] source agent disabled: {}", error);
+                            file_debug_log::append(&format!(
+                                "[jam-source] source agent disabled: {}",
+                                error
+                            ));
+                        }
                     }
                 }
             }
@@ -923,6 +985,8 @@ fn main() {
                         {
                             Ok(_) => {
                                 eprintln!("[updater] install complete, restarting...");
+                                #[cfg(target_os = "windows")]
+                                shutdown_jam_source_agent(&handle).await;
                                 handle.restart();
                             }
                             Err(e) => eprintln!("[updater] install failed: {}", e),
@@ -939,14 +1003,18 @@ fn main() {
         .expect("Error while building Echo Chamber")
         .run(|app, event| {
             #[cfg(target_os = "windows")]
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if let Some(agent) = app.try_state::<jam_source::JamSourceAgent>() {
-                    agent.stop();
+                    if !agent.shutdown_complete() {
+                        api.prevent_exit();
+                        let shutdown = agent.begin_shutdown();
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            shutdown.wait().await;
+                            handle.exit(code.unwrap_or(0));
+                        });
+                    }
                 }
-                app.state::<JamSourceHost>().set_active(false);
             }
         });
 }

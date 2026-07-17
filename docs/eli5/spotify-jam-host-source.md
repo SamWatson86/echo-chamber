@@ -1,71 +1,81 @@
 # Spotify Jam host-source reliability
 
-## What broke
+## The simple version
 
-Echo said a Spotify Jam was running, but listeners received silence unless a
-separate interactive Spotify/Echo setup happened to be open on the server PC.
-The viewer and deployed server could also be on different Jam contracts, which
-made a broken combination look current.
+Echo has one shared Jam and one Spotify source PC. That PC runs the Microsoft
+Store build of Spotify Desktop and Echo Desktop in the same signed-in Windows session. Echo's server controls
+the same Premium account and exact Spotify Connect device. Everyone else joins
+through Echo; listeners do not need Spotify accounts.
 
-## Why it broke
+The server cannot capture the user's Spotify audio itself because it runs as a
+Windows service in a different session. The configured Echo Desktop client is
+therefore the only source. It sends authenticated, generation-tagged audio to
+the server using Jam protocol v3.
 
-The control plane runs as a Windows service in session 0. Spotify runs in the
-signed-in user's interactive session. Windows process-loopback capture in the
-service session cannot capture that Spotify process tree. The old fallback also
-let any viewer race to become the audio source and shared capture ownership with
-screen sharing.
+## What the source-PC user does
 
-## What changed
+The source PC shows **Spotify Jam on this PC** before the user even logs into
+Echo, and shows the same controls again in the Jam panel:
 
-One explicitly configured Echo desktop client on the Spotify PC is now the only
-Jam source. It captures Spotify in the same interactive Windows session and
-sends generation-tagged PCM over an authenticated protocol-v2 WebSocket. The
-control plane rejects stale sources/actions, targets one exact Spotify Connect
-device, reports real source health, and only records queue changes that Spotify
-accepted. Viewer assets are published as one verified snapshot. The listener
-audio URL contains only the protocol version and current generation; the first
-WebSocket frame authenticates with the listener's bound LiveKit token. When the
-source host starts or joins the Jam, its local relayed copy is muted
-automatically to prevent double playback over Spotify's direct output.
-If Windows capture stops delivering packets while Spotify is still playing,
-the server asks that same source to replace only its Jam capture handle; current
-listeners stay connected and resume when the replacement reports ready.
+- **Allow Echo Jam to use Spotify on this PC** permits temporary takeover.
+- **Hear Jam on this PC** chooses whether this PC also plays Echo's synchronized
+  relay. Its loudness is the separate Jam Volume setting.
 
-Echo has one global shared Jam at a time. Any authenticated Echo user can start
-it, join it, search, add songs, and skip from Echo's Jam panel. Listeners do not
-need Spotify accounts, and they add songs through Echo rather than their own
-Spotify apps. The configured source PC's Premium account is the one Spotify
-account and playback device behind the shared Jam.
+Turning Allow on while idle does not reroute anything. When a Jam starts, Echo
+temporarily routes only Spotify Desktop to the exact
+`CABLE Input (VB-Audio Virtual Cable)` endpoint as a silent local sink. Echo
+captures Spotify itself through Windows process loopback and relays that audio
+to every listener. The Windows default output and other apps are not changed.
+If Hear Jam is off, only Echo's local relay is muted; the saved Jam Volume is
+not changed.
 
-## How we know it works
+Any authenticated Echo participant can start or join the one global Jam,
+search, add songs, skip, and use **Stop Music**. Stop Music pauses the exact
+Spotify device already bound to the Jam without transferring playback. The Jam,
+listeners, queue, capture route, and audio connections stay open, so adding a
+song can start playback again.
 
-- Control tests: 50 passed.
-- Windows desktop tests: 80 passed.
-- Viewer tests: 123 passed.
-- Full Cargo workspace check passed.
-- Atomic viewer publish/rollback tests passed.
-- Desktop deploy-config preservation tests passed.
-- The capture tests prove Spotify selection stays in Echo's Windows session,
-  uses Spotify's root process tree, and reconnects if that process is replaced.
+Turning Allow off, reaching the last-listener empty timeout, or ending the Jam
+is different: Echo pauses the bound Spotify device first, then releases its
+temporary Spotify-only route and capture.
 
-The remaining proof is a live end-to-end run with the Premium host account,
-Spotify desktop, and the newly provisioned Echo source client on the same PC.
+Echo journals Spotify's prior output before takeover so it can restore the
+exact route. A generation-fenced source teardown command restores immediately.
+Turning Allow off gives the server three seconds to send that command before
+Echo restores locally. A broken connection keeps Spotify silent for 36 seconds
+so heartbeat checks, the watchdog, and the server pause can finish. App exit
+waits up to 16 seconds for the teardown command and otherwise leaves the silent
+route journaled. After a forced kill or preserved exit, startup recovery waits
+until that exact old Echo process has been observed dead
+for 36 seconds, then restores the saved route (or Windows Default if the old
+endpoint vanished). A reboot, logoff, or Fast User Switch can assign a new
+Windows session number. Echo treats the old number as a note, then restores only
+through Spotify in Echo's current session when the Store app identity still
+matches.
 
-## Does this need a desktop update?
+## Required pieces
 
-Yes, on the configured Spotify source PC. The server/control plane and complete
-server-served viewer snapshot must also be deployed. Ordinary listener PCs do
-not need Jam-source credentials; they receive the viewer update from the server.
+The source PC needs:
+
+- the matching Echo Desktop Windows binary;
+- the Microsoft Store build of Spotify Desktop signed into the Premium account
+  authorized by Echo OAuth;
+- VB-CABLE with `CABLE Input (VB-Audio Virtual Cable)` present;
+- the exact configured Spotify device name or ID; and
+- source credentials and a trusted HTTPS connection matching the server.
+
+Protocol v3 crosses a release boundary: deploy the control plane and its whole
+viewer bundle, then update the configured source PC's Echo Desktop binary.
+Ordinary listener PCs get the viewer from the server and never receive source
+credentials.
 
 ## What could still go wrong?
 
-- Spotify or Echo is closed, or they run in different Windows sessions.
-- Echo OAuth and the Spotify desktop app use different Spotify accounts.
-- The configured Spotify device name is missing or matches multiple devices.
-- A rotating Spotify device ID was pinned instead of using an exact unique name.
-- The source client uses a server URL that does not match a trusted TLS
-  certificate.
-- The source token differs between the control environment and source client's
-  `config.json`.
-- Spotify reports playback but Windows delivers no audible process-loopback
-  frames; Echo now exposes this as `stalled` instead of pretending it works.
+- Spotify or Echo Desktop is closed, or they run in different Windows sessions.
+- Echo OAuth and Spotify Desktop use different Spotify accounts.
+- The configured Spotify device is missing, ambiguous, or has a stale pinned ID.
+- VB-CABLE is missing or its playback endpoint does not have the exact name.
+- The source token or ID differs between the server and source `config.json`.
+- The source URL does not match a certificate trusted by Windows.
+- Spotify reports playback but no process-loopback frames arrive; Echo reports the source
+  as stalled instead of claiming that audio is healthy.
