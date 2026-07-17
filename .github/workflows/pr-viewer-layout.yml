@@ -1,0 +1,58 @@
+name: PR Viewer Layout
+
+on:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "core/viewer/**"
+      - "core/viewer-tests/**"
+      - ".github/workflows/pr-viewer-layout.yml"
+      - "package.json"
+  workflow_dispatch:
+
+concurrency:
+  group: pr-viewer-layout-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  geometry:
+    name: viewer-geometry
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: core/viewer-tests/package-lock.json
+
+      - name: Install browser test dependencies
+        working-directory: core/viewer-tests
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: core/viewer-tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run production viewer geometry tests
+        working-directory: core/viewer-tests
+        run: npm test
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-layout-failure
+          path: |
+            core/viewer-tests/playwright-report/
+            core/viewer-tests/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

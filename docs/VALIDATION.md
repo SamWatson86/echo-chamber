@@ -24,6 +24,37 @@ CI equivalent:
 
 - `PR Verification (Quick)` workflow (`.github/workflows/pr-verify-quick.yml`)
 
+## Viewer Layout Verification
+
+Required for connected-shell, participant-card, screen-grid, panel, dock, or
+responsive CSS changes:
+
+```bash
+npm --prefix core/viewer-tests ci
+npm --prefix core/viewer-tests run browser:install
+npm run verify:viewer:layout
+```
+
+The tests load the production `core/viewer/index.html`, inject deterministic
+room scenarios through production participant/screen renderers, and establish
+desktop geometry and resize-state baselines. Known narrow-layout failures run
+as exact bad-geometry sentinels during Phase 0; Clubhouse implementation PRs
+must replace them with positive contract assertions. The suite is deliberately
+outside `core/viewer/`, so its dependencies and fixtures are never copied into
+the served viewer snapshot.
+
+During Phase 0 the pure layout policy is injected by the test and is not yet
+loaded by production `index.html`. Phase 1 must replace that check with live
+mode-controller coverage before the new shell can be enabled.
+
+CI equivalent:
+
+- path-filtered `PR Viewer Layout` workflow
+  (`.github/workflows/pr-viewer-layout.yml`)
+
+Chromium geometry coverage does not replace the Windows WebView2 smoke required
+before a UI release.
+
 ## Extended Verification
 
 Recommended for risky fixes:

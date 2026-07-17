@@ -11,6 +11,8 @@ agents.
   basics
 - [Testing](./TESTING.md) - verification model, CI expectations, regression
   strategy
+- [Responsive UI contract](./UI-RESPONSIVE-CONTRACT.md) - connected-shell
+  geometry, state-preservation rules, and Clubhouse rollout gates
 - [Codex operating model](./CODEX.md) - canonical project/thread/worktree rules
 - [Release Boundaries](./RELEASE-BOUNDARIES.md) - when desktop-binary updates
   are required vs server-only deploys
