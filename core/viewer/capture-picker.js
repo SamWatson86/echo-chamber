@@ -7,6 +7,19 @@ var _capturePickerReject = null;
 var _selectedSource = null;
 var _capturePickerSupport = null;
 
+var UNSUPPORTED_SYSTEM_CAPTURE_TITLES = Object.freeze([
+    'program manager',
+    'windows input experience',
+    'msctfime ui',
+    'default ime',
+]);
+
+function isUnsupportedSystemCaptureSource(source) {
+    if (!source) return false;
+    var title = String(source.title || '').trim().toLowerCase();
+    return UNSUPPORTED_SYSTEM_CAPTURE_TITLES.indexOf(title) !== -1;
+}
+
 function isTauriCommandMissingError(err, commandName) {
     var msg = (err && err.message) ? err.message : String(err || '');
     return msg.indexOf('Command ' + commandName + ' not found') !== -1;
@@ -125,6 +138,13 @@ async function _loadSources() {
             body.innerHTML = '<div class="capture-source-empty">No capture sources found</div>';
             return;
         }
+
+        // Windows exposes several shell/IME surfaces as ordinary top-level
+        // windows even though WGC can only produce black frames for them.
+        // Never offer those dead sources in Echo's picker.
+        sources = sources.filter(function(source) {
+            return !isUnsupportedSystemCaptureSource(source);
+        });
 
         // Categorize
         var monitors = sources.filter(function(s) { return s.source_type === 'monitor'; });
@@ -293,5 +313,5 @@ function _escHtml(s) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-    module.exports = { isTauriCommandMissingError };
+    module.exports = { isTauriCommandMissingError, isUnsupportedSystemCaptureSource };
 }

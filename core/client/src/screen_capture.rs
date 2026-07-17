@@ -258,6 +258,79 @@ fn wgc_draw_border_setting(scope: &str) -> windows_capture::settings::DrawBorder
     }
 }
 
+fn is_unsupported_system_capture_window(title: &str, exe_name: Option<&str>) -> bool {
+    let normalized_title = title.trim().to_ascii_lowercase();
+    if matches!(
+        normalized_title.as_str(),
+        "program manager" | "windows input experience" | "msctfime ui" | "default ime"
+    ) {
+        return true;
+    }
+
+    matches!(
+        exe_name.map(str::to_ascii_lowercase).as_deref(),
+        Some("textinputhost.exe")
+            | Some("shellexperiencehost.exe")
+            | Some("searchhost.exe")
+            | Some("lockapp.exe")
+    )
+}
+
+fn executable_name_for_pid(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 260];
+        let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
+        if len == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit('\\').next().map(|name| name.to_lowercase())
+    }
+}
+
+fn validate_capture_window(source_id: u64) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+    };
+
+    let hwnd = HWND(source_id as *mut _);
+    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+        return Err("The selected window is no longer available".to_string());
+    }
+
+    let mut title_buf = [0u16; 512];
+    let title_len = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
+    if title_len == 0 {
+        return Err("The selected window no longer has capturable content".to_string());
+    }
+    let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
+
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    if pid == 0 {
+        return Err("The selected window process is no longer available".to_string());
+    }
+
+    let exe = executable_name_for_pid(pid);
+    if is_unsupported_system_capture_window(&title, exe.as_deref()) {
+        return Err(format!(
+            "{} is a Windows system surface and cannot be screen shared",
+            title.trim()
+        ));
+    }
+
+    Ok(())
+}
+
 // ── Public API (called from Tauri IPC) ──
 
 /// List available capture sources (monitors + windows).
@@ -266,8 +339,6 @@ pub fn list_sources() -> Vec<CaptureSource> {
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
     };
-    use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
     };
@@ -368,25 +439,6 @@ pub fn list_sources() -> Vec<CaptureSource> {
         "lockapp.exe",
     ];
 
-    /// Get the executable name for a process ID.
-    fn exe_name_for_pid(pid: u32) -> Option<String> {
-        use windows::Win32::Foundation::HMODULE;
-        use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-            let mut buf = [0u16; 260];
-            let len = GetModuleFileNameExW(handle, HMODULE::default(), &mut buf);
-            let _ = windows::Win32::Foundation::CloseHandle(handle);
-            if len == 0 {
-                return None;
-            }
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            path.rsplit('\\').next().map(|s| s.to_lowercase())
-        }
-    }
-
     match windows_capture::window::Window::enumerate() {
         Ok(windows) => {
             for w in windows {
@@ -426,7 +478,10 @@ pub fn list_sources() -> Vec<CaptureSource> {
                 }
 
                 // Classify: game vs window
-                let exe = exe_name_for_pid(pid);
+                let exe = executable_name_for_pid(pid);
+                if is_unsupported_system_capture_window(&title, exe.as_deref()) {
+                    continue;
+                }
                 let is_game = match &exe {
                     Some(name) => !NON_GAME_EXES.iter().any(|&known| known == name.as_str()),
                     None => false, // can't determine → default to window
@@ -460,6 +515,10 @@ pub async fn start_share(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
+    // The source may have closed or its HWND may have been reused since the
+    // picker was rendered. Revalidate the live window before interrupting an
+    // existing share or spawning a new capture task.
+    validate_capture_window(source_id)?;
     stop_share();
 
     let running = Arc::new(AtomicBool::new(true));
@@ -1519,6 +1578,22 @@ mod tests {
             capture_source_visibility_warning(true, false, false, 1.0),
             None
         );
+    }
+
+    #[test]
+    fn capture_picker_omits_windows_shell_surfaces_that_encode_black_frames() {
+        assert!(is_unsupported_system_capture_window(
+            "Windows Input Experience",
+            Some("TextInputHost.exe")
+        ));
+        assert!(is_unsupported_system_capture_window(
+            "Search",
+            Some("SearchHost.exe")
+        ));
+        assert!(!is_unsupported_system_capture_window(
+            "PowerPoint - Quarterly Review",
+            Some("POWERPNT.EXE")
+        ));
     }
 
     #[test]
