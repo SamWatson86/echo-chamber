@@ -1,0 +1,18 @@
+{
+  "name": "@echo/viewer-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "browser:install": "playwright install chromium",
+    "test": "playwright test tests/layout.geometry.spec.js",
+    "test:all": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
+  }
+}

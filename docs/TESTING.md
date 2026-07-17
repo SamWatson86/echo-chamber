@@ -20,6 +20,35 @@ Goal: make regressions hard and PR review lightweight by relying on automated ve
 - Broader test sets
 - Slower integration scenarios
 - Stress/race-focused checks
+- Production-viewer browser geometry tests
+
+The browser suite is isolated in `core/viewer-tests/`. It serves the real
+`core/viewer/` page and injects deterministic participants and screen tiles
+through production renderers; it does not depend on or exercise
+`core/viewer-next/`.
+
+First-time setup:
+
+```bash
+npm --prefix core/viewer-tests ci
+npm --prefix core/viewer-tests run browser:install
+```
+
+Normal run:
+
+```bash
+npm run verify:viewer:layout
+```
+
+The browser suite remains separate from `verify:quick` so the dependency-free
+PR baseline stays fast. The path-filtered `PR Viewer Layout` workflow runs it
+for production viewer and layout-test changes.
+
+Phase 0 records known legacy narrow-layout failures as narrowly scoped
+sentinels that assert the exact current bad geometry. Unrelated runtime failures
+still fail normally, and a corrected layout makes the sentinel fail until it is
+replaced by the positive contract assertion. That conversion is required before
+default-on rollout.
 
 ### Layer 3 — Release confidence checks (as needed)
 - Smoke tests on release candidate builds

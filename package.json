@@ -5,6 +5,7 @@
   "scripts": {
     "verify:guardrails": "node tools/verify/guardrails.mjs",
     "verify:viewer": "node --check core/viewer/app.js && node --check core/viewer/jam.js && node --test core/viewer/*.test.js",
+    "verify:viewer:layout": "npm --prefix core/viewer-tests test",
     "verify:quick": "npm run verify:guardrails && npm run verify:viewer"
   }
 }
