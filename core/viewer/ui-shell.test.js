@@ -99,9 +99,10 @@ test("flag parsing accepts explicit on and off values without guessing", () => {
   }
 });
 
-test("query override wins over storage and absence defaults to legacy", () => {
-  assert.equal(resolveShellVariant({ search: "", storedValue: null }), "legacy");
+test("query override wins over storage and absence defaults to v2", () => {
+  assert.equal(resolveShellVariant({ search: "", storedValue: null }), "v2");
   assert.equal(resolveShellVariant({ search: "", storedValue: "1" }), "v2");
+  assert.equal(resolveShellVariant({ search: "", storedValue: "0" }), "legacy");
   assert.equal(resolveShellVariant({ search: "?echo-ui-shell-v2=1", storedValue: "0" }), "v2");
   assert.equal(resolveShellVariant({ search: "?echo-ui-shell-v2=0", storedValue: "1" }), "legacy");
 });
