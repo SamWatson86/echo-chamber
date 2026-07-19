@@ -6,6 +6,7 @@ function hookPublication(publication, participant) {
   if (!publication || !participant) return;
   // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
   patchScreenCompanionSource(publication, publication?.track, participant);
+  updatePublisherMicrophoneState(publication, participant, true);
   if (!publication._echoHooked) {
     publication._echoHooked = true;
     if (publication.setSubscribed && !isUnwatchedScreenShare(publication, participant)) {
@@ -126,8 +127,13 @@ async function switchRoom(roomId) {
 
   switchingRoom = true;
   _isRoomSwitch = true;
+  // Freeze local publish intent until the new room is connected. This keeps a
+  // click or keyboard shortcut during the async handoff from being silently
+  // overwritten by the pre-switch microphone snapshot.
+  setPublishButtonsEnabled(false);
+  await waitForMicToggleSettled();
   // Remember mic state before switch so we can restore it
-  var wasMicEnabled = micEnabled;
+  var wasMicEnabled = desiredMicEnabledForRoomSwitch();
   debugLog(`Switching from ${fromRoom} to ${roomId} (mic was ${wasMicEnabled ? "on" : "off"})`);
 
   try {
@@ -152,6 +158,7 @@ async function switchRoom(roomId) {
     throw err;
   } finally {
     switchingRoom = false;
+    setPublishButtonsEnabled(!!room);
   }
 }
 
@@ -171,6 +178,12 @@ function setPublishButtonsEnabled(enabled) {
     // Show flip button only on mobile devices
     flipCamBtn.classList.toggle("hidden", !_isMobileDevice);
   }
+  participantCards.forEach((cardRef) => {
+    if (!cardRef?.isLocal || !cardRef.controls) return;
+    cardRef.controls.querySelectorAll("button").forEach((button) => {
+      button.disabled = !enabled;
+    });
+  });
   // Device selects stay enabled so users can choose devices before connecting
 }
 
@@ -189,15 +202,32 @@ function renderPublishButtons() {
   screenBtn.classList.toggle("is-on", screenEnabled);
 }
 
+function updatePublisherMicrophoneState(publication, participant, published) {
+  if (!publication || !participant) return false;
+  const LK = getLiveKitClient();
+  const source = publication.source || publication.track?.source;
+  const kind = publication.kind || publication.track?.kind;
+  if (source !== LK?.Track?.Source?.Microphone || kind !== LK?.Track?.Kind?.Audio) return false;
+
+  const state = participantState.get(participant.identity);
+  if (!state) return true;
+  state.micPublished = !!published;
+  state.micPublisherMuted = !published || !!publication.isMuted;
+  state.micMuted = !published || !!publication.isMuted;
+  updateActiveSpeakerUi();
+  return true;
+}
+
 function reconcileLocalPublishIndicators(reason) {
   if (!publishStateReconcile || !room || !room.localParticipant) return;
   // Skip reconciliation while a toggle is in progress — the toggle sets
-  // camEnabled from the SDK's authoritative state when it finishes.
+  // micEnabled/camEnabled from authoritative state when each toggle finishes.
   if (_camToggling || _micToggling) return;
   // Use the SDK's authoritative isCameraEnabled / isScreenShareEnabled
   // instead of checking !!pub.track. Publication objects retain muted/ended
   // tracks after setCameraEnabled(false), giving false positives.
   const cameraPublished = !!room.localParticipant.isCameraEnabled;
+  const microphonePublished = _isMicrophoneActuallyEnabled();
   const LK = getLiveKitClient();
   const pubs = getParticipantPublications(room.localParticipant);
   const screenPublished = window._echoNativeCaptureActive || pubs.some((pub) =>
@@ -209,19 +239,27 @@ function reconcileLocalPublishIndicators(reason) {
   );
 
   const out = publishStateReconcile(
-    { camEnabled, screenEnabled },
-    { cameraPublished, screenPublished }
+    { micEnabled, camEnabled, screenEnabled },
+    { microphonePublished, cameraPublished, screenPublished }
   );
 
   if (out.anyDrift) {
+    micEnabled = out.next.micEnabled;
+    if (out.drift.microphone) syncDesiredMicToActual(micEnabled);
     camEnabled = out.next.camEnabled;
     screenEnabled = out.next.screenEnabled;
+    if (!micEnabled) disableNoiseCancellation();
     renderPublishButtons();
-    debugLog(`[publish-reconcile] ${reason || "unknown"} camera=${camEnabled} screen=${screenEnabled}`);
+    updateActiveSpeakerUi();
+    debugLog(`[publish-reconcile] ${reason || "unknown"} mic=${micEnabled} camera=${camEnabled} screen=${screenEnabled}`);
   }
 }
 
 async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuseAdmin }) {
+  // A newly connected LiveKit participant has no publications yet. Preserve
+  // the user's pre-switch intent separately so authoritative reconciliation
+  // can report the new room truth without cancelling mic restoration.
+  const restoreMicAfterConnect = !!(reuseAdmin && desiredMicEnabledForRoomSwitch());
   if (!controlUrl || !sfuUrl) {
     setStatus("Enter control URL and SFU URL.", true);
     return;
@@ -581,6 +619,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         debugLog("[reconnect] cancelled pending disconnect for " + pendingKey);
       }
       _pendingDisconnects.clear();
+      reconcileLocalPublishIndicators("signal-reconnected");
       // Reset adaptive layer tracker to HIGH after reconnection
       for (const [dtKey, dtVal] of _inboundDropTracker) {
         if (dtVal.currentQuality !== "HIGH" && LK?.VideoQuality) {
@@ -616,6 +655,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         debugLog("[reconnect] cancelled pending disconnect for " + pendingKey);
       }
       _pendingDisconnects.clear();
+      reconcileLocalPublishIndicators("reconnected");
       // Reset adaptive layer tracker to HIGH after reconnection so quality recovers immediately
       for (const [dtKey, dtVal] of _inboundDropTracker) {
         if (dtVal.currentQuality !== "HIGH" && LK?.VideoQuality) {
@@ -799,6 +839,11 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (!remoteP) room.remoteParticipants.forEach(function(p) { if (p.identity === publicationIdentity) remoteP = p; });
       }
       var pubs = remoteP ? getParticipantPublications(remoteP) : [];
+
+      // Publisher mute/off is independent from whether this viewer currently
+      // has the remote audio track subscribed.  Preserve that truth even when
+      // there is no track object to inspect.
+      updatePublisherMicrophoneState(publication, participant, false);
 
       // ── Screen share cleanup ──
       if (source === LK.Track.Source.ScreenShare) {
@@ -1058,6 +1103,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
         if (state) {
+          state.micPublished = true;
+          state.micPublisherMuted = true;
           state.micMuted = true;
           applyParticipantAudioVolumes(state);
           updateActiveSpeakerUi();
@@ -1078,6 +1125,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
         if (state) {
+          state.micPublished = true;
+          state.micPublisherMuted = false;
           state.micMuted = false;
           applyParticipantAudioVolumes(state);
           updateActiveSpeakerUi();
@@ -1198,6 +1247,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     newRoom.on(LK.RoomEvent.LocalTrackPublished, (publication) => {
       const local = room.localParticipant;
       if (!local || !publication) return;
+      updatePublisherMicrophoneState(publication, local, true);
       const source = publication.source;
       if (publication.track?.kind === "video" && source === LK.Track.Source.ScreenShare) {
         localScreenTrackSid = publication.trackSid || "";
@@ -1236,6 +1286,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
   if (LK.RoomEvent?.LocalTrackUnpublished) {
     newRoom.on(LK.RoomEvent.LocalTrackUnpublished, (publication) => {
+      const localParticipant = room?.localParticipant;
+      if (localParticipant) updatePublisherMicrophoneState(publication, localParticipant, false);
       const source = publication.source;
       if (publication.track?.kind === "video" && source === LK.Track.Source.ScreenShare) {
         removeScreenTile(publication.trackSid);
@@ -1336,15 +1388,15 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   } else {
     currentRoomName = roomId;
   }
-  setPublishButtonsEnabled(true);
+  setPublishButtonsEnabled(!switchingRoom);
   // Show dashboard button for all connected users
   var dashBtn = document.getElementById("open-admin-dash");
   if (dashBtn) dashBtn.classList.remove("hidden");
   reconcileLocalPublishIndicators("post-connect");
-  if (reuseAdmin && micEnabled) {
+  if (restoreMicAfterConnect) {
     // Room switch: mic was already on, re-enable immediately without permission dance
     micEnabled = false; // reset so toggleMicOn proceeds
-    toggleMicOn().catch((err) => {
+    toggleMicOn(true).catch((err) => {
       debugLog("[mic] room-switch re-enable failed: " + (err.message || err));
     });
   } else {
@@ -1768,6 +1820,7 @@ async function disconnect() {
   if (dashBtn) dashBtn.classList.add("hidden");
   if (_adminDashOpen) toggleAdminDash();
   micEnabled = false;
+  syncDesiredMicToActual(false);
   camEnabled = false;
   screenEnabled = false;
   renderPublishButtons();

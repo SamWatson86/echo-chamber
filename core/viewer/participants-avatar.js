@@ -209,6 +209,23 @@ function startWatchingScreenIdentity(identity, reason) {
   scheduleReconcileWaves("opt-in-watch");
 }
 
+function getParticipantMicrophonePublicationState(participant) {
+  var LK = getLiveKitClient();
+  var micSource = LK?.Track?.Source?.Microphone;
+  var publications = getParticipantPublications(participant);
+  var publication = publications.find(function(pub) {
+    if (!pub) return false;
+    var source = pub.source || pub.track?.source;
+    var kind = pub.kind || pub.track?.kind;
+    return source === micSource && (!kind || kind === LK?.Track?.Kind?.Audio || kind === "audio");
+  });
+
+  return {
+    published: !!publication,
+    muted: publication ? !!publication.isMuted : true,
+  };
+}
+
 function ensureParticipantCard(participant, isLocal = false) {
   const key = participant.identity;
   // Hide ghost subscriber from UI
@@ -231,6 +248,20 @@ function ensureParticipantCard(participant, isLocal = false) {
   title.textContent = participant.name || "Guest";
   title.title = title.textContent;
   card.append(title);
+
+  const publisherMicState = document.createElement("div");
+  publisherMicState.className = "participant-mic-state";
+  publisherMicState.hidden = true;
+  publisherMicState.setAttribute("role", "status");
+  publisherMicState.setAttribute("aria-label", "Microphone off for " + participantDisplayName);
+  const publisherMicStateIcon = document.createElement("span");
+  publisherMicStateIcon.className = "participant-mic-state-icon";
+  publisherMicStateIcon.innerHTML = iconSvg("mic");
+  const publisherMicStateLabel = document.createElement("span");
+  publisherMicStateLabel.className = "participant-mic-state-label";
+  publisherMicStateLabel.textContent = "Mic off";
+  publisherMicState.append(publisherMicStateIcon, publisherMicStateLabel);
+  card.append(publisherMicState);
 
   const header = document.createElement("div");
   header.className = "user-header";
@@ -953,12 +984,15 @@ function ensureParticipantCard(participant, isLocal = false) {
     userListEl.appendChild(card);
   }
 
+  const initialMicState = getParticipantMicrophonePublicationState(participant);
   const state = {
     cameraTrackSid: null,
     screenTrackSid: null,
     micSid: null,
     screenAudioSid: null,
-    micMuted: false,
+    micMuted: initialMicState.muted,
+    micPublished: initialMicState.published,
+    micPublisherMuted: initialMicState.muted,
     micVolume: 1,
     screenVolume: 1,
     chimeVolume: 0.5,  // default 50% — halves built-in chime loudness
@@ -1247,6 +1281,12 @@ function ensureParticipantCard(participant, isLocal = false) {
     if (settingsMicSlider) settingsMicSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
     if (settingsScreenSlider) settingsScreenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
     if (settingsChimeSlider) settingsChimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
+    if (publisherMicState) {
+      publisherMicState.setAttribute(
+        "aria-label",
+        (publisherMicStateLabel?.textContent || "Mic off") + " for " + participantDisplayName
+      );
+    }
   }
 
   participantCards.set(key, {
@@ -1255,6 +1295,8 @@ function ensureParticipantCard(participant, isLocal = false) {
     isLocal,
     controls,
     micStatusEl,
+    publisherMicStateEl: publisherMicState,
+    publisherMicStateLabel,
     screenStatusEl,
     micSlider,
     screenSlider,
@@ -1302,7 +1344,6 @@ function updateAvatarVideo(cardRef, track) {
   }
   var avatar = cardRef.avatar;
   var card = cardRef.card;
-  var isLocal = cardRef.isLocal;
   // Preserve the hidden file input for local user avatar upload
   var fileInput = avatar.querySelector('input[type="file"]');
   avatar.innerHTML = "";
@@ -1313,20 +1354,18 @@ function updateAvatarVideo(cardRef, track) {
     startBasicVideoMonitor(element);
     avatar.appendChild(element);
     debugLog("video attached to avatar for track " + (track.sid || "unknown"));
-    // Toggle camera-first layout for remote users
-    if (!isLocal && card) {
-      card.classList.add("has-camera");
-    }
+    // Camera-on participants always use the same prominent camera-first card.
+    if (card) card.classList.add("has-camera");
+    if (cardRef.isLocal) avatar.title = "Click to view camera fullscreen";
   } else {
     avatar.textContent = getInitials(card?.querySelector(".user-name")?.textContent || "");
     if (fileInput) avatar.appendChild(fileInput);
     // Show avatar image if one exists (replaces initials)
     var identity = card?.dataset?.identity;
     if (identity) updateAvatarDisplay(identity);
-    // Revert to compact layout for remote users
-    if (!isLocal && card) {
-      card.classList.remove("has-camera");
-    }
+    // Camera-off participants return to the compact avatar card.
+    if (card) card.classList.remove("has-camera");
+    if (cardRef.isLocal) avatar.title = "Click to upload avatar";
     // Close any open volume popup
     if (cardRef.camOverlay) {
       var popup = cardRef.camOverlay.querySelector(".vol-popup");

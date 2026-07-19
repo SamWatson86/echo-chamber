@@ -39,10 +39,16 @@ function makeAvatarElement(initials = "Z") {
   return avatar;
 }
 
-function loadParticipantsAvatar({ deviceId, imageResults } = {}) {
+function loadParticipantsAvatar({ deviceId, imageResults, isLocal = false } = {}) {
   const avatar = makeAvatarElement();
+  const classes = new Set();
   const card = {
     dataset: { identity: "z-6826" },
+    classList: {
+      add(value) { classes.add(value); },
+      remove(value) { classes.delete(value); },
+      contains(value) { return classes.has(value); },
+    },
     querySelector(selector) {
       if (selector === ".user-name") return { textContent: "Z" };
       return null;
@@ -50,7 +56,7 @@ function loadParticipantsAvatar({ deviceId, imageResults } = {}) {
   };
   const context = {
     participantCards: new Map([
-      ["z-6826", { avatar, card, isLocal: false }],
+      ["z-6826", { avatar, card, isLocal }],
     ]),
     avatarUrls: new Map(),
     deviceIdByIdentity: new Map(deviceId ? [["z", deviceId]] : []),
@@ -79,6 +85,14 @@ function loadParticipantsAvatar({ deviceId, imageResults } = {}) {
       }
     },
     Node: { TEXT_NODE: 3 },
+    createLockedVideoElement(track) {
+      return { className: "", track };
+    },
+    configureVideoElement() {},
+    startBasicVideoMonitor() {},
+    getInitials(value) {
+      return (value || "").slice(0, 2).toUpperCase();
+    },
     apiUrl(pathname) {
       return "https://echo.example.test:9443" + pathname;
     },
@@ -99,7 +113,7 @@ function loadParticipantsAvatar({ deviceId, imageResults } = {}) {
   vm.createContext(context);
   const code = fs.readFileSync(path.join(__dirname, "participants-avatar.js"), "utf8");
   vm.runInContext(code, context, { filename: "participants-avatar.js" });
-  return { context, avatar };
+  return { context, avatar, card };
 }
 
 test("remote avatar falls back to the server identity avatar when no broadcast URL arrived", () => {
@@ -145,3 +159,16 @@ test("remote avatar keeps the last good image when a replacement fails to load",
     "https://echo.example.test:9443/api/avatar/70ff47ce-0128-4d5f-a29d"
   );
 });
+
+for (const isLocal of [true, false]) {
+  test(`${isLocal ? "local" : "remote"} camera uses and restores the prominent camera card`, () => {
+    const { context, card } = loadParticipantsAvatar({ isLocal });
+    const cardRef = context.participantCards.get("z-6826");
+
+    context.updateAvatarVideo(cardRef, { sid: "camera-track" });
+    assert.equal(card.classList.contains("has-camera"), true);
+
+    context.updateAvatarVideo(cardRef, null);
+    assert.equal(card.classList.contains("has-camera"), false);
+  });
+}

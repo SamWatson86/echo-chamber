@@ -807,6 +807,237 @@ for (const viewport of [
 
 for (const viewport of [
   { width: 1280, height: 720, mode: "theater" },
+  { width: 360, height: 640, mode: "mini" },
+]) {
+  test(`local camera is promoted exactly like remote cameras in ${viewport.mode}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openPhaseOneViewer(page, {
+      participants: 3,
+      cameras: 1,
+      localCamera: true,
+      screenShares: 0,
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", viewport.mode);
+
+    const localCard = page.locator(".user-card.is-local.has-camera");
+    const remoteCard = page.locator(".user-card.is-remote.has-camera");
+    await expect(localCard).toHaveCount(1);
+    await expect(remoteCard).toHaveCount(1);
+    await expect(localCard.locator(".user-name")).toBeVisible();
+
+    for (const card of [localCard, remoteCard]) {
+      await card.evaluate((element) => element.scrollIntoView({ block: "nearest" }));
+      const geometry = await card.evaluate((element) => {
+        const cardRect = element.getBoundingClientRect();
+        const videoRect = element.querySelector("video").getBoundingClientRect();
+        return {
+          ratio: cardRect.width / cardRect.height,
+          videoHeightDelta: Math.abs(videoRect.height - cardRect.height),
+          videoWidthDelta: Math.abs(videoRect.width - cardRect.width),
+        };
+      });
+      expect.soft(geometry.ratio).toBeGreaterThan(1.73);
+      expect.soft(geometry.ratio).toBeLessThan(1.82);
+      // The card's 1px border accounts for a 2px outer-size difference.
+      expect.soft(geometry.videoHeightDelta).toBeLessThanOrEqual(2.1);
+      expect.soft(geometry.videoWidthDelta).toBeLessThanOrEqual(2.1);
+      await expectContained(card.locator("video"), card);
+    }
+
+    await page.evaluate(() => {
+      const local = document.querySelector(".user-card.is-local");
+      updateAvatarVideo(participantCards.get(local.dataset.identity), null);
+    });
+    await expect(page.locator(".user-card.is-local")).not.toHaveClass(/has-camera/);
+    await expect(page.locator(".user-card.is-local .user-avatar video")).toHaveCount(0);
+  });
+}
+
+test("publisher microphone badges stay truthful and visible in avatar and camera cards", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  await openPhaseOneViewer(page, {
+    participants: 3,
+    cameras: 1,
+    screenShares: 0,
+  });
+
+  const cameraCard = page.locator(".user-card.is-remote.has-camera");
+  const avatarCard = page.locator(".user-card.is-remote:not(.has-camera)");
+  const cameraIdentity = await cameraCard.getAttribute("data-identity");
+  const avatarIdentity = await avatarCard.getAttribute("data-identity");
+
+  await page.evaluate(({ cameraIdentity, avatarIdentity }) => {
+    window.EchoLayoutTestScenario.setParticipantMicrophoneState(cameraIdentity, {
+      published: true,
+      muted: true,
+    });
+    window.EchoLayoutTestScenario.setParticipantMicrophoneState(avatarIdentity, {
+      published: false,
+      muted: true,
+    });
+  }, { cameraIdentity, avatarIdentity });
+
+  const cameraBadge = cameraCard.locator(".participant-mic-state");
+  const avatarBadge = avatarCard.locator(".participant-mic-state");
+  await expect(cameraBadge).toBeVisible();
+  await expect(cameraBadge).toContainText("Muted");
+  await expect(cameraBadge).toHaveAccessibleName(/Muted.*Friend 2/i);
+  await expect(avatarBadge).toBeVisible();
+  await expect(avatarBadge).toContainText("Mic off");
+  await expect(avatarBadge).toHaveAccessibleName(/Mic off.*Friend 3/i);
+  await expectContained(cameraBadge, cameraCard);
+  await expectContained(avatarBadge, avatarCard);
+  await expectNoOverlap(avatarBadge, avatarCard.locator(".participant-settings-toggle"));
+
+  await page.evaluate((identity) => {
+    window.EchoLayoutTestScenario.setParticipantMicrophoneState(identity, {
+      published: true,
+      muted: false,
+    });
+    const state = participantState.get(identity);
+    state.micUserMuted = true;
+    roomAudioMuted = true;
+    updateActiveSpeakerUi();
+  }, avatarIdentity);
+  await expect(avatarBadge).toBeHidden();
+});
+
+test("room switching freezes local publish controls and rejects user media toggles", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openPhaseOneViewer(page, {
+    participants: 2,
+    cameras: 0,
+    screenShares: 0,
+  });
+
+  const result = await page.evaluate(async () => {
+    const calls = { camera: 0, microphone: 0 };
+    room = {
+      localParticipant: {
+        async setCameraEnabled() { calls.camera += 1; },
+        async setMicrophoneEnabled() { calls.microphone += 1; },
+      },
+    };
+    switchingRoom = true;
+    setPublishButtonsEnabled(false);
+
+    const localCard = Array.from(participantCards.values()).find((cardRef) => cardRef.isLocal);
+    const localButtons = Array.from(localCard.controls.querySelectorAll("button"));
+    const dockButtons = [micBtn, camBtn, screenBtn];
+
+    await toggleMic();
+    await toggleCam();
+    await toggleScreen();
+
+    return {
+      calls,
+      dockDisabled: dockButtons.every((button) => button.disabled),
+      localDisabled: localButtons.length > 0 && localButtons.every((button) => button.disabled),
+    };
+  });
+
+  expect(result.calls).toEqual({ camera: 0, microphone: 0 });
+  expect(result.dockDisabled).toBe(true);
+  expect(result.localDisabled).toBe(true);
+});
+
+test("room switching waits for an in-flight mic toggle and preserves its intent", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openPhaseOneViewer(page, {
+    participants: 2,
+    cameras: 0,
+    screenShares: 0,
+  });
+
+  const result = await page.evaluate(async () => {
+    const LK = getLiveKitClient();
+    const observedAtConnect = [];
+    const originalConnectToRoom = connectToRoom;
+    connectToRoom = async function () {
+      observedAtConnect.push({
+        actual: micEnabled,
+        desired: desiredMicEnabledForRoomSwitch(),
+      });
+    };
+
+    async function runToggleThenSwitch(initialEnabled, targetRoom) {
+      roomSwitchState.forceConnected("main");
+      currentRoomName = "main";
+      _lastRoomSwitchTime = 0;
+      switchingRoom = false;
+      _isRoomSwitch = false;
+
+      const microphonePublication = {
+        source: LK.Track.Source.Microphone,
+        kind: LK.Track.Kind.Audio,
+        isMuted: !initialEnabled,
+        track: {
+          source: LK.Track.Source.Microphone,
+          kind: LK.Track.Kind.Audio,
+          isMuted: !initialEnabled,
+          mediaStreamTrack: { readyState: "live" },
+        },
+      };
+      const publications = new Map();
+      if (initialEnabled) publications.set("mic", microphonePublication);
+
+      let releaseSdkCall;
+      const sdkCall = new Promise((resolve) => {
+        releaseSdkCall = resolve;
+      });
+      const localCard = Array.from(participantCards.values()).find((cardRef) => cardRef.isLocal);
+      const localParticipant = {
+        identity: localCard.card.dataset.identity,
+        name: localCard.card.querySelector(".user-name").textContent,
+        isMicrophoneEnabled: initialEnabled,
+        isCameraEnabled: false,
+        trackPublications: publications,
+        async setMicrophoneEnabled(desired) {
+          await sdkCall;
+          this.isMicrophoneEnabled = desired;
+          microphonePublication.isMuted = !desired;
+          microphonePublication.track.isMuted = !desired;
+          if (desired) publications.set("mic", microphonePublication);
+          else publications.delete("mic");
+        },
+      };
+
+      room = { localParticipant };
+      micEnabled = initialEnabled;
+      syncDesiredMicToActual(initialEnabled);
+
+      const togglePromise = toggleMic();
+      await Promise.resolve();
+      const connectsBeforeSwitch = observedAtConnect.length;
+      const switchPromise = switchRoom(targetRoom);
+      await Promise.resolve();
+      const waitedForToggle = observedAtConnect.length === connectsBeforeSwitch;
+
+      releaseSdkCall();
+      await Promise.all([togglePromise, switchPromise]);
+      return waitedForToggle;
+    }
+
+    try {
+      const disableWaited = await runToggleThenSwitch(true, "breakout-1");
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      const enableWaited = await runToggleThenSwitch(false, "breakout-2");
+      return { disableWaited, enableWaited, observedAtConnect };
+    } finally {
+      connectToRoom = originalConnectToRoom;
+    }
+  });
+
+  expect(result.disableWaited).toBe(true);
+  expect(result.enableWaited).toBe(true);
+  expect(result.observedAtConnect).toEqual([
+    { actual: false, desired: false },
+    { actual: true, desired: true },
+  ]);
+});
+
+for (const viewport of [
+  { width: 1280, height: 720, mode: "theater" },
   { width: 1024, height: 768, mode: "lounge" },
 ]) {
   test(`${viewport.mode} camera-card grid tracks prevent card overlap`, async ({ page }) => {

@@ -770,6 +770,12 @@
   display: none;
 }
 
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .participant-mic-state {
+  right: auto;
+  bottom: 10px;
+  left: 74px;
+}
+
 :root[data-ui-shell="v2"] .user-indicators {
   margin: 0;
   display: flex;
@@ -990,6 +996,21 @@
   overflow: hidden;
   border-radius: var(--club-radius-card);
   background: #06080b;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera .participant-mic-state {
+  top: 8px;
+  right: auto;
+  bottom: auto;
+  left: 8px;
+}
+
+:root[data-ui-shell="v2"] .user-card.is-local.has-camera .user-name {
+  left: 9px;
+  bottom: 9px;
+  max-width: calc(100% - 64px);
+  color: var(--club-text);
+  font-size: 12px;
 }
 
 :root[data-ui-shell="v2"] .user-card.has-camera .user-header,
