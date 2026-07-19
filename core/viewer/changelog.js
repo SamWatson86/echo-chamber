@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.33",
+    title: "Truthful Media Presence",
+    notes: [
+      "Echo now shows the microphone as on only after a real, live microphone track is published; failed starts return the button to off with an actionable message.",
+      "Participant cards now show a clear Mic off or Muted badge and a subtle red outline based on the publisher's actual microphone state.",
+      "Your own camera now receives the same prominent 16:9 participant card as everyone else's camera."
+    ]
+  },
+  {
     version: "v0.6.31",
     title: "Jam Source Controls",
     notes: [

@@ -360,6 +360,20 @@ function updateCameraLobbySpeakingIndicators() {
 
 let _micToggling = false;
 let _camToggling = false;
+let _micDesiredEnabled = !!micEnabled;
+let _micToggleCompletion = Promise.resolve();
+
+function desiredMicEnabledForRoomSwitch() {
+  return !!_micDesiredEnabled;
+}
+
+function waitForMicToggleSettled() {
+  return _micToggleCompletion;
+}
+
+function syncDesiredMicToActual(actualEnabled) {
+  _micDesiredEnabled = !!actualEnabled;
+}
 
 // Check if camera is actually enabled using the SDK's own state.
 // Publication objects can retain muted/ended tracks — checking !!pub.track
@@ -368,10 +382,46 @@ function _isCameraActuallyEnabled() {
   return !!room?.localParticipant?.isCameraEnabled;
 }
 
-async function toggleMic() {
-  if (!room || _micToggling) return;
+// The button may only claim the microphone is live when LiveKit agrees and an
+// unmuted microphone publication still owns a live audio track.  In particular,
+// setMicrophoneEnabled(true) can resolve after a device failure without leaving
+// a usable publication behind.
+function _isMicrophoneActuallyEnabled() {
+  const local = room?.localParticipant;
+  if (!local || !local.isMicrophoneEnabled) return false;
+  const LK = getLiveKitClient();
+  const truth = window.EchoPublishStateReconcile?.isMicrophoneActuallyEnabled;
+  if (!truth) return false;
+  return truth(
+    local,
+    getParticipantPublications(local),
+    LK?.Track?.Source?.Microphone,
+    LK?.Track?.Kind?.Audio
+  );
+}
+
+function _syncLocalMicUi() {
+  renderPublishButtons();
+  if (room?.localParticipant) {
+    const cardRef = ensureParticipantCard(room.localParticipant, true);
+    if (cardRef.controls) {
+      cardRef.controls.querySelectorAll(".icon-button")[0]?.classList.toggle("is-on", micEnabled);
+    }
+  }
+  updateActiveSpeakerUi();
+}
+
+async function toggleMic(allowDuringRoomSwitch = false) {
+  if (!room || _micToggling || (switchingRoom && !allowDuringRoomSwitch)) return;
+  let settleMicToggle;
+  _micToggleCompletion = new Promise((resolve) => {
+    settleMicToggle = resolve;
+  });
   _micToggling = true;
   const desired = !micEnabled;
+  // Capture intent before the SDK call yields. A room switch that starts while
+  // this operation is pending must preserve the click, not stale rendered UI.
+  _micDesiredEnabled = desired;
   micBtn.disabled = true;
   try {
     try {
@@ -388,27 +438,36 @@ async function toggleMic() {
         throw devErr;
       }
     }
-    micEnabled = desired;
+    const actualState = _isMicrophoneActuallyEnabled();
+    micEnabled = actualState;
+
+    if (actualState !== desired) {
+      debugLog(`[mic] SDK state drift after toggle desired=${desired} actual=${actualState}`);
+      const publishErr = new Error(desired
+        ? "Microphone did not start — choose an input device in Settings and try again"
+        : "Microphone is still live — try disabling it again");
+      publishErr.name = "MicrophonePublishError";
+      throw publishErr;
+    }
 
     // Apply or remove noise cancellation
-    if (desired && noiseCancelEnabled) {
+    if (actualState && noiseCancelEnabled) {
       try { await enableNoiseCancellation(); } catch (e) {
         debugLog("[noise-cancel] Could not enable on mic toggle: " + (e.message || e));
       }
-    } else if (!desired) {
+    } else if (!actualState) {
       disableNoiseCancellation();
     }
 
-    renderPublishButtons();
-    if (room?.localParticipant) {
-      const cardRef = ensureParticipantCard(room.localParticipant, true);
-      if (cardRef.controls) {
-        cardRef.controls.querySelectorAll(".icon-button")[0]?.classList.toggle("is-on", micEnabled);
-      }
-    }
-    updateActiveSpeakerUi();
+    _syncLocalMicUi();
   } catch (err) {
     debugLog("[mic] toggle error: " + (err.message || err) + " (name=" + err.name + ")");
+    micEnabled = _isMicrophoneActuallyEnabled();
+    // A failed enable should stay visibly and intentionally off. A failed
+    // disable keeps the off intent so the next room does not republish it.
+    if (desired && !micEnabled) _micDesiredEnabled = false;
+    if (!micEnabled) disableNoiseCancellation();
+    _syncLocalMicUi();
     // Provide actionable error messages for common Mac issues
     if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
       setStatus("Mic permission denied — grant access in System Settings > Privacy > Microphone", true);
@@ -420,14 +479,16 @@ async function toggleMic() {
       setStatus(err.message || "Mic failed", true);
     }
   } finally {
-    micBtn.disabled = false;
+    micBtn.disabled = switchingRoom;
     _micToggling = false;
+    settleMicToggle();
+    reconcileLocalPublishIndicators("mic-toggle-complete");
   }
 }
 
 
 async function toggleCam() {
-  if (!room || _camToggling) return;
+  if (!room || _camToggling || switchingRoom) return;
   _camToggling = true;
   const desired = !camEnabled;
   camBtn.disabled = true;
@@ -486,13 +547,13 @@ async function toggleCam() {
       setStatus(err.message || "Camera failed", true);
     }
   } finally {
-    camBtn.disabled = false;
+    camBtn.disabled = switchingRoom;
     _camToggling = false;
   }
 }
 
 async function toggleScreen() {
-  if (!room) return;
+  if (!room || switchingRoom) return;
   const desired = !screenEnabled;
   debugLog("[toggleScreen] screenEnabled=" + screenEnabled + " desired=" + desired + " _nativeScreenShareActive=" + (typeof _nativeScreenShareActive !== "undefined" ? _nativeScreenShareActive : "undef"));
   screenBtn.disabled = true;
@@ -513,7 +574,7 @@ async function toggleScreen() {
   } catch (err) {
     setStatus(err.message || "Screen share failed", true);
   } finally {
-    screenBtn.disabled = false;
+    screenBtn.disabled = switchingRoom;
   }
 }
 
@@ -542,9 +603,9 @@ async function enableAllMedia() {
   await toggleScreenOn();
 }
 
-async function toggleMicOn() {
+async function toggleMicOn(allowDuringRoomSwitch = false) {
   if (micEnabled) return;
-  await toggleMic();
+  await toggleMic(allowDuringRoomSwitch);
 }
 
 async function toggleCamOn() {

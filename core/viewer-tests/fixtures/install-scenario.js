@@ -92,7 +92,7 @@
     };
   }
 
-  function addParticipants(count, cameraCount, longNames, unbrokenNames) {
+  function addParticipants(count, cameraCount, longNames, unbrokenNames, localCamera) {
     if (typeof ensureParticipantCard !== "function") {
       throw new Error("production ensureParticipantCard renderer is unavailable");
     }
@@ -107,7 +107,8 @@
         makeParticipant(index, longNames, unbrokenNames),
         isLocal,
       );
-      if (!cardRef || isLocal || attachedCameras >= cameraCount) continue;
+      const shouldAttachCamera = isLocal ? !!localCamera : attachedCameras < cameraCount;
+      if (!cardRef || !shouldAttachCamera) continue;
 
       const media = createVideoTrackStub(`fixture-camera-${index}`, 16 / 9);
       updateAvatarVideo(cardRef, media.track);
@@ -116,7 +117,7 @@
       exposeFixtureDimensions(video, media);
       video.classList.add("layout-fixture-camera");
       video.setAttribute("aria-label", `${cardRef.card.dataset.identity} camera fixture`);
-      attachedCameras += 1;
+      if (!isLocal) attachedCameras += 1;
     }
   }
 
@@ -162,6 +163,7 @@
       shareAspects: [16 / 9],
       chatOpen: false,
       longNames: false,
+      localCamera: false,
       unbrokenNames: false,
     }, options || {});
 
@@ -171,6 +173,7 @@
       scenario.cameras,
       scenario.longNames,
       scenario.unbrokenNames,
+      scenario.localCamera,
     );
     addScreenShares(scenario.screenShares, scenario.shareAspects);
     populateChat(scenario.chatOpen);
@@ -358,6 +361,16 @@
     };
   }
 
+  function setParticipantMicrophoneState(identity, options) {
+    const state = participantState.get(identity);
+    if (!state) throw new Error("participant state is unavailable for " + identity);
+    const next = Object.assign({ published: false, muted: true }, options || {});
+    state.micPublished = !!next.published;
+    state.micPublisherMuted = !!next.muted;
+    state.micMuted = !!next.muted;
+    updateActiveSpeakerUi();
+  }
+
   window.EchoLayoutTestScenario = Object.freeze({
     captureCameraLobbySnapshot: captureCameraLobbySnapshot,
     captureIdentitySnapshot: captureIdentitySnapshot,
@@ -365,6 +378,7 @@
     inspectIdentitySnapshot: inspectIdentitySnapshot,
     install: install,
     installCameraLobby: installCameraLobby,
+    setParticipantMicrophoneState: setParticipantMicrophoneState,
     unbrokenDisplayName: unbrokenDisplayName,
   });
 })();

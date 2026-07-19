@@ -201,6 +201,26 @@ function updateActiveSpeakerUi() {
   participantCards.forEach((cardRef, identity) => {
     const micEl = cardRef.micStatusEl;
     const state = participantState.get(identity);
+    const publisherMicOff = cardRef.isLocal
+      ? !micEnabled
+      : !state?.micPublished || !!state?.micPublisherMuted;
+    const publisherMicLabel = state?.micPublished && state?.micPublisherMuted ? "Muted" : "Mic off";
+    if (cardRef.publisherMicStateEl) {
+      const shouldHidePublisherMicState = !publisherMicOff;
+      if (cardRef.publisherMicStateEl.hidden !== shouldHidePublisherMicState) {
+        cardRef.publisherMicStateEl.hidden = shouldHidePublisherMicState;
+      }
+      const publisherMicAriaLabel = publisherMicLabel + " for " +
+        (cardRef.card?.querySelector(".user-name")?.textContent || identity);
+      if (cardRef.publisherMicStateEl.getAttribute("aria-label") !== publisherMicAriaLabel) {
+        cardRef.publisherMicStateEl.setAttribute("aria-label", publisherMicAriaLabel);
+      }
+    }
+    if (cardRef.publisherMicStateLabel && cardRef.publisherMicStateLabel.textContent !== publisherMicLabel) {
+      cardRef.publisherMicStateLabel.textContent = publisherMicLabel;
+    }
+    cardRef.card?.classList.toggle("is-publisher-mic-off", publisherMicOff);
+
     const muted = roomAudioMuted || state?.micMuted || state?.micUserMuted || (cardRef.isLocal && !micEnabled);
     if (micEl) {
       micEl.classList.toggle("is-muted", !!muted);
@@ -649,6 +669,8 @@ function handleTrackSubscribed(track, publication, participant) {
     } else {
       state.micSid = getTrackSid(publication, track, `${effectiveParticipant.identity}-mic`);
       state.micMuted = publication?.isMuted || false;
+      state.micPublished = true;
+      state.micPublisherMuted = !!publication?.isMuted;
       state.micAudioEls.add(element);
       if (!state.micAnalyser && LK?.createAudioAnalyser) {
         state.micAnalyser = LK.createAudioAnalyser(track);
