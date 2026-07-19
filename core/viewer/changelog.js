@@ -12,7 +12,7 @@ var ECHO_CHANGELOG = [
     title: "Truthful Media Presence",
     notes: [
       "Echo now shows the microphone as on only after a real, live microphone track is published; failed starts return the button to off with an actionable message.",
-      "Participant cards now show a clear Mic off or Muted badge based on the publisher's actual microphone state.",
+      "Participant cards now show a clear Mic off or Muted badge and a subtle red outline based on the publisher's actual microphone state.",
       "Your own camera now receives the same prominent 16:9 participant card as everyone else's camera."
     ]
   },

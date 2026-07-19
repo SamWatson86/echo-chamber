@@ -879,6 +879,11 @@ test("publisher microphone badges stay truthful and visible in avatar and camera
 
   const cameraBadge = cameraCard.locator(".participant-mic-state");
   const avatarBadge = avatarCard.locator(".participant-mic-state");
+  await expect(cameraCard).toHaveClass(/is-publisher-mic-off/);
+  await expect(avatarCard).toHaveClass(/is-publisher-mic-off/);
+  await expect(cameraCard).toHaveCSS("border-color", "rgba(229, 106, 106, 0.58)");
+  await cameraCard.hover();
+  await expect(cameraCard).toHaveCSS("border-color", "rgba(229, 106, 106, 0.58)");
   await expect(cameraBadge).toBeVisible();
   await expect(cameraBadge).toContainText("Muted");
   await expect(cameraBadge).toHaveAccessibleName(/Muted.*Friend 2/i);
@@ -899,6 +904,7 @@ test("publisher microphone badges stay truthful and visible in avatar and camera
     roomAudioMuted = true;
     updateActiveSpeakerUi();
   }, avatarIdentity);
+  await expect(avatarCard).not.toHaveClass(/is-publisher-mic-off/);
   await expect(avatarBadge).toBeHidden();
 });
 
