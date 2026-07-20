@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::capture_health::{CaptureHealthState, CaptureSenderDiagnostics};
+use crate::capture_health::{CaptureHealthState, CaptureSenderDiagnostics, CaptureSessionId};
 use crate::file_debug_log;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
@@ -513,7 +513,11 @@ impl CapturePublisher {
         self.start_time.elapsed()
     }
 
-    pub async fn log_sender_stats(&self, log_prefix: &str, health: Option<&CaptureHealthState>) {
+    pub async fn log_sender_stats(
+        &self,
+        log_prefix: &str,
+        health: Option<(&CaptureHealthState, CaptureSessionId)>,
+    ) {
         match self.track.get_stats().await {
             Ok(stats) => {
                 let transport = stats.iter().find_map(|stat| match stat {
@@ -736,8 +740,8 @@ impl CapturePublisher {
                     eprintln!("[{}] transport stats missing", log_prefix);
                     file_debug_log::append(&format!("[{}] transport stats missing", log_prefix));
                 }
-                if let (Some(health), Some(diagnostics)) = (health, sender_diagnostics) {
-                    health.record_sender_diagnostics(diagnostics);
+                if let (Some((health, session)), Some(diagnostics)) = (health, sender_diagnostics) {
+                    health.record_sender_diagnostics(session, diagnostics);
                 }
             }
             Err(e) => {
@@ -751,7 +755,7 @@ impl CapturePublisher {
         &self,
         rt: &tokio::runtime::Handle,
         log_prefix: &str,
-        health: Option<&CaptureHealthState>,
+        health: Option<(&CaptureHealthState, CaptureSessionId)>,
     ) {
         rt.block_on(self.log_sender_stats(log_prefix, health));
     }

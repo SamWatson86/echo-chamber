@@ -5,7 +5,7 @@
 //! applies HDR→SDR tonemap + downscale via compute shader, outputs
 //! BGRA8 at the target encode resolution.
 
-use crate::capture_health::CaptureHealthState;
+use crate::capture_health::{CaptureHealthState, CaptureSessionId};
 use windows::core::PCSTR;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
@@ -328,7 +328,7 @@ impl GpuConverter {
         crop_y: u32,
         crop_w: u32,
         crop_h: u32,
-        health: Option<&CaptureHealthState>,
+        health: Option<(&CaptureHealthState, CaptureSessionId)>,
     ) -> Result<(*const u8, u32, u32, u32), String> {
         // 1. Copy captured frame → gpu_src (GPU→GPU, preserves format)
         context.CopyResource(&self.gpu_src, frame_texture);
@@ -384,8 +384,8 @@ impl GpuConverter {
         context
             .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
             .map_err(|e| {
-                if let Some(h) = health {
-                    h.record_shader_error();
+                if let Some((health, session)) = health {
+                    health.record_shader_error(session);
                 }
                 format!("map staging: {e}")
             })?;

@@ -17,7 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
-use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
+use crate::capture_health::{
+    CaptureErrorEvent, CaptureHealthState, CaptureMode, CaptureSessionId, CaptureStoppedEvent,
+    EncoderType,
+};
 use crate::capture_pipeline::{
     CapturePublisher, PublishProfile, StaticFrameHeartbeat, STATIC_FRAME_HEARTBEAT_INTERVAL,
 };
@@ -63,7 +66,9 @@ impl CaptureWindowStatus {
 // ── Global State ──
 
 struct ShareHandle {
+    session: CaptureSessionId,
     running: Arc<AtomicBool>,
+    health: Arc<CaptureHealthState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +237,50 @@ fn window_is_above(
 fn global_state() -> &'static Mutex<Option<ShareHandle>> {
     static STATE: OnceLock<Mutex<Option<ShareHandle>>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn request_stop(state: &Mutex<Option<ShareHandle>>, cancel_session: bool) -> bool {
+    let current = {
+        let state = state.lock().unwrap();
+        state.as_ref().map(|handle| {
+            (
+                handle.session,
+                Arc::clone(&handle.running),
+                Arc::clone(&handle.health),
+            )
+        })
+    };
+    let Some((session, running, health)) = current else {
+        return false;
+    };
+    if cancel_session {
+        health.cancel_capture_session(session);
+    }
+    running.store(false, Ordering::SeqCst);
+    true
+}
+
+fn replace_handle(
+    state: &Mutex<Option<ShareHandle>>,
+    replacement: ShareHandle,
+) -> Option<ShareHandle> {
+    state.lock().unwrap().replace(replacement)
+}
+
+fn clear_if_owner(
+    state: &Mutex<Option<ShareHandle>>,
+    session: CaptureSessionId,
+    running: &Arc<AtomicBool>,
+) -> bool {
+    let mut state = state.lock().unwrap();
+    let owns_handle = state
+        .as_ref()
+        .map(|handle| handle.session == session && Arc::ptr_eq(&handle.running, running))
+        .unwrap_or(false);
+    if owns_handle {
+        *state = None;
+    }
+    owns_handle
 }
 
 #[cfg(target_os = "windows")]
@@ -514,54 +563,88 @@ pub async fn start_share(
     publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     // The source may have closed or its HWND may have been reused since the
     // picker was rendered. Revalidate the live window before interrupting an
     // existing share or spawning a new capture task.
     validate_capture_window(source_id)?;
-    stop_share();
-
     let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            running: running.clone(),
-        });
+    let running_for_handle = Arc::clone(&running);
+    let health_for_handle = Arc::clone(&health);
+    let (session, retired) = health.begin_capture_session_with(|session| {
+        replace_handle(
+            global_state(),
+            ShareHandle {
+                session,
+                running: running_for_handle,
+                health: health_for_handle,
+            },
+        )
+    });
+    if let Some(retired) = retired {
+        retired.running.store(false, Ordering::SeqCst);
+    }
+    if !health.with_current_capture_session(session, crate::desktop_capture::stop_for_replacement) {
+        running.store(false, Ordering::SeqCst);
+        if clear_if_owner(global_state(), session, &running) {
+            health.complete_capture_session(session, || {
+                let _ = app.emit("screen-capture-stopped", CaptureStoppedEvent::new(session));
+            });
+        }
+        return Err("screen capture start cancelled or superseded".to_string());
     }
 
     let app2 = app.clone();
     let r2 = running.clone();
+    let health_for_loop = Arc::clone(&health);
     tokio::spawn(async move {
-        if let Err(e) = share_loop(
+        let result = share_loop(
             source_id,
             &sfu_url,
             &token,
             publish_profile,
             &app2,
             &r2,
-            health,
+            health_for_loop,
+            session,
         )
-        .await
-        {
-            eprintln!("[screen-capture] error: {}", e);
-            let _ = app2.emit("screen-capture-error", format!("{}", e));
+        .await;
+
+        if !clear_if_owner(global_state(), session, &r2) {
+            eprintln!("[screen-capture] stale task exited after replacement");
+            return;
         }
-        let _ = app2.emit("screen-capture-stopped", ());
+
+        let error = result.err();
+        if !health.complete_capture_session(session, || {
+            if let Some(error) = error.as_ref() {
+                eprintln!("[screen-capture] error: {}", error);
+                let _ = app2.emit(
+                    "screen-capture-error",
+                    CaptureErrorEvent::new(session, error.to_string()),
+                );
+            }
+            let _ = app2.emit("screen-capture-stopped", CaptureStoppedEvent::new(session));
+        }) {
+            eprintln!("[screen-capture] task exited after a newer backend took ownership");
+            return;
+        }
         eprintln!("[screen-capture] task exited");
-        let mut state = global_state().lock().unwrap();
-        *state = None;
     });
 
-    Ok(())
+    Ok(session.as_u64())
 }
 
 /// Stop the current screen share.
 pub fn stop_share() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
-        handle.running.store(false, Ordering::SeqCst);
+    if request_stop(global_state(), true) {
         eprintln!("[screen-capture] stop requested");
+    }
+}
+
+pub(crate) fn stop_for_replacement() {
+    if request_stop(global_state(), false) {
+        eprintln!("[screen-capture] replacement stop requested");
     }
 }
 
@@ -840,6 +923,7 @@ async fn share_loop(
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     health: Arc<CaptureHealthState>,
+    session: CaptureSessionId,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
     let publish_settings = wgc_publish_settings(publish_profile);
@@ -855,6 +939,11 @@ async fn share_loop(
     )
     .await?;
 
+    if !running.load(Ordering::SeqCst) {
+        publisher.shutdown().await;
+        return Ok(());
+    }
+
     // Resolve HWND -> PID for WASAPI audio auto-start
     let target_pid = unsafe {
         use windows::Win32::Foundation::HWND;
@@ -866,14 +955,29 @@ async fn share_loop(
         pid
     };
 
-    eprintln!("[screen-capture] starting WGC capture");
-    let _ = app.emit("screen-capture-started", target_pid);
-    health.set_active(
-        true,
+    if !running.load(Ordering::SeqCst) {
+        publisher.shutdown().await;
+        return Ok(());
+    }
+
+    if !health.activate_capture_session(
+        session,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
         publish_profile.target_fps(),
-    );
+    ) {
+        running.store(false, Ordering::SeqCst);
+        publisher.shutdown().await;
+        return Ok(());
+    }
+    eprintln!("[screen-capture] starting WGC capture");
+    if !health.with_current_capture_session(session, || {
+        let _ = app.emit("screen-capture-started", target_pid);
+    }) {
+        running.store(false, Ordering::SeqCst);
+        publisher.shutdown().await;
+        return Ok(());
+    }
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
@@ -1139,7 +1243,7 @@ async fn share_loop(
                 pushed,
                 from_heartbeat
             ));
-            health.record_capture_fps(pushed_fps.round() as u32);
+            health.record_capture_fps(session, pushed_fps.round() as u32);
             last_publish_log_at = now;
             last_publish_attempt_count = publish_attempt_count;
             last_publish_frame_count = fc;
@@ -1149,7 +1253,7 @@ async fn share_loop(
 
         if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
             publisher
-                .log_sender_stats("screen-capture", Some(health.as_ref()))
+                .log_sender_stats("screen-capture", Some((health.as_ref(), session)))
                 .await;
             last_sender_stats_at = now;
         }
@@ -1173,7 +1277,7 @@ async fn share_loop(
             if let Some(emit_fps) =
                 publisher.maybe_emit_stats(app, "screen-capture-stats", "wgc", *width, *height, 30)
             {
-                health.record_capture_fps(emit_fps);
+                health.record_capture_fps(session, emit_fps);
             }
         }
     }
@@ -1183,7 +1287,6 @@ async fn share_loop(
         "[screen-capture] shutting down, {} frames captured",
         publisher.frame_count()
     );
-    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())
 }
@@ -1201,32 +1304,71 @@ pub async fn start_share_monitor(
     token: String,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
-) -> Result<(), String> {
-    stop_share();
-
+) -> Result<u64, String> {
     let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            running: running.clone(),
-        });
+    let running_for_handle = Arc::clone(&running);
+    let health_for_handle = Arc::clone(&health);
+    let (session, retired) = health.begin_capture_session_with(|session| {
+        replace_handle(
+            global_state(),
+            ShareHandle {
+                session,
+                running: running_for_handle,
+                health: health_for_handle,
+            },
+        )
+    });
+    if let Some(retired) = retired {
+        retired.running.store(false, Ordering::SeqCst);
+    }
+    if !health.with_current_capture_session(session, crate::desktop_capture::stop_for_replacement) {
+        running.store(false, Ordering::SeqCst);
+        if clear_if_owner(global_state(), session, &running) {
+            health.complete_capture_session(session, || {
+                let _ = app.emit("screen-capture-stopped", CaptureStoppedEvent::new(session));
+            });
+        }
+        return Err("monitor capture start cancelled or superseded".to_string());
     }
 
     let app2 = app.clone();
     let r2 = running.clone();
+    let health_for_loop = Arc::clone(&health);
     tokio::spawn(async move {
-        if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2, health).await {
-            eprintln!("[screen-capture-monitor] error: {}", e);
-            let _ = app2.emit("screen-capture-error", format!("{}", e));
+        let result = share_loop_monitor(
+            hmonitor,
+            &sfu_url,
+            &token,
+            &app2,
+            &r2,
+            health_for_loop,
+            session,
+        )
+        .await;
+
+        if !clear_if_owner(global_state(), session, &r2) {
+            eprintln!("[screen-capture-monitor] stale task exited after replacement");
+            return;
         }
-        let _ = app2.emit("screen-capture-stopped", ());
+
+        let error = result.err();
+        if !health.complete_capture_session(session, || {
+            if let Some(error) = error.as_ref() {
+                eprintln!("[screen-capture-monitor] error: {}", error);
+                let _ = app2.emit(
+                    "screen-capture-error",
+                    CaptureErrorEvent::new(session, error.to_string()),
+                );
+            }
+            let _ = app2.emit("screen-capture-stopped", CaptureStoppedEvent::new(session));
+        }) {
+            eprintln!("[screen-capture-monitor] task exited after a newer backend took ownership");
+            return;
+        }
         eprintln!("[screen-capture-monitor] task exited");
-        let mut state = global_state().lock().unwrap();
-        *state = None;
     });
 
-    Ok(())
+    Ok(session.as_u64())
 }
 
 async fn share_loop_monitor(
@@ -1236,6 +1378,7 @@ async fn share_loop_monitor(
     app: &AppHandle,
     running: &Arc<AtomicBool>,
     health: Arc<CaptureHealthState>,
+    session: CaptureSessionId,
 ) -> Result<(), String> {
     // 1. Connect to SFU and publish track via shared pipeline
     let publish_settings = wgc_monitor_publish_settings();
@@ -1251,18 +1394,33 @@ async fn share_loop_monitor(
     )
     .await?;
 
+    if !running.load(Ordering::SeqCst) {
+        publisher.shutdown().await;
+        return Ok(());
+    }
+
+    if !health.activate_capture_session(
+        session,
+        CaptureMode::Wgc,
+        EncoderType::Nvenc,
+        PublishProfile::Desktop.target_fps(),
+    ) {
+        running.store(false, Ordering::SeqCst);
+        publisher.shutdown().await;
+        return Ok(());
+    }
     eprintln!(
         "[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}",
         hmonitor
     );
     // No PID for monitor capture — system-wide audio not per-process
-    let _ = app.emit("screen-capture-started", 0u32);
-    health.set_active(
-        true,
-        CaptureMode::Wgc,
-        EncoderType::Nvenc,
-        PublishProfile::Desktop.target_fps(),
-    );
+    if !health.with_current_capture_session(session, || {
+        let _ = app.emit("screen-capture-started", 0u32);
+    }) {
+        running.store(false, Ordering::SeqCst);
+        publisher.shutdown().await;
+        return Ok(());
+    }
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
@@ -1498,7 +1656,7 @@ async fn share_loop_monitor(
                 pushed,
                 from_heartbeat
             ));
-            health.record_capture_fps(pushed_fps.round() as u32);
+            health.record_capture_fps(session, pushed_fps.round() as u32);
             last_publish_log_at = now;
             last_publish_attempt_count = publish_attempt_count;
             last_publish_frame_count = fc;
@@ -1508,7 +1666,7 @@ async fn share_loop_monitor(
 
         if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
             publisher
-                .log_sender_stats("screen-capture-monitor", Some(health.as_ref()))
+                .log_sender_stats("screen-capture-monitor", Some((health.as_ref(), session)))
                 .await;
             last_sender_stats_at = now;
         }
@@ -1537,7 +1695,7 @@ async fn share_loop_monitor(
                 *height,
                 30,
             ) {
-                health.record_capture_fps(emit_fps);
+                health.record_capture_fps(session, emit_fps);
             }
         }
     }
@@ -1547,7 +1705,6 @@ async fn share_loop_monitor(
         "[screen-capture-monitor] shutting down, {} frames captured",
         publisher.frame_count()
     );
-    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
     publisher.shutdown().await;
     Ok(())
 }
@@ -1555,6 +1712,54 @@ async fn share_loop_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_owns_handle_and_explicit_stop_targets_latest_wgc_session() {
+        let health = Arc::new(CaptureHealthState::new());
+        let state = Mutex::new(None);
+
+        let old_running = Arc::new(AtomicBool::new(true));
+        let old_for_handle = Arc::clone(&old_running);
+        let old_health = Arc::clone(&health);
+        let (old_session, retired) = health.begin_capture_session_with(|session| {
+            replace_handle(
+                &state,
+                ShareHandle {
+                    session,
+                    running: old_for_handle,
+                    health: old_health,
+                },
+            )
+        });
+        assert!(retired.is_none());
+
+        let new_running = Arc::new(AtomicBool::new(true));
+        let new_for_handle = Arc::clone(&new_running);
+        let new_health = Arc::clone(&health);
+        let (new_session, retired) = health.begin_capture_session_with(|session| {
+            replace_handle(
+                &state,
+                ShareHandle {
+                    session,
+                    running: new_for_handle,
+                    health: new_health,
+                },
+            )
+        });
+        let retired = retired.expect("the replacement must retire the old handle");
+        retired.running.store(false, Ordering::SeqCst);
+
+        assert!(!old_running.load(Ordering::SeqCst));
+        assert!(!clear_if_owner(&state, old_session, &old_running));
+        assert!(request_stop(&state, true));
+        assert!(!new_running.load(Ordering::SeqCst));
+        assert!(
+            state.lock().unwrap().is_some(),
+            "stop must retain ownership"
+        );
+        assert!(clear_if_owner(&state, new_session, &new_running));
+        assert!(state.lock().unwrap().is_none());
+    }
 
     #[test]
     fn source_visibility_warning_flags_minimized_window() {
