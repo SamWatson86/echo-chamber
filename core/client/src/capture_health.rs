@@ -93,6 +93,10 @@ pub struct CaptureHealthSnapshot {
     pub consecutive_timeouts_max_5m: u32,
     pub encoder_skip_rate_pct: f32,
     pub shader_errors_5m: u32,
+    /// Correlates the active native capture with lifecycle events and the
+    /// value returned by the Tauri start command. Absent on older binaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_session_id: Option<u64>,
     /// Seconds since capture became active. Used by the classifier to
     /// suppress fps-based checks during the cold-start grace window.
     /// Zero when capture is inactive.
@@ -119,9 +123,63 @@ pub struct CaptureSenderDiagnostics {
     pub encoder: Option<String>,
 }
 
+/// Monotonic lease for one native capture attempt. Window WGC, monitor WGC,
+/// and DXGI all draw from the same sequence so a task from an older backend
+/// cannot deactivate or complete a newer capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureSessionId(u64);
+
+impl CaptureSessionId {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStoppedEvent {
+    pub session_id: u64,
+}
+
+impl CaptureStoppedEvent {
+    pub fn new(session: CaptureSessionId) -> Self {
+        Self {
+            session_id: session.as_u64(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureErrorEvent {
+    pub session_id: u64,
+    pub message: String,
+}
+
+impl CaptureErrorEvent {
+    pub fn new(session: CaptureSessionId, message: String) -> Self {
+        Self {
+            session_id: session.as_u64(),
+            message,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CaptureSessionState {
+    next_id: u64,
+    current: Option<CaptureSessionId>,
+    stopping: bool,
+}
+
 // ── State ───────────────────────────────────────────────────────────
 
 pub struct CaptureHealthState {
+    /// Serializes capture-session replacement and completion. The health
+    /// fields below use atomics/locks for cheap sampling, but lifecycle writes
+    /// must be ordered as one transition so a stale task cannot win a race
+    /// after merely checking a generation number.
+    capture_session: Mutex<CaptureSessionState>,
     consecutive_timeouts: AtomicU32,
     consecutive_timeouts_max_5m: AtomicU32,
     encoder_skipped_total: AtomicU64,
@@ -146,6 +204,7 @@ pub struct CaptureHealthState {
 impl CaptureHealthState {
     pub fn new() -> Self {
         Self {
+            capture_session: Mutex::new(CaptureSessionState::default()),
             consecutive_timeouts: AtomicU32::new(0),
             consecutive_timeouts_max_5m: AtomicU32::new(0),
             encoder_skipped_total: AtomicU64::new(0),
@@ -173,50 +232,158 @@ impl CaptureHealthState {
         events.retain(|(t, _)| *t >= cutoff);
     }
 
-    pub fn record_reinit(&self) {
-        let now = Instant::now();
-        let mut e = self.reinit_events.lock();
-        Self::prune(&mut e, now);
-        e.push(now);
+    pub fn record_reinit(&self, session: CaptureSessionId) {
+        self.with_current_capture_session(session, || {
+            let now = Instant::now();
+            let mut e = self.reinit_events.lock();
+            Self::prune(&mut e, now);
+            e.push(now);
+        });
     }
 
-    pub fn record_consecutive_timeout(&self, current: u32) {
-        self.consecutive_timeouts.store(current, Ordering::Relaxed);
-        let now = Instant::now();
-        let mut e = self.timeout_max_events.lock();
-        Self::prune_pairs(&mut e, now);
-        e.push((now, current));
-        let max = e.iter().map(|(_, n)| *n).max().unwrap_or(0);
-        self.consecutive_timeouts_max_5m
-            .store(max, Ordering::Relaxed);
+    pub fn record_consecutive_timeout(&self, session: CaptureSessionId, current: u32) {
+        self.with_current_capture_session(session, || {
+            self.consecutive_timeouts.store(current, Ordering::Relaxed);
+            let now = Instant::now();
+            let mut e = self.timeout_max_events.lock();
+            Self::prune_pairs(&mut e, now);
+            e.push((now, current));
+            let max = e.iter().map(|(_, n)| *n).max().unwrap_or(0);
+            self.consecutive_timeouts_max_5m
+                .store(max, Ordering::Relaxed);
+        });
     }
 
-    pub fn reset_consecutive_timeouts(&self) {
-        self.consecutive_timeouts.store(0, Ordering::Relaxed);
+    pub fn reset_consecutive_timeouts(&self, session: CaptureSessionId) {
+        self.with_current_capture_session(session, || {
+            self.consecutive_timeouts.store(0, Ordering::Relaxed);
+        });
     }
 
-    pub fn record_encoder_status(&self, skipped_total: u64, sent_total: u64) {
-        self.encoder_skipped_total
-            .store(skipped_total, Ordering::Relaxed);
-        self.encoder_sent_total.store(sent_total, Ordering::Relaxed);
+    pub fn record_encoder_status(
+        &self,
+        session: CaptureSessionId,
+        skipped_total: u64,
+        sent_total: u64,
+    ) {
+        self.with_current_capture_session(session, || {
+            self.encoder_skipped_total
+                .store(skipped_total, Ordering::Relaxed);
+            self.encoder_sent_total.store(sent_total, Ordering::Relaxed);
+        });
     }
 
-    pub fn record_shader_error(&self) {
-        let now = Instant::now();
-        let mut e = self.shader_error_events.lock();
-        Self::prune(&mut e, now);
-        e.push(now);
+    pub fn record_shader_error(&self, session: CaptureSessionId) {
+        self.with_current_capture_session(session, || {
+            let now = Instant::now();
+            let mut e = self.shader_error_events.lock();
+            Self::prune(&mut e, now);
+            e.push(now);
+        });
     }
 
-    pub fn record_capture_fps(&self, fps: u32) {
-        self.last_capture_fps.store(fps, Ordering::Relaxed);
+    pub fn record_capture_fps(&self, session: CaptureSessionId, fps: u32) {
+        self.with_current_capture_session(session, || {
+            self.last_capture_fps.store(fps, Ordering::Relaxed);
+        });
     }
 
-    pub fn record_sender_diagnostics(&self, diagnostics: CaptureSenderDiagnostics) {
-        *self.sender_diagnostics.write() = Some(diagnostics);
+    pub fn record_sender_diagnostics(
+        &self,
+        session: CaptureSessionId,
+        diagnostics: CaptureSenderDiagnostics,
+    ) {
+        self.with_current_capture_session(session, || {
+            *self.sender_diagnostics.write() = Some(diagnostics);
+        });
     }
 
-    pub fn set_active(&self, active: bool, mode: CaptureMode, encoder: EncoderType, target: u32) {
+    /// Start a new cross-backend capture session and invalidate every older
+    /// task. Health is reset while the new task connects to the SFU.
+    pub fn begin_capture_session_with<T, F>(&self, install: F) -> (CaptureSessionId, T)
+    where
+        F: FnOnce(CaptureSessionId) -> T,
+    {
+        let mut state = self.capture_session.lock();
+        state.next_id = state.next_id.wrapping_add(1).max(1);
+        let session = CaptureSessionId(state.next_id);
+        state.current = Some(session);
+        state.stopping = false;
+        self.set_active_inner(false, CaptureMode::None, EncoderType::None, 0);
+        let installed = install(session);
+        (session, installed)
+    }
+
+    #[cfg(test)]
+    fn begin_capture_session(&self) -> CaptureSessionId {
+        self.begin_capture_session_with(|_| ()).0
+    }
+
+    /// Mark a capture session active only if it is still the newest native
+    /// capture attempt. Returns false when a replacement already owns health.
+    pub fn activate_capture_session(
+        &self,
+        session: CaptureSessionId,
+        mode: CaptureMode,
+        encoder: EncoderType,
+        target: u32,
+    ) -> bool {
+        let state = self.capture_session.lock();
+        if state.current != Some(session) || state.stopping {
+            return false;
+        }
+        self.set_active_inner(true, mode, encoder, target);
+        true
+    }
+
+    /// Run a short ownership transition only while this session is current.
+    /// Start paths use this to stop the opposite backend without allowing a
+    /// concurrent newer start to be mistaken for the backend being retired.
+    pub fn with_current_capture_session<F>(&self, session: CaptureSessionId, action: F) -> bool
+    where
+        F: FnOnce(),
+    {
+        let state = self.capture_session.lock();
+        if state.current != Some(session) || state.stopping {
+            return false;
+        }
+        action();
+        true
+    }
+
+    /// Cancel a current session before its async connection/publisher task has
+    /// necessarily started. A cancelled lease can complete and emit its final
+    /// stop event, but it can never activate or publish live metrics again.
+    pub fn cancel_capture_session(&self, session: CaptureSessionId) -> bool {
+        let mut state = self.capture_session.lock();
+        if state.current != Some(session) {
+            return false;
+        }
+        state.stopping = true;
+        self.set_active_inner(false, CaptureMode::None, EncoderType::None, 0);
+        true
+    }
+
+    /// Complete the current capture and run its notification while session
+    /// replacement is serialized. This makes stop/error events truthful: a
+    /// newer start either happens before this call (and suppresses the stale
+    /// callback) or after the current stop notification has been emitted.
+    pub fn complete_capture_session<F>(&self, session: CaptureSessionId, on_current: F) -> bool
+    where
+        F: FnOnce(),
+    {
+        let mut state = self.capture_session.lock();
+        if state.current != Some(session) {
+            return false;
+        }
+        self.set_active_inner(false, CaptureMode::None, EncoderType::None, 0);
+        on_current();
+        state.current = None;
+        state.stopping = false;
+        true
+    }
+
+    fn set_active_inner(&self, active: bool, mode: CaptureMode, encoder: EncoderType, target: u32) {
         let was_active = self.capture_active.swap(active, Ordering::Relaxed);
         *self.capture_mode.write() = mode;
         // Use the caller's encoder hint, but OVERRIDE to OpenH264 if we
@@ -255,9 +422,9 @@ impl CaptureHealthState {
     /// libwebrtc actually selected for encoderImplementation. The viewer
     /// reads this from getStats() which is the canonical source — Rust
     /// side has no easy way to know which encoder libwebrtc chose at
-    /// publish time. We default-assume Nvenc in set_active() and let the
+    /// publish time. We default-assume Nvenc when capture activates and let the
     /// viewer correct us if WebRTC picked OpenH264 or anything else.
-    pub fn set_encoder_type_from_string(&self, raw: &str) {
+    pub fn set_encoder_type_from_string(&self, session_id: u64, raw: &str) -> bool {
         let lower = raw.to_lowercase();
         let new_type =
             if lower.contains("openh264") || lower == "open h264" || lower.contains("software") {
@@ -271,12 +438,22 @@ impl CaptureHealthState {
                 EncoderType::Nvenc
             } else {
                 // Unknown encoder string — leave whatever set_active put there.
-                return;
+                return false;
             };
+        let state = self.capture_session.lock();
+        if state.current.map(CaptureSessionId::as_u64) != Some(session_id) || state.stopping {
+            return false;
+        }
         *self.encoder_type.write() = new_type;
+        true
     }
 
     pub fn snapshot(&self) -> CaptureHealthSnapshot {
+        // Lifecycle writers always lock session first, then individual health
+        // fields. Hold that same guard through sampling so one snapshot cannot
+        // combine session A's ID with session B's active/mode/counters.
+        let session_state = self.capture_session.lock();
+        let capture_session_id = session_state.current.map(CaptureSessionId::as_u64);
         let now = Instant::now();
         let reinit_count_5m = {
             let mut e = self.reinit_events.lock();
@@ -328,6 +505,7 @@ impl CaptureHealthState {
             consecutive_timeouts_max_5m,
             encoder_skip_rate_pct,
             shader_errors_5m,
+            capture_session_id,
             seconds_since_capture_started: {
                 let started = *self.capture_started_at.lock();
                 started.map(|t| t.elapsed().as_secs()).unwrap_or(0)
@@ -346,6 +524,7 @@ impl CaptureHealthState {
                 .as_ref()
                 .and_then(|diag| diag.encoder.clone()),
         };
+        drop(session_state);
         let (level, reasons) = classify(&snap);
         snap.level = level;
         snap.reasons = reasons;
@@ -490,6 +669,7 @@ mod tests {
             consecutive_timeouts_max_5m: 0,
             encoder_skip_rate_pct: 0.0,
             shader_errors_5m: 0,
+            capture_session_id: None,
             // Past the 10s cold-start grace by default so existing tests
             // exercise the steady-state classifier behavior. Tests that
             // need to verify cold-start suppression set this to a small
@@ -501,6 +681,80 @@ mod tests {
             sender_quality_limitation: None,
             sender_encoder: None,
         }
+    }
+
+    #[test]
+    fn cancelled_connect_cannot_activate_or_write_metrics_but_completes_once() {
+        let state = CaptureHealthState::new();
+        let session = state.begin_capture_session();
+
+        assert!(state.cancel_capture_session(session));
+        assert!(!state.activate_capture_session(session, CaptureMode::Wgc, EncoderType::Nvenc, 30));
+        state.record_capture_fps(session, 99);
+
+        let cancelled = state.snapshot();
+        assert!(!cancelled.capture_active);
+        assert_eq!(cancelled.current_fps, 0);
+        assert_eq!(cancelled.capture_session_id, Some(session.as_u64()));
+
+        let completions = std::sync::atomic::AtomicU32::new(0);
+        assert!(state.complete_capture_session(session, || {
+            completions.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(!state.complete_capture_session(session, || {
+            completions.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(completions.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stale_completion_and_metrics_cannot_supersede_newest_session() {
+        let state = CaptureHealthState::new();
+        let old = state.begin_capture_session();
+        assert!(state.activate_capture_session(old, CaptureMode::DxgiDd, EncoderType::Nvenc, 60));
+        state.record_capture_fps(old, 12);
+
+        let newest = state.begin_capture_session();
+        assert!(state.activate_capture_session(newest, CaptureMode::Wgc, EncoderType::Nvenc, 30));
+        state.record_capture_fps(newest, 27);
+
+        state.record_capture_fps(old, 1);
+        assert!(!state.set_encoder_type_from_string(old.as_u64(), "OpenH264"));
+        let stale_callback_ran = std::sync::atomic::AtomicBool::new(false);
+        assert!(!state.complete_capture_session(old, || {
+            stale_callback_ran.store(true, Ordering::SeqCst);
+        }));
+
+        let snapshot = state.snapshot();
+        assert!(snapshot.capture_active);
+        assert_eq!(snapshot.capture_mode, "WGC");
+        assert_eq!(snapshot.current_fps, 27);
+        assert_eq!(snapshot.capture_session_id, Some(newest.as_u64()));
+        assert!(!stale_callback_ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn newest_cross_backend_claim_exclusively_runs_replacement_transition() {
+        let state = CaptureHealthState::new();
+        let installed = Mutex::new(None::<(CaptureSessionId, &'static str)>);
+
+        let (wgc, retired) =
+            state.begin_capture_session_with(|session| installed.lock().replace((session, "WGC")));
+        assert!(retired.is_none());
+
+        let (dxgi, retired) =
+            state.begin_capture_session_with(|session| installed.lock().replace((session, "DXGI")));
+        assert_eq!(retired, Some((wgc, "WGC")));
+        assert_eq!(*installed.lock(), Some((dxgi, "DXGI")));
+
+        let transitions = std::sync::atomic::AtomicU32::new(0);
+        assert!(!state.with_current_capture_session(wgc, || {
+            transitions.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert!(state.with_current_capture_session(dxgi, || {
+            transitions.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(transitions.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -645,14 +899,23 @@ mod tests {
     #[test]
     fn snapshot_includes_sender_diagnostics_and_clears_when_inactive() {
         let state = CaptureHealthState::new();
-        state.set_active(true, CaptureMode::DxgiDd, EncoderType::Nvenc, 60);
-        state.record_sender_diagnostics(CaptureSenderDiagnostics {
-            fps: Some(8.0),
-            target_bitrate_kbps: Some(5520),
-            available_outgoing_bitrate_kbps: Some(5615),
-            quality_limitation: Some("Cpu".into()),
-            encoder: Some("NVIDIA H264 Encoder".into()),
-        });
+        let session = state.begin_capture_session();
+        assert!(state.activate_capture_session(
+            session,
+            CaptureMode::DxgiDd,
+            EncoderType::Nvenc,
+            60
+        ));
+        state.record_sender_diagnostics(
+            session,
+            CaptureSenderDiagnostics {
+                fps: Some(8.0),
+                target_bitrate_kbps: Some(5520),
+                available_outgoing_bitrate_kbps: Some(5615),
+                quality_limitation: Some("Cpu".into()),
+                encoder: Some("NVIDIA H264 Encoder".into()),
+            },
+        );
 
         let active = state.snapshot();
         assert_eq!(active.sender_fps, Some(8.0));
@@ -664,7 +927,7 @@ mod tests {
             Some("NVIDIA H264 Encoder")
         );
 
-        state.set_active(false, CaptureMode::None, EncoderType::None, 0);
+        assert!(state.complete_capture_session(session, || {}));
         let inactive = state.snapshot();
         assert_eq!(inactive.sender_fps, None);
         assert_eq!(inactive.sender_target_bitrate_kbps, None);

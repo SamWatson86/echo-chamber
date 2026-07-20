@@ -534,7 +534,7 @@ async fn start_screen_share(
     publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let health_arc = std::sync::Arc::clone(&*health);
     screen_capture::start_share(
         source_id,
@@ -583,7 +583,7 @@ async fn start_desktop_capture(
     publish_profile: Option<capture_pipeline::PublishProfile>,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let health_arc = std::sync::Arc::clone(&*health);
     desktop_capture::start(
         hwnd,
@@ -608,7 +608,7 @@ async fn start_screen_share_monitor(
     token: String,
     app: tauri::AppHandle,
     health: tauri::State<'_, std::sync::Arc<CaptureHealthState>>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let health_arc = std::sync::Arc::clone(&*health);
     screen_capture::start_share_monitor(hmonitor, sfu_url, token, app, health_arc).await
 }
@@ -634,8 +634,12 @@ fn get_capture_health(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn report_encoder_implementation(state: tauri::State<Arc<CaptureHealthState>>, encoder: String) {
-    state.set_encoder_type_from_string(&encoder);
+fn report_encoder_implementation(
+    state: tauri::State<Arc<CaptureHealthState>>,
+    encoder: String,
+    capture_session_id: u64,
+) {
+    state.set_encoder_type_from_string(capture_session_id, &encoder);
 }
 
 fn main() {

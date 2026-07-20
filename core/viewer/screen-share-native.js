@@ -12,6 +12,60 @@ function _sourceVisibilityToastCooldownMs() {
   return typeof SOURCE_VISIBILITY_TOAST_COOLDOWN_MS === 'number' ? SOURCE_VISIBILITY_TOAST_COOLDOWN_MS : 10000;
 }
 
+function _normalizeNativeCaptureSessionId(value) {
+  if (value && typeof value === 'object') {
+    value = value.sessionId !== undefined ? value.sessionId : value.session_id;
+  }
+  if (value === undefined || value === null || value === '') return null;
+  return String(value);
+}
+
+function _nativeCaptureLifecycleVersion() {
+  return Number(window._echoNativeLifecycleVersion) || 0;
+}
+
+function _rememberNativeCaptureSessionId(startResult, lifecycleVersionAtStart) {
+  var sessionId = _normalizeNativeCaptureSessionId(startResult);
+  var stoppedSessionId = _normalizeNativeCaptureSessionId(
+    window._echoLastStoppedNativeCaptureSessionId
+  );
+  if (sessionId && sessionId === stoppedSessionId) {
+    window._echoNativeCaptureSessionId = null;
+    throw new Error('Native capture ended before startup completed');
+  }
+  // Older binaries return no session ID. A lifecycle event accepted while the
+  // invoke was in flight is the only authoritative signal available; never
+  // mark that already-ended attempt active just because the void invoke later
+  // resolved.
+  if (!sessionId && lifecycleVersionAtStart !== undefined &&
+      _nativeCaptureLifecycleVersion() !== lifecycleVersionAtStart) {
+    window._echoNativeCaptureSessionId = null;
+    throw new Error('Native capture ended before startup completed');
+  }
+  window._echoNativeCaptureSessionId = sessionId;
+  return window._echoNativeCaptureSessionId;
+}
+
+function _nativeEncoderReportArgs(encoder) {
+  var args = { encoder: encoder };
+  var sessionId = _normalizeNativeCaptureSessionId(window._echoNativeCaptureSessionId);
+  if (sessionId !== null) args.captureSessionId = Number(sessionId);
+  return args;
+}
+
+function _nativeCaptureEventDetails(event) {
+  var payload = event && Object.prototype.hasOwnProperty.call(event, 'payload')
+    ? event.payload
+    : event;
+  var structured = !!(payload && typeof payload === 'object');
+  return {
+    message: structured ? payload.message : (typeof payload === 'string' ? payload : null),
+    // Older binaries emitted unit stop payloads and plain-string errors. Only
+    // the new structured payload is trustworthy capture-session evidence.
+    sessionId: structured ? _normalizeNativeCaptureSessionId(payload) : null,
+  };
+}
+
 function _shouldMonitorNativeCaptureSource(source, mode) {
   return !!(
     source &&
@@ -163,7 +217,110 @@ function _stopNativeCaptureStopListeners() {
   }
 }
 
-async function _finalizeNativeCaptureStop(stopMessage) {
+function _nativeCaptureStopCommands(captureMode) {
+  var normalizedMode = String(captureMode || '').trim().toLowerCase();
+  if (normalizedMode === 'desktop-dd' || normalizedMode === 'dxgi-dd') {
+    return ['stop_desktop_capture'];
+  }
+  if (normalizedMode === 'wgc' || normalizedMode === 'wgc-monitor' ||
+      normalizedMode === 'wgc-game-monitor') {
+    return ['stop_screen_share'];
+  }
+  // A reloaded viewer may know that its native companion is still live but no
+  // longer know which Rust capture route created it. Both stop commands are
+  // intentionally idempotent, so cover both routes before removing the share.
+  return ['stop_screen_share', 'stop_desktop_capture'];
+}
+
+function _hasOwnNativeScreenCompanion() {
+  var localIdentity = room && room.localParticipant ? room.localParticipant.identity : null;
+  if (!localIdentity) return false;
+  var parentIdentity = localIdentity.endsWith('$screen')
+    ? localIdentity.slice(0, -'$screen'.length)
+    : localIdentity;
+  var companionIdentity = parentIdentity + '$screen';
+  var remotes = room && room.remoteParticipants;
+
+  if (remotes) {
+    if (typeof remotes.get === 'function' && remotes.get(companionIdentity)) return true;
+    if (typeof remotes.forEach === 'function') {
+      var companionFound = false;
+      remotes.forEach(function(participant) {
+        if (participant && participant.identity === companionIdentity) companionFound = true;
+      });
+      if (companionFound) return true;
+    }
+  }
+
+  if (typeof screenTileByIdentity !== 'undefined' && screenTileByIdentity) {
+    if (screenTileByIdentity.has(companionIdentity)) return true;
+    // Native shares have no browser LocalVideoTrack. In that case the parent
+    // tile is sufficient fallback evidence for older companion bookkeeping.
+    if ((!_screenShareVideoTrack) && screenTileByIdentity.has(parentIdentity)) return true;
+  }
+  if (typeof screenTrackMeta !== 'undefined' && screenTrackMeta && screenTrackMeta.forEach) {
+    var metadataFound = false;
+    screenTrackMeta.forEach(function(meta) {
+      if (!meta) return;
+      if (meta.identity === companionIdentity ||
+          ((!_screenShareVideoTrack) && meta.identity === parentIdentity)) {
+        metadataFound = true;
+      }
+    });
+    if (metadataFound) return true;
+  }
+  return false;
+}
+
+async function _resolveNativeCaptureStopCommands() {
+  if (window._echoNativeCaptureActive || window._echoNativeCaptureMode) {
+    return _nativeCaptureStopCommands(window._echoNativeCaptureMode);
+  }
+
+  // The native publisher runs in a separate companion participant. A viewer
+  // reload can lose these JavaScript flags while Rust is still publishing, so
+  // ask the desktop capture engine before falling through to browser cleanup.
+  if (!window.__ECHO_NATIVE__ || typeof tauriInvoke !== 'function') return null;
+  var hasCompanion = _hasOwnNativeScreenCompanion();
+  try {
+    var health = await tauriInvoke('get_capture_health');
+    if (health && health.capture_active) {
+      var healthSessionId = health.capture_session_id !== undefined
+        ? health.capture_session_id
+        : health.captureSessionId;
+      if (healthSessionId !== undefined && healthSessionId !== null) {
+        _rememberNativeCaptureSessionId(healthSessionId);
+      }
+      return _nativeCaptureStopCommands(health.capture_mode);
+    }
+    // Older WGC completion paths can report health inactive while the native
+    // companion is still publishing. Companion/tile evidence is authoritative
+    // for this explicit user-requested stop.
+    return hasCompanion ? _nativeCaptureStopCommands(null) : null;
+  } catch (err) {
+    if (typeof debugLog === 'function') {
+      debugLog('[screen-share] get_capture_health failed during stop: ' + (err.message || err));
+    }
+    if (hasCompanion) return _nativeCaptureStopCommands(null);
+    // A native shell can intentionally fall back to getDisplayMedia when its
+    // capture commands are unavailable. Only that known browser-track case may
+    // continue through browser cleanup; otherwise preserve the truthful
+    // "Stop Sharing" state and let the caller surface the failed transition.
+    if (typeof _screenShareVideoTrack !== 'undefined' && _screenShareVideoTrack) return null;
+    throw new Error('Unable to verify the active native screen share: ' + (err.message || err));
+  }
+}
+
+async function _finalizeNativeCaptureStop(stopMessage, stoppedSessionId) {
+  var normalizedStoppedSessionId = _normalizeNativeCaptureSessionId(stoppedSessionId);
+  var currentSessionId = _normalizeNativeCaptureSessionId(window._echoNativeCaptureSessionId);
+  if (normalizedStoppedSessionId && currentSessionId &&
+      normalizedStoppedSessionId !== currentSessionId) {
+    if (typeof debugLog === 'function') {
+      debugLog('[screen-share] ignored stale finalize for native session ' + normalizedStoppedSessionId);
+    }
+    return false;
+  }
   var wasActive = !!(window._echoNativeCaptureActive || window._echoNativeCaptureMode || screenEnabled);
   window._echoNativeCaptureActive = false;
   window._echoNativeCaptureMode = null;
@@ -175,13 +332,31 @@ async function _finalizeNativeCaptureStop(stopMessage) {
   _stopQualityWarnListener();
   await stopNativeAudioCapture();
   renderPublishButtons();
+  var latestSessionId = _normalizeNativeCaptureSessionId(window._echoNativeCaptureSessionId);
+  if ((normalizedStoppedSessionId && latestSessionId === normalizedStoppedSessionId) ||
+      (!normalizedStoppedSessionId && !currentSessionId && !latestSessionId)) {
+    window._echoNativeCaptureSessionId = null;
+  }
+  if (normalizedStoppedSessionId) {
+    window._echoLastStoppedNativeCaptureSessionId = normalizedStoppedSessionId;
+  }
   if (stopMessage && wasActive) showToast(stopMessage, 3000);
+  return true;
+}
+
+async function _cleanupStoppedNativePublication() {
+  var localIdentity = room && room.localParticipant ? room.localParticipant.identity : null;
+  var roomName = currentRoomName || 'main';
+  _clearNativeScreenTilesForIdentity(localIdentity);
+  await _removeNativeScreenCompanion(localIdentity, roomName);
 }
 
 function _clearNativeScreenTilesForIdentity(identity) {
   if (!identity) return;
-  var identities = [identity];
-  if (!identity.endsWith('$screen')) identities.push(identity + '$screen');
+  var parentIdentity = identity.endsWith('$screen')
+    ? identity.slice(0, -'$screen'.length)
+    : identity;
+  var identities = [parentIdentity, parentIdentity + '$screen'];
 
   function removeTile(tile, trackSid) {
     if (trackSid && typeof removeScreenTile === 'function') {
@@ -262,6 +437,8 @@ async function _startNativeCaptureStopListeners() {
   var stopEvents = {
     'screen-capture-stopped': 'Screen capture ended',
     'desktop-capture-stopped': 'Desktop capture ended',
+    'screen-capture-error': 'Screen capture failed',
+    'desktop-capture-error': 'Desktop capture failed',
   };
   var unlisteners = [];
 
@@ -269,10 +446,43 @@ async function _startNativeCaptureStopListeners() {
     for (var eventName in stopEvents) {
       if (!Object.prototype.hasOwnProperty.call(stopEvents, eventName)) continue;
       var unlisten = await tauriListen(eventName, function(name) {
-        return function() {
-          debugLog('[' + name + '] stopped by Rust');
-          _finalizeNativeCaptureStop(stopEvents[name]).catch(function(err) {
+        return function(event) {
+          var details = _nativeCaptureEventDetails(event);
+          var currentSessionId = _normalizeNativeCaptureSessionId(window._echoNativeCaptureSessionId);
+          var lastStoppedSessionId = _normalizeNativeCaptureSessionId(
+            window._echoLastStoppedNativeCaptureSessionId
+          );
+          if (details.sessionId && details.sessionId === lastStoppedSessionId) {
+            debugLog('[' + name + '] ignored duplicate native session ' + details.sessionId);
+            return Promise.resolve(false);
+          }
+          // New binaries identify every native attempt. A queued event from an
+          // older attempt must never clear or kick the replacement share.
+          if (currentSessionId && details.sessionId !== currentSessionId) {
+            debugLog('[' + name + '] ignored stale native session ' + (details.sessionId || 'legacy'));
+            return Promise.resolve(false);
+          }
+
+          debugLog('[' + name + '] stopped by Rust' +
+            (details.sessionId ? ' session=' + details.sessionId : ''));
+          window._echoNativeLifecycleVersion = _nativeCaptureLifecycleVersion() + 1;
+          if (details.sessionId) {
+            // Mark completion before any awaited cleanup. The start invoke can
+            // resolve after Rust has already emitted this event; its returned
+            // session ID must not resurrect the dead attempt.
+            window._echoLastStoppedNativeCaptureSessionId = details.sessionId;
+            // The session-correlated Rust task has already disconnected its SFU
+            // companion. Clear only its local presentation; do not issue a kick
+            // that could race a just-started replacement using the same identity.
+            var localIdentity = room && room.localParticipant ? room.localParticipant.identity : null;
+            _clearNativeScreenTilesForIdentity(localIdentity);
+          }
+          var message = details.message
+            ? stopEvents[name] + ': ' + details.message
+            : stopEvents[name];
+          return _finalizeNativeCaptureStop(message, details.sessionId).catch(function(err) {
             debugLog('[screen-share] native stop cleanup failed: ' + (err.message || err));
+            return false;
           });
         };
       }(eventName));
@@ -385,12 +595,14 @@ async function startScreenShareManual() {
         if (!captureStarted && gameCaptureMode !== 'desktop-dd' && wgcSupported) {
           try {
             debugLog('[wgc] trying WGC window capture for HWND ' + source.id + ' (build ' + osBuild + ')');
-            await tauriInvoke('start_screen_share', {
+            var wgcLifecycleVersion = _nativeCaptureLifecycleVersion();
+            var wgcSessionId = await tauriInvoke('start_screen_share', {
               sourceId: source.id,
               sfuUrl: sfuUrl,
               token: screenToken,
               publishProfile: publishProfile,
             });
+            _rememberNativeCaptureSessionId(wgcSessionId, wgcLifecycleVersion);
             window._echoNativeCaptureMode = 'wgc';
             captureStarted = true;
           } catch (wgcErr) {
@@ -407,13 +619,15 @@ async function startScreenShareManual() {
             var ddResult = await tauriInvoke('check_desktop_capture_available');
             if (ddResult && ddResult[0]) {
               debugLog('[desktop-dd] available: ' + ddResult[1]);
-              await tauriInvoke('start_desktop_capture', {
+              var desktopLifecycleVersion = _nativeCaptureLifecycleVersion();
+              var desktopSessionId = await tauriInvoke('start_desktop_capture', {
                 hwnd: source.id,
                 fullscreen: source.isMonitor || false,
                 sfuUrl: sfuUrl,
                 token: screenToken,
                 publishProfile: publishProfile,
               });
+              _rememberNativeCaptureSessionId(desktopSessionId, desktopLifecycleVersion);
               window._echoNativeCaptureMode = 'desktop-dd';
               captureStarted = true;
             } else {
@@ -441,24 +655,28 @@ async function startScreenShareManual() {
           debugLog('[monitor] using DXGI DD for monitor capture');
           var ddResult = await tauriInvoke('check_desktop_capture_available');
           if (ddResult && ddResult[0]) {
-            await tauriInvoke('start_desktop_capture', {
+            var monitorLifecycleVersion = _nativeCaptureLifecycleVersion();
+            var monitorSessionId = await tauriInvoke('start_desktop_capture', {
               hwnd: source.id,
               fullscreen: true,
               sfuUrl: sfuUrl,
               token: screenToken,
               publishProfile: 'desktop',
             });
+            _rememberNativeCaptureSessionId(monitorSessionId, monitorLifecycleVersion);
             window._echoNativeCaptureMode = 'desktop-dd';
           } else {
             throw new Error('Desktop capture not available: ' + (ddResult ? ddResult[1] : 'unknown'));
           }
         } else if (wgcSupported) {
-          await tauriInvoke('start_screen_share', {
+          var fallbackLifecycleVersion = _nativeCaptureLifecycleVersion();
+          var fallbackSessionId = await tauriInvoke('start_screen_share', {
             sourceId: source.id,
             sfuUrl: sfuUrl,
             token: screenToken,
             publishProfile: 'desktop',
           });
+          _rememberNativeCaptureSessionId(fallbackSessionId, fallbackLifecycleVersion);
           window._echoNativeCaptureMode = 'wgc';
         } else {
           throw new Error('Window capture requires Windows 11 24H2+ (current build: ' + osBuild + ')');
@@ -892,9 +1110,20 @@ async function startScreenShareManual() {
               // the classifier will turn the chip Red.
               if (codec && codec !== "unknown" && typeof tauriInvoke === "function") {
                 try {
-                  if (window._lastReportedEncoder !== codec) {
+                  var encoderSessionId = _normalizeNativeCaptureSessionId(
+                    window._echoNativeCaptureSessionId
+                  );
+                  if (window._lastReportedEncoder !== codec ||
+                      window._lastReportedEncoderSessionId !== encoderSessionId) {
                     window._lastReportedEncoder = codec;
-                    tauriInvoke("report_encoder_implementation", { encoder: codec }).catch(function(){});
+                    window._lastReportedEncoderSessionId = encoderSessionId;
+                    // New binaries require the capture lease so late stats from
+                    // an old sender cannot overwrite the replacement session.
+                    // Omit it only for the browser fallback / older binaries.
+                    tauriInvoke(
+                      "report_encoder_implementation",
+                      _nativeEncoderReportArgs(codec)
+                    ).catch(function(){});
                   }
                 } catch (e) { /* IPC unavailable, ignore */ }
               }
@@ -1205,21 +1434,34 @@ async function startScreenShareManual() {
 
 async function stopScreenShareManual() {
   // ── Native capture stop path ──
-  if (window._echoNativeCaptureActive || window._echoNativeCaptureMode) {
-    var stopCommand = window._echoNativeCaptureMode === 'desktop-dd'
-      ? 'stop_desktop_capture'
-      : 'stop_screen_share';
-    var localIdentity = room && room.localParticipant ? room.localParticipant.identity : null;
-    var roomName = currentRoomName || 'main';
+  var stopCommands = await _resolveNativeCaptureStopCommands();
+  if (stopCommands && stopCommands.length) {
+    var stoppingSessionId = _normalizeNativeCaptureSessionId(window._echoNativeCaptureSessionId);
     _stopNativeCaptureStopListeners();
-    try {
-      await tauriInvoke(stopCommand);
-    } catch (e) {
-      console.error('[screen-share] native stop error:', e);
+    var stopErrors = [];
+    for (var commandIndex = 0; commandIndex < stopCommands.length; commandIndex += 1) {
+      var stopCommand = stopCommands[commandIndex];
+      try {
+        await tauriInvoke(stopCommand);
+      } catch (e) {
+        stopErrors.push(e);
+        if (typeof debugLog === 'function') {
+          debugLog('[screen-share] ' + stopCommand + ' failed: ' + (e.message || e));
+        }
+      }
     }
-    _clearNativeScreenTilesForIdentity(localIdentity);
-    await _removeNativeScreenCompanion(localIdentity, roomName);
-    await _finalizeNativeCaptureStop(null);
+    if (stopErrors.length > 0) {
+      try {
+        await _startNativeCaptureStopListeners();
+      } catch (listenErr) {
+        if (typeof debugLog === 'function') {
+          debugLog('[screen-share] native stop listener rollback failed: ' + (listenErr.message || listenErr));
+        }
+      }
+      throw stopErrors[0];
+    }
+    await _cleanupStoppedNativePublication();
+    await _finalizeNativeCaptureStop(null, stoppingSessionId);
     return; // Don't fall through to browser path
   }
 

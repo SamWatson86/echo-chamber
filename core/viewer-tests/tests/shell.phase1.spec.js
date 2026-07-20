@@ -947,6 +947,91 @@ test("room switching freezes local publish controls and rejects user media toggl
   expect(result.localDisabled).toBe(true);
 });
 
+test("Stop Sharing recovers a native companion after viewer capture flags are lost", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openPhaseOneViewer(page, {
+    participants: 2,
+    cameras: 0,
+    screenShares: 1,
+    screenOwners: [1],
+  });
+
+  const localCard = page.locator(".user-card.is-local");
+  const sharingBadge = localCard.locator(".participant-screen-state");
+  await expect(localCard).toHaveClass(/is-screen-sharing/);
+  await expect(sharingBadge).toBeVisible();
+  await expect(page.locator("#screen-grid > .tile")).toHaveCount(1);
+
+  await page.evaluate(() => {
+    window.__echoNativeStopCalls = [];
+    window.__echoNativeStopFetches = [];
+    window.__ECHO_NATIVE__ = true;
+    window.__TAURI__ = {
+      core: {
+        invoke: async function(command) {
+          window.__echoNativeStopCalls.push(command);
+          if (command === "get_capture_health") {
+            return {
+              capture_active: true,
+              capture_mode: "WGC",
+              captureSessionId: 73,
+            };
+          }
+          return null;
+        },
+      },
+    };
+    window.fetch = async function(input, options) {
+      window.__echoNativeStopFetches.push({
+        url: String(input),
+        method: options && options.method,
+      });
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    };
+    adminToken = "fixture-admin-token";
+    screenEnabled = true;
+    window._echoNativeCaptureActive = false;
+    window._echoNativeCaptureMode = null;
+    _nativeAudioActive = true;
+    renderPublishButtons();
+    screenBtn.disabled = false;
+  });
+
+  const stopButton = page.locator("#toggle-screen");
+  await expect(stopButton).toHaveText("Stop Sharing");
+  await expect(stopButton).toHaveAttribute("aria-pressed", "true");
+  await stopButton.click();
+
+  await expect(stopButton).toHaveText("Share Screen");
+  await expect(stopButton).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#screen-grid > .tile")).toHaveCount(0);
+  await expect(localCard).not.toHaveClass(/is-screen-sharing/);
+  await expect(sharingBadge).toBeHidden();
+  await expect(localCard.locator(".participant-settings-toggle")).toBeHidden();
+
+  const cleanup = await page.evaluate(() => ({
+    calls: window.__echoNativeStopCalls,
+    fetches: window.__echoNativeStopFetches,
+    parentMapped: screenTileByIdentity.has(room.localParticipant.identity),
+    companionMapped: screenTileByIdentity.has(room.localParticipant.identity + "$screen"),
+    nativeSessionId: window._echoNativeCaptureSessionId,
+    screenEnabled: screenEnabled,
+  }));
+  expect(cleanup.calls).toEqual([
+    "get_capture_health",
+    "stop_screen_share",
+    "stop_audio_capture",
+  ]);
+  expect(cleanup.fetches).toEqual([{
+    url: "/v1/rooms/main/kick/layout-fixture-1%24screen",
+    method: "POST",
+  }]);
+  expect(cleanup.parentMapped).toBe(false);
+  expect(cleanup.companionMapped).toBe(false);
+  expect(cleanup.nativeSessionId).toBe(null);
+  expect(cleanup.screenEnabled).toBe(false);
+});
+
 test("room switching waits for an in-flight mic toggle and preserves its intent", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await openPhaseOneViewer(page, {

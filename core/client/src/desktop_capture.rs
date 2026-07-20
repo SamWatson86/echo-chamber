@@ -51,7 +51,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
+use crate::capture_health::{
+    CaptureErrorEvent, CaptureHealthState, CaptureMode, CaptureSessionId, CaptureStoppedEvent,
+    EncoderType,
+};
 use crate::capture_pipeline::{CapturePublisher, PublishProfile};
 use crate::file_debug_log;
 
@@ -62,12 +65,58 @@ use crate::gpu_converter::GpuConverter;
 // ── Global State ──
 
 struct DesktopShareHandle {
+    session: CaptureSessionId,
     running: Arc<AtomicBool>,
+    health: Arc<CaptureHealthState>,
 }
 
 fn global_state() -> &'static Mutex<Option<DesktopShareHandle>> {
     static STATE: OnceLock<Mutex<Option<DesktopShareHandle>>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn request_stop(state: &Mutex<Option<DesktopShareHandle>>, cancel_session: bool) -> bool {
+    let current = {
+        let state = state.lock().unwrap();
+        state.as_ref().map(|handle| {
+            (
+                handle.session,
+                Arc::clone(&handle.running),
+                Arc::clone(&handle.health),
+            )
+        })
+    };
+    let Some((session, running, health)) = current else {
+        return false;
+    };
+    if cancel_session {
+        health.cancel_capture_session(session);
+    }
+    running.store(false, Ordering::SeqCst);
+    true
+}
+
+fn replace_handle(
+    state: &Mutex<Option<DesktopShareHandle>>,
+    replacement: DesktopShareHandle,
+) -> Option<DesktopShareHandle> {
+    state.lock().unwrap().replace(replacement)
+}
+
+fn clear_if_owner(
+    state: &Mutex<Option<DesktopShareHandle>>,
+    session: CaptureSessionId,
+    running: &Arc<AtomicBool>,
+) -> bool {
+    let mut state = state.lock().unwrap();
+    let owns_handle = state
+        .as_ref()
+        .map(|handle| handle.session == session && Arc::ptr_eq(&handle.running, running))
+        .unwrap_or(false);
+    if owns_handle {
+        *state = None;
+    }
+    owns_handle
 }
 
 fn should_emit_frame_count_stats(frame_count: u64, last_stats_frame_count: &mut u64) -> bool {
@@ -82,6 +131,47 @@ fn should_emit_frame_count_stats(frame_count: u64, last_stats_frame_count: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_dxgi_completion_cannot_clear_replacement_handle() {
+        let health = Arc::new(CaptureHealthState::new());
+        let state = Mutex::new(None);
+
+        let old_running = Arc::new(AtomicBool::new(true));
+        let old_for_handle = Arc::clone(&old_running);
+        let old_health = Arc::clone(&health);
+        let (old_session, retired) = health.begin_capture_session_with(|session| {
+            replace_handle(
+                &state,
+                DesktopShareHandle {
+                    session,
+                    running: old_for_handle,
+                    health: old_health,
+                },
+            )
+        });
+        assert!(retired.is_none());
+
+        let new_running = Arc::new(AtomicBool::new(true));
+        let new_for_handle = Arc::clone(&new_running);
+        let new_health = Arc::clone(&health);
+        let (new_session, retired) = health.begin_capture_session_with(|session| {
+            replace_handle(
+                &state,
+                DesktopShareHandle {
+                    session,
+                    running: new_for_handle,
+                    health: new_health,
+                },
+            )
+        });
+        let retired = retired.expect("the replacement must retire the old handle");
+        retired.running.store(false, Ordering::SeqCst);
+
+        assert!(!clear_if_owner(&state, old_session, &old_running));
+        assert!(new_running.load(Ordering::SeqCst));
+        assert!(clear_if_owner(&state, new_session, &new_running));
+    }
 
     #[test]
     fn frame_count_stats_gate_only_emits_once_per_60_frame_boundary() {
@@ -205,16 +295,31 @@ pub async fn start(
     publish_profile: PublishProfile,
     app: AppHandle,
     health: Arc<CaptureHealthState>,
-) -> Result<(), String> {
-    stop();
-
+) -> Result<u64, String> {
     let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(DesktopShareHandle {
-            running: running.clone(),
-        });
+    let running_for_handle = Arc::clone(&running);
+    let health_for_handle = Arc::clone(&health);
+    let (session, retired) = health.begin_capture_session_with(|session| {
+        replace_handle(
+            global_state(),
+            DesktopShareHandle {
+                session,
+                running: running_for_handle,
+                health: health_for_handle,
+            },
+        )
+    });
+    if let Some(retired) = retired {
+        retired.running.store(false, Ordering::SeqCst);
+    }
+    if !health.with_current_capture_session(session, crate::screen_capture::stop_for_replacement) {
+        running.store(false, Ordering::SeqCst);
+        if clear_if_owner(global_state(), session, &running) {
+            health.complete_capture_session(session, || {
+                let _ = app.emit("desktop-capture-stopped", CaptureStoppedEvent::new(session));
+            });
+        }
+        return Err("desktop capture start cancelled or superseded".to_string());
     }
 
     // Get game PID for audio capture
@@ -225,46 +330,68 @@ pub async fn start(
         pid
     };
 
-    let _ = app.emit("desktop-capture-started", target_pid);
-
-    let r2 = running.clone();
-    let health_clone = Arc::clone(&health);
+    let r2 = Arc::clone(&running);
+    let running_for_loop = Arc::clone(&running);
+    let health_for_loop = Arc::clone(&health);
+    let app_for_capture = app.clone();
     tokio::spawn(async move {
         // Run DXGI capture on a blocking thread — it uses COM and blocking waits
-        let result = tokio::task::spawn_blocking(move || {
+        let result = match tokio::task::spawn_blocking(move || {
             capture_loop_blocking(
                 &sfu_url,
                 &token,
                 publish_profile,
-                &app,
-                &r2,
+                &app_for_capture,
+                &running_for_loop,
                 hwnd,
                 fullscreen,
-                health_clone,
+                target_pid,
+                health_for_loop,
+                session,
             )
         })
         .await
-        .map_err(|e| format!("spawn_blocking: {e}"))?;
+        {
+            Ok(result) => result,
+            Err(error) => Err(format!("spawn_blocking: {error}")),
+        };
 
-        if let Err(e) = result {
-            eprintln!("[desktop-capture] error: {e}");
-            file_debug_log::append(&format!("[desktop-capture] task error: {}", e));
+        if !clear_if_owner(global_state(), session, &r2) {
+            eprintln!("[desktop-capture] stale task exited after replacement");
+            return;
         }
 
-        let mut state = global_state().lock().unwrap();
-        *state = None;
-        Ok::<(), String>(())
+        let error = result.err();
+        if !health.complete_capture_session(session, || {
+            if let Some(error) = error.as_ref() {
+                eprintln!("[desktop-capture] error: {error}");
+                file_debug_log::append(&format!("[desktop-capture] task error: {}", error));
+                let _ = app.emit(
+                    "desktop-capture-error",
+                    CaptureErrorEvent::new(session, error.to_string()),
+                );
+            }
+            let _ = app.emit("desktop-capture-stopped", CaptureStoppedEvent::new(session));
+        }) {
+            eprintln!("[desktop-capture] task exited after a newer backend took ownership");
+            return;
+        }
+        eprintln!("[desktop-capture] task exited");
     });
 
-    Ok(())
+    Ok(session.as_u64())
 }
 
 /// Stop the current desktop capture.
 pub fn stop() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
-        handle.running.store(false, Ordering::SeqCst);
+    if request_stop(global_state(), true) {
         eprintln!("[desktop-capture] stop requested");
+    }
+}
+
+pub(crate) fn stop_for_replacement() {
+    if request_stop(global_state(), false) {
+        eprintln!("[desktop-capture] replacement stop requested");
     }
 }
 
@@ -457,6 +584,32 @@ unsafe fn create_anti_mpo_window(monitor_rect: &RECT) -> Option<HWND> {
     } else {
         eprintln!("[anti-mpo] CreateWindowExW failed: {:?}", hwnd.err());
         None
+    }
+}
+
+/// Owns the anti-MPO overlay on the capture thread. DXGI setup has many fallible
+/// steps after the window is created, so RAII is required to restore normal DWM
+/// behavior on every early return as well as the normal stop path.
+struct AntiMpoWindow(Option<HWND>);
+
+impl AntiMpoWindow {
+    fn new(hwnd: Option<HWND>) -> Self {
+        Self(hwnd)
+    }
+
+    fn hwnd(&self) -> Option<HWND> {
+        self.0
+    }
+}
+
+impl Drop for AntiMpoWindow {
+    fn drop(&mut self) {
+        if let Some(hwnd) = self.0.take() {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            eprintln!("[anti-mpo] overlay window destroyed");
+        }
     }
 }
 
@@ -679,7 +832,9 @@ fn capture_loop_blocking(
     running: &Arc<AtomicBool>,
     hwnd: u64,
     fullscreen: bool,
+    target_pid: u32,
     health: Arc<CaptureHealthState>,
+    session: CaptureSessionId,
 ) -> Result<(), String> {
     eprintln!("[desktop-capture] initializing DXGI Desktop Duplication...");
     file_debug_log::append(&format!(
@@ -696,7 +851,7 @@ fn capture_loop_blocking(
     // 1b. Create anti-MPO overlay to force DWM Composed Flip.
     // Without this, borderless windowed games trigger Independent Flip / MPO,
     // causing DXGI DD to capture at 5-15fps instead of the game's native framerate.
-    let anti_mpo_hwnd = unsafe {
+    let anti_mpo_window = AntiMpoWindow::new(unsafe {
         let monitor = if fullscreen {
             use windows::Win32::Graphics::Gdi::HMONITOR;
             HMONITOR(hwnd as *mut _)
@@ -714,7 +869,7 @@ fn capture_loop_blocking(
             eprintln!("[anti-mpo] GetMonitorInfoW failed, skipping overlay");
             None
         }
-    };
+    });
 
     // 2. Create D3D11 device on the same adapter
     let adapter_base: windows::Win32::Graphics::Dxgi::IDXGIAdapter = adapter
@@ -849,6 +1004,9 @@ fn capture_loop_blocking(
     ));
 
     // 4. Connect to LiveKit and publish track via shared pipeline
+    if !running.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let rt = tokio::runtime::Handle::current();
     let mut publisher = CapturePublisher::connect_and_publish_blocking(
         &rt,
@@ -862,12 +1020,28 @@ fn capture_loop_blocking(
         true,
     )?;
 
-    health.set_active(
-        true,
+    if !running.load(Ordering::SeqCst) {
+        publisher.shutdown_blocking(&rt);
+        return Ok(());
+    }
+
+    if !health.activate_capture_session(
+        session,
         CaptureMode::DxgiDd,
         EncoderType::Nvenc,
         publish_profile.target_fps(),
-    );
+    ) {
+        running.store(false, Ordering::SeqCst);
+        publisher.shutdown_blocking(&rt);
+        return Ok(());
+    }
+    if !health.with_current_capture_session(session, || {
+        let _ = app.emit("desktop-capture-started", target_pid);
+    }) {
+        running.store(false, Ordering::SeqCst);
+        publisher.shutdown_blocking(&rt);
+        return Ok(());
+    }
 
     // 6. Prepare GPU converter (shader pipeline) or CPU fallback
     let mut gpu_converter: Option<GpuConverter> = None;
@@ -981,7 +1155,7 @@ fn capture_loop_blocking(
                     // encode load, driver hiccups, UAC intrusions, display mode
                     // changes, etc. Reinit typically recovers immediately.
                     consecutive_timeouts += 1;
-                    health.record_consecutive_timeout(consecutive_timeouts);
+                    health.record_consecutive_timeout(session, consecutive_timeouts);
                     if consecutive_timeouts >= 50 {
                         eprintln!(
                             "[desktop-capture] 50 consecutive timeouts (~5s stall) \
@@ -998,8 +1172,8 @@ fn capture_loop_blocking(
                             Some(new_dup) => {
                                 duplication = new_dup;
                                 consecutive_timeouts = 0;
-                                health.reset_consecutive_timeouts();
-                                health.record_reinit();
+                                health.reset_consecutive_timeouts(session);
+                                health.record_reinit(session);
                                 continue;
                             }
                             None => break,
@@ -1037,8 +1211,8 @@ fn capture_loop_blocking(
                         Some(new_dup) => {
                             duplication = new_dup;
                             consecutive_timeouts = 0;
-                            health.reset_consecutive_timeouts();
-                            health.record_reinit();
+                            health.reset_consecutive_timeouts(session);
+                            health.record_reinit(session);
                             continue;
                         }
                         None => break,
@@ -1050,7 +1224,7 @@ fn capture_loop_blocking(
                         e
                     ));
                     consecutive_timeouts += 1;
-                    health.record_consecutive_timeout(consecutive_timeouts);
+                    health.record_consecutive_timeout(session, consecutive_timeouts);
                     if consecutive_timeouts >= 10 {
                         break;
                     }
@@ -1059,7 +1233,7 @@ fn capture_loop_blocking(
             }
             Ok(()) => {
                 consecutive_timeouts = 0;
-                health.reset_consecutive_timeouts();
+                health.reset_consecutive_timeouts(session);
             }
         }
 
@@ -1197,7 +1371,7 @@ fn capture_loop_blocking(
                     crop_y,
                     crop_w,
                     crop_h,
-                    Some(&*health),
+                    Some((&*health, session)),
                 ) {
                     Ok((bgra_ptr, stride, w, h)) => {
                         duplication.ReleaseFrame().ok();
@@ -1324,7 +1498,7 @@ fn capture_loop_blocking(
         // Reassert anti-MPO overlay topmost status every 60 frames (~1s).
         // Games can temporarily promote themselves above our overlay.
         if frame_count % 60 == 0 {
-            if let Some(h) = anti_mpo_hwnd {
+            if let Some(h) = anti_mpo_window.hwnd() {
                 unsafe {
                     refresh_anti_mpo_window(h);
                 }
@@ -1347,13 +1521,15 @@ fn capture_loop_blocking(
                     "[desktop-capture] stats {}x{} fps={} frames={}",
                     enc_w, enc_h, fps, frame_count
                 ));
-                health.record_capture_fps(fps);
+                health.record_capture_fps(session, fps);
             }
-            publisher.log_sender_stats_blocking(&rt, "desktop-capture", Some(health.as_ref()));
+            publisher.log_sender_stats_blocking(
+                &rt,
+                "desktop-capture",
+                Some((health.as_ref(), session)),
+            );
         }
     }
-
-    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
 
     running.store(false, Ordering::SeqCst);
     eprintln!(
@@ -1365,14 +1541,7 @@ fn capture_loop_blocking(
         publisher.frame_count()
     ));
 
-    // Destroy anti-MPO overlay -- restore normal DWM flip behavior
-    if let Some(h) = anti_mpo_hwnd {
-        unsafe {
-            let _ = DestroyWindow(h);
-        }
-        eprintln!("[anti-mpo] overlay window destroyed");
-    }
-
+    drop(anti_mpo_window);
     publisher.shutdown_blocking(&rt);
     eprintln!("[desktop-capture] SFU room closed");
 
