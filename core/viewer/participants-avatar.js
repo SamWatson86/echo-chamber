@@ -261,6 +261,21 @@ function ensureParticipantCard(participant, isLocal = false) {
   publisherMicStateLabel.className = "participant-mic-state-label";
   publisherMicStateLabel.textContent = "Mic off";
   publisherMicState.append(publisherMicStateIcon, publisherMicStateLabel);
+
+  const publisherScreenState = document.createElement("div");
+  publisherScreenState.className = "participant-screen-state shell-v2-only";
+  publisherScreenState.hidden = true;
+  publisherScreenState.setAttribute("role", "status");
+  publisherScreenState.setAttribute("aria-label", "Sharing screen from " + participantDisplayName);
+  publisherScreenState.title = "Sharing screen";
+  const publisherScreenStateIcon = document.createElement("span");
+  publisherScreenStateIcon.className = "participant-screen-state-icon";
+  publisherScreenStateIcon.innerHTML = iconSvg("screen");
+  const publisherScreenStateLabel = document.createElement("span");
+  publisherScreenStateLabel.className = "participant-screen-state-label";
+  publisherScreenStateLabel.textContent = "Sharing";
+  publisherScreenState.append(publisherScreenStateIcon, publisherScreenStateLabel);
+
   card.append(publisherMicState);
 
   const header = document.createElement("div");
@@ -359,6 +374,9 @@ function ensureParticipantCard(participant, isLocal = false) {
     if (ovWatchClone) ovWatchClone.style.display = screenWatchAvailable ? "" : "none";
     if (settingsWatchButton) settingsWatchButton.classList.toggle("hidden", !screenWatchAvailable);
 
+    card.classList.toggle("is-screen-sharing", screenWatchAvailable);
+    publisherScreenState.hidden = !screenWatchAvailable;
+
     if (isLocal && participantSettingsButton) {
       participantSettingsButton.classList.toggle("is-stream-control-unavailable", !screenWatchAvailable);
       if (!screenWatchAvailable && participantSettingsPopup?.classList.contains("is-open")) {
@@ -381,7 +399,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenIndicatorRow.className = "indicator-row";
     micIndicator = document.createElement("button");
     micIndicator.type = "button";
-    micIndicator.className = "icon-button indicator-only";
+    micIndicator.className = "icon-button indicator-only participant-mic-activity";
     micIndicator.innerHTML = iconSvg("mic");
     micIndicator.setAttribute("aria-label", "Microphone audio settings for " + (participant.name || "Guest"));
     micMuteButton = document.createElement("button");
@@ -829,7 +847,7 @@ function ensureParticipantCard(participant, isLocal = false) {
       toggleParticipantSettings(participantSettingsButton, participantSettingsPopup);
     });
   }
-  header.append(avatar, meta);
+  header.append(avatar, meta, publisherScreenState);
   card.append(header);
 
   let controls = null;
@@ -847,7 +865,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     row.className = "control-row";
     const micControl = document.createElement("button");
     micControl.type = "button";
-    micControl.className = "icon-button";
+    micControl.className = "icon-button participant-mic-activity";
     micControl.innerHTML = iconSvg("mic");
     micControl.setAttribute("aria-label", "Toggle microphone");
     micControl.addEventListener("click", () => toggleMic().catch(() => {}));
@@ -1280,6 +1298,7 @@ function ensureParticipantCard(participant, isLocal = false) {
         (publisherMicStateLabel?.textContent || "Mic off") + " for " + participantDisplayName
       );
     }
+    publisherScreenState.setAttribute("aria-label", "Sharing screen from " + participantDisplayName);
     syncScreenWatchControls();
   }
 
@@ -1291,6 +1310,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     micStatusEl,
     publisherMicStateEl: publisherMicState,
     publisherMicStateLabel,
+    publisherScreenStateEl: publisherScreenState,
     screenStatusEl,
     micSlider,
     screenSlider,

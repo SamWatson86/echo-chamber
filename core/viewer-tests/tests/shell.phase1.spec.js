@@ -1544,13 +1544,62 @@ test("every member can hide and restore any shared screen on their own Stage", a
   const remoteIdentity = "layout-fixture-2";
   const localCard = page.locator(`.user-card[data-identity="${localIdentity}"]`);
   const remoteCard = page.locator(`.user-card[data-identity="${remoteIdentity}"]`);
+  const nonSharingCard = page.locator('.user-card[data-identity="layout-fixture-3"]');
   const localTile = page.locator(`#screen-grid > .tile[data-identity="${localIdentity}"]`);
   const remoteTile = page.locator(`#screen-grid > .tile[data-identity="${remoteIdentity}"]`);
+  const localSharingBadge = localCard.locator(".participant-screen-state");
+  const remoteSharingBadge = remoteCard.locator(".participant-screen-state");
+
+  await page.evaluate(() => updateActiveSpeakerUi());
 
   await expect(localTile).toBeVisible();
   await expect(remoteTile).toBeVisible();
   await expect(localCard.locator(".participant-settings-toggle")).toBeVisible();
   await expect(remoteCard.locator(".participant-settings-toggle")).toBeVisible();
+  await expect(localCard).toHaveClass(/is-screen-sharing/);
+  await expect(remoteCard).toHaveClass(/is-screen-sharing/);
+  await expect(nonSharingCard).not.toHaveClass(/is-screen-sharing/);
+  await expect(localSharingBadge).toBeVisible();
+  await expect(localSharingBadge).toHaveText("Sharing");
+  await expect(localSharingBadge).toHaveAccessibleName(/Sharing screen from Friend 1/i);
+  await expect(remoteSharingBadge).toBeVisible();
+  await expect(remoteSharingBadge).toHaveText("Sharing");
+  await expect(remoteSharingBadge).toHaveAccessibleName(/Sharing screen from Friend 2/i);
+  await expect(nonSharingCard.locator(".participant-screen-state")).toBeHidden();
+  await expectContained(localSharingBadge, localCard);
+  await expectContained(remoteSharingBadge, remoteCard);
+  await expectNoOverlap(localSharingBadge, localCard.locator(".participant-mic-state"));
+  await expectNoOverlap(localSharingBadge, localCard.locator(".participant-settings-toggle"));
+  await expectNoOverlap(remoteSharingBadge, remoteCard.locator(".participant-mic-state"));
+  await expectNoOverlap(remoteSharingBadge, remoteCard.locator(".participant-settings-toggle"));
+
+  await page.evaluate((identity) => {
+    window.EchoLayoutTestScenario.setParticipantMicrophoneState(identity, {
+      published: true,
+      muted: false,
+    });
+  }, remoteIdentity);
+  await expect(remoteCard).toHaveCSS("border-color", "rgba(201, 168, 106, 0.72)");
+
+  await page.evaluate((identity) => {
+    const state = participantState.get(identity);
+    state.micActive = true;
+    lastActiveSpeakerEvent = Number.NEGATIVE_INFINITY;
+    updateActiveSpeakerUi();
+  }, remoteIdentity);
+  await expect(remoteCard).toHaveCSS("border-color", "rgba(79, 195, 200, 0.72)");
+
+  await page.evaluate((identity) => {
+    window.EchoLayoutTestScenario.setParticipantMicrophoneState(identity, {
+      published: true,
+      muted: true,
+    });
+  }, remoteIdentity);
+  await expect(remoteCard).toHaveClass(/is-publisher-mic-off/);
+  await expect(remoteCard).toHaveClass(/is-screen-sharing/);
+  await expect(remoteCard).toHaveCSS("border-color", "rgba(229, 106, 106, 0.58)");
+  await expect(remoteSharingBadge).toBeVisible();
+  await expectNoOverlap(remoteSharingBadge, remoteCard.locator(".participant-mic-state"));
 
   async function openScreenAction(card, participantName, action) {
     const toggle = card.locator(".participant-settings-toggle");
@@ -1568,6 +1617,10 @@ test("every member can hide and restore any shared screen on their own Stage", a
   await expect(localTile).toBeHidden();
   await expect(remoteTile).toBeVisible();
   await expect(localCard.locator(".participant-settings-toggle")).toBeVisible();
+  await expect(localCard).toHaveClass(/is-screen-sharing/);
+  await expect(localSharingBadge).toBeVisible();
+  await expectContained(localSharingBadge, localCard);
+  await expectNoOverlap(localSharingBadge, localCard.locator(".participant-settings-toggle"));
 
   const localHiddenState = await page.evaluate((identity) => {
     const state = participantState.get(identity);
@@ -1609,6 +1662,8 @@ test("every member can hide and restore any shared screen on their own Stage", a
   await hideRemote.click();
   await expect(remoteTile).toBeHidden();
   await expect(localTile).toBeVisible();
+  await expect(remoteCard).toHaveClass(/is-screen-sharing/);
+  await expect(remoteSharingBadge).toBeVisible();
 
   const remoteHiddenState = await page.evaluate((identity) => {
     const state = participantState.get(identity);
@@ -1646,7 +1701,19 @@ test("every member can hide and restore any shared screen on their own Stage", a
     getComputedStyle(grid, "::before").content
   )).toContain("All shared screens are hidden");
   await expect(localCard.locator(".participant-settings-toggle")).toBeVisible();
+  await expect(localSharingBadge).toBeVisible();
+  await expect(remoteSharingBadge).toBeVisible();
   await expect(remoteCard.locator(".participant-settings-popover").getByRole("button", {
     name: /Show the shared screen from Friend 2 on my Stage/i,
   })).toBeVisible();
+
+  await page.evaluate(({ localIdentity, remoteIdentity }) => {
+    window.EchoLayoutTestScenario.setParticipantScreenShareAvailable(localIdentity, false);
+    window.EchoLayoutTestScenario.setParticipantScreenShareAvailable(remoteIdentity, false);
+  }, { localIdentity, remoteIdentity });
+  await expect(localCard).not.toHaveClass(/is-screen-sharing/);
+  await expect(remoteCard).not.toHaveClass(/is-screen-sharing/);
+  await expect(localSharingBadge).toBeHidden();
+  await expect(remoteSharingBadge).toBeHidden();
+  await expect(localCard.locator(".participant-settings-toggle")).toBeHidden();
 });

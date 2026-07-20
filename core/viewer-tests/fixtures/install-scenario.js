@@ -434,6 +434,14 @@
     updateActiveSpeakerUi();
   }
 
+  function setParticipantScreenShareAvailable(identity, available) {
+    const cardRef = participantCards.get(identity);
+    if (!cardRef?.setScreenWatchAvailable) {
+      throw new Error("participant screen-share state is unavailable for " + identity);
+    }
+    cardRef.setScreenWatchAvailable(available);
+  }
+
   window.EchoLayoutTestScenario = Object.freeze({
     captureCameraLobbySnapshot: captureCameraLobbySnapshot,
     captureIdentitySnapshot: captureIdentitySnapshot,
@@ -442,6 +450,7 @@
     install: install,
     installCameraLobby: installCameraLobby,
     setParticipantMicrophoneState: setParticipantMicrophoneState,
+    setParticipantScreenShareAvailable: setParticipantScreenShareAvailable,
     unbrokenDisplayName: unbrokenDisplayName,
   });
 })();

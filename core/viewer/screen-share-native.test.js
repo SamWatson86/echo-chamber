@@ -334,6 +334,7 @@ test("native stop clears local screen tile and removes the screen companion", as
   const { context, calls, fetches } = loadScreenShareNative();
   let removed = false;
   let unregisteredSid = null;
+  const screenAvailability = [];
   const tile = {
     dataset: { trackSid: "TR_SCREEN" },
     classList: { contains: () => false },
@@ -359,6 +360,9 @@ test("native stop clears local screen tile and removes the screen companion", as
     unregisteredSid = sid;
     context.screenTrackMeta.delete(sid);
   };
+  context.setParticipantScreenWatchAvailable = (identity, available) => {
+    screenAvailability.push([identity, available]);
+  };
 
   await context.stopScreenShareManual();
 
@@ -369,6 +373,7 @@ test("native stop clears local screen tile and removes the screen companion", as
   assert.equal(context.hiddenScreens.has("Sam"), false);
   assert.equal(context.watchedScreens.has("Sam"), false);
   assert.equal(context._pubBitrateControl.has("Sam"), false);
+  assert.deepEqual(screenAvailability, [["Sam", false], ["Sam$screen", false]]);
   assert.equal(fetches.length, 1);
   assert.match(fetches[0].url, /\/v1\/rooms\/main\/kick\/Sam%24screen$/);
   assert.equal(fetches[0].opts.method, "POST");
