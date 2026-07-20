@@ -55,6 +55,14 @@ function toggleParticipantSettings(button, popup) {
   activeParticipantSettings = opening ? { button: button, popup: popup } : null;
 }
 
+function setParticipantScreenWatchAvailable(identity, available) {
+  if (!identity) return;
+  var cardRef = participantCards.get(identity);
+  if (cardRef && typeof cardRef.setScreenWatchAvailable === "function") {
+    cardRef.setScreenWatchAvailable(available);
+  }
+}
+
 if (typeof document.addEventListener === "function") {
   document.addEventListener("click", function(event) {
     if (!activeParticipantSettings) return;
@@ -104,15 +112,7 @@ function startWatchingScreenIdentity(identity, reason) {
   hiddenScreens.delete(identity);
   watchedScreens.add(identity);
 
-  var cardRef = participantCards.get(identity);
-  if (cardRef && cardRef.watchToggleBtn) {
-    cardRef.watchToggleBtn.style.display = "";
-    cardRef.watchToggleBtn.textContent = "Stop Watching";
-    if (cardRef.ovWatchClone) {
-      cardRef.ovWatchClone.style.display = "";
-      cardRef.ovWatchClone.textContent = "Stop Watching";
-    }
-  }
+  setParticipantScreenWatchAvailable(identity, true);
 
   var tile = screenTileByIdentity.get(identity);
   if (tile) tile.style.display = "";
@@ -339,6 +339,39 @@ function ensureParticipantCard(participant, isLocal = false) {
   let settingsChimeSlider = null;
   let settingsChimePct = null;
   let settingsWatchButton = null;
+  let screenWatchAvailable = false;
+
+  function syncScreenWatchControls() {
+    var screenHidden = hiddenScreens.has(key);
+    var actionText = screenHidden ? "Show on my Stage" : "Hide from my Stage";
+    var actionLabel = (screenHidden ? "Show" : "Hide") +
+      " the shared screen from " + participantDisplayName + " on my Stage";
+
+    [watchToggleBtn, ovWatchClone, settingsWatchButton].forEach(function(button) {
+      if (!button) return;
+      button.textContent = actionText;
+      button.setAttribute("aria-label", actionLabel);
+      button.title = actionLabel;
+      button.classList.toggle("is-screen-hidden", screenHidden);
+    });
+
+    if (watchToggleBtn) watchToggleBtn.style.display = screenWatchAvailable ? "" : "none";
+    if (ovWatchClone) ovWatchClone.style.display = screenWatchAvailable ? "" : "none";
+    if (settingsWatchButton) settingsWatchButton.classList.toggle("hidden", !screenWatchAvailable);
+
+    if (isLocal && participantSettingsButton) {
+      participantSettingsButton.classList.toggle("is-stream-control-unavailable", !screenWatchAvailable);
+      if (!screenWatchAvailable && participantSettingsPopup?.classList.contains("is-open")) {
+        closeParticipantSettings(false);
+      }
+    }
+  }
+
+  function setScreenWatchAvailable(available) {
+    screenWatchAvailable = !!available;
+    syncScreenWatchControls();
+  }
+
   if (!isLocal) {
     const indicators = document.createElement("div");
     indicators.className = "user-indicators";
@@ -371,7 +404,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     var watchToggleBtn = document.createElement("button");
     watchToggleBtn.type = "button";
     watchToggleBtn.className = "watch-toggle-btn";
-    watchToggleBtn.textContent = "Stop Watching";
+    watchToggleBtn.textContent = "Hide from my Stage";
     watchToggleBtn.style.display = "none";
     watchToggleBtn.addEventListener("click", function(e) {
       e.stopPropagation();
@@ -384,97 +417,12 @@ function ensureParticipantCard(participant, isLocal = false) {
       }
 
       if (hiddenScreens.has(identity)) {
-        // === START WATCHING: subscribe to screen share tracks ===
         startWatchingScreenIdentity(identity, "manual-click");
         return;
-        hiddenScreens.delete(identity);
-        watchedScreens.add(identity);
-        watchToggleBtn.textContent = "Stop Watching";
-        if (ovWatchClone) ovWatchClone.textContent = "Stop Watching";
-        debugLog("[opt-in] user opted in to watch " + identity);
-
-        // Find the remote participant and subscribe to their screen share tracks
-        var remotes = getRemoteParticipantsForScreenIdentity(identity);
-        if (remotes.length > 0) {
-          remotes.forEach(function(remote) {
-            var pubs = getParticipantPublications(remote);
-            pubs.forEach(function(pub) {
-              var src = getWatchSource(pub, remote);
-              if (src === LK_wt.Track.Source.ScreenShare || src === LK_wt.Track.Source.ScreenShareAudio) {
-                // Subscribe to the track on the SFU
-                if (pub.setSubscribed) pub.setSubscribed(true);
-                // Ensure publication is hooked (event listeners registered)
-                hookPublication(pub, remote);
-                // If the track is already available (SDK cached it), process immediately
-                if (pub.track && pub.isSubscribed) {
-                  debugLog("[opt-in] track already available for " + src + " " + remote.identity + " → " + identity + " — processing immediately");
-                  handleTrackSubscribed(pub.track, pub, remote);
-                } else {
-                  debugLog("[opt-in] subscribed to " + src + " for " + remote.identity + " → " + identity + " — waiting for track (subscribed=" + (pub.isSubscribed ?? "?") + " hasTrack=" + !!pub.track + ")");
-                }
-              }
-            });
-          });
-          // Fallback at 500ms: check if tracks arrived and process them
-          setTimeout(function() {
-            var remoteFbs = getRemoteParticipantsForScreenIdentity(identity);
-            if (remoteFbs.length === 0) return;
-            remoteFbs.forEach(function(remoteFb) {
-              var fbPubs = getParticipantPublications(remoteFb);
-              fbPubs.forEach(function(pub) {
-                var src = getWatchSource(pub, remoteFb);
-                if (src === LK_wt.Track.Source.ScreenShare) {
-                  if (pub.track && pub.isSubscribed && !screenTileByIdentity.has(identity)) {
-                    debugLog("[opt-in] fallback@500ms: processing screen track for " + remoteFb.identity + " → " + identity);
-                    handleTrackSubscribed(pub.track, pub, remoteFb);
-                  }
-                  if (!pub.isSubscribed && pub.setSubscribed) {
-                    debugLog("[opt-in] fallback@500ms: re-subscribing screen for " + remoteFb.identity + " → " + identity);
-                    pub.setSubscribed(true);
-                  }
-                }
-                if (src === LK_wt.Track.Source.ScreenShareAudio) {
-                  var fbState = participantState.get(identity);
-                  if (pub.track && pub.isSubscribed && fbState && fbState.screenAudioEls.size === 0) {
-                    debugLog("[opt-in] fallback@500ms: processing screen audio for " + remoteFb.identity + " → " + identity);
-                    handleTrackSubscribed(pub.track, pub, remoteFb);
-                  }
-                  if (!pub.isSubscribed && pub.setSubscribed) {
-                    debugLog("[opt-in] fallback@500ms: re-subscribing screen audio for " + remoteFb.identity + " → " + identity);
-                    pub.setSubscribed(true);
-                  }
-                }
-              });
-            });
-          }, 500);
-          // Fallback at 1500ms: full reconcile to catch anything still missing
-          setTimeout(function() {
-            var remoteFb2s = getRemoteParticipantsForScreenIdentity(identity);
-            remoteFb2s.forEach(function(remoteFb2) {
-              debugLog("[opt-in] fallback@1500ms: full reconcile for " + remoteFb2.identity + " → " + identity);
-              reconcileParticipantMedia(remoteFb2);
-            });
-          }, 1500);
-          // Schedule reconcile waves to ensure everything settles
-          scheduleReconcileWaves("opt-in-watch");
-        }
-        // Show existing tile if it was created
-        var tile = screenTileByIdentity.get(identity);
-        if (tile) tile.style.display = "";
-        // Unmute screen share audio
-        if (pState && pState.screenAudioEls) {
-          pState.screenAudioEls.forEach(function(el) {
-            el.muted = false;
-            var gn = pState.screenGainNodes?.get(el);
-            if (gn) gn.gain.gain.value = pState.screenVolume || 1;
-          });
-        }
       } else {
         // === STOP WATCHING: unsubscribe from screen share tracks ===
         hiddenScreens.add(identity);
         watchedScreens.delete(identity);
-        watchToggleBtn.textContent = "Start Watching";
-        if (ovWatchClone) ovWatchClone.textContent = "Start Watching";
         debugLog("[opt-in] user stopped watching " + identity);
 
         // Find the remote participant and unsubscribe from their screen share tracks
@@ -505,6 +453,7 @@ function ensureParticipantCard(participant, isLocal = false) {
             if (gn) gn.gain.gain.value = 0;
           });
         }
+        syncScreenWatchControls();
       }
     });
     screenIndicatorRow.append(watchToggleBtn);
@@ -753,16 +702,16 @@ function ensureParticipantCard(participant, isLocal = false) {
     participantSettingsButton.type = "button";
     participantSettingsButton.className = "participant-settings-toggle shell-v2-only";
     participantSettingsButton.innerHTML = iconSvg("settings");
-    participantSettingsButton.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+    participantSettingsButton.setAttribute("aria-label", "Controls for " + participantDisplayName);
     participantSettingsButton.setAttribute("aria-haspopup", "dialog");
     participantSettingsButton.setAttribute("aria-expanded", "false");
-    participantSettingsButton.title = "Audio settings for " + participantDisplayName;
+    participantSettingsButton.title = "Controls for " + participantDisplayName;
 
     participantSettingsPopup = document.createElement("div");
     participantSettingsPopup.id = "participant-settings-" + participantControlId;
     participantSettingsPopup.className = "participant-settings-popover shell-v2-only";
     participantSettingsPopup.setAttribute("role", "dialog");
-    participantSettingsPopup.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+    participantSettingsPopup.setAttribute("aria-label", "Controls for " + participantDisplayName);
     participantSettingsButton.setAttribute("aria-controls", participantSettingsPopup.id);
 
     var settingsHeading = document.createElement("div");
@@ -771,13 +720,13 @@ function ensureParticipantCard(participant, isLocal = false) {
     var settingsHeadingTitle = document.createElement("strong");
     settingsHeadingTitle.textContent = participantDisplayName;
     var settingsHeadingHint = document.createElement("span");
-    settingsHeadingHint.textContent = "Adjust what you hear";
+    settingsHeadingHint.textContent = "Choose what you see and hear";
     settingsHeadingCopy.append(settingsHeadingTitle, settingsHeadingHint);
     var settingsClose = document.createElement("button");
     settingsClose.type = "button";
     settingsClose.className = "participant-settings-close";
     settingsClose.textContent = "\u00d7";
-    settingsClose.setAttribute("aria-label", "Close audio settings for " + participantDisplayName);
+    settingsClose.setAttribute("aria-label", "Close controls for " + participantDisplayName);
     settingsClose.addEventListener("click", function(event) {
       event.stopPropagation();
       closeParticipantSettings(true);
@@ -847,18 +796,6 @@ function ensureParticipantCard(participant, isLocal = false) {
       event.stopPropagation();
       watchToggleBtn.click();
     });
-    function syncSettingsWatchButton() {
-      settingsWatchButton.textContent = watchToggleBtn.textContent;
-      settingsWatchButton.classList.toggle("hidden", watchToggleBtn.style.display === "none");
-    }
-    if (typeof MutationObserver !== "undefined") {
-      new MutationObserver(syncSettingsWatchButton).observe(watchToggleBtn, {
-        attributes: true,
-        childList: true,
-        subtree: true,
-      });
-    }
-    syncSettingsWatchButton();
 
     var settingsFooter = document.createElement("div");
     settingsFooter.className = "participant-settings-footer";
@@ -894,9 +831,6 @@ function ensureParticipantCard(participant, isLocal = false) {
   }
   header.append(avatar, meta);
   card.append(header);
-  if (participantSettingsButton && participantSettingsPopup) {
-    card.append(participantSettingsButton, participantSettingsPopup);
-  }
 
   let controls = null;
   let micStatusEl = micIndicator;
@@ -931,11 +865,11 @@ function ensureParticipantCard(participant, isLocal = false) {
     screenControl.addEventListener("click", () => toggleScreen().catch(() => {}));
     row.append(micControl, camControl, screenControl);
     controls.append(enableAll, row);
-    // Add watch toggle button for local user's own screen share
+    // Local-only Stage visibility. This never stops the published screen share.
     var watchToggleBtn = document.createElement("button");
     watchToggleBtn.type = "button";
     watchToggleBtn.className = "watch-toggle-btn";
-    watchToggleBtn.textContent = "Stop Watching";
+    watchToggleBtn.textContent = "Hide from my Stage";
     watchToggleBtn.style.display = "none";
     watchToggleBtn.addEventListener("click", function(e) {
       e.stopPropagation();
@@ -952,7 +886,6 @@ function ensureParticipantCard(participant, isLocal = false) {
             if (gn) gn.gain.gain.value = pState.screenVolume || 1;
           });
         }
-        watchToggleBtn.textContent = "Stop Watching";
       } else {
         hiddenScreens.add(identity);
         var tile = screenTileByIdentity.get(identity);
@@ -970,13 +903,73 @@ function ensureParticipantCard(participant, isLocal = false) {
             if (gn) gn.gain.gain.value = 0;
           });
         }
-        watchToggleBtn.textContent = "Start Watching";
       }
+      syncScreenWatchControls();
     });
     controls.append(watchToggleBtn);
     meta.append(controls);
     micStatusEl = micControl;
     screenStatusEl = screenControl;
+
+    // V2 hides the legacy local control row. Give the local card the same
+    // single settings affordance as every other member while a share exists.
+    participantSettingsButton = document.createElement("button");
+    participantSettingsButton.type = "button";
+    participantSettingsButton.className =
+      "participant-settings-toggle shell-v2-only is-stream-control-unavailable";
+    participantSettingsButton.innerHTML = iconSvg("settings");
+    participantSettingsButton.setAttribute("aria-label", "Controls for " + participantDisplayName);
+    participantSettingsButton.setAttribute("aria-haspopup", "dialog");
+    participantSettingsButton.setAttribute("aria-expanded", "false");
+    participantSettingsButton.title = "Controls for " + participantDisplayName;
+
+    participantSettingsPopup = document.createElement("div");
+    participantSettingsPopup.id = "participant-settings-" + participantControlId;
+    participantSettingsPopup.className =
+      "participant-settings-popover participant-screen-settings shell-v2-only";
+    participantSettingsPopup.setAttribute("role", "dialog");
+    participantSettingsPopup.setAttribute("aria-label", "Controls for " + participantDisplayName);
+    participantSettingsButton.setAttribute("aria-controls", participantSettingsPopup.id);
+
+    var settingsHeading = document.createElement("div");
+    settingsHeading.className = "participant-settings-heading";
+    var settingsHeadingCopy = document.createElement("div");
+    var settingsHeadingTitle = document.createElement("strong");
+    settingsHeadingTitle.textContent = participantDisplayName;
+    var settingsHeadingHint = document.createElement("span");
+    settingsHeadingHint.textContent = "Control your Stage view";
+    settingsHeadingCopy.append(settingsHeadingTitle, settingsHeadingHint);
+    var settingsClose = document.createElement("button");
+    settingsClose.type = "button";
+    settingsClose.className = "participant-settings-close";
+    settingsClose.textContent = "\u00d7";
+    settingsClose.setAttribute("aria-label", "Close controls for " + participantDisplayName);
+    settingsClose.addEventListener("click", function(event) {
+      event.stopPropagation();
+      closeParticipantSettings(true);
+    });
+    settingsHeading.append(settingsHeadingCopy, settingsClose);
+
+    settingsWatchButton = document.createElement("button");
+    settingsWatchButton.type = "button";
+    settingsWatchButton.className = "participant-settings-watch hidden";
+    settingsWatchButton.addEventListener("click", function(event) {
+      event.stopPropagation();
+      watchToggleBtn.click();
+    });
+
+    var settingsFooter = document.createElement("div");
+    settingsFooter.className = "participant-settings-footer";
+    settingsFooter.append(settingsWatchButton);
+    participantSettingsPopup.append(settingsHeading, settingsFooter);
+    participantSettingsButton.addEventListener("click", function(event) {
+      event.stopPropagation();
+      toggleParticipantSettings(participantSettingsButton, participantSettingsPopup);
+    });
+  }
+
+  if (participantSettingsButton && participantSettingsPopup) {
+    card.append(participantSettingsButton, participantSettingsPopup);
   }
   if (isLocal) {
     userListEl.prepend(card);
@@ -1272,12 +1265,12 @@ function ensureParticipantCard(participant, isLocal = false) {
     });
 
     if (participantSettingsButton) {
-      participantSettingsButton.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
-      participantSettingsButton.title = "Audio settings for " + participantDisplayName;
+      participantSettingsButton.setAttribute("aria-label", "Controls for " + participantDisplayName);
+      participantSettingsButton.title = "Controls for " + participantDisplayName;
     }
-    if (participantSettingsPopup) participantSettingsPopup.setAttribute("aria-label", "Audio settings for " + participantDisplayName);
+    if (participantSettingsPopup) participantSettingsPopup.setAttribute("aria-label", "Controls for " + participantDisplayName);
     if (settingsHeadingTitle) settingsHeadingTitle.textContent = participantDisplayName;
-    if (settingsClose) settingsClose.setAttribute("aria-label", "Close audio settings for " + participantDisplayName);
+    if (settingsClose) settingsClose.setAttribute("aria-label", "Close controls for " + participantDisplayName);
     if (settingsMicSlider) settingsMicSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
     if (settingsScreenSlider) settingsScreenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
     if (settingsChimeSlider) settingsChimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
@@ -1287,6 +1280,7 @@ function ensureParticipantCard(participant, isLocal = false) {
         (publisherMicStateLabel?.textContent || "Mic off") + " for " + participantDisplayName
       );
     }
+    syncScreenWatchControls();
   }
 
   participantCards.set(key, {
@@ -1326,9 +1320,11 @@ function ensureParticipantCard(participant, isLocal = false) {
     settingsScreenSlider,
     settingsChimeSlider,
     settingsWatchButton,
+    setScreenWatchAvailable,
     setParticipantDisplayName
   });
   participantState.set(key, state);
+  setScreenWatchAvailable(false);
   debugLog(`participant card created and added to DOM for ${key}, card.isConnected=${card.isConnected}, avatar exists=${!!avatar}`);
   // Show avatar image if one exists for this user
   updateAvatarDisplay(key);

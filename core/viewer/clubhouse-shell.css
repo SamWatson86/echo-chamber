@@ -521,7 +521,8 @@
   justify-content: stretch;
 }
 
-:root[data-ui-shell="v2"] .screens-grid:empty::before {
+:root[data-ui-shell="v2"] .screens-grid:empty::before,
+:root[data-ui-shell="v2"] #screen-grid[data-visible-tiles="0"]:not(:empty)::before {
   content: "No one is sharing\A Use Share Screen when you are ready to take the stage.";
   width: min(440px, calc(100% - 32px));
   min-height: min(240px, calc(100% - 16px));
@@ -543,6 +544,10 @@
     url("badge.jpg") center 22px / min(208px, 64%) auto no-repeat,
     linear-gradient(145deg, rgba(201, 168, 106, 0.045), rgba(255, 255, 255, 0.012));
   opacity: 0.78;
+}
+
+:root[data-ui-shell="v2"] #screen-grid[data-visible-tiles="0"]:not(:empty)::before {
+  content: "All shared screens are hidden\A Open People and choose Show on my Stage to restore one.";
 }
 
 :root[data-ui-shell="v2"] .screens-grid .tile {
@@ -861,6 +866,10 @@
   background: rgba(201, 168, 106, 0.1);
 }
 
+:root[data-ui-shell="v2"] .participant-settings-toggle.is-stream-control-unavailable {
+  display: none !important;
+}
+
 :root[data-ui-shell="v2"] .participant-settings-popover {
   position: relative;
   z-index: 6;
@@ -962,6 +971,19 @@
   color: #ff9aa1;
   border-color: rgba(229, 106, 106, 0.38);
   background: rgba(229, 106, 106, 0.12);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-watch {
+  width: 100%;
+  min-height: 38px;
+  justify-content: center;
+  font-size: 11px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-watch.is-screen-hidden {
+  color: var(--club-brass-bright);
+  border-color: rgba(201, 168, 106, 0.38);
+  background: rgba(201, 168, 106, 0.1);
 }
 
 :root[data-ui-shell="v2"] .participant-settings-slider-row {

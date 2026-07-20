@@ -769,12 +769,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           playScreenShareChime(ssVol);
         }
         if (hiddenScreens.has(_pubIdentity)) {
-          var cardRef = participantCards.get(_pubIdentity);
-          if (cardRef && cardRef.watchToggleBtn) {
-            cardRef.watchToggleBtn.style.display = "";
-            cardRef.watchToggleBtn.textContent = "Start Watching";
-            if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
-          }
+          setParticipantScreenWatchAvailable(_pubIdentity, true);
           debugLog(`[opt-in] track published (screen, user-hidden) ${_pubIdentity} src=${pubSource}`);
           // Still hook so we can subscribe later when user opts in
           if (participant) hookPublication(publication, participant);
@@ -876,12 +871,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
           hiddenScreens.delete(identity);
           watchedScreens.delete(identity);
           _pubBitrateControl.delete(identity);
-          var cardRef = participantCards.get(identity);
-          if (cardRef?.watchToggleBtn) {
-            cardRef.watchToggleBtn.style.display = "none";
-            cardRef.watchToggleBtn.textContent = "Stop Watching";
-            if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = "none"; cardRef.ovWatchClone.textContent = "Stop Watching"; }
-          }
+          setParticipantScreenWatchAvailable(identity, false);
         }
       }
 
@@ -1260,12 +1250,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (publication.trackSid) {
           registerScreenTrack(publication.trackSid, publication, tile, localIdentity);
         }
-        // Show "Stop Watching" button for local screen share
-        const localCardRef = participantCards.get(localIdentity);
-        if (localCardRef && localCardRef.watchToggleBtn) {
-          localCardRef.watchToggleBtn.style.display = "";
-          localCardRef.watchToggleBtn.textContent = hiddenScreens.has(localIdentity) ? "Start Watching" : "Stop Watching";
-        }
+        setParticipantScreenWatchAvailable(localIdentity, true);
       } else if (publication.track?.kind === "video" && source === LK.Track.Source.Camera) {
         updateAvatarVideo(ensureParticipantCard(local, true), publication.track);
       } else if (publication.track?.kind === "audio") {
@@ -1295,16 +1280,12 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         if (publication.trackSid === localScreenTrackSid) {
           localScreenTrackSid = "";
         }
-        // Hide "Stop Watching" button when local screen share ends
+        // Remove the local Stage-view action when the share itself ends.
         const localId = room?.localParticipant?.identity;
         if (localId) {
           hiddenScreens.delete(localId);
           screenTileByIdentity.delete(localId);
-          const localCard = participantCards.get(localId);
-          if (localCard && localCard.watchToggleBtn) {
-            localCard.watchToggleBtn.style.display = "none";
-            localCard.watchToggleBtn.textContent = "Stop Watching";
-          }
+          setParticipantScreenWatchAvailable(localId, false);
         }
       } else if (publication.track?.kind === "video" && source === LK.Track.Source.Camera) {
         const cardRef = participantCards.get(room?.localParticipant?.identity || "");
@@ -1420,7 +1401,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   remoteList.forEach((participant) => {
     ensureParticipantCard(participant);
     attachParticipantTracks(participant);
-    // Opt-in: detect existing screen shares and show "Start Watching" button
+    // Detect existing screen shares and expose the viewer-local Stage action.
     var pubs = getParticipantPublications(participant);
     pubs.forEach(function(pub) {
       patchScreenCompanionSource(pub, pub?.track, participant);
@@ -1433,19 +1414,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
         ? getParentIdentity(participant.identity)
         : participant.identity;
       // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
-      // The "Stop Watching" button is available if they want to unsubscribe later.
+      // The Stage-view action remains available if they want to hide it later.
       startWatchingScreenIdentity(effectiveIdentity, "late-join");
-      return;
-      hiddenScreens.delete(effectiveIdentity);
-      watchedScreens.add(effectiveIdentity);
-      resubscribeParticipantTracks(participant);
-      reconcileParticipantMedia(participant);
-      var cardRef = participantCards.get(effectiveIdentity);
-      if (cardRef && cardRef.watchToggleBtn) {
-        cardRef.watchToggleBtn.style.display = "";
-        cardRef.watchToggleBtn.textContent = "Stop Watching";
-        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Stop Watching"; }
-      }
     }
   });
   // Retry existing participants — fast on room switch, full on first connect

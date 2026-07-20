@@ -1530,3 +1530,123 @@ test("one participant audio menu owns voice, shared-audio, and chime controls", 
     await expect(nonCameraCard.locator(".user-indicators .mute-button").nth(muteIndex)).toBeVisible();
   }
 });
+
+test("every member can hide and restore any shared screen on their own Stage", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await openPhaseOneViewer(page, {
+    participants: 3,
+    cameras: 1,
+    screenShares: 2,
+    screenOwners: [1, 2],
+  });
+
+  const localIdentity = "layout-fixture-1";
+  const remoteIdentity = "layout-fixture-2";
+  const localCard = page.locator(`.user-card[data-identity="${localIdentity}"]`);
+  const remoteCard = page.locator(`.user-card[data-identity="${remoteIdentity}"]`);
+  const localTile = page.locator(`#screen-grid > .tile[data-identity="${localIdentity}"]`);
+  const remoteTile = page.locator(`#screen-grid > .tile[data-identity="${remoteIdentity}"]`);
+
+  await expect(localTile).toBeVisible();
+  await expect(remoteTile).toBeVisible();
+  await expect(localCard.locator(".participant-settings-toggle")).toBeVisible();
+  await expect(remoteCard.locator(".participant-settings-toggle")).toBeVisible();
+
+  async function openScreenAction(card, participantName, action) {
+    const toggle = card.locator(".participant-settings-toggle");
+    const popup = card.locator(".participant-settings-popover");
+    if (!(await popup.isVisible())) await toggle.click();
+    await expect(popup).toBeVisible();
+    return popup.getByRole("button", {
+      name: new RegExp(`${action} the shared screen from ${participantName} on my Stage`, "i"),
+    });
+  }
+
+  const hideLocal = await openScreenAction(localCard, "Friend 1", "Hide");
+  await expect(hideLocal).toHaveText("Hide from my Stage");
+  await hideLocal.click();
+  await expect(localTile).toBeHidden();
+  await expect(remoteTile).toBeVisible();
+  await expect(localCard.locator(".participant-settings-toggle")).toBeVisible();
+
+  const localHiddenState = await page.evaluate((identity) => {
+    const state = participantState.get(identity);
+    const audio = Array.from(state.screenAudioEls)[0];
+    const gainNode = state.screenGainNodes.get(audio);
+    return {
+      gain: gainNode.gain.gain.value,
+      hidden: hiddenScreens.has(identity),
+      muted: audio.muted,
+      subscriptions: window.__echoLayoutFixtureSubscriptions.filter((entry) => entry.identity === identity),
+    };
+  }, localIdentity);
+  expect(localHiddenState).toEqual({ gain: 0, hidden: true, muted: true, subscriptions: [] });
+
+  await page.setViewportSize({ width: 560, height: 640 });
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "mini");
+  const showLocal = await openScreenAction(localCard, "Friend 1", "Show");
+  await expect(showLocal).toHaveText("Show on my Stage");
+  const restoreGeometry = await showLocal.evaluate((button) => {
+    const rect = button.getBoundingClientRect();
+    return {
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(restoreGeometry.left).toBeGreaterThanOrEqual(0);
+  expect(restoreGeometry.top).toBeGreaterThanOrEqual(0);
+  expect(restoreGeometry.right).toBeLessThanOrEqual(restoreGeometry.viewportWidth);
+  expect(restoreGeometry.bottom).toBeLessThanOrEqual(restoreGeometry.viewportHeight);
+  await showLocal.click();
+  await expect(localTile).toBeVisible();
+
+  await page.setViewportSize({ width: 1024, height: 768 });
+  const hideRemote = await openScreenAction(remoteCard, "Friend 2", "Hide");
+  await hideRemote.click();
+  await expect(remoteTile).toBeHidden();
+  await expect(localTile).toBeVisible();
+
+  const remoteHiddenState = await page.evaluate((identity) => {
+    const state = participantState.get(identity);
+    const audio = Array.from(state.screenAudioEls)[0];
+    const gainNode = state.screenGainNodes.get(audio);
+    return {
+      gain: gainNode.gain.gain.value,
+      hidden: hiddenScreens.has(identity),
+      muted: audio.muted,
+      unsubscribedSources: window.__echoLayoutFixtureSubscriptions
+        .filter((entry) => entry.identity === identity && !entry.subscribed)
+        .map((entry) => entry.source)
+        .sort(),
+    };
+  }, remoteIdentity);
+  expect(remoteHiddenState.hidden).toBe(true);
+  expect(remoteHiddenState.muted).toBe(true);
+  expect(remoteHiddenState.gain).toBe(0);
+  expect(remoteHiddenState.unsubscribedSources).toEqual(["screen_share", "screen_share_audio"]);
+
+  const showRemote = await openScreenAction(remoteCard, "Friend 2", "Show");
+  await showRemote.click();
+  await expect(remoteTile).toBeVisible();
+  await expect.poll(() => page.evaluate((identity) => ({
+    hidden: hiddenScreens.has(identity),
+    resubscribed: window.__echoLayoutFixtureSubscriptions.some((entry) =>
+      entry.identity === identity && entry.subscribed
+    ),
+  }), remoteIdentity)).toEqual({ hidden: false, resubscribed: true });
+
+  await (await openScreenAction(localCard, "Friend 1", "Hide")).click();
+  await (await openScreenAction(remoteCard, "Friend 2", "Hide")).click();
+  await expect(page.locator("#screen-grid")).toHaveAttribute("data-visible-tiles", "0");
+  await expect.poll(() => page.locator("#screen-grid").evaluate((grid) =>
+    getComputedStyle(grid, "::before").content
+  )).toContain("All shared screens are hidden");
+  await expect(localCard.locator(".participant-settings-toggle")).toBeVisible();
+  await expect(remoteCard.locator(".participant-settings-popover").getByRole("button", {
+    name: /Show the shared screen from Friend 2 on my Stage/i,
+  })).toBeVisible();
+});
