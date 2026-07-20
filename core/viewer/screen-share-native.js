@@ -212,16 +212,8 @@ function _clearNativeScreenTilesForIdentity(identity) {
     if (typeof watchedScreens !== 'undefined' && watchedScreens) watchedScreens.delete(key);
     if (typeof _pubBitrateControl !== 'undefined' && _pubBitrateControl) _pubBitrateControl.delete(key);
 
-    if (typeof participantCards !== 'undefined' && participantCards) {
-      var cardRef = participantCards.get(key);
-      if (cardRef && cardRef.watchToggleBtn) {
-        cardRef.watchToggleBtn.style.display = 'none';
-        cardRef.watchToggleBtn.textContent = 'Stop Watching';
-        if (cardRef.ovWatchClone) {
-          cardRef.ovWatchClone.style.display = 'none';
-          cardRef.ovWatchClone.textContent = 'Stop Watching';
-        }
-      }
+    if (typeof setParticipantScreenWatchAvailable === 'function') {
+      setParticipantScreenWatchAvailable(key, false);
     }
   });
 

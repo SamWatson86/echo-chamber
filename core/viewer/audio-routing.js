@@ -415,11 +415,7 @@ function handleTrackSubscribed(track, publication, participant) {
     var _isLocalScreen = room && room.localParticipant && effectiveParticipant.identity === room.localParticipant.identity;
     if (!_isLocalScreen && isUnwatchedScreenShare(publication, participant)) {
       if (publication?.setSubscribed) publication.setSubscribed(false);
-      if (cardRef && cardRef.watchToggleBtn) {
-        cardRef.watchToggleBtn.style.display = "";
-        cardRef.watchToggleBtn.textContent = "Start Watching";
-        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = "Start Watching"; }
-      }
+      setParticipantScreenWatchAvailable(effectiveParticipant.identity, true);
       debugLog("[opt-in] auto-unsubscribed unwatched screen " + effectiveParticipant.identity);
       return;
     }
@@ -432,11 +428,7 @@ function handleTrackSubscribed(track, publication, participant) {
       if (!hiddenScreens.has(identity)) {
         existingTile.style.display = "";
       }
-      if (cardRef && cardRef.watchToggleBtn) {
-        cardRef.watchToggleBtn.style.display = "";
-        cardRef.watchToggleBtn.textContent = hiddenScreens.has(identity) ? "Start Watching" : "Stop Watching";
-        if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = cardRef.watchToggleBtn.textContent; }
-      }
+      setParticipantScreenWatchAvailable(identity, true);
       // If same track object, NEVER replace the element — just ensure it plays.
       // SDP renegotiations fire unsub/resub for the same track every ~2s. Replacing
       // the video element interrupts play(), creating a loop of "interrupted by new load".
@@ -517,11 +509,7 @@ function handleTrackSubscribed(track, publication, participant) {
     if (!_isLocalTile) startInboundScreenStatsMonitor();
     // Opt-in screen shares: tile was created because user is watching (or it's local)
     // No need to hide — the intercept at the top of this function already unsubscribed unwatched screens
-    if (cardRef && cardRef.watchToggleBtn) {
-      cardRef.watchToggleBtn.style.display = "";
-      cardRef.watchToggleBtn.textContent = hiddenScreens.has(effectiveParticipant.identity) ? "Start Watching" : "Stop Watching";
-      if (cardRef.ovWatchClone) { cardRef.ovWatchClone.style.display = ""; cardRef.ovWatchClone.textContent = cardRef.watchToggleBtn.textContent; }
-    }
+    setParticipantScreenWatchAvailable(effectiveParticipant.identity, true);
     var _pState = participantState.get(effectiveParticipant.identity);
     if (_pState) _pState.screenTrackSid = screenTrackSid;
     forceVideoLayer(publication, element);
@@ -762,12 +750,7 @@ function handleTrackUnsubscribed(track, publication, participant) {
           _pubBitrateControl.delete(identity);
           debugLog("[bitrate-ctrl] cleared AIMD state for " + identity + " (screen share ended)");
         }
-        var cardRef2 = participantCards.get(identity);
-        if (cardRef2 && cardRef2.watchToggleBtn) {
-          cardRef2.watchToggleBtn.style.display = "none";
-          cardRef2.watchToggleBtn.textContent = "Stop Watching";
-          if (cardRef2.ovWatchClone) { cardRef2.ovWatchClone.style.display = "none"; cardRef2.ovWatchClone.textContent = "Stop Watching"; }
-        }
+        setParticipantScreenWatchAvailable(identity, false);
       }
       // If still publishing but user unsubscribed, keep hiddenScreens and button as-is
     }

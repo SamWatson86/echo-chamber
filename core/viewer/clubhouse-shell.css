@@ -521,7 +521,8 @@
   justify-content: stretch;
 }
 
-:root[data-ui-shell="v2"] .screens-grid:empty::before {
+:root[data-ui-shell="v2"] .screens-grid:empty::before,
+:root[data-ui-shell="v2"] #screen-grid[data-visible-tiles="0"]:not(:empty)::before {
   content: "No one is sharing\A Use Share Screen when you are ready to take the stage.";
   width: min(440px, calc(100% - 32px));
   min-height: min(240px, calc(100% - 16px));
@@ -543,6 +544,10 @@
     url("badge.jpg") center 22px / min(208px, 64%) auto no-repeat,
     linear-gradient(145deg, rgba(201, 168, 106, 0.045), rgba(255, 255, 255, 0.012));
   opacity: 0.78;
+}
+
+:root[data-ui-shell="v2"] #screen-grid[data-visible-tiles="0"]:not(:empty)::before {
+  content: "All shared screens are hidden\A Open People and choose Show on my Stage to restore one.";
 }
 
 :root[data-ui-shell="v2"] .screens-grid .tile {
@@ -728,9 +733,16 @@
   box-shadow: none;
 }
 
-:root[data-ui-shell="v2"] .user-card:not(.is-publisher-mic-off):has(.icon-button.is-active) {
+:root[data-ui-shell="v2"] .user-card:not(.is-publisher-mic-off):has(.participant-mic-activity.is-active) {
   border-color: rgba(79, 195, 200, 0.72);
   box-shadow: 0 0 0 2px rgba(79, 195, 200, 0.1), 0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-ui-shell="v2"] .user-card.is-screen-sharing:not(.is-publisher-mic-off) {
+  border-color: rgba(201, 168, 106, 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(201, 168, 106, 0.08),
+    0 0 18px rgba(201, 168, 106, 0.14);
 }
 
 :root[data-ui-shell="v2"] .user-card.is-publisher-mic-off {
@@ -759,6 +771,7 @@
 }
 
 :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-header {
+  position: relative;
   grid-template-columns: 54px minmax(0, 1fr);
   gap: 10px;
 }
@@ -781,6 +794,55 @@
   right: auto;
   bottom: 10px;
   left: 74px;
+}
+
+:root[data-ui-shell="v2"] .participant-screen-state {
+  position: absolute;
+  right: 48px;
+  bottom: 0;
+  z-index: 5;
+  min-width: 0;
+  min-height: 26px;
+  padding: 4px 8px;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--club-brass-bright);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  border: 1px solid rgba(201, 168, 106, 0.46);
+  border-radius: var(--club-radius-pill);
+  background: rgba(68, 49, 17, 0.9);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"] .participant-screen-state[hidden] {
+  display: none !important;
+}
+
+:root[data-ui-shell="v2"] .participant-screen-state-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  flex: 0 0 14px;
+  place-items: center;
+}
+
+:root[data-ui-shell="v2"] .participant-screen-state-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+:root[data-ui-shell="v2"] .participant-screen-state-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 :root[data-ui-shell="v2"] .user-indicators {
@@ -859,6 +921,10 @@
   color: var(--club-brass-bright);
   border-color: rgba(201, 168, 106, 0.38);
   background: rgba(201, 168, 106, 0.1);
+}
+
+:root[data-ui-shell="v2"] .participant-settings-toggle.is-stream-control-unavailable {
+  display: none !important;
 }
 
 :root[data-ui-shell="v2"] .participant-settings-popover {
@@ -964,6 +1030,19 @@
   background: rgba(229, 106, 106, 0.12);
 }
 
+:root[data-ui-shell="v2"] .participant-settings-watch {
+  width: 100%;
+  min-height: 38px;
+  justify-content: center;
+  font-size: 11px;
+}
+
+:root[data-ui-shell="v2"] .participant-settings-watch.is-screen-hidden {
+  color: var(--club-brass-bright);
+  border-color: rgba(201, 168, 106, 0.38);
+  background: rgba(201, 168, 106, 0.1);
+}
+
 :root[data-ui-shell="v2"] .participant-settings-slider-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 38px;
@@ -1010,6 +1089,12 @@
   right: auto;
   bottom: auto;
   left: 8px;
+}
+
+:root[data-ui-shell="v2"] .user-card.has-camera .participant-screen-state {
+  top: 8px;
+  right: 8px;
+  bottom: auto;
 }
 
 :root[data-ui-shell="v2"] .user-card.is-local.has-camera .user-name {
@@ -1475,6 +1560,16 @@
   :root[data-ui-shell="v2"] .participant-chime-toggle::before {
     content: "♪";
     font-size: 13px;
+  }
+}
+
+@container (max-width: 280px) {
+  :root[data-ui-shell="v2"] .participant-screen-state {
+    padding-inline: 6px;
+  }
+
+  :root[data-ui-shell="v2"] .participant-screen-state-label {
+    display: none;
   }
 }
 

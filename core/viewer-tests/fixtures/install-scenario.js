@@ -35,6 +35,11 @@
     if (typeof participantCards !== "undefined") participantCards.clear();
     if (typeof participantState !== "undefined") participantState.clear();
     if (typeof screenTileBySid !== "undefined") screenTileBySid.clear();
+    if (typeof screenTileByIdentity !== "undefined") screenTileByIdentity.clear();
+    if (typeof hiddenScreens !== "undefined") hiddenScreens.clear();
+    if (typeof watchedScreens !== "undefined") watchedScreens.clear();
+    if (typeof room !== "undefined") room = null;
+    window.__echoLayoutFixtureSubscriptions = [];
   }
 
   function createVideoTrackStub(label, aspectRatio) {
@@ -101,10 +106,14 @@
     }
 
     let attachedCameras = 0;
+    const participants = [];
     for (let index = 1; index <= count; index += 1) {
       const isLocal = index === 1;
+      const participant = makeParticipant(index, longNames, unbrokenNames);
+      participant.trackPublications = new Map();
+      participants.push(participant);
       const cardRef = ensureParticipantCard(
-        makeParticipant(index, longNames, unbrokenNames),
+        participant,
         isLocal,
       );
       const shouldAttachCamera = isLocal ? !!localCamera : attachedCameras < cameraCount;
@@ -119,9 +128,10 @@
       video.setAttribute("aria-label", `${cardRef.card.dataset.identity} camera fixture`);
       if (!isLocal) attachedCameras += 1;
     }
+    return participants;
   }
 
-  function addScreenShares(count, aspectRatios) {
+  function addScreenShares(count, aspectRatios, screenOwners, participants) {
     if (typeof addScreenTile !== "function" || typeof createLockedVideoElement !== "function") {
       throw new Error("production screen renderer is unavailable");
     }
@@ -133,7 +143,51 @@
       exposeFixtureDimensions(video, media);
       video.classList.add("layout-fixture-screen");
       video.setAttribute("aria-label", `screen share ${index + 1}`);
-      addScreenTile(`Shared by Friend ${index + 2}`, video, media.track.sid);
+      const ownerIndex = Number(Array.isArray(screenOwners) ? screenOwners[index] : 0);
+      const owner = Number.isInteger(ownerIndex) && ownerIndex > 0
+        ? participants[ownerIndex - 1]
+        : null;
+      const ownerName = owner ? owner.name : `Friend ${index + 2}`;
+      const tile = addScreenTile(`Shared by ${ownerName}`, video, media.track.sid);
+
+      if (owner) {
+        const LK = getLiveKitClient();
+        tile.dataset.identity = owner.identity;
+        screenTileByIdentity.set(owner.identity, tile);
+
+        const subscriptionLog = window.__echoLayoutFixtureSubscriptions;
+        function makePublication(suffix, source, kind) {
+          const publication = {
+            isSubscribed: true,
+            kind: kind,
+            source: source,
+            track: null,
+            trackSid: `${media.track.sid}-${suffix}`,
+            setSubscribed: function(value) {
+              publication.isSubscribed = !!value;
+              subscriptionLog.push({
+                identity: owner.identity,
+                source: source,
+                subscribed: !!value,
+              });
+            },
+          };
+          owner.trackPublications.set(publication.trackSid, publication);
+        }
+        makePublication("video", LK.Track.Source.ScreenShare, LK.Track.Kind.Video);
+        makePublication("audio", LK.Track.Source.ScreenShareAudio, LK.Track.Kind.Audio);
+
+        const state = participantState.get(owner.identity);
+        if (state) {
+          const audio = document.createElement("audio");
+          audio.muted = false;
+          state.screenAudioEls.add(audio);
+          state.screenGainNodes.set(audio, { gain: { gain: { value: 1 } } });
+        }
+
+        const cardRef = participantCards.get(owner.identity);
+        if (cardRef?.setScreenWatchAvailable) cardRef.setScreenWatchAvailable(true);
+      }
     }
   }
 
@@ -164,18 +218,27 @@
       chatOpen: false,
       longNames: false,
       localCamera: false,
+      screenOwners: [],
       unbrokenNames: false,
     }, options || {});
 
     resetRoom();
-    addParticipants(
+    const participants = addParticipants(
       scenario.participants,
       scenario.cameras,
       scenario.longNames,
       scenario.unbrokenNames,
       scenario.localCamera,
     );
-    addScreenShares(scenario.screenShares, scenario.shareAspects);
+    if (participants.length > 0 && scenario.screenOwners.length > 0) {
+      room = {
+        localParticipant: participants[0],
+        remoteParticipants: new Map(participants.slice(1).map(function(participant) {
+          return [participant.identity, participant];
+        })),
+      };
+    }
+    addScreenShares(scenario.screenShares, scenario.shareAspects, scenario.screenOwners, participants);
     populateChat(scenario.chatOpen);
     await nextFrame();
 
@@ -371,6 +434,14 @@
     updateActiveSpeakerUi();
   }
 
+  function setParticipantScreenShareAvailable(identity, available) {
+    const cardRef = participantCards.get(identity);
+    if (!cardRef?.setScreenWatchAvailable) {
+      throw new Error("participant screen-share state is unavailable for " + identity);
+    }
+    cardRef.setScreenWatchAvailable(available);
+  }
+
   window.EchoLayoutTestScenario = Object.freeze({
     captureCameraLobbySnapshot: captureCameraLobbySnapshot,
     captureIdentitySnapshot: captureIdentitySnapshot,
@@ -379,6 +450,7 @@
     install: install,
     installCameraLobby: installCameraLobby,
     setParticipantMicrophoneState: setParticipantMicrophoneState,
+    setParticipantScreenShareAvailable: setParticipantScreenShareAvailable,
     unbrokenDisplayName: unbrokenDisplayName,
   });
 })();
