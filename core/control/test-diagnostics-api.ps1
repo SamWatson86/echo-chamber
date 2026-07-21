@@ -234,7 +234,7 @@ try {
         session_id = '00000000-0000-4000-8000-000000000103'
         captured_at_ms = $now - 1000
         sent_at_ms = $now
-        app = @{ version = '0.6.33'; git_sha = 'd6191a5f'; channel = 'web-smoke'; runtimes = @{ browser_name = 'Chromium'; browser_version = 'smoke' } }
+        app = @{ version = '0.6.33'; git_sha = 'd6191a5f'; channel = 'web-smoke'; runtimes = @{ browser_name = 'Chromium'; browser_version = '152.0.8123.44' } }
         platform = @{ client_kind = 'browser'; operating_system = 'macos'; architecture = 'aarch64'; os_version = '15.5'; os_build = '24F74' }
         events = @(
             @{
@@ -282,7 +282,12 @@ try {
     if ($badQuery.CacheControl -ne 'no-store') { throw 'Owner query rejection was cacheable' }
     $listCount = @(($list.Content | ConvertFrom-Json).incidents).Count
     if ($listCount -ne 1) { throw "Owner list expected one incident, got $listCount" }
-    Assert-Status (Invoke-EchoRequest GET ('/admin/api/diagnostics/' + $incidentId) $null $ownerToken) 200 'owner detail'
+    $detail = Invoke-EchoRequest GET ('/admin/api/diagnostics/' + $incidentId) $null $ownerToken
+    Assert-Status $detail 200 'owner detail'
+    $detailPayload = $detail.Content | ConvertFrom-Json
+    if ($detailPayload.envelope.app.runtimes.browser_version -ne '152.0.8123.44') {
+        throw 'Owner detail did not preserve the Chrome full version'
+    }
     $download = Invoke-EchoRequest GET ('/admin/api/diagnostics/' + $incidentId + '/download') $null $ownerToken
     Assert-Status $download 200 'owner download'
     foreach ($forbidden in @('forbidden-value', 'person@example.invalid', '192.0.2.77', 'F:\private', 'candidate:', 'ice-ufrag private')) {
@@ -314,6 +319,7 @@ try {
         CanonicalUuid = 'uppercase rejected'
         Oversized = $oversized.StatusCode
         Redaction = 'verified in owner download'
+        BrowserVersion = $detailPayload.envelope.app.runtimes.browser_version
         RateLimitedAtRetry = $rateLimitedAt
         Delete = 204
     }

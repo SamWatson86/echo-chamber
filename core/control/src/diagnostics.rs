@@ -2678,6 +2678,50 @@ mod tests {
     }
 
     #[test]
+    fn ip_shaped_browser_version_stays_redacted_across_ingest_and_restart() {
+        let directory = TestDirectory::new();
+        let store = DiagnosticStore::open(&directory.0).expect("open store");
+        let raw_ip = "192.0.2.77";
+        let mut value = envelope(1);
+        value.app.runtimes.browser_version = Some(raw_ip.to_owned());
+        let raw = serde_json::to_vec(&value).expect("serialize envelope");
+        let incident_id = match store
+            .ingest("Example Tester", &raw, NOW)
+            .expect("ingest incident")
+        {
+            AppendOutcome::Stored { incident_id } => incident_id,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+
+        let stored = store
+            .get_incident(&incident_id)
+            .expect("read incident")
+            .expect("incident exists");
+        assert_ne!(
+            stored.envelope.app.runtimes.browser_version.as_deref(),
+            Some(raw_ip)
+        );
+        let persisted = fs::read_to_string(
+            storage_files(&directory.0).expect("list storage files")[0]
+                .2
+                .clone(),
+        )
+        .expect("read JSONL");
+        assert!(!persisted.contains(raw_ip));
+
+        drop(store);
+        let reopened = DiagnosticStore::open(&directory.0).expect("reopen store");
+        let stored = reopened
+            .get_incident(&incident_id)
+            .expect("read reopened incident")
+            .expect("reopened incident exists");
+        assert_ne!(
+            stored.envelope.app.runtimes.browser_version.as_deref(),
+            Some(raw_ip)
+        );
+    }
+
+    #[test]
     fn rejects_invalid_ids_timestamps_order_counts_and_strings() {
         let mut value = envelope(1);
         value.envelope_id = "not-an-id".to_owned();
