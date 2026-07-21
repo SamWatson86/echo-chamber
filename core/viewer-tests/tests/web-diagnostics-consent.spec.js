@@ -23,6 +23,15 @@ async function readStorage(page) {
   ));
 }
 
+async function installDesktopMacNavigator(page) {
+  await page.addInitScript(() => {
+    Object.defineProperties(window.navigator, {
+      maxTouchPoints: { configurable: true, get: () => 0 },
+      platform: { configurable: true, get: () => "MacIntel" },
+    });
+  });
+}
+
 function diagnosticsState(storage) {
   return Object.fromEntries(
     Object.entries(storage).filter(([key]) => key.startsWith(DIAGNOSTICS_PREFIX)),
@@ -89,16 +98,11 @@ test("late diagnostics callbacks from a replaced room are ignored", async ({ pag
   });
 });
 
-test("Mac web diagnostics remain data-free until consent and can be enabled from Settings", async ({ page }) => {
+test("fresh Mac stays inert until an exact canary invite, then remains data-free until consent", async ({ page }) => {
   const versionRequests = [];
   const diagnosticsUploads = [];
 
-  await page.addInitScript(() => {
-    Object.defineProperties(window.navigator, {
-      maxTouchPoints: { configurable: true, get: () => 0 },
-      platform: { configurable: true, get: () => "MacIntel" },
-    });
-  });
+  await installDesktopMacNavigator(page);
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -135,6 +139,25 @@ test("Mac web diagnostics remain data-free until consent and can be enabled from
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
   const consentModal = page.locator("#diagnostics-consent-modal");
+  await expect(consentModal).toBeHidden();
+  await expect(page.locator("#diagnostics-settings-section")).toHaveClass(/\bhidden\b/);
+  expect(await page.evaluate(() => window.EchoWebDiagnosticsRuntime)).toBeUndefined();
+  expect(diagnosticsState(await readStorage(page))).toEqual({});
+  expect(versionRequests).toHaveLength(0);
+  expect(diagnosticsUploads).toHaveLength(0);
+
+  await page.goto("/?echoWebDiagnosticsCanary=1&echoWebDiagnosticsCanary=1", {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(consentModal).toBeHidden();
+  await expect(page.locator("#diagnostics-settings-section")).toHaveClass(/\bhidden\b/);
+  expect(await page.evaluate(() => window.EchoWebDiagnosticsRuntime)).toBeUndefined();
+  expect(diagnosticsState(await readStorage(page))).toEqual({});
+  expect(versionRequests).toHaveLength(0);
+  expect(diagnosticsUploads).toHaveLength(0);
+
+  await page.goto("/?echoWebDiagnosticsCanary=1", { waitUntil: "domcontentloaded" });
+
   await expect(consentModal).toBeVisible();
   await expect(consentModal).toContainText("linked to your current Echo participant");
   await expect(page.locator("#diagnostics-consent-decline")).toBeFocused();
@@ -153,6 +176,7 @@ test("Mac web diagnostics remain data-free until consent and can be enabled from
   expect(diagnosticsState(await readStorage(page))).toEqual({});
   expect(versionRequests).toHaveLength(0);
   expect(diagnosticsUploads).toHaveLength(0);
+  expect(new URL(page.url()).searchParams.get("echoWebDiagnosticsCanary")).toBe("1");
 
   await page.getByRole("button", { name: "Keep Off" }).click();
   await expect(consentModal).toBeHidden();
@@ -164,6 +188,7 @@ test("Mac web diagnostics remain data-free until consent and can be enabled from
   });
   expect(versionRequests).toHaveLength(0);
   expect(diagnosticsUploads).toHaveLength(0);
+  expect(new URL(page.url()).searchParams.has("echoWebDiagnosticsCanary")).toBe(false);
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(consentModal).toBeHidden();
@@ -224,4 +249,54 @@ test("Mac web diagnostics remain data-free until consent and can be enabled from
     },
   });
   expect(diagnosticsUploads).toHaveLength(0);
+});
+
+test("Allow Diagnostics consumes the invite and enrolls normal-URL reloads", async ({ page }) => {
+  await installDesktopMacNavigator(page);
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/version") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          version: "0.6.33",
+          git_sha: "abcdef123456",
+          latest_client: "",
+        }),
+      });
+      return;
+    }
+    if (url.pathname === "/api/online") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      return;
+    }
+    await route.fulfill({
+      status: 501,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "unmodeled viewer-test endpoint" }),
+    });
+  });
+
+  await page.goto("/?echo-ui-shell-v2=1&echoWebDiagnosticsCanary=1#canary-check", {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(page.locator("#diagnostics-consent-modal")).toBeVisible();
+  await page.getByRole("button", { name: "Allow Diagnostics" }).click();
+  await expect(page.locator("#diagnostics-action-status")).toHaveText("Diagnostics are on.");
+
+  const decidedUrl = new URL(page.url());
+  expect(decidedUrl.searchParams.has("echoWebDiagnosticsCanary")).toBe(false);
+  expect(decidedUrl.searchParams.get("echo-ui-shell-v2")).toBe("1");
+  expect(decidedUrl.hash).toBe("#canary-check");
+  expect(diagnosticsState(await readStorage(page))[CONSENT_KEY]).toBe("enabled-v1");
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.locator("#diagnostics-consent-modal")).toBeHidden();
+  await expect(page.locator("#diagnostics-settings-section")).not.toHaveClass(/\bhidden\b/);
+  await expect(page.locator("#diagnostics-enabled-toggle")).toBeChecked();
+  await expect.poll(() => page.evaluate(() => (
+    window.EchoWebDiagnosticsRuntime?.consentState()
+  ))).toBe("enabled");
 });

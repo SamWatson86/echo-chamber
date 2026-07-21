@@ -14,6 +14,7 @@ const {
   QUEUE_KEY,
   STATUS_KEY,
   ACTIVE_KEY,
+  CANARY_QUERY_PARAM,
   CONSENT_ENABLED,
   CONSENT_DISABLED,
   MAX_ENVELOPES,
@@ -389,6 +390,103 @@ test("desktop Mac browser gating excludes native shell, iPad masquerade, and non
   };
   assert.equal(diagnostics.installBrowserRuntime(nativeEnvironment), null);
   assert.equal(nativeStorage.writes.length, 0);
+
+  for (const environment of [
+    {
+      __ECHO_NATIVE__: true,
+      navigator: { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh)", maxTouchPoints: 0 },
+    },
+    {
+      __ECHO_NATIVE__: false,
+      navigator: { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh)", maxTouchPoints: 5 },
+    },
+    {
+      __ECHO_NATIVE__: false,
+      navigator: { platform: "Win32", userAgent: "Mozilla/5.0 (Windows NT 10.0)", maxTouchPoints: 0 },
+    },
+  ]) {
+    const storage = new MemoryStorage();
+    Object.assign(environment, {
+      URLSearchParams,
+      location: { search: "?echoWebDiagnosticsCanary=1" },
+      localStorage: storage,
+    });
+    assert.equal(diagnostics.installBrowserRuntime(environment), null);
+    assert.equal(storage.writes.length, 0);
+  }
+
+  assert.equal(diagnostics.installBrowserRuntime({
+    __ECHO_NATIVE__: false,
+    navigator: { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh)", maxTouchPoints: 0 },
+    URLSearchParams,
+    location: { search: "?echoWebDiagnosticsCanary=1" },
+    localStorage: null,
+  }), null);
+});
+
+test("web diagnostics canary enrollment requires an exact invite or persisted consent", () => {
+  const emptyStorage = new MemoryStorage();
+  const replacements = [];
+  const environment = {
+    URLSearchParams,
+    location: {
+      pathname: "/viewer/",
+      search: "?echo-ui-shell-v2=1&echoWebDiagnosticsCanary=1",
+      hash: "#test-room",
+    },
+    history: {
+      state: { retained: true },
+      replaceState(state, title, url) { replacements.push({ state, title, url }); },
+    },
+  };
+
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled(environment, emptyStorage), true);
+  assert.equal(emptyStorage.writes.length, 0);
+  assert.equal(diagnostics.clearWebDiagnosticsCanaryInvite(environment), true);
+  assert.deepEqual(replacements, [{
+    state: { retained: true },
+    title: "",
+    url: "/viewer/?echo-ui-shell-v2=1#test-room",
+  }]);
+
+  for (const search of [
+    "",
+    "?echoWebDiagnosticsCanary=0",
+    "?echowebdiagnosticscanary=1",
+    "?echoWebDiagnosticsCanary=1&echoWebDiagnosticsCanary=1",
+    "?echoWebDiagnosticsCanary=1&echoWebDiagnosticsCanary=0",
+  ]) {
+    assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled({
+      URLSearchParams,
+      location: { search },
+    }, emptyStorage), false, `unexpected enrollment for ${search || "empty query"}`);
+  }
+
+  assert.equal(CANARY_QUERY_PARAM, "echoWebDiagnosticsCanary");
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled({}, new MemoryStorage({
+    [CONSENT_KEY]: CONSENT_ENABLED,
+  })), true);
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled({}, new MemoryStorage({
+    [CONSENT_KEY]: CONSENT_DISABLED,
+  })), true);
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled({}, new MemoryStorage({
+    [CONSENT_KEY]: "corrupt-v99",
+  })), false);
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled(environment, null), false);
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled(environment, { getItem() { return null; } }), false);
+  assert.equal(diagnostics.isWebDiagnosticsCanaryEnrolled(environment, {
+    getItem() { throw new Error("storage blocked"); },
+    setItem() {},
+    removeItem() {},
+  }), false);
+
+  assert.equal(diagnostics.installBrowserRuntime({
+    __ECHO_NATIVE__: false,
+    navigator: { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh)", maxTouchPoints: 0 },
+    URLSearchParams,
+    location: { search: "?echoWebDiagnosticsCanary=1" },
+    get localStorage() { throw new Error("storage blocked"); },
+  }), null);
 });
 
 test("secure UUID generation is canonical lowercase and fails closed without secure randomness", async (t) => {

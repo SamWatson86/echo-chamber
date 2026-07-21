@@ -10,6 +10,15 @@ inside the native Echo shell, on Windows/Linux browsers, or on iPadOS devices
 that identify themselves as `MacIntel`. Existing users therefore receive no
 prompt or collection behavior unless they are using the Mac web canary.
 
+The canary is also locally enrollment-gated. A fresh desktop Mac profile on the
+normal viewer URL remains inert. The first prompt appears only from the exact
+non-secret trailing-slash invitation
+`/viewer/?echoWebDiagnosticsCanary=1`. After that choice, an exact
+enabled/disabled diagnostics consent value keeps only that profile enrolled on
+the normal URL. The flag is not authorization. It is removed after the first
+consent decision while preserving unrelated query parameters and the fragment,
+and no separate pre-consent enrollment key is written.
+
 Diagnostics remain off until the browser user explicitly accepts the first-run
 consent. The same Settings panel then provides an On/Off switch, last-upload
 status, Send Now, and Delete Queued Data. Turning diagnostics off first records
@@ -86,3 +95,6 @@ unknown or absent. The collector never guesses them.
   Mac client and are outside the web fallback.
 - No third-party telemetry.
 - No live deployment, service restart, or tester rollout is part of this PR.
+
+Use `docs/WEB-DIAGNOSTICS-TESTING.md` for the isolated readiness gate,
+approved-window deployment checks, Safari canary matrix, and rollback rules.

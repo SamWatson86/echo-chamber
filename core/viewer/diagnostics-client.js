@@ -15,6 +15,7 @@
   var QUEUE_KEY = "echo-web-diagnostics-queue-v1";
   var STATUS_KEY = "echo-web-diagnostics-status-v1";
   var ACTIVE_KEY = "echo-web-diagnostics-active-v1";
+  var CANARY_QUERY_PARAM = "echoWebDiagnosticsCanary";
   var CONSENT_ENABLED = "enabled-v1";
   var CONSENT_DISABLED = "disabled-v1";
   var QUEUE_VERSION = 1;
@@ -1080,6 +1081,56 @@
     return isMac && !isIPadMasquerading;
   }
 
+  function hasUsableDiagnosticsStorage(storage) {
+    try {
+      return !!storage && typeof storage.getItem === "function" && typeof storage.setItem === "function" &&
+        typeof storage.removeItem === "function";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function persistedCanaryConsent(storage) {
+    if (!hasUsableDiagnosticsStorage(storage)) return null;
+    try {
+      var consent = storage.getItem(CONSENT_KEY);
+      return consent === CONSENT_ENABLED || consent === CONSENT_DISABLED ? consent : "";
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function canaryInviteParams(environment) {
+    if (!environment || !environment.location || typeof environment.URLSearchParams !== "function") return null;
+    try {
+      var params = new environment.URLSearchParams(String(environment.location.search || ""));
+      var values = params.getAll(CANARY_QUERY_PARAM);
+      return values.length === 1 && values[0] === "1" ? params : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function isWebDiagnosticsCanaryEnrolled(environment, storage) {
+    var consent = persistedCanaryConsent(storage);
+    return consent !== null && (!!consent || !!canaryInviteParams(environment));
+  }
+
+  function clearWebDiagnosticsCanaryInvite(environment) {
+    var params = canaryInviteParams(environment);
+    if (!params || !environment.history || typeof environment.history.replaceState !== "function") return false;
+    params.delete(CANARY_QUERY_PARAM);
+    try {
+      var search = params.toString();
+      var cleanUrl = String(environment.location.pathname || "/") + (search ? "?" + search : "") +
+        String(environment.location.hash || "");
+      environment.history.replaceState(environment.history.state, "", cleanUrl);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function detectBrowserRuntime(navigatorObject, livekit) {
     var userAgent = String((navigatorObject && navigatorObject.userAgent) || "");
     var browserName = "Browser";
@@ -1122,6 +1173,9 @@
     } catch (_) {
       return null;
     }
+    var persistedConsent = persistedCanaryConsent(storage);
+    if (persistedConsent === null || (!persistedConsent && !canaryInviteParams(environment))) return null;
+    if (persistedConsent) clearWebDiagnosticsCanaryInvite(environment);
     var collector = createCollector({
       storage: storage,
       crypto: environment.crypto,
@@ -1180,6 +1234,7 @@
         collector.disable();
         if (actionStatus) actionStatus.textContent = "Diagnostics are off. Queued browser data was deleted.";
       }
+      if (collector.consentState() !== "unset") clearWebDiagnosticsCanaryInvite(environment);
       render();
     }
 
@@ -1228,6 +1283,8 @@
     createCollector: createCollector,
     installBrowserRuntime: installBrowserRuntime,
     isDesktopMacBrowser: isDesktopMacBrowser,
+    isWebDiagnosticsCanaryEnrolled: isWebDiagnosticsCanaryEnrolled,
+    clearWebDiagnosticsCanaryInvite: clearWebDiagnosticsCanaryInvite,
     detectBrowserRuntime: detectBrowserRuntime,
     safeMetadata: safeMetadata,
     sanitizeEvent: sanitizeEvent,
@@ -1241,6 +1298,7 @@
       QUEUE_KEY: QUEUE_KEY,
       STATUS_KEY: STATUS_KEY,
       ACTIVE_KEY: ACTIVE_KEY,
+      CANARY_QUERY_PARAM: CANARY_QUERY_PARAM,
       CONSENT_ENABLED: CONSENT_ENABLED,
       CONSENT_DISABLED: CONSENT_DISABLED,
       MAX_ENVELOPES: MAX_ENVELOPES,
