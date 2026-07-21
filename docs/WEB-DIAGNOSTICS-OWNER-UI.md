@@ -104,3 +104,7 @@ Changes to it are server-side/static-asset changes; they do not require a new
 Windows desktop binary. Enabling or changing the owner secret is an operations
 change and still follows the service verification and restart rules in
 `docs/OPERATIONS.md`.
+
+Use `docs/WEB-DIAGNOSTICS-TESTING.md` for the isolated readiness gate,
+coordinated control/viewer/admin rollout checks, owner verification, and the
+manual Safari canary matrix.

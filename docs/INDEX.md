@@ -11,6 +11,8 @@ agents.
   basics
 - [Testing](./TESTING.md) - verification model, CI expectations, regression
   strategy
+- [Mac web diagnostics testing](./WEB-DIAGNOSTICS-TESTING.md) - isolated
+  readiness gate, approved-window checks, Safari canary, and rollback
 - [Responsive UI contract](./UI-RESPONSIVE-CONTRACT.md) - connected-shell
   geometry, state-preservation rules, and Clubhouse rollout gates
 - [Codex operating model](./CODEX.md) - canonical project/thread/worktree rules
