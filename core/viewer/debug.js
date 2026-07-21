@@ -26,22 +26,14 @@ function debugLog(message) {
   }
 }
 
-// ── Persistent event logging (server-side JSONL) ──
-// Captures important events (freeze, screen share start/stop, layer changes)
-// to daily stats log files for offline diagnosis.
-function logEvent(eventName, detail) {
+// Legacy call sites feed the consented structured diagnostics collector. The
+// old endpoint never existed, and free-form `detail` is deliberately ignored.
+function logEvent(eventName, _detail) {
   try {
-    if (!room?.localParticipant?.identity) return;
-    fetch(apiUrl("/api/stats-log"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        identity: room.localParticipant.identity,
-        room: currentRoomName || "",
-        event: eventName,
-        event_detail: detail || null,
-      }),
-    }).catch(function() {});
+    var diagnostics = typeof window !== "undefined" ? window.EchoWebDiagnosticsRuntime : null;
+    if (diagnostics && typeof diagnostics.recordLegacyEvent === "function") {
+      diagnostics.recordLegacyEvent(eventName);
+    }
   } catch (e) {}
 }
 
@@ -169,5 +161,6 @@ if (typeof module === "object" && module.exports) {
   module.exports = {
     buildNativePresenterDebugFallback,
     getNativePresenterDebugReport,
+    logEvent,
   };
 }

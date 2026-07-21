@@ -26,6 +26,7 @@ pub(crate) async fn health() -> Json<HealthResponse> {
 /// Returns server version and latest available client version from deploy/latest.json.
 pub(crate) async fn api_version() -> Json<serde_json::Value> {
     let server_version = env!("CARGO_PKG_VERSION");
+    let git_sha = env!("ECHO_GIT_SHA");
     let mut latest_client = String::new();
     if let Ok(data) = fs::read_to_string(resolve_deploy_dir().join("latest.json")) {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -36,6 +37,7 @@ pub(crate) async fn api_version() -> Json<serde_json::Value> {
     }
     Json(serde_json::json!({
         "version": server_version,
+        "git_sha": git_sha,
         "latest_client": latest_client,
     }))
 }
@@ -56,6 +58,23 @@ pub(crate) async fn api_update_latest() -> axum::response::Response {
             "latest.json not found — no update available",
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn version_response_exposes_the_compiled_git_revision() {
+        let Json(payload) = api_version().await;
+        let git_sha = payload["git_sha"].as_str().expect("git_sha string");
+        assert_eq!(git_sha, env!("ECHO_GIT_SHA"));
+        assert!((7..=12).contains(&git_sha.len()));
+        assert!(git_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+        assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
     }
 }
 

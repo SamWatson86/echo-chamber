@@ -64,7 +64,9 @@ async function ensureDevicePermissions() {
     const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioStream.getTracks().forEach((t) => t.stop());
     gotAudio = true;
+    window.EchoWebDiagnosticsRuntime?.recordPermission?.("microphone", true, null);
   } catch (err) {
+    window.EchoWebDiagnosticsRuntime?.recordPermission?.("microphone", false, err?.name);
     debugLog("[devices] audio permission denied or unavailable: " + err.message);
   }
 
@@ -72,7 +74,9 @@ async function ensureDevicePermissions() {
     const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
     videoStream.getTracks().forEach((t) => t.stop());
     gotVideo = true;
+    window.EchoWebDiagnosticsRuntime?.recordPermission?.("camera", true, null);
   } catch (err) {
+    window.EchoWebDiagnosticsRuntime?.recordPermission?.("camera", false, err?.name);
     debugLog("[devices] video permission denied or unavailable: " + err.message);
   }
 
@@ -110,6 +114,12 @@ async function refreshDevices() {
 
   // Detect macOS permission-denied scenario: devices exist but all have empty labels
   const allLabelsEmpty = devices.length > 0 && devices.every((d) => !d.label);
+  window.EchoWebDiagnosticsRuntime?.recordDeviceCounts?.({
+    microphone: mics.length,
+    camera: cams.length,
+    output: speakers.length,
+    labelsAvailable: !allLabelsEmpty,
+  });
   if (allLabelsEmpty) {
     debugLog("[devices] enumerateDevices returned " + devices.length + " devices but all labels are empty (permissions not granted)");
   }
@@ -485,6 +495,12 @@ async function toggleMic(allowDuringRoomSwitch = false) {
     }
     const actualState = _isMicrophoneActuallyEnabled();
     micEnabled = actualState;
+    window.EchoWebDiagnosticsRuntime?.recordMedia?.(
+      "microphone",
+      desired ? "enable" : "disable",
+      actualState ? "enabled" : "disabled",
+      null
+    );
 
     if (actualState !== desired) {
       debugLog(`[mic] SDK state drift after toggle desired=${desired} actual=${actualState}`);
@@ -506,6 +522,11 @@ async function toggleMic(allowDuringRoomSwitch = false) {
 
     _syncLocalMicUi();
   } catch (err) {
+    if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+      window.EchoWebDiagnosticsRuntime?.recordPermission?.("microphone", false, err.name);
+    } else {
+      window.EchoWebDiagnosticsRuntime?.recordMedia?.("microphone", desired ? "enable" : "disable", "failed", err?.name);
+    }
     debugLog("[mic] toggle error: " + (err.message || err) + " (name=" + err.name + ")");
     micEnabled = _isMicrophoneActuallyEnabled();
     // A failed enable should stay visibly and intentionally off. A failed
@@ -562,6 +583,12 @@ async function toggleCam() {
       debugLog("[cam] post-toggle drift: desired=" + desired + " actual=" + actualState);
     }
     camEnabled = actualState;
+    window.EchoWebDiagnosticsRuntime?.recordMedia?.(
+      "camera",
+      desired ? "enable" : "disable",
+      actualState ? "enabled" : "disabled",
+      null
+    );
     renderPublishButtons();
     if (room?.localParticipant) {
       const cardRef = ensureParticipantCard(room.localParticipant, true);
@@ -581,6 +608,11 @@ async function toggleCam() {
       }
     }
   } catch (err) {
+    if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+      window.EchoWebDiagnosticsRuntime?.recordPermission?.("camera", false, err.name);
+    } else {
+      window.EchoWebDiagnosticsRuntime?.recordMedia?.("camera", desired ? "enable" : "disable", "failed", err?.name);
+    }
     debugLog("[cam] toggle error: " + (err.message || err) + " (name=" + err.name + ")");
     if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
       setStatus("Camera permission denied — grant access in System Settings > Privacy > Camera", true);
@@ -617,6 +649,11 @@ async function toggleScreen() {
       }
     }
   } catch (err) {
+    if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+      window.EchoWebDiagnosticsRuntime?.recordPermission?.("screen", false, err.name);
+    } else {
+      window.EchoWebDiagnosticsRuntime?.recordMedia?.("screen", desired ? "start" : "stop", "failed", err?.name);
+    }
     setStatus(err.message || "Screen share failed", true);
   } finally {
     screenBtn.disabled = switchingRoom;

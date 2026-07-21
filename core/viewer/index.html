@@ -228,7 +228,25 @@
           <h3>Settings</h3>
           <button id="close-settings" type="button">Close</button>
         </div>
-        <div id="settings-device-panel" class="settings-body"></div>
+        <div id="settings-device-panel" class="settings-body">
+          <section id="diagnostics-settings-section" class="chime-settings-section hidden" aria-labelledby="diagnostics-settings-title">
+            <div id="diagnostics-settings-title" class="chime-settings-title">Private Web Diagnostics</div>
+            <label class="settings-toggle-row diagnostics-toggle-row" for="diagnostics-enabled-toggle">
+              <span>Send technical diagnostics to Sam's Echo server</span>
+              <input id="diagnostics-enabled-toggle" type="checkbox" />
+            </label>
+            <p class="settings-hint diagnostics-privacy-hint">Never includes chat, credentials, audio, video, screen content, screenshots, clipboard, device names, or files. Accepted reports are linked privately to your current Echo participant. Turning this off deletes queued data from this browser.</p>
+            <div class="diagnostics-status-grid" aria-live="polite">
+              <span>Delivery status</span><span id="diagnostics-last-upload">Never</span>
+              <span>Queued</span><span id="diagnostics-queue-count">0 reports</span>
+            </div>
+            <div class="diagnostics-actions">
+              <button id="diagnostics-send-now" type="button">Send Now</button>
+              <button id="diagnostics-delete-queued" type="button">Delete Queued Data</button>
+            </div>
+            <div id="diagnostics-action-status" class="settings-hint" aria-live="polite"></div>
+          </section>
+        </div>
         <div class="settings-body settings-perf-section">
           <label class="settings-toggle-row">
             <input type="checkbox" id="performance-mode-toggle">
@@ -514,6 +532,19 @@
       <pre id="debug-log"></pre>
     </div>
 
+    <div id="diagnostics-consent-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="diagnostics-consent-title" hidden>
+      <div class="modal diagnostics-consent-card">
+        <h2 id="diagnostics-consent-title">Mac Web Canary Diagnostics</h2>
+        <p>Echo can automatically send Sam a small, private timeline of technical failures and connection health. This helps diagnose browser problems without asking you to find or send log files.</p>
+        <p><strong>It never captures chat, passwords, tokens, audio, video, screen content, screenshots, clipboard, device names, or files.</strong> Accepted reports are linked to your current Echo participant so Sam can identify the affected session. They remain private on Echo and are normally deleted after about 14 days.</p>
+        <p>Browser privacy protections may prevent Echo from identifying the exact macOS build or Apple Silicon model. Missing values are reported as unknown, never guessed.</p>
+        <div class="modal-actions">
+          <button type="button" id="diagnostics-consent-decline">Keep Off</button>
+          <button type="button" id="diagnostics-consent-accept" class="primary">Allow Diagnostics</button>
+        </div>
+      </div>
+    </div>
+
     <script src="livekit-client.umd.js?v=0.6.11.1777930912"></script>
     <script src="room-switch-state.js?v=0.6.11.1777930912"></script>
     <script src="jam-session-state.js?v=0.6.11.1777930912"></script>
@@ -522,6 +553,7 @@
     <script src="debug.js?v=0.6.11.1777930912"></script>
     <script src="urls.js?v=0.6.11.1777930912"></script>
     <script src="settings.js?v=0.6.11.1777930912"></script>
+    <script src="diagnostics-client.js?v=0.6.11.1777930912"></script>
     <script src="display-status.js?v=0.6.10-local.1.1776128211"></script>
     <script src="native-presenter.js?v=0.6.11.1777921630"></script>
     <script src="identity.js?v=0.6.11.1777930912"></script>

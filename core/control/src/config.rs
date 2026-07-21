@@ -165,7 +165,7 @@ pub fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
                 "style.css", "jam.css", "clubhouse-shell.css",
                 "layout-policy.js", "ui-shell.js",
                 "livekit-client.umd.js", "room-switch-state.js", "jam-session-state.js", "publish-state-reconcile.js",
-                "state.js", "debug.js", "urls.js", "settings.js", "display-status.js",
+                "state.js", "debug.js", "urls.js", "settings.js", "diagnostics-client.js", "display-status.js",
                 "native-presenter.js", "identity.js",
                 "rnnoise.js", "chimes.js", "room-status.js", "auth.js", "theme.js",
                 "chat.js", "soundboard.js", "admin-panel.js",
@@ -243,6 +243,7 @@ mod tests {
             <link rel="stylesheet" href="clubhouse-shell.css?v=old" />
             <script src="layout-policy.js?v=old"></script>
             <script src="ui-shell.js?v=old"></script>
+            <script src="diagnostics-client.js?v=old"></script>
             <script src="grid-layout.js?v=old"></script>
             <script src="camera-lobby-layout.js?v=old"></script>
             <script src="display-status.js?v=old"></script>
@@ -259,6 +260,7 @@ mod tests {
         assert!(stamped.contains("clubhouse-shell.css?v=0.6.12.test"));
         assert!(stamped.contains("layout-policy.js?v=0.6.12.test"));
         assert!(stamped.contains("ui-shell.js?v=0.6.12.test"));
+        assert!(stamped.contains("diagnostics-client.js?v=0.6.12.test"));
         assert!(stamped.contains("grid-layout.js?v=0.6.12.test"));
         assert!(stamped.contains("camera-lobby-layout.js?v=0.6.12.test"));
         assert!(stamped.contains("display-status.js?v=0.6.12.test"));

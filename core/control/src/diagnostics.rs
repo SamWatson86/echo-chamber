@@ -2638,6 +2638,46 @@ mod tests {
     }
 
     #[test]
+    fn browser_diagnostics_fixture_matches_wire_contract() {
+        let raw = include_bytes!("../testdata/browser-diagnostics-envelope-v1.json");
+        let raw_text = std::str::from_utf8(raw).expect("fixture is UTF-8");
+        for forbidden_field in [
+            "\"message\"",
+            "\"fingerprint\"",
+            "\"identity\"",
+            "\"participant\"",
+            "\"room\"",
+            "\"token\"",
+            "\"email\"",
+            "\"device_label\"",
+        ] {
+            assert!(
+                !raw_text.contains(forbidden_field),
+                "browser fixture must not contain {forbidden_field}"
+            );
+        }
+
+        let parsed = parse_validate_and_sanitize(raw, NOW).expect("valid browser envelope");
+        assert_eq!(parsed.schema_version, INCIDENT_SCHEMA_VERSION);
+        assert_eq!(parsed.app.git_sha, "ceaaf6f1034a");
+        assert_eq!(parsed.app.channel, "web-canary");
+        assert_eq!(parsed.app.runtimes.browser_name.as_deref(), Some("Safari"));
+        assert_eq!(parsed.platform.client_kind, ClientKind::Browser);
+        assert_eq!(parsed.platform.operating_system, OperatingSystem::Macos);
+        assert_eq!(parsed.platform.architecture, CpuArchitecture::Unknown);
+        assert_eq!(parsed.platform.os_version, None);
+        assert_eq!(parsed.platform.os_build, None);
+        assert_eq!(parsed.events.len(), 3);
+        assert_eq!(parsed.events[0].code, "session.start");
+        assert_eq!(parsed.events[1].code, "media.devices_observed");
+        assert_eq!(parsed.events[2].code, "connection.connected");
+        assert!(parsed
+            .events
+            .iter()
+            .all(|event| event.message.is_none() && event.fingerprint.is_none()));
+    }
+
+    #[test]
     fn rejects_invalid_ids_timestamps_order_counts_and_strings() {
         let mut value = envelope(1);
         value.envelope_id = "not-an-id".to_owned();

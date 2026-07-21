@@ -405,6 +405,7 @@ function startHeartbeat() {
   _heartbeatAbort = new AbortController();
   const sendBeat = async () => {
     if (!_heartbeatAbort || _heartbeatAbort.signal.aborted) return;
+    const beatToken = currentAccessToken;
     const identity = identityInput ? identityInput.value : "";
     const name = nameInput.value.trim() || "Viewer";
     const beatRoom = roomSwitchState && roomSwitchState.heartbeatRoomName
@@ -413,11 +414,12 @@ function startHeartbeat() {
     try {
       const resp = await fetch(`${controlUrl}/v1/participants/heartbeat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentAccessToken}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${beatToken}` },
         body: JSON.stringify({ room: beatRoom, identity, name, viewer_version: _viewerVersion }),
         signal: _heartbeatAbort.signal,
       });
       if (resp.status === 401 || resp.status === 403) {
+        window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
         // A control restart clears the in-memory participant binding even when
         // the old LiveKit JWT still verifies cryptographically. Treat that as
         // the same forced-stale condition as an explicit stale heartbeat so the
@@ -425,10 +427,19 @@ function startHeartbeat() {
         showStaleBanner();
       } else if (resp.ok) {
         const data = await resp.json().catch(() => null);
-        if (data && data.stale) {
+        if (data && data.stale === true) {
+          window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
           showStaleBanner();
-        } else {
+        } else if (data && data.stale === false) {
           hideStaleBanner();
+          if (beatToken === currentAccessToken) {
+            window.EchoWebDiagnosticsRuntime?.heartbeatSucceeded?.({
+              controlUrl,
+              token: beatToken,
+            });
+          }
+        } else {
+          window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
         }
       }
     } catch {}
@@ -438,6 +449,7 @@ function startHeartbeat() {
 }
 
 function stopHeartbeat() {
+  window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;

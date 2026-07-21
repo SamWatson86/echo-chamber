@@ -26,6 +26,10 @@ The control plane is a Rust service responsible for:
 - DELETE /v1/rooms/{roomId}
 - GET /v1/metrics
 
+`GET /api/version` includes the control/viewer release version and the exact
+short Git SHA compiled into the control binary. Set `ECHO_GIT_SHA` explicitly
+for source-less packaging; normal repository builds discover it from Git.
+
 Notes:
 - LiveKit API key/secret are used to sign access tokens.
 - Admin auth is separate from room password.
