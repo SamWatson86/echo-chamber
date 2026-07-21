@@ -81,6 +81,14 @@ pub struct LiveKitVideoGrant {
     pub canPublishData: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthenticatedParticipant {
+    pub(crate) identity: String,
+    pub(crate) name: String,
+    pub(crate) room: String,
+    pub(crate) participant_auth_id: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompanionIdentityKind {
     ScreenPublisher,
@@ -262,6 +270,7 @@ fn bind_participant_identity(
                 name: payload.name.clone().unwrap_or_default(),
                 room_id: payload.room.clone(),
                 last_seen: now,
+                last_heartbeat_at: None,
                 viewer_version: None,
             },
         );
@@ -520,6 +529,60 @@ pub(crate) fn ensure_livekit_participant(
     ensure_current_participant_claims(state, claims, claimed_identity)
 }
 
+/// Authenticate a route that must be tied to a participant who is both the
+/// current installation binding and actively heartbeating in the JWT's room.
+/// This is deliberately stricter than `ensure_livekit_participant`: heartbeat
+/// itself needs the looser helper so it can establish or recover presence.
+pub(crate) fn ensure_livekit_active_participant(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedParticipant, StatusCode> {
+    let claims = ensure_livekit(state, headers)?;
+    let now = now_ts();
+    let participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
+    let bindings = state
+        .participant_bindings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    active_participant_from_maps(&claims, &participants, &bindings, now)
+        .ok_or(StatusCode::UNAUTHORIZED)
+}
+
+fn active_participant_from_maps(
+    claims: &LiveKitClaims,
+    participants: &HashMap<String, crate::ParticipantEntry>,
+    bindings: &HashMap<String, crate::ParticipantBinding>,
+    now: u64,
+) -> Option<AuthenticatedParticipant> {
+    if claims.sub.trim().is_empty()
+        || claims.video.room.trim().is_empty()
+        || claims.exp <= now as usize
+        || claims.iat > now.saturating_add(30) as usize
+        || claims.iat > claims.exp
+    {
+        return None;
+    }
+
+    let entry = participants.get(&claims.sub)?;
+    let binding = bindings.get(&claims.sub)?;
+    if !participant_claims_match(claims, &claims.sub, binding)
+        || entry.room_id != claims.video.room
+        || entry
+            .last_heartbeat_at
+            .map(|heartbeat| now.saturating_sub(heartbeat) >= PARTICIPANT_ACTIVE_SECS)
+            .unwrap_or(true)
+    {
+        return None;
+    }
+
+    Some(AuthenticatedParticipant {
+        identity: entry.identity.clone(),
+        name: entry.name.clone(),
+        room: entry.room_id.clone(),
+        participant_auth_id: binding.auth_id.clone(),
+    })
+}
+
 pub(crate) fn ensure_jam_participant(
     state: &AppState,
     headers: &HeaderMap,
@@ -767,5 +830,83 @@ mod tests {
             "sam-7475",
             &binding
         ));
+    }
+
+    fn active_participant_maps(
+        room: &str,
+        heartbeat: Option<u64>,
+    ) -> (
+        HashMap<String, crate::ParticipantEntry>,
+        HashMap<String, crate::ParticipantBinding>,
+    ) {
+        (
+            HashMap::from([(
+                "sam-7475".to_string(),
+                crate::ParticipantEntry {
+                    identity: "sam-7475".to_string(),
+                    name: "Sam".to_string(),
+                    room_id: room.to_string(),
+                    last_seen: 100,
+                    last_heartbeat_at: heartbeat,
+                    viewer_version: None,
+                },
+            )]),
+            HashMap::from([(
+                "sam-7475".to_string(),
+                crate::ParticipantBinding {
+                    auth_key: "a".repeat(64),
+                    auth_id: "epoch-a".to_string(),
+                },
+            )]),
+        )
+    }
+
+    #[test]
+    fn active_participant_requires_recent_heartbeat_and_authoritative_room() {
+        let claims = participant_claims("sam-7475", "epoch-a");
+        let (participants, bindings) = active_participant_maps("main", Some(100));
+        let authenticated =
+            active_participant_from_maps(&claims, &participants, &bindings, 110).unwrap();
+        assert_eq!(authenticated.identity, "sam-7475");
+        assert_eq!(authenticated.name, "Sam");
+        assert_eq!(authenticated.room, "main");
+
+        let (never_heartbeat, bindings) = active_participant_maps("main", None);
+        assert!(active_participant_from_maps(&claims, &never_heartbeat, &bindings, 110).is_none());
+
+        let (stale_heartbeat, bindings) = active_participant_maps("main", Some(90));
+        assert!(active_participant_from_maps(&claims, &stale_heartbeat, &bindings, 110).is_none());
+
+        let (wrong_room, bindings) = active_participant_maps("games", Some(100));
+        assert!(active_participant_from_maps(&claims, &wrong_room, &bindings, 110).is_none());
+    }
+
+    #[test]
+    fn active_participant_rejects_companion_stale_and_time_invalid_tokens() {
+        let (participants, mut bindings) = active_participant_maps("main", Some(100));
+
+        let mut companion = participant_claims("sam-7475$screen", "epoch-a");
+        companion.video = livekit_video_grant(
+            "main".to_string(),
+            Some(CompanionIdentityKind::ScreenPublisher),
+        );
+        assert!(active_participant_from_maps(&companion, &participants, &bindings, 110).is_none());
+
+        bindings.get_mut("sam-7475").unwrap().auth_id = "epoch-new".to_string();
+        let claims = participant_claims("sam-7475", "epoch-a");
+        assert!(active_participant_from_maps(&claims, &participants, &bindings, 110).is_none());
+
+        let (_, current_bindings) = active_participant_maps("main", Some(100));
+        let mut expired = participant_claims("sam-7475", "epoch-a");
+        expired.exp = 110;
+        assert!(
+            active_participant_from_maps(&expired, &participants, &current_bindings, 110).is_none()
+        );
+
+        let mut future = participant_claims("sam-7475", "epoch-a");
+        future.iat = 141;
+        assert!(
+            active_participant_from_maps(&future, &participants, &current_bindings, 110).is_none()
+        );
     }
 }

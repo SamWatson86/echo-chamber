@@ -201,6 +201,35 @@ POST /v1/rooms/:id/kick/:identity → admin_kick_participant
 POST /v1/rooms/:id/mute/:identity → admin_mute_participant
 ```
 
+### Private Diagnostics API
+
+The ordinary viewer login currently receives the legacy admin token, so private
+diagnostics deliberately use a separate owner-only issuer, audience, scope, and
+signing secret. There is no `ensure_admin` fallback.
+
+```
+POST   /v1/auth/diagnostics/login                   -> diagnostics_owner_login
+POST   /api/diagnostics/v1/envelopes                -> diagnostics_ingest (current participant)
+GET    /admin/api/diagnostics                       -> diagnostics_list (owner only)
+GET    /admin/api/diagnostics/:incident_id          -> diagnostics_get (owner only)
+GET    /admin/api/diagnostics/:incident_id/download -> diagnostics_download (owner only)
+DELETE /admin/api/diagnostics/:incident_id          -> diagnostics_delete (owner only)
+```
+
+Ingestion is limited to 256 KiB, strict allowlisted schemas, a recent heartbeat,
+the current participant binding/room, and bounded per-IP, binding, installation,
+global, and in-flight admission. Identity metadata is always stamped from server
+state. Stored records are sanitized again, rotated daily, pruned to the
+configured retention/cap, and addressed only by opaque server-generated
+incident IDs. Free-form messages and client fingerprints are discarded; dedupe
+uses a private store-local identity HMAC and lowercase envelope UUID. The
+storage path must remain provably disjoint from every mounted web-readable root;
+served roots containing filesystem links/junctions fail isolation, and an
+existing store fails startup if that boundary cannot be established.
+Owner list pagination uses the received timestamp and incident ID together.
+Removing the owner secret closes collection and owner access while retention
+continues for an existing store.
+
 ### Misc
 ```
 GET  /health              → health
@@ -238,6 +267,10 @@ POST /api/open-url        → open_url (server-side URL open, Sam-only)
 | `CORE_ADMIN_PASSWORD_HASH` | — | bcrypt hash (preferred) |
 | `CORE_ADMIN_JWT_SECRET` | random | JWT signing secret |
 | `CORE_ADMIN_TOKEN_TTL_SECS` | 43200 | Admin JWT TTL (12h) |
+| `CORE_DIAGNOSTICS_OWNER_SECRET` | disabled | Unique 32+ byte secret for owner-only diagnostics login and JWT signing |
+| `CORE_DIAGNOSTICS_DIR` | sibling `logs/diagnostics` directory | Private durable incident storage |
+| `CORE_DIAGNOSTICS_RETENTION_DAYS` | 14 | Detailed incident retention window |
+| `CORE_DIAGNOSTICS_MAX_MB` | 100 | Hard disk cap for retained incidents |
 | `LK_API_KEY` | — | LiveKit API key |
 | `LK_API_SECRET` | — | LiveKit API secret |
 | `LK_TOKEN_TTL_SECS` | 14400 | LiveKit token TTL (4h) |

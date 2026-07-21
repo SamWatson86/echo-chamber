@@ -159,6 +159,7 @@ pub(crate) async fn participant_heartbeat(
     let mut participants = state.participants.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = participants.get_mut(&identity) {
         entry.last_seen = now;
+        entry.last_heartbeat_at = Some(now);
         entry.room_id = room_id.clone();
         entry.name = name.clone();
         if payload.viewer_version.is_some() {
@@ -174,6 +175,7 @@ pub(crate) async fn participant_heartbeat(
                 name: name.clone(),
                 room_id: room_id.clone(),
                 last_seen: now,
+                last_heartbeat_at: Some(now),
                 viewer_version: payload.viewer_version.clone(),
             },
         );

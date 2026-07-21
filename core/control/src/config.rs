@@ -16,6 +16,9 @@ pub struct Config {
     pub admin_password: Option<String>,
     pub admin_jwt_secret: String,
     pub admin_token_ttl_secs: u64,
+    /// Independent owner-only diagnostics credential. This is intentionally
+    /// optional so diagnostics remain disabled until the operator opts in.
+    pub diagnostics_owner_secret: Option<String>,
     pub livekit_api_key: String,
     pub livekit_api_secret: String,
     pub livekit_token_ttl_secs: u64,
