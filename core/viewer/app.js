@@ -593,7 +593,6 @@ refreshDevicesBtn.addEventListener("click", async () => {
   setDeviceStatus("Refreshing devices...");
   await ensureDevicePermissions();
   await refreshDevices();
-  setDeviceStatus("");
 });
 
 // Create Room button removed in favor of fixed rooms (Main, Breakout 1-3)
@@ -724,7 +723,7 @@ setRoomAudioMutedState(false);
 refreshDevices().catch(() => {}).then(() => {
   micSelect.disabled = false;
   camSelect.disabled = false;
-  speakerSelect.disabled = false;
+  applyAudioOutputCapability();
   refreshDevicesBtn.disabled = false;
 });
 
