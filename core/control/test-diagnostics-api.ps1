@@ -38,6 +38,11 @@ $chatDir = Join-Path $logsDir 'chat'
 $uploadsDir = Join-Path $logsDir 'uploads'
 $soundDir = Join-Path $logsDir 'soundboard'
 New-Item -ItemType Directory -Force -Path $viewerDir, $adminDir, $diagDir, $chatDir, $uploadsDir, $soundDir | Out-Null
+$adminSource = Join-Path $coreDir 'admin'
+if (-not (Test-Path -LiteralPath (Join-Path $adminSource 'diagnostics\index.html'))) {
+    throw 'Missing owner diagnostics UI fixture'
+}
+Copy-Item -Path (Join-Path $adminSource '*') -Destination $adminDir -Recurse
 
 $environmentNames = @(
     'CORE_BIND', 'CORE_PORT', 'ECHO_CORE_VIEWER_DIR', 'ECHO_CORE_ADMIN_DIR',
@@ -98,7 +103,14 @@ function Invoke-EchoRequest {
     }
     try {
         $response = Invoke-WebRequest @parameters
-        return [pscustomobject]@{ StatusCode = [int]$response.StatusCode; Content = [string]$response.Content; CacheControl = [string]$response.Headers['Cache-Control'] }
+        return [pscustomobject]@{
+            StatusCode = [int]$response.StatusCode
+            Content = [string]$response.Content
+            CacheControl = [string]$response.Headers['Cache-Control']
+            ContentTypeOptions = [string]$response.Headers['X-Content-Type-Options']
+            ReferrerPolicy = [string]$response.Headers['Referrer-Policy']
+            FrameOptions = [string]$response.Headers['X-Frame-Options']
+        }
     }
     catch [System.Net.WebException] {
         $response = $_.Exception.Response
@@ -109,7 +121,14 @@ function Invoke-EchoRequest {
             $reader = New-Object IO.StreamReader($stream)
             try { $content = $reader.ReadToEnd() } finally { $reader.Dispose() }
         }
-        return [pscustomobject]@{ StatusCode = [int]$response.StatusCode; Content = $content; CacheControl = [string]$response.Headers['Cache-Control'] }
+        return [pscustomobject]@{
+            StatusCode = [int]$response.StatusCode
+            Content = $content
+            CacheControl = [string]$response.Headers['Cache-Control']
+            ContentTypeOptions = [string]$response.Headers['X-Content-Type-Options']
+            ReferrerPolicy = [string]$response.Headers['Referrer-Policy']
+            FrameOptions = [string]$response.Headers['X-Frame-Options']
+        }
     }
 }
 
@@ -151,6 +170,26 @@ try {
     }
     if ($process.HasExited -or $null -eq $health -or $health.StatusCode -ne 200) {
         throw ('Test server failed to start: ' + (Get-Content -Raw $stderr -ErrorAction SilentlyContinue))
+    }
+
+    $legacyAdmin = Invoke-EchoRequest GET '/admin/'
+    Assert-Status $legacyAdmin 200 'legacy admin asset'
+    if (-not $legacyAdmin.Content.Contains('Echo Chamber Admin')) {
+        throw 'Diagnostics asset routing replaced the legacy admin surface'
+    }
+    $legacyAdminScript = Invoke-EchoRequest GET '/admin/admin.js'
+    Assert-Status $legacyAdminScript 200 'legacy admin script'
+    if (-not $legacyAdminScript.Content.Contains('Echo Chamber Admin Dashboard')) {
+        throw 'Diagnostics asset routing replaced the legacy admin script'
+    }
+
+    foreach ($ownerAssetPath in @('/admin/diagnostics/', '/admin/diagnostics/diagnostics.js', '/admin/diagnostics/diagnostics.css')) {
+        $ownerAsset = Invoke-EchoRequest GET $ownerAssetPath
+        Assert-Status $ownerAsset 200 ('owner diagnostics asset ' + $ownerAssetPath)
+        if ($ownerAsset.CacheControl -ne 'no-store') { throw "Owner diagnostics asset was cacheable: $ownerAssetPath" }
+        if ($ownerAsset.ContentTypeOptions -ne 'nosniff') { throw "Owner diagnostics asset allowed MIME sniffing: $ownerAssetPath" }
+        if ($ownerAsset.ReferrerPolicy -ne 'no-referrer') { throw "Owner diagnostics asset allowed referrers: $ownerAssetPath" }
+        if ($ownerAsset.FrameOptions -ne 'DENY') { throw "Owner diagnostics asset allowed framing: $ownerAssetPath" }
     }
 
     $roomLogin = Invoke-EchoRequest POST '/v1/auth/login' @{ password = 'synthetic-room-password' }

@@ -12,6 +12,7 @@ node tools/verify/guardrails.mjs
 echo "[verify] JS syntax checks"
 node --check core/viewer/app.js
 node --check core/viewer/jam.js
+node --check core/admin/diagnostics/diagnostics.js
 
 echo "[verify] JS deterministic tests"
 node --test core/viewer/*.test.js

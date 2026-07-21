@@ -26,7 +26,7 @@ use rooms::*;
 use sfu_proxy::*;
 use soundboard::*;
 
-use axum::http::HeaderValue;
+use axum::http::{HeaderName, HeaderValue};
 use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
@@ -42,7 +42,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tower::Layer;
+use tower::{Layer, ServiceBuilder};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -694,6 +694,27 @@ async fn main() {
         .route("/admin/api/deploys", get(admin_deploys))
         .route("/admin/api/force-reload", post(admin_force_reload))
         .nest("/admin/api/diagnostics", diagnostics_owner_routes)
+        .nest_service(
+            "/admin/diagnostics",
+            ServiceBuilder::new()
+                .layer(SetResponseHeaderLayer::overriding(
+                    axum::http::header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("x-content-type-options"),
+                    HeaderValue::from_static("nosniff"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("referrer-policy"),
+                    HeaderValue::from_static("no-referrer"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("x-frame-options"),
+                    HeaderValue::from_static("DENY"),
+                ))
+                .service(ServeDir::new(admin_dir.join("diagnostics"))),
+        )
         .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
