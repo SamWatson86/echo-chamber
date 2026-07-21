@@ -17,6 +17,42 @@ function setSelectOptions(select, items, placeholder) {
   });
 }
 
+function shouldEnableAudioOutputSelection(options) {
+  var opts = options || {};
+  return opts.nativeIpc === true || opts.setSinkIdSupported === true;
+}
+
+function audioOutputSelectionSupported() {
+  var nativeIpc = !!(window.__ECHO_NATIVE__ && hasTauriIPC());
+  var setSinkIdSupported = typeof HTMLMediaElement !== "undefined" &&
+    typeof HTMLMediaElement.prototype.setSinkId === "function";
+  return shouldEnableAudioOutputSelection({ nativeIpc, setSinkIdSupported });
+}
+
+function applyAudioOutputCapability() {
+  var supported = audioOutputSelectionSupported();
+  if (!speakerSelect) return supported;
+  speakerSelect.disabled = !supported;
+  speakerSelect.title = supported
+    ? "Choose Echo's audio output"
+    : "This browser uses the system audio output";
+  speakerSelect.setAttribute("aria-label", supported
+    ? "Audio output device"
+    : "Audio output is controlled by the operating system");
+  return supported;
+}
+
+function devicePermissionGuidance(options) {
+  var opts = options || {};
+  if (opts.macOS && opts.nativeShell) {
+    return "Devices detected but permissions not granted. Open macOS System Settings → Privacy & Security → Microphone/Camera, then restart Echo.";
+  }
+  if (opts.macOS) {
+    return "Devices detected but permissions not granted. Allow this Echo site in browser settings and macOS Privacy & Security, then reload.";
+  }
+  return "Devices detected but permissions not granted. Allow microphone and camera access in browser or system settings, then retry.";
+}
+
 async function ensureDevicePermissions() {
   let gotAudio = false;
   let gotVideo = false;
@@ -97,7 +133,13 @@ async function refreshDevices() {
 
   setSelectOptions(micSelect, mics, "Default mic");
   setSelectOptions(camSelect, cams, "Default camera");
-  setSelectOptions(speakerSelect, speakers, "Default output");
+  var outputSelectionSupported = audioOutputSelectionSupported();
+  setSelectOptions(
+    speakerSelect,
+    outputSelectionSupported ? speakers : [],
+    outputSelectionSupported ? "Default output" : "Use system output"
+  );
+  applyAudioOutputCapability();
   // Restore saved device selections from localStorage if not already set
   if (!selectedMicId) {
     selectedMicId = echoGet("echo-device-mic") || "";
@@ -125,7 +167,10 @@ async function refreshDevices() {
     else selectedSpeakerId = "";
   }
   if (allLabelsEmpty) {
-    setDeviceStatus("Devices detected but permissions not granted. On Mac: System Settings → Privacy & Security → Microphone/Camera, then restart the app.", true);
+    setDeviceStatus(devicePermissionGuidance({
+      macOS: typeof _isMacOSDevice !== "undefined" && _isMacOSDevice,
+      nativeShell: window.__ECHO_NATIVE__ === true,
+    }), true);
   } else if (!mics.length && !cams.length) {
     setDeviceStatus("No audio or video devices found. Check permissions.");
   } else if (!mics.length) {

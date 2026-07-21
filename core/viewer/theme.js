@@ -4,6 +4,11 @@
 
 // ── Version info + Update button at bottom of settings ──
 // Called after room connect so it appears at the bottom (after device/NC/chime sections)
+function shouldShowDesktopUpdater(options) {
+  var opts = options || {};
+  return opts.nativeShell === true && opts.hasIpc === true;
+}
+
 function buildVersionSection() {
   if (!settingsDevicePanel) return;
   if (document.getElementById("version-settings-section")) return; // already built
@@ -25,7 +30,11 @@ function buildVersionSection() {
   updateStatus.id = "update-status";
   updateStatus.style.cssText = "font-size:12px; opacity:0.7; margin-left:4px;";
   versionRow.appendChild(versionLabel);
-  versionRow.appendChild(updateBtn);
+  var showDesktopUpdater = shouldShowDesktopUpdater({
+    nativeShell: window.__ECHO_NATIVE__ === true,
+    hasIpc: hasTauriIPC(),
+  });
+  if (showDesktopUpdater) versionRow.appendChild(updateBtn);
   versionRow.appendChild(updateStatus);
   section.appendChild(versionRow);
   settingsDevicePanel.appendChild(section);
@@ -43,6 +52,11 @@ function buildVersionSection() {
       versionLabel.textContent = "Version: unknown";
     }
   })();
+
+  if (!showDesktopUpdater) {
+    updateStatus.textContent = "Updates automatically with the Echo server.";
+    return;
+  }
 
   // Check for updates — query server /api/version then try Tauri auto-update
   updateBtn.addEventListener("click", async function() {

@@ -1840,10 +1840,16 @@ function buildChimeSettingsUI() {
   var ncBtn = document.createElement("button");
   ncBtn.type = "button";
   ncBtn.id = "nc-toggle-btn";
-  ncBtn.className = "nc-toggle-btn" + (noiseCancelEnabled ? " is-on" : "");
-  ncBtn.textContent = noiseCancelEnabled ? "ON" : "OFF";
+  var ncBlockedOnPlatform = typeof isNoiseCancellationBlockedForPlatform === "function"
+    ? isNoiseCancellationBlockedForPlatform()
+    : false;
+  ncBtn.className = "nc-toggle-btn" + (!ncBlockedOnPlatform && noiseCancelEnabled ? " is-on" : "");
+  ncBtn.textContent = !ncBlockedOnPlatform && noiseCancelEnabled ? "ON" : "OFF";
+  ncBtn.disabled = ncBlockedOnPlatform;
+  ncBtn.title = ncBlockedOnPlatform ? "Unavailable on macOS while microphone stability is being hardened" : "";
 
   ncBtn.addEventListener("click", async function() {
+    if (ncBlockedOnPlatform) return;
     debugLog("[noise-cancel] Button clicked, was: " + noiseCancelEnabled + ", micEnabled: " + micEnabled + ", room: " + !!room);
     noiseCancelEnabled = !noiseCancelEnabled;
     debugLog("[noise-cancel] Now: " + noiseCancelEnabled);
@@ -1877,7 +1883,9 @@ function buildChimeSettingsUI() {
 
   var ncDesc = document.createElement("div");
   ncDesc.className = "nc-description";
-  ncDesc.textContent = "Reduces background noise like fans, AC, and keyboard sounds.";
+  ncDesc.textContent = ncBlockedOnPlatform
+    ? "Unavailable on macOS for now. Echo keeps the direct microphone path active for reliability."
+    : "Reduces background noise like fans, AC, and keyboard sounds.";
   ncSection.appendChild(ncDesc);
 
   // Suppression strength selector
@@ -1893,7 +1901,9 @@ function buildChimeSettingsUI() {
     btn.type = "button";
     btn.className = "nc-level-btn" + (ncSuppressionLevel === idx ? " is-active" : "");
     btn.textContent = label;
+    btn.disabled = ncBlockedOnPlatform;
     btn.addEventListener("click", function() {
+      if (ncBlockedOnPlatform) return;
       updateNoiseGateLevel(idx);
       ncLevelBtns.querySelectorAll(".nc-level-btn").forEach(function(b, i) {
         b.classList.toggle("is-active", i === idx);
@@ -1906,7 +1916,9 @@ function buildChimeSettingsUI() {
 
   var ncLevelDesc = document.createElement("div");
   ncLevelDesc.className = "nc-description";
-  ncLevelDesc.textContent = "Light = AI denoise only. Medium/Strong adds a noise gate that mutes silence.";
+  ncLevelDesc.textContent = ncBlockedOnPlatform
+    ? "The browser's normal microphone processing remains available."
+    : "Light = AI denoise only. Medium/Strong adds a noise gate that mutes silence.";
   ncSection.appendChild(ncLevelDesc);
 
   settingsDevicePanel.appendChild(ncSection);

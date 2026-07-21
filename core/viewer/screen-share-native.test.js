@@ -259,6 +259,143 @@ test("source visibility monitor is only enabled for native window-like sources",
   );
 });
 
+test("Mac browser sharing selects the conservative direct-track profile", () => {
+  const { context } = loadScreenShareNative();
+
+  assert.equal(context.shouldUseConservativeBrowserScreenShare({
+    nativeClient: false,
+    navigatorLike: {
+      platform: "MacIntel",
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)",
+    },
+    canvasCaptureSupported: true,
+    workerSupported: true,
+  }), true);
+});
+
+test("capable Windows browser sharing keeps the existing canvas profile", () => {
+  const { context } = loadScreenShareNative();
+
+  assert.equal(context.shouldUseConservativeBrowserScreenShare({
+    nativeClient: false,
+    navigatorLike: {
+      platform: "Win32",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    },
+    canvasCaptureSupported: true,
+    workerSupported: true,
+  }), false);
+});
+
+test("missing canvas or Worker capability safely selects direct-track sharing", () => {
+  const { context } = loadScreenShareNative();
+  const navigatorLike = {
+    platform: "Linux x86_64",
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+  };
+
+  assert.equal(context.shouldUseConservativeBrowserScreenShare({
+    nativeClient: false,
+    navigatorLike,
+    canvasCaptureSupported: false,
+    workerSupported: true,
+  }), true);
+  assert.equal(context.shouldUseConservativeBrowserScreenShare({
+    nativeClient: false,
+    navigatorLike,
+    canvasCaptureSupported: true,
+    workerSupported: false,
+  }), true);
+});
+
+test("conservative display request omits Chromium-only system-audio hints", () => {
+  const { context } = loadScreenShareNative();
+  const constraints = context.buildBrowserDisplayMediaConstraints(true);
+
+  assert.equal(constraints.video.frameRate.ideal, 30);
+  assert.equal(constraints.audio, true);
+  assert.equal("systemAudio" in constraints, false);
+  assert.equal("surfaceSwitching" in constraints, false);
+});
+
+test("browser capture cleanup stops every acquired track", () => {
+  const { context } = loadScreenShareNative();
+  const stopped = [];
+  context.stopBrowserCaptureStream({
+    getTracks: () => [
+      { stop: () => stopped.push("video") },
+      { stop: () => stopped.push("audio") },
+    ],
+  });
+
+  assert.deepEqual(stopped, ["video", "audio"]);
+});
+
+test("Mac browser start publishes the original display track without creating a canvas", async () => {
+  const { context } = loadScreenShareNative();
+  const published = [];
+  const optionCalls = [];
+  let canvasCreated = false;
+  const videoTrack = {
+    id: "mac-display-track",
+    readyState: "live",
+    enabled: true,
+    muted: false,
+    label: "Screen 1",
+    getSettings: () => ({ width: 1728, height: 1117, frameRate: 30, displaySurface: "monitor" }),
+    addEventListener() {},
+    stop() {},
+  };
+  const stream = {
+    getVideoTracks: () => [videoTrack],
+    getAudioTracks: () => [],
+    getTracks: () => [videoTrack],
+  };
+
+  context.window.__ECHO_NATIVE__ = false;
+  context.navigator = {
+    platform: "MacIntel",
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)",
+    mediaDevices: { getDisplayMedia: async () => stream },
+  };
+  context.HTMLCanvasElement = function HTMLCanvasElement() {};
+  context.HTMLCanvasElement.prototype.captureStream = function() {};
+  context.Worker = function Worker() {};
+  context.prewarmedRooms = new Map();
+  context._screenShareStatsInterval = null;
+  context.logEvent = () => {};
+  context.renderPublishButtons = () => {};
+  context.getScreenSharePublishOptions = (width, height, conservative) => {
+    optionCalls.push({ width, height, conservative });
+    return { simulcast: false };
+  };
+  context.getLiveKitClient = () => ({
+    Track: { Source: { ScreenShare: "screen_share", ScreenShareAudio: "screen_share_audio" } },
+    LocalVideoTrack: class {
+      constructor(mediaStreamTrack) {
+        this.mediaStreamTrack = mediaStreamTrack;
+        this.sender = null;
+      }
+    },
+  });
+  context.room.localParticipant.publishTrack = async (track, options) => {
+    published.push({ track, options });
+  };
+  context.document.createElement = () => {
+    canvasCreated = true;
+    throw new Error("Mac direct-track route must not create a canvas");
+  };
+
+  await context.startScreenShareManual();
+
+  assert.equal(canvasCreated, false);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].track.mediaStreamTrack, videoTrack);
+  assert.equal(published[0].options.source, "screen_share");
+  assert.deepEqual(optionCalls, [{ width: 1728, height: 1117, conservative: true }]);
+  assert.equal(context.window._echoCaptureSourceReport.capture_route, "browser-direct");
+});
+
 test("monitor audio capture requests system audio with Echo playback excluded", () => {
   const { context } = loadScreenShareNative();
 

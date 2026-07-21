@@ -38,6 +38,58 @@ function _stringOrNull(value) {
   return String(value);
 }
 
+function _isDesktopMacOSBrowser(navigatorLike) {
+  var nav = navigatorLike || {};
+  var uaPlatform = "";
+  try {
+    uaPlatform = nav.userAgentData && nav.userAgentData.platform || "";
+  } catch (e) {}
+  return /mac/i.test(uaPlatform) ||
+    /Mac/i.test(nav.platform || "") ||
+    /Macintosh|Mac OS X/i.test(nav.userAgent || "");
+}
+
+function shouldUseConservativeBrowserScreenShare(options) {
+  var opts = options || {};
+  if (opts.nativeClient) return false;
+  return _isDesktopMacOSBrowser(opts.navigatorLike) ||
+    opts.canvasCaptureSupported !== true ||
+    opts.workerSupported !== true;
+}
+
+function buildBrowserDisplayMediaConstraints(conservative) {
+  if (conservative) {
+    // Safari and Mac Chromium get the standards-only, lower-cost request.
+    // System audio is intentionally not promised on the web canary.
+    return {
+      video: { frameRate: { ideal: 30 } },
+      audio: true,
+    };
+  }
+  return {
+    video: {
+      frameRate: { ideal: 60 },
+      resizeMode: "none",
+    },
+    surfaceSwitching: "exclude",
+    selfBrowserSurface: "exclude",
+    preferCurrentTab: false,
+    audio: {
+      autoGainControl: false,
+      echoCancellation: false,
+      noiseSuppression: false,
+    },
+    systemAudio: "include",
+  };
+}
+
+function stopBrowserCaptureStream(stream) {
+  if (!stream || typeof stream.getTracks !== "function") return;
+  stream.getTracks().forEach(function(track) {
+    try { track.stop(); } catch (e) {}
+  });
+}
+
 function buildCaptureSourceReport(source, captureRoute, publishProfile) {
   if (!source) return null;
   var sourceType = source.sourceType || source.source_type || null;
@@ -507,31 +559,25 @@ async function startScreenShareManual() {
   }
 
   // ── Browser path (getDisplayMedia) ──
-  var gdmConstraints = {
-    video: {
-      // Capture at native resolution — NVENC handles 4K with zero CPU cost.
-      // No width/height cap so 4K monitors capture at 3840x2160.
-      frameRate: { ideal: 60 },
-      // Don't resize window captures to monitor resolution — preserve native window size.
-      // Without this, sharing a small window on an ultrawide captures at 3432x1440 and stretches.
-      resizeMode: "none",
-    },
-    surfaceSwitching: "exclude",
-    selfBrowserSurface: "exclude",
-    preferCurrentTab: false,
-  };
-  // Always request audio from getDisplayMedia — works as baseline for all clients
-  // Native client will additionally try WASAPI per-process capture for better quality
-  gdmConstraints.audio = {
-    autoGainControl: false,
-    echoCancellation: false,
-    noiseSuppression: false,
-  };
-  gdmConstraints.systemAudio = "include";
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== "function") {
+    throw new Error("Screen sharing is not supported by this browser.");
+  }
+  var conservativeBrowserShare = shouldUseConservativeBrowserScreenShare({
+    nativeClient: isNativeClient,
+    navigatorLike: navigator,
+    canvasCaptureSupported: typeof HTMLCanvasElement !== "undefined" &&
+      typeof HTMLCanvasElement.prototype.captureStream === "function",
+    workerSupported: typeof Worker === "function",
+  });
+  var gdmConstraints = buildBrowserDisplayMediaConstraints(conservativeBrowserShare);
   const stream = await navigator.mediaDevices.getDisplayMedia(gdmConstraints);
 
   // Log the actual capture frame rate
   const videoMst = stream.getVideoTracks()[0];
+  if (!videoMst) {
+    stopBrowserCaptureStream(stream);
+    throw new Error("The browser did not provide a screen video track.");
+  }
   if (videoMst) {
     const settings = videoMst.getSettings();
     debugLog("Screen capture actual FPS: " + (settings.frameRate || "unknown") +
@@ -540,7 +586,7 @@ async function startScreenShareManual() {
       sourceType: "browser",
       id: "browser-picker",
       title: settings.displaySurface || videoMst.label || "Browser picker",
-    }, "browser", "desktop");
+    }, conservativeBrowserShare ? "browser-direct" : "browser-canvas", "desktop");
 
     // Set content hint for smooth motion (gaming/video)
     videoMst.contentHint = "motion";
@@ -550,9 +596,10 @@ async function startScreenShareManual() {
     // Drawing through a canvas creates a new track without this flag, unlocking 60fps.
     // With NVENC hardware encoding, the canvas drawImage overhead is trivial (GPU-composited).
     // A Web Worker timer drives requestFrame() to avoid setTimeout throttling when occluded.
-    let publishMst;
+    let publishMst = videoMst;
     let canvasW = settings.width || 1920;
     let canvasH = settings.height || 1080;
+    if (!conservativeBrowserShare) {
     // ── Smart downscaling for ultrawide/4K captures ──
     // At 15Mbps/60fps, standard 1080p (2.07M px) gets 0.12 bits/pixel — good.
     // A 3440x1440 ultrawide (4.95M px) gets only 0.05 bpp — causes encoder stalls.
@@ -709,6 +756,10 @@ async function startScreenShareManual() {
     });
     debugLog("Screen capture: canvas pipeline active (" + canvasW + "x" + canvasH + " @60fps captureStream(60), NVENC H264)");
     logEvent("screen-share-start", canvasW + "x" + canvasH + " @60fps canvas+NVENC");
+    } else {
+      debugLog("Screen capture: conservative direct-track pipeline active (" + canvasW + "x" + canvasH + " @up to 30fps)");
+      logEvent("screen-share-start", canvasW + "x" + canvasH + " @up to 30fps browser-direct");
+    }
 
     // ── Resource shedding: tear down pre-warmed room connections ──
     // Each pre-warmed room holds a WebRTC peer connection (ICE, DTLS, STUN keepalives).
@@ -724,10 +775,18 @@ async function startScreenShareManual() {
 
     // Create LiveKit LocalVideoTrack and publish
     _screenShareVideoTrack = new LK.LocalVideoTrack(publishMst, undefined, false);
-    await room.localParticipant.publishTrack(_screenShareVideoTrack, {
-      source: LK.Track.Source.ScreenShare,
-      ...getScreenSharePublishOptions(canvasW, canvasH),
-    });
+    try {
+      await room.localParticipant.publishTrack(_screenShareVideoTrack, {
+        source: LK.Track.Source.ScreenShare,
+        ...getScreenSharePublishOptions(canvasW, canvasH, conservativeBrowserShare),
+      });
+    } catch (publishError) {
+      if (conservativeBrowserShare) {
+        stopBrowserCaptureStream(stream);
+        _screenShareVideoTrack = null;
+      }
+      throw publishError;
+    }
 
     // Set initial sender parameters for simulcast screen share.
     // 3 layers: HIGH (4K@60), MEDIUM (1080p@60), LOW (720p@30).
@@ -736,7 +795,7 @@ async function startScreenShareManual() {
     debugLog("Screen share sender: " + (sender ? "found" : "NULL") +
       " track.sender=" + (typeof _screenShareVideoTrack?.sender) +
       " mediaStreamTrack=" + (publishMst ? publishMst.readyState + " " + publishMst.getSettings().width + "x" + publishMst.getSettings().height : "null"));
-    if (sender) {
+    if (sender && !conservativeBrowserShare) {
       try {
         const params = sender.getParameters();
         debugLog("Screen share encodings BEFORE override: " + JSON.stringify(params.encodings));
