@@ -1195,8 +1195,8 @@ pub(crate) async fn create_github_issue(
     if let Some(ref url) = report.screenshot_url {
         // Extract filename from upload URL (e.g. "/api/chat/uploads/upload-123" -> "upload-123")
         let file_name = url.rsplit('/').next().unwrap_or("");
-        let file_path = uploads_dir.join(file_name);
-        if !file_name.is_empty() {
+        if crate::is_generated_chat_upload_name(file_name) {
+            let file_path = uploads_dir.join(file_name);
             match fs::read(&file_path) {
                 Ok(bytes) => {
                     // GitHub renders HTML in issue bodies; embed as base64 data URI.
@@ -1223,6 +1223,8 @@ pub(crate) async fn create_github_issue(
                     ));
                 }
             }
+        } else {
+            body.push_str("\n### Screenshot\nInvalid screenshot reference was omitted.\n");
         }
     }
 
@@ -1435,6 +1437,19 @@ pub(crate) async fn admin_force_reload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_screenshot_embedding_accepts_only_generated_upload_names() {
+        assert!(crate::is_generated_chat_upload_name("upload-1785000000000"));
+        for unsafe_name in [
+            "diagnostics-2026-07-21.jsonl",
+            "..\\diagnostics\\diagnostics-2026-07-21.jsonl",
+            "upload-123.png",
+            "upload-",
+        ] {
+            assert!(!crate::is_generated_chat_upload_name(unsafe_name));
+        }
+    }
 
     #[test]
     fn client_stats_merge_preserves_native_presenter_report() {

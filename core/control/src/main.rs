@@ -2,6 +2,9 @@ mod admin;
 mod auth;
 mod chat;
 mod config;
+mod diagnostics;
+mod diagnostics_api;
+mod diagnostics_auth;
 pub mod file_serving;
 mod jam_bot;
 mod jam_session;
@@ -14,6 +17,8 @@ use admin::*;
 use auth::*;
 use chat::*;
 use config::*;
+use diagnostics_api::*;
+use diagnostics_auth::*;
 use file_serving::*;
 use jam_session::*;
 use jam_source::*;
@@ -73,6 +78,8 @@ pub(crate) struct AppState {
     pub(crate) http_client: reqwest::Client,
     pub(crate) viewer_stamp: Arc<RwLock<String>>,
     pub(crate) login_attempts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
+    pub(crate) owner_login_attempts: Arc<Mutex<OwnerLoginLimiter>>,
+    pub(crate) diagnostics: Option<Arc<DiagnosticsRuntime>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -81,6 +88,10 @@ pub(crate) struct ParticipantEntry {
     pub(crate) name: String,
     pub(crate) room_id: String,
     pub(crate) last_seen: u64,
+    /// Proof that this participant completed an authenticated heartbeat. Token
+    /// issuance may seed presence, but it must not count as a live connection.
+    #[serde(skip_serializing)]
+    pub(crate) last_heartbeat_at: Option<u64>,
     pub(crate) viewer_version: Option<String>,
 }
 
@@ -156,7 +167,17 @@ async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     load_dotenv();
-    let config = Arc::new(load_config());
+    let mut loaded_config = load_config();
+    let diagnostics_owner_requested = loaded_config.diagnostics_owner_secret.is_some();
+    if !diagnostics_owner_secret_is_safe(&loaded_config) {
+        loaded_config.diagnostics_owner_secret = None;
+        if diagnostics_owner_requested {
+            warn!(
+                "owner diagnostics disabled: CORE_DIAGNOSTICS_OWNER_SECRET is weak or reuses another credential"
+            );
+        }
+    }
+    let config = Arc::new(loaded_config);
     let max_body = config
         .soundboard_max_bytes
         .max(config.chat_max_upload_bytes)
@@ -246,6 +267,99 @@ async fn main() {
         .join("bugs");
     fs::create_dir_all(&bug_log_dir).ok();
 
+    let viewer_dir = resolve_viewer_dir();
+    info!("viewer dir: {:?}", viewer_dir);
+    let admin_dir = resolve_admin_dir();
+    info!("admin dir: {:?}", admin_dir);
+
+    let diagnostics_dir = std::env::var("CORE_DIAGNOSTICS_DIR")
+        .map(resolve_path)
+        .unwrap_or_else(|_| {
+            session_log_dir
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("diagnostics")
+        });
+    let retention_days = std::env::var("CORE_DIAGNOSTICS_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(diagnostics::DEFAULT_RETENTION.as_secs() / (24 * 60 * 60))
+        .clamp(1, 30);
+    let max_megabytes = std::env::var("CORE_DIAGNOSTICS_MAX_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(diagnostics::DEFAULT_DISK_CAP_BYTES / (1024 * 1024))
+        .clamp(1, 1_024);
+    let retention = diagnostics::RetentionPolicy {
+        max_age: Duration::from_secs(retention_days * 24 * 60 * 60),
+        max_total_bytes: max_megabytes * 1024 * 1024,
+    };
+    let diagnostics_owner_enabled = config.diagnostics_owner_secret.is_some();
+    let should_open_diagnostics = diagnostics_owner_enabled || diagnostics_dir.exists();
+    let diagnostics_runtime = if should_open_diagnostics {
+        match diagnostics::storage_path_overlaps(
+            &diagnostics_dir,
+            &[
+                &viewer_dir,
+                &admin_dir,
+                &config.chat_dir,
+                &config.chat_uploads_dir,
+                &config.soundboard_dir,
+                &avatars_dir,
+                &chimes_dir,
+            ],
+        ) {
+            Ok(true) => {
+                if diagnostics_dir.exists() {
+                    panic!(
+                        "refusing to start: existing diagnostics storage is not isolated from web-readable roots"
+                    );
+                }
+                warn!(
+                    "private diagnostics disabled: storage is not isolated from web-readable roots"
+                );
+                None
+            }
+            Ok(false) => match DiagnosticsRuntime::open(&diagnostics_dir, retention) {
+                Ok(runtime) => Some(Arc::new(runtime)),
+                Err(error) => {
+                    warn!(
+                        "private diagnostics disabled: storage unavailable: {}",
+                        error
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                if diagnostics_dir.exists() {
+                    panic!(
+                        "refusing to start: existing diagnostics storage isolation could not be validated: {}",
+                        error
+                    );
+                }
+                warn!(
+                    "private diagnostics disabled: storage path validation failed: {}",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let diagnostics = if diagnostics_owner_enabled {
+        if diagnostics_runtime.is_some() {
+            info!("private diagnostics enabled at {:?}", diagnostics_dir);
+        }
+        diagnostics_runtime.clone()
+    } else {
+        info!("private diagnostics disabled (owner credential not configured)");
+        None
+    };
+    // Keep an already-existing store under retention even when collection and
+    // owner access are disabled by removing the owner credential.
+    let diagnostics_pruner = diagnostics_runtime;
+
     // Load persisted Spotify token if available
     let spotify_token_file = session_log_dir
         .parent()
@@ -325,7 +439,29 @@ async fn main() {
         http_client,
         viewer_stamp: Arc::new(RwLock::new(viewer_stamp.clone())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
+        owner_login_attempts: Arc::new(Mutex::new(OwnerLoginLimiter::default())),
+        diagnostics,
     };
+
+    // Enforce age retention even when the service is idle or receives only
+    // duplicate uploads. Store locking serializes this with ingest and owner
+    // reads, and diagnostics remain disabled when no private owner secret is
+    // configured.
+    if let Some(runtime) = diagnostics_pruner {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+                let runtime_for_prune = Arc::clone(&runtime);
+                let result =
+                    tokio::task::spawn_blocking(move || runtime_for_prune.prune(now_ts_ms())).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => warn!("diagnostics retention pruning failed: {}", error),
+                    Err(error) => warn!("diagnostics retention task failed: {}", error),
+                }
+            }
+        });
+    }
 
     // Local source consent is authoritative. Turning Jam sharing off on the
     // source PC pauses the bound Spotify device, ends only the current
@@ -455,12 +591,6 @@ async fn main() {
         });
     }
 
-    let viewer_dir = resolve_viewer_dir();
-    info!("viewer dir: {:?}", viewer_dir);
-
-    let admin_dir = resolve_admin_dir();
-    info!("admin dir: {:?}", admin_dir);
-
     // Stamp viewer files with startup-unique cache-busting string
     stamp_viewer_index(&viewer_dir, &viewer_stamp);
 
@@ -522,6 +652,18 @@ async fn main() {
         });
     }
 
+    let diagnostics_owner_routes = Router::new()
+        .route("/", get(diagnostics_list))
+        .route(
+            "/:incident_id",
+            get(diagnostics_get).delete(diagnostics_delete),
+        )
+        .route("/:incident_id/download", get(diagnostics_download))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_diagnostics_owner,
+        ));
+
     let app = Router::new()
         .route("/", get(root_route))
         .nest_service(
@@ -536,17 +678,31 @@ async fn main() {
         .route("/admin/api/sessions", get(admin_sessions))
         .route("/admin/api/stats", post(admin_report_stats))
         .route("/api/client-stats-report", post(client_stats_report))
+        .route(
+            "/api/diagnostics/v1/envelopes",
+            post(diagnostics_ingest)
+                .layer(DefaultBodyLimit::max(diagnostics::MAX_REQUEST_BYTES))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    diagnostics_ingest_admission,
+                )),
+        )
         .route("/admin/api/metrics", get(admin_metrics))
         .route("/admin/api/bugs", get(admin_bug_reports))
         .route("/admin/api/metrics/dashboard", get(admin_dashboard_metrics))
         .route("/admin/api/deploys", get(admin_deploys))
         .route("/admin/api/force-reload", post(admin_force_reload))
+        .nest("/admin/api/diagnostics", diagnostics_owner_routes)
         .nest_service("/admin", ServeDir::new(admin_dir))
         .route("/rtc", get(sfu_proxy))
         .route("/sfu", get(sfu_proxy))
         .route("/sfu/rtc", get(sfu_proxy))
         .route("/health", get(health))
         .route("/v1/auth/login", post(login))
+        .route(
+            "/v1/auth/diagnostics/login",
+            post(diagnostics_owner_login).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
         .route("/v1/auth/token", post(issue_token))
         .route("/v1/rooms", get(list_rooms).post(create_room))
         .route("/v1/rooms/:room_id", get(get_room).delete(delete_room))
@@ -652,10 +808,22 @@ async fn main() {
 
 // ── Admin: kick / mute participants via LiveKit SFU REST API ─────────
 
-/// Generate a short-lived LiveKit service JWT for SFU admin API calls.
-
 pub(crate) fn is_safe_path_component(s: &str) -> bool {
-    !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..") && s != "."
+    !s.is_empty()
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains(':')
+        && !s.contains("..")
+        && !s.chars().any(char::is_control)
+        && s != "."
+}
+
+pub(crate) fn is_generated_chat_upload_name(file_name: &str) -> bool {
+    is_safe_path_component(file_name)
+        && file_name
+            .strip_prefix("upload-")
+            .map(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+            .unwrap_or(false)
 }
 
 fn load_config() -> Config {
@@ -672,6 +840,9 @@ fn load_config() -> Config {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(43200);
+    let diagnostics_owner_secret = std::env::var("CORE_DIAGNOSTICS_OWNER_SECRET")
+        .ok()
+        .filter(|secret| !secret.trim().is_empty());
 
     let livekit_api_key = std::env::var("LK_API_KEY").unwrap_or_else(|_| "LK_API_KEY".to_string());
     let livekit_api_secret =
@@ -733,6 +904,7 @@ fn load_config() -> Config {
         admin_password,
         admin_jwt_secret,
         admin_token_ttl_secs,
+        diagnostics_owner_secret,
         livekit_api_key,
         livekit_api_secret,
         livekit_token_ttl_secs,
@@ -765,6 +937,7 @@ mod lifecycle_tests {
             name: identity.to_string(),
             room_id: "main".to_string(),
             last_seen,
+            last_heartbeat_at: None,
             viewer_version: None,
         }
     }
@@ -774,6 +947,26 @@ mod lifecycle_tests {
             auth_key: "a".repeat(64),
             auth_id: auth_id.to_string(),
         }
+    }
+
+    #[test]
+    fn web_file_components_reject_decoded_traversal() {
+        for unsafe_component in [
+            "..",
+            "../secret",
+            "..\\secret",
+            "folder/secret",
+            "C:secret",
+            "file:stream",
+            ".",
+        ] {
+            assert!(!is_safe_path_component(unsafe_component));
+        }
+        assert!(is_safe_path_component("upload-1785000000000"));
+        assert!(is_generated_chat_upload_name("upload-1785000000000"));
+        assert!(!is_generated_chat_upload_name(
+            "diagnostics-2026-07-21.jsonl"
+        ));
     }
 
     #[test]

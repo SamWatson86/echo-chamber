@@ -257,23 +257,9 @@ pub(crate) async fn chat_get_upload(
     headers: HeaderMap,
     Path(file_name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    info!(
-        "chat_get_upload: file_name={}, auth_header={:?}",
-        file_name,
-        headers
-            .get("authorization")
-            .map(|h| h.to_str().unwrap_or("invalid"))
-    );
-
-    match ensure_livekit(&state, &headers) {
-        Ok(claims) => info!(
-            "chat_get_upload: auth successful for identity={}",
-            claims.sub
-        ),
-        Err(e) => {
-            info!("chat_get_upload: auth failed with status={}", e.as_u16());
-            return Err(e);
-        }
+    ensure_livekit(&state, &headers)?;
+    if !crate::is_generated_chat_upload_name(&file_name) {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     let chat = state.chat.lock().unwrap_or_else(|e| e.into_inner());
