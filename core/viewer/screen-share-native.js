@@ -1015,50 +1015,6 @@ async function startScreenShareManual() {
             }).catch(() => {});
           }
 
-          // ── Persistent stats log (daily JSONL on server) ──
-          // Captures both outbound encoder stats and inbound viewer stats
-          // for offline analysis across sessions.
-          try {
-            var inboundArr = [];
-            _inboundDropTracker.forEach(function(dt, key) {
-              var lastBytes = _inboundScreenLastBytes.get(key);
-              if (!lastBytes) return;
-              var parts = key.split("-");
-              var source = parts[parts.length - 1]; // "screen" or "camera"
-              var fromId = parts.slice(0, parts.length - 1).join("-");
-              var avgF = dt.fpsHistory.length > 0
-                ? dt.fpsHistory.reduce(function(a, b) { return a + b; }, 0) / dt.fpsHistory.length : 0;
-              // Pull latest stats from the last debugLog data (stored in tracker)
-              if (dt._lastReport) {
-                inboundArr.push({
-                  from: fromId, source: source,
-                  fps: dt._lastReport.fps, width: dt._lastReport.w, height: dt._lastReport.h,
-                  bitrate_kbps: dt._lastReport.kbps, jitter_ms: dt._lastReport.jitter,
-                  lost: dt._lastReport.lost, dropped: dt._lastReport.dropped,
-                  decoded: dt._lastReport.decoded, nack: dt._lastReport.nack,
-                  pli: dt._lastReport.pli, avg_fps: Math.round(avgF),
-                  layer: dt.currentQuality, codec: dt._lastReport.codec || null,
-                });
-              }
-            });
-            fetch(apiUrl("/api/stats-log"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                identity: room?.localParticipant?.identity || "",
-                room: currentRoomName || "",
-                out_fps: highLayer.fps, out_width: highLayer.w, out_height: highLayer.h,
-                out_bitrate_kbps: totalKbps,
-                out_bwe_kbps: typeof bwe === "number" ? bwe : null,
-                out_limit: highLayer.limit || null,
-                out_encoder: highLayer.codec || null,
-                out_layers: layers.length,
-                out_ice: iceInfo || null,
-                inbound: inboundArr.length > 0 ? inboundArr : null,
-              }),
-            }).catch(function() {});
-          } catch (e) {}
-
           // Adaptive camera quality: reduce camera when HIGH layer is bandwidth-constrained
           if (highLayerLimit === "bandwidth" || highLayerFps === 0) {
             _bwLimitedCount++;

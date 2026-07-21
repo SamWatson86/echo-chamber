@@ -3,7 +3,25 @@ const assert = require("node:assert/strict");
 const {
   buildNativePresenterDebugFallback,
   getNativePresenterDebugReport,
+  logEvent,
 } = require("./debug.js");
+
+test("legacy event logging delegates only the event name to private diagnostics", () => {
+  const oldWindow = global.window;
+  const calls = [];
+  global.window = {
+    EchoWebDiagnosticsRuntime: {
+      recordLegacyEvent() {
+        calls.push(Array.from(arguments));
+      },
+    },
+  };
+
+  logEvent("room-join", "private-room as private-user");
+
+  assert.deepEqual(calls, [["room-join"]]);
+  global.window = oldWindow;
+});
 
 test("native presenter debug fallback uses client stats schema", () => {
   const report = buildNativePresenterDebugFallback("native presenter script unavailable");

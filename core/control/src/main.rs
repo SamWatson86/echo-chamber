@@ -608,6 +608,7 @@ async fn main() {
                 "clubhouse-shell.css",
                 "layout-policy.js",
                 "ui-shell.js",
+                "diagnostics-client.js",
                 "grid-layout.js",
                 "index.html",
                 "connect.js",
