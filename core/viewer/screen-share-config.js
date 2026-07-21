@@ -2,7 +2,18 @@
    SCREEN SHARE — Publish options builder
    ========================================================= */
 
-function getScreenSharePublishOptions(srcW, srcH) {
+function getScreenSharePublishOptions(srcW, srcH, conservativeBrowserShare) {
+  // The Mac web canary favors a direct, single-layer 30fps publication over
+  // the Chromium/NVENC-oriented canvas and three-layer 60fps path.
+  if (conservativeBrowserShare) {
+    debugLog("[simulcast] conservative browser share — direct single layer");
+    return {
+      videoCodec: "h264",
+      simulcast: false,
+      screenShareEncoding: { maxBitrate: 5_000_000, maxFramerate: 30 },
+      degradationPreference: "balanced",
+    };
+  }
   // Performance Mode: single layer, reduced settings — saves GPU on weak hardware
   if (performanceMode) {
     debugLog("[simulcast] performance mode — single layer screen share");
