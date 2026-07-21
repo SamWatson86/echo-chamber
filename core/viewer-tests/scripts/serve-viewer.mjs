@@ -5,6 +5,7 @@ import { readFile, stat } from "node:fs/promises";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const viewerRoot = path.resolve(scriptDirectory, "..", "..", "viewer");
+const adminRoot = path.resolve(scriptDirectory, "..", "..", "admin");
 const port = Number.parseInt(process.env.PORT || "4175", 10);
 
 const contentTypes = new Map([
@@ -29,14 +30,22 @@ function send(response, statusCode, body, contentType) {
   response.end(body);
 }
 
-function resolveViewerFile(requestUrl) {
+function resolveStaticFile(requestUrl) {
   const url = new URL(requestUrl, `http://127.0.0.1:${port}`);
   const pathname = decodeURIComponent(url.pathname);
-  const relativePath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const candidate = path.resolve(viewerRoot, relativePath);
-  const rootPrefix = `${viewerRoot}${path.sep}`;
+  const isAdminRequest = pathname === "/admin" || pathname.startsWith("/admin/");
+  const root = isAdminRequest ? adminRoot : viewerRoot;
+  let relativePath = isAdminRequest
+    ? pathname.slice("/admin".length).replace(/^\/+/, "")
+    : pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  if (isAdminRequest && (!relativePath || pathname.endsWith("/"))) {
+    relativePath = path.join(relativePath, "index.html");
+  }
 
-  if (candidate !== viewerRoot && !candidate.startsWith(rootPrefix)) {
+  const candidate = path.resolve(root, relativePath);
+  const rootPrefix = `${root}${path.sep}`;
+
+  if (candidate !== root && !candidate.startsWith(rootPrefix)) {
     return null;
   }
   return candidate;
@@ -55,7 +64,7 @@ const server = http.createServer(async (request, response) => {
 
   let filePath;
   try {
-    filePath = resolveViewerFile(request.url || "/");
+    filePath = resolveStaticFile(request.url || "/");
   } catch {
     send(response, 400, "bad request", "text/plain; charset=utf-8");
     return;
@@ -83,7 +92,9 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`[viewer-tests] serving ${viewerRoot} at http://127.0.0.1:${port}`);
+  console.log(
+    `[viewer-tests] serving ${viewerRoot} and ${adminRoot} at http://127.0.0.1:${port}`,
+  );
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

@@ -41,6 +41,11 @@ Notes:
 
 ## Private diagnostics endpoints
 
+- `GET /admin/diagnostics/` - open the dedicated private owner UI. It uses only
+  the separately configured diagnostics owner secret; ordinary admin and room
+  credentials are not accepted. Its bearer token and incident data remain in
+  page memory and are cleared on sign-out, reload, expiry, or authentication
+  failure.
 - `POST /v1/auth/diagnostics/login` - exchange the configured owner secret for
   a one-hour diagnostics-only bearer token.
 - `POST /api/diagnostics/v1/envelopes` - submit a strict, redacted incident

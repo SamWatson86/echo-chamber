@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'">
+  <title>Private Diagnostics | Echo Chamber</title>
+  <link rel="stylesheet" href="./diagnostics.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to diagnostics</a>
+
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">Echo Chamber</p>
+      <h1>Private Diagnostics</h1>
+    </div>
+    <a class="quiet-link" href="/admin/">Main admin</a>
+  </header>
+
+  <main id="main-content">
+    <section id="login-view" class="login-view" aria-labelledby="login-title">
+      <form id="login-form" class="login-card" action="/admin/diagnostics/" method="get" autocomplete="off">
+        <p class="eyebrow">Owner access</p>
+        <h2 id="login-title">Open diagnostic incidents</h2>
+        <p class="lede">
+          Use the separately configured diagnostics owner secret. Ordinary room
+          and admin credentials cannot open this private surface.
+        </p>
+        <label for="owner-secret">Diagnostics owner secret</label>
+        <input
+          id="owner-secret"
+          type="password"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          required
+        >
+        <button id="login-button" class="button button-primary" type="submit">Sign in</button>
+        <p id="login-status" class="status-message" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section id="dashboard-view" class="dashboard" aria-labelledby="dashboard-title" hidden>
+      <div class="dashboard-heading">
+        <div>
+          <p class="eyebrow">Owner-only records</p>
+          <h2 id="dashboard-title">Diagnostic incidents</h2>
+          <p class="lede compact">
+            Records stay in memory on this page. Refresh is manual and filters
+            apply only to the loaded page.
+          </p>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-button" class="button" type="button">Refresh page</button>
+          <button id="logout-button" class="button button-danger-quiet" type="button">Sign out</button>
+        </div>
+      </div>
+
+      <div class="toolbar" aria-label="Current-page filters">
+        <div class="field field-wide">
+          <label for="search-filter">Identity or incident</label>
+          <input id="search-filter" type="search" autocomplete="off" placeholder="Search this page">
+        </div>
+        <div class="field">
+          <label for="os-filter">Operating system</label>
+          <select id="os-filter">
+            <option value="">All systems</option>
+            <option value="macos">macOS</option>
+            <option value="windows">Windows</option>
+            <option value="linux">Linux</option>
+            <option value="ios">iOS</option>
+            <option value="android">Android</option>
+            <option value="unknown">Unknown</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="severity-filter">Minimum severity</label>
+          <select id="severity-filter">
+            <option value="">Any severity</option>
+            <option value="debug">Debug</option>
+            <option value="info">Info</option>
+            <option value="warning">Warning</option>
+            <option value="error">Error</option>
+            <option value="fatal">Fatal</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="event-filter">Event type</label>
+          <select id="event-filter">
+            <option value="">All event types</option>
+            <option value="session_start">Session start</option>
+            <option value="session_end">Session end</option>
+            <option value="unclean_shutdown">Unclean shutdown</option>
+            <option value="javascript_error">JavaScript error</option>
+            <option value="unhandled_rejection">Unhandled rejection</option>
+            <option value="console_warning">Console warning</option>
+            <option value="console_error">Console error</option>
+            <option value="permission">Permission</option>
+            <option value="media">Media</option>
+            <option value="connection">Connection</option>
+            <option value="reconnect">Reconnect</option>
+            <option value="tauri_ipc_error">Tauri IPC error</option>
+            <option value="native_error">Native error</option>
+          </select>
+        </div>
+        <div class="field field-action">
+          <span class="field-spacer" aria-hidden="true">Filters</span>
+          <button id="clear-filters-button" class="button button-quiet" type="button">Clear filters</button>
+        </div>
+      </div>
+
+      <div class="results-header">
+        <p id="results-summary" class="results-summary" tabindex="-1">No page loaded.</p>
+        <p id="dashboard-status" class="status-message" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="table-shell">
+        <table>
+          <caption class="visually-hidden">Diagnostic incidents on the current server page</caption>
+          <thead>
+            <tr>
+              <th scope="col">Received</th>
+              <th scope="col">Identity</th>
+              <th scope="col">Platform</th>
+              <th scope="col">Severity</th>
+              <th scope="col">Events</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="incident-rows"></tbody>
+        </table>
+        <div id="empty-state" class="empty-state" hidden>
+          <p id="empty-state-title" class="empty-title">No incidents found</p>
+          <p id="empty-state-copy">This page has no incidents matching the current filters.</p>
+        </div>
+      </div>
+
+      <nav class="pagination" aria-label="Incident pages">
+        <button id="previous-button" class="button button-quiet" type="button" disabled>Previous</button>
+        <span id="page-label">Page 1</span>
+        <button id="next-button" class="button button-quiet" type="button" disabled>Next</button>
+      </nav>
+
+      <section id="detail-panel" class="detail-panel" aria-labelledby="detail-title" hidden>
+        <div class="detail-heading">
+          <div>
+            <p class="eyebrow">Incident detail</p>
+            <h3 id="detail-title" tabindex="-1">Selected incident</h3>
+          </div>
+          <button id="close-detail-button" class="button button-quiet" type="button">Close</button>
+        </div>
+        <div id="detail-content"></div>
+        <div class="detail-actions">
+          <button id="download-button" class="button" type="button" disabled>Download redacted JSON</button>
+          <button id="delete-button" class="button button-danger" type="button" disabled>Delete incident</button>
+        </div>
+        <p id="detail-status" class="status-message" role="status" aria-live="polite"></p>
+      </section>
+    </section>
+  </main>
+
+  <script src="./diagnostics.js" defer></script>
+</body>
+</html>
