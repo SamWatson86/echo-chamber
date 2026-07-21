@@ -394,7 +394,13 @@
 
     function setStatus(code, at) {
       var payload = JSON.stringify({ version: 1, code: safeToken(code), at_ms: safeInteger(at || now(), Number.MAX_SAFE_INTEGER) });
-      try { storage.setItem(STATUS_KEY, payload); } catch (_) {}
+      try {
+        if (storage.getItem(CONSENT_KEY) !== CONSENT_ENABLED) return false;
+        storage.setItem(STATUS_KEY, payload);
+        return true;
+      } catch (_) {
+        return false;
+      }
     }
 
     function consentState() {
@@ -408,6 +414,14 @@
       }
     }
 
+    function requirePersistedConsent() {
+      try {
+        if (storage.getItem(CONSENT_KEY) === CONSENT_ENABLED) return true;
+      } catch (_) {}
+      disable(false);
+      return false;
+    }
+
     function loadQueue() {
       try { return parseQueue(storage.getItem(QUEUE_KEY), now()); }
       catch (_) { haltRuntime("storage_unavailable"); return emptyQueue(); }
@@ -415,6 +429,7 @@
 
     function saveQueue(queue) {
       if (!enabled) return false;
+      if (!requirePersistedConsent()) return false;
       try {
         queue.revision = safeInteger(queue.revision + 1, Number.MAX_SAFE_INTEGER);
         queue.writer = writerId || "";
@@ -608,7 +623,13 @@
     }
 
     function writeActiveSessions(registry) {
-      try { storage.setItem(ACTIVE_KEY, JSON.stringify(registry)); } catch (_) {}
+      if (!enabled || !requirePersistedConsent()) return false;
+      try {
+        storage.setItem(ACTIVE_KEY, JSON.stringify(registry));
+        return true;
+      } catch (_) {
+        return false;
+      }
     }
 
     function refreshActiveSession(reportStale) {
@@ -658,26 +679,29 @@
     }
 
     function scheduleRetry(delay) {
+      if (!enabled || !requirePersistedConsent()) return false;
       if (retryTimer) clearTimer(retryTimer);
       retryTimer = setTimer(function () { retryTimer = null; void uploadAvailable(); }, Math.max(1000, delay));
+      return true;
     }
 
     function removeEnvelope(body) {
       var queue = loadQueue();
       queue.envelopes = queue.envelopes.filter(function (item) { return item.body !== body; });
-      saveQueue(queue);
+      return saveQueue(queue);
     }
 
     function updateEnvelope(body, update) {
       var queue = loadQueue();
       var item = queue.envelopes.find(function (entry) { return entry.body === body; });
-      if (!item) return;
+      if (!item) return false;
       update(item);
-      saveQueue(queue);
+      return saveQueue(queue);
     }
 
     async function uploadAvailable(force) {
       if (!enabled || !auth || uploading || pageDisabled || !fetchImpl) return false;
+      if (!requirePersistedConsent()) return false;
       if (auth.proved_at_ms + HEARTBEAT_AUTH_MAX_MS < now()) {
         auth = null;
         return false;
@@ -689,8 +713,11 @@
       });
       if (!candidate) return false;
       if (!validateSealedBody(candidate.body, installId)) {
-        removeEnvelope(candidate.body);
-        setStatus("invalid_dropped");
+        if (!removeEnvelope(candidate.body)) return false;
+        if (!setStatus("invalid_dropped")) {
+          disable(false);
+          return false;
+        }
         return false;
       }
       uploading = true;
@@ -702,6 +729,7 @@
       uploadAbort = controller;
       var timeout = controller ? setTimer(function () { controller.abort(); }, 10000) : null;
       try {
+        if (!requirePersistedConsent()) return false;
         var response = await fetchImpl(uploadAuth.origin + "/api/diagnostics/v1/envelopes", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: "Bearer " + uploadAuth.token },
@@ -709,42 +737,60 @@
           cache: "no-store",
           signal: controller ? controller.signal : undefined,
         });
-        if (uploadOperation !== uploadSequence || !enabled) return false;
+        if (uploadOperation !== uploadSequence || !enabled || !requirePersistedConsent()) return false;
         if (response.status === 200 || response.status === 202) {
-          removeEnvelope(candidate.body);
-          setStatus(response.status === 200 ? "duplicate" : "accepted");
+          if (!removeEnvelope(candidate.body)) return false;
+          if (!setStatus(response.status === 200 ? "duplicate" : "accepted")) {
+            disable(false);
+            return false;
+          }
         } else if (response.status === 401 || response.status === 403) {
           if (uploadHeartbeat === heartbeatVersion) {
             auth = null;
-            setStatus("auth_wait");
+            if (!setStatus("auth_wait")) {
+              disable(false);
+              return false;
+            }
           }
         } else if (response.status === 404) {
           pageDisabled = true;
-          setStatus("server_disabled");
+          if (!setStatus("server_disabled")) {
+            disable(false);
+            return false;
+          }
         } else if ([400, 409, 413, 422].indexOf(response.status) >= 0) {
-          removeEnvelope(candidate.body);
-          setStatus(response.status === 409 ? "conflict_dropped" : "invalid_dropped");
+          if (!removeEnvelope(candidate.body)) return false;
+          if (!setStatus(response.status === 409 ? "conflict_dropped" : "invalid_dropped")) {
+            disable(false);
+            return false;
+          }
         } else {
           var retryAfter = response.status === 429 && response.headers && response.headers.get
             ? parseRetryAfter(response.headers.get("Retry-After"), now()) : 0;
           var delay = retryAfter || Math.min(300000, 5000 * Math.pow(2, Math.min(candidate.attempts, 6)));
-          updateEnvelope(candidate.body, function (item) {
+          if (!updateEnvelope(candidate.body, function (item) {
             item.attempts += 1;
             item.next_attempt_ms = now() + delay;
-          });
-          setStatus(response.status === 429 ? "rate_limited" : "retry_wait");
-          scheduleRetry(delay);
+          })) return false;
+          if (!setStatus(response.status === 429 ? "rate_limited" : "retry_wait")) {
+            disable(false);
+            return false;
+          }
+          if (!scheduleRetry(delay)) return false;
         }
       } catch (_) {
-        if (uploadOperation === uploadSequence && enabled && auth) {
-          var networkDelay = Math.min(300000, 5000 * Math.pow(2, Math.min(candidate.attempts, 6)));
-          updateEnvelope(candidate.body, function (item) {
-            item.attempts += 1;
-            item.next_attempt_ms = now() + networkDelay;
-          });
-          setStatus("network_wait");
-          scheduleRetry(networkDelay);
+        if (uploadOperation !== uploadSequence || !enabled || !auth) return false;
+        if (!requirePersistedConsent()) return false;
+        var networkDelay = Math.min(300000, 5000 * Math.pow(2, Math.min(candidate.attempts, 6)));
+        if (!updateEnvelope(candidate.body, function (item) {
+          item.attempts += 1;
+          item.next_attempt_ms = now() + networkDelay;
+        })) return false;
+        if (!setStatus("network_wait")) {
+          disable(false);
+          return false;
         }
+        if (!scheduleRetry(networkDelay)) return false;
       } finally {
         if (timeout) clearTimer(timeout);
         if (uploadOperation === uploadSequence) {
@@ -785,7 +831,7 @@
       var pendingMetadata = Promise.resolve().then(metadataProvider).then(safeMetadata).catch(function () { return null; });
       metadataPromise = pendingMetadata;
       var resolvedMetadata = await pendingMetadata;
-      if (generation !== lifecycleVersion || !enabled) return false;
+      if (generation !== lifecycleVersion || !enabled || !requirePersistedConsent()) return false;
       if (!resolvedMetadata) {
         metadata = null;
         haltRuntime("metadata_unavailable");
@@ -844,9 +890,14 @@
     }
 
     function clearQueuedData() {
+      if (!enabled || !requirePersistedConsent()) return false;
       cancelUpload();
       try { storage.removeItem(QUEUE_KEY); } catch (_) {}
-      setStatus("queue_cleared");
+      if (!setStatus("queue_cleared")) {
+        disable(false);
+        return false;
+      }
+      return true;
     }
 
     async function heartbeatSucceeded(context) {

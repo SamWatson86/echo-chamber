@@ -48,6 +48,10 @@ report is private, not anonymous.
 - The complete persisted queue document (including JSON wrapper overhead) is
   limited to ten envelopes and 512 KiB, with a 72-hour retention window shorter
   than the server's seven-day ingestion maximum.
+- Concurrent tabs share browser storage on a best-effort basis. Simultaneous
+  writes can lose a diagnostic event or unclean-tab sentinel, but every sealed
+  report retains its participant-and-origin scope and cannot be uploaded under
+  a different scope.
 - Upload is released only by an HTTP-successful, non-stale participant heartbeat
   using the exact LiveKit JWT and control origin that heartbeat just proved.
 - `202 accepted` and `200 duplicate` remove the local envelope. Authentication,

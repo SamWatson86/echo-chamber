@@ -192,13 +192,19 @@ class DeferredFetchHarness extends FetchHarness {
       body: init && init.body,
       cache: init && init.cache,
     });
-    return new Promise((resolve) => this.pending.push(resolve));
+    return new Promise((resolve, reject) => this.pending.push({ resolve, reject }));
   }
 
   respond(status) {
-    const resolve = this.pending.shift();
-    assert.ok(resolve, "expected a pending fetch");
-    resolve({ status, ok: status >= 200 && status < 300, headers: { get: () => null } });
+    const pending = this.pending.shift();
+    assert.ok(pending, "expected a pending fetch");
+    pending.resolve({ status, ok: status >= 200 && status < 300, headers: { get: () => null } });
+  }
+
+  reject(error) {
+    const pending = this.pending.shift();
+    assert.ok(pending, "expected a pending fetch");
+    pending.reject(error || new Error("network unavailable"));
   }
 }
 
@@ -278,6 +284,24 @@ function readQueue(storage, now) {
 
 function readStatus(storage) {
   return JSON.parse(storage.getItem(STATUS_KEY) || "null");
+}
+
+function interceptNextStorageMutation(storage, method, key, afterMutation) {
+  const original = storage[method].bind(storage);
+  let armed = false;
+  let fired = false;
+  storage[method] = function (...args) {
+    const result = original(...args);
+    if (armed && !fired && String(args[0]) === key) {
+      fired = true;
+      afterMutation();
+    }
+    return result;
+  };
+  return {
+    arm() { armed = true; },
+    fired() { return fired; },
+  };
 }
 
 function utf8Bytes(value) {
@@ -887,6 +911,213 @@ test("opt-out persists OFF, detaches handlers, and deletes only diagnostics-owne
   assert.equal(harness.eventTarget.count("pagehide"), 0);
   assert.equal(harness.eventTarget.count("pageshow"), 0);
   assert.equal(harness.collector.snapshot().enabled, false);
+});
+
+test("a delayed tab cannot recreate its queue after another tab opts out", async () => {
+  const storage = new MemoryStorage({ unrelated_application_key: "keep-me" });
+  const staleTab = createHarness({ storage });
+  const optingOutTab = createHarness({ storage });
+  await staleTab.collector.enable();
+  assert.ok(storage.getItem(QUEUE_KEY));
+
+  optingOutTab.collector.disable();
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+
+  // Deliberately do not deliver a storage event to the stale tab.
+  staleTab.collector.recordDeviceCounts({ microphone: 1, camera: 1, output: 1 });
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+  assert.equal(storage.getItem("unrelated_application_key"), "keep-me");
+  assert.equal(staleTab.fetchHarness.calls.length, 0);
+});
+
+test("a delayed tab cannot recreate its active sentinel after another tab opts out", async () => {
+  const storage = new MemoryStorage();
+  const staleTab = createHarness({ storage });
+  const optingOutTab = createHarness({ storage });
+  await staleTab.collector.enable();
+  const sessionRefresh = Array.from(staleTab.timers.intervals.values())
+    .find((timer) => timer.delay === 10000);
+  assert.ok(sessionRefresh);
+
+  optingOutTab.collector.disable();
+  sessionRefresh.callback();
+
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+});
+
+test("a delayed tab rechecks shared consent immediately before starting fetch", async () => {
+  const storage = new MemoryStorage();
+  const staleTab = createHarness({ storage, responses: [{ status: 202 }] });
+  const optingOutTab = createHarness({ storage });
+  await staleTab.collector.enable();
+  assert.equal(await staleTab.collector.heartbeatSucceeded({
+    controlUrl: "https://control.example.test",
+    token: "shared-consent-token",
+  }), true);
+  assert.equal(staleTab.fetchHarness.calls.length, 1);
+
+  staleTab.collector.recordDeviceCounts({ microphone: 1, camera: 1, output: 1 });
+  assert.equal(staleTab.collector._sealDraft(), true);
+  assert.equal(staleTab.collector.snapshot().sealed, 1);
+
+  const originalGetItem = storage.getItem.bind(storage);
+  let revokedAtNetworkBoundary = false;
+  storage.getItem = function (key) {
+    if (!revokedAtNetworkBoundary && String(key) === CONSENT_KEY) {
+      revokedAtNetworkBoundary = true;
+      optingOutTab.collector.disable();
+    }
+    return originalGetItem(key);
+  };
+
+  assert.equal(await staleTab.collector.sendNow(), false);
+  assert.equal(revokedAtNetworkBoundary, true);
+  assert.equal(staleTab.fetchHarness.calls.length, 1);
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+});
+
+test("a delayed upload response cannot recreate state after another tab opts out", async () => {
+  const storage = new MemoryStorage();
+  const fetchHarness = new DeferredFetchHarness();
+  const staleTab = createHarness({ storage, fetchHarness });
+  const optingOutTab = createHarness({ storage });
+  await staleTab.collector.enable();
+  const pendingUpload = staleTab.collector.heartbeatSucceeded({
+    controlUrl: "https://control.example.test",
+    token: "cross-tab-late-response-token",
+  });
+  while (fetchHarness.calls.length === 0) await Promise.resolve();
+
+  optingOutTab.collector.disable();
+  fetchHarness.respond(202);
+
+  assert.equal(await pendingUpload, false);
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+});
+
+test("an in-flight enable cannot restart after another tab opts out", async () => {
+  const storage = new MemoryStorage();
+  let resolveMetadata;
+  const staleTab = createHarness({
+    storage,
+    metadataProvider: () => new Promise((resolve) => { resolveMetadata = resolve; }),
+  });
+  const optingOutTab = createHarness({ storage });
+  const pendingEnable = staleTab.collector.enable();
+  while (!resolveMetadata) await Promise.resolve();
+
+  optingOutTab.collector.disable();
+  resolveMetadata(validMetadata());
+
+  assert.equal(await pendingEnable, false);
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+});
+
+test("queue clearing cannot recreate status when another tab opts out at the delete boundary", async () => {
+  const storage = new MemoryStorage();
+  const staleTab = createHarness({ storage });
+  const optingOutTab = createHarness({ storage });
+  await staleTab.collector.enable();
+  const boundary = interceptNextStorageMutation(storage, "removeItem", QUEUE_KEY, () => {
+    optingOutTab.collector.disable();
+  });
+  boundary.arm();
+
+  assert.equal(staleTab.collector.clearQueuedData(), false);
+  assert.equal(boundary.fired(), true);
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+  assert.equal(staleTab.timers.timeouts.size, 0);
+});
+
+for (const responseStatus of [202, 503]) {
+  test(`a ${responseStatus} response cannot recreate state or retry after boundary opt-out`, async () => {
+    const storage = new MemoryStorage();
+    const fetchHarness = new DeferredFetchHarness();
+    const staleTab = createHarness({ storage, fetchHarness });
+    const optingOutTab = createHarness({ storage });
+    await staleTab.collector.enable();
+    const pendingUpload = staleTab.collector.heartbeatSucceeded({
+      controlUrl: "https://control.example.test",
+      token: `boundary-response-${responseStatus}`,
+    });
+    while (fetchHarness.calls.length === 0) await Promise.resolve();
+    const boundary = interceptNextStorageMutation(storage, "setItem", QUEUE_KEY, () => {
+      optingOutTab.collector.disable();
+    });
+    boundary.arm();
+
+    fetchHarness.respond(responseStatus);
+
+    assert.equal(await pendingUpload, false);
+    assert.equal(boundary.fired(), true);
+    assert.equal(staleTab.collector.snapshot().enabled, false);
+    assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+    assert.equal(storage.getItem(INSTALL_KEY), null);
+    assert.equal(storage.getItem(QUEUE_KEY), null);
+    assert.equal(storage.getItem(STATUS_KEY), null);
+    assert.equal(storage.getItem(ACTIVE_KEY), null);
+    assert.equal(staleTab.timers.timeouts.size, 0);
+  });
+}
+
+test("a network failure cannot recreate status or retry after boundary opt-out", async () => {
+  const storage = new MemoryStorage();
+  const fetchHarness = new DeferredFetchHarness();
+  const staleTab = createHarness({ storage, fetchHarness });
+  const optingOutTab = createHarness({ storage });
+  await staleTab.collector.enable();
+  const pendingUpload = staleTab.collector.heartbeatSucceeded({
+    controlUrl: "https://control.example.test",
+    token: "boundary-network-failure",
+  });
+  while (fetchHarness.calls.length === 0) await Promise.resolve();
+  const boundary = interceptNextStorageMutation(storage, "setItem", QUEUE_KEY, () => {
+    optingOutTab.collector.disable();
+  });
+  boundary.arm();
+
+  fetchHarness.reject(new Error("network unavailable"));
+
+  assert.equal(await pendingUpload, false);
+  assert.equal(boundary.fired(), true);
+  assert.equal(staleTab.collector.snapshot().enabled, false);
+  assert.equal(storage.getItem(CONSENT_KEY), CONSENT_DISABLED);
+  assert.equal(storage.getItem(INSTALL_KEY), null);
+  assert.equal(storage.getItem(QUEUE_KEY), null);
+  assert.equal(storage.getItem(STATUS_KEY), null);
+  assert.equal(storage.getItem(ACTIVE_KEY), null);
+  assert.equal(staleTab.timers.timeouts.size, 0);
 });
 
 test("a late upload response cannot recreate diagnostics state after opt-out", async () => {

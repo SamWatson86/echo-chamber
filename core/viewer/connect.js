@@ -91,6 +91,18 @@ document.addEventListener(
 let switchingRoom = false;
 let connectSequence = 0;
 
+function recordActiveRoomDiagnostic(candidateRoom, recorder) {
+  if (!candidateRoom ||
+      candidateRoom !== room ||
+      candidateRoom._echoDiagnosticsCommitted !== true ||
+      candidateRoom._echoExpectedDisconnect ||
+      typeof recorder !== "function") {
+    return false;
+  }
+  recorder();
+  return true;
+}
+
 var _lastRoomSwitchTime = 0;
 async function switchRoom(roomId) {
   if (!room) return;
@@ -581,9 +593,10 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       } else {
         setStatus(`Connection: ${state}`);
       }
-      if (newRoom._echoDiagnosticsCommitted &&
-          !(state === "disconnected" && (_isRoomSwitch || newRoom._echoExpectedDisconnect))) {
-        window.EchoWebDiagnosticsRuntime?.recordConnectionState?.(state, null);
+      if (!(state === "disconnected" && _isRoomSwitch)) {
+        recordActiveRoomDiagnostic(newRoom, () => {
+          window.EchoWebDiagnosticsRuntime?.recordConnectionState?.(state, null);
+        });
       }
     });
   }
@@ -591,8 +604,10 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     newRoom.on(LK.RoomEvent.Disconnected, (reason) => {
       const detail = describeDisconnectReason(reason, LK);
       setStatus(`Disconnected: ${detail}`, true);
-      if (newRoom._echoDiagnosticsCommitted && !_isRoomSwitch && !newRoom._echoExpectedDisconnect) {
-        logEvent("room-disconnect", detail);
+      if (!_isRoomSwitch) {
+        recordActiveRoomDiagnostic(newRoom, () => {
+          logEvent("room-disconnect", detail);
+        });
       }
       // Stop the inbound stats poller so its 3s interval doesn't keep firing
       // against a stale token after disconnect. The participants-grid teardown
@@ -607,7 +622,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     newRoom.on(LK.RoomEvent.SignalReconnecting, () => {
       _isReconnecting = true;
       setStatus("Signal reconnecting...", true);
-      if (newRoom._echoDiagnosticsCommitted) logEvent("signal-reconnecting", "");
+      recordActiveRoomDiagnostic(newRoom, () => logEvent("signal-reconnecting", ""));
       debugLog("[reconnect] signal reconnecting — suppressing chimes and delaying cleanup");
       // Safety: auto-reset after 10s if reconnection stalls
       setTimeout(() => { if (_isReconnecting) { _isReconnecting = false; debugLog("[reconnect] safety timeout — resetting reconnecting flag"); } }, 10000);
@@ -617,7 +632,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     newRoom.on(LK.RoomEvent.SignalReconnected, () => {
       _isReconnecting = false;
       setStatus("Signal reconnected");
-      if (newRoom._echoDiagnosticsCommitted) logEvent("signal-reconnected", "");
+      recordActiveRoomDiagnostic(newRoom, () => logEvent("signal-reconnected", ""));
       debugLog("[reconnect] signal reconnected — cancelling pending disconnects");
       // Cancel any pending disconnect cleanups — the participant is back
       for (const [pendingKey, pendingTimer] of _pendingDisconnects) {
@@ -645,7 +660,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     newRoom.on(LK.RoomEvent.Reconnecting, () => {
       _isReconnecting = true;
       setStatus("Reconnecting...", true);
-      if (newRoom._echoDiagnosticsCommitted) logEvent("reconnecting", "");
+      recordActiveRoomDiagnostic(newRoom, () => logEvent("reconnecting", ""));
       debugLog("[reconnect] room reconnecting — suppressing chimes and delaying cleanup");
       setTimeout(() => { if (_isReconnecting) { _isReconnecting = false; debugLog("[reconnect] safety timeout — resetting reconnecting flag"); } }, 10000);
     });
@@ -654,7 +669,7 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     newRoom.on(LK.RoomEvent.Reconnected, () => {
       _isReconnecting = false;
       setStatus("Reconnected");
-      if (newRoom._echoDiagnosticsCommitted) logEvent("reconnected", "");
+      recordActiveRoomDiagnostic(newRoom, () => logEvent("reconnected", ""));
       debugLog("[reconnect] room reconnected — cancelling pending disconnects");
       for (const [pendingKey, pendingTimer] of _pendingDisconnects) {
         clearTimeout(pendingTimer);
@@ -679,9 +694,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (LK.RoomEvent?.ConnectionError) {
     newRoom.on(LK.RoomEvent.ConnectionError, (err) => {
       const detail = err?.message || String(err || "unknown");
-      if (newRoom._echoDiagnosticsCommitted) {
+      recordActiveRoomDiagnostic(newRoom, () => {
         window.EchoWebDiagnosticsRuntime?.recordConnectionState?.("error", err?.name);
-      }
+      });
       setStatus(`Connection error: ${detail}`, true);
     });
   }

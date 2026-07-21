@@ -29,6 +29,66 @@ function diagnosticsState(storage) {
   );
 }
 
+test("late diagnostics callbacks from a replaced room are ignored", async ({ page }) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  const result = await page.evaluate(() => {
+    const replacedRoom = {
+      _echoDiagnosticsCommitted: true,
+      _echoExpectedDisconnect: false,
+    };
+    const activeRoom = {
+      _echoDiagnosticsCommitted: true,
+      _echoExpectedDisconnect: false,
+    };
+    const uncommittedRoom = {
+      _echoDiagnosticsCommitted: false,
+      _echoExpectedDisconnect: false,
+    };
+    const expectedDisconnectRoom = {
+      _echoDiagnosticsCommitted: true,
+      _echoExpectedDisconnect: true,
+    };
+    const recorded = [];
+
+    room = activeRoom;
+    const callbackKinds = ["state", "reconnecting", "error"];
+    const replacedResults = callbackKinds.map((kind) => (
+      recordActiveRoomDiagnostic(replacedRoom, () => recorded.push(`replaced:${kind}`))
+    ));
+    const activeResults = callbackKinds.map((kind) => (
+      recordActiveRoomDiagnostic(activeRoom, () => recorded.push(`active:${kind}`))
+    ));
+
+    room = uncommittedRoom;
+    const uncommittedResult = recordActiveRoomDiagnostic(
+      uncommittedRoom,
+      () => recorded.push("uncommitted"),
+    );
+    room = expectedDisconnectRoom;
+    const expectedDisconnectResult = recordActiveRoomDiagnostic(
+      expectedDisconnectRoom,
+      () => recorded.push("expected-disconnect"),
+    );
+
+    return {
+      activeResults,
+      expectedDisconnectResult,
+      recorded,
+      replacedResults,
+      uncommittedResult,
+    };
+  });
+
+  expect(result).toEqual({
+    activeResults: [true, true, true],
+    expectedDisconnectResult: false,
+    recorded: ["active:state", "active:reconnecting", "active:error"],
+    replacedResults: [false, false, false],
+    uncommittedResult: false,
+  });
+});
+
 test("Mac web diagnostics remain data-free until consent and can be enabled from Settings", async ({ page }) => {
   const versionRequests = [];
   const diagnosticsUploads = [];
