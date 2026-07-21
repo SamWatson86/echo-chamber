@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-const MAC_SAFARI_USER_AGENT = [
+const MAC_CHROME_USER_AGENT = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-  "AppleWebKit/605.1.15 (KHTML, like Gecko)",
-  "Version/18.5 Safari/605.1.15",
+  "AppleWebKit/537.36 (KHTML, like Gecko)",
+  "Chrome/152.0.0.0 Safari/537.36",
 ].join(" ");
 
 const DIAGNOSTICS_PREFIX = "echo-web-diagnostics-";
@@ -13,7 +13,7 @@ const QUEUE_KEY = `${DIAGNOSTICS_PREFIX}queue-v1`;
 const STATUS_KEY = `${DIAGNOSTICS_PREFIX}status-v1`;
 const ACTIVE_KEY = `${DIAGNOSTICS_PREFIX}active-v1`;
 
-test.use({ userAgent: MAC_SAFARI_USER_AGENT });
+test.use({ userAgent: MAC_CHROME_USER_AGENT });
 
 async function readStorage(page) {
   return page.evaluate(() => Object.fromEntries(
@@ -25,9 +25,24 @@ async function readStorage(page) {
 
 async function installDesktopMacNavigator(page) {
   await page.addInitScript(() => {
+    window.__echoUaHintRequests = 0;
+    const userAgentData = {
+      async getHighEntropyValues(hints) {
+        window.__echoUaHintRequests += 1;
+        return {
+          fullVersionList: hints.includes("fullVersionList")
+            ? [
+              { brand: "Chromium", version: "152.0.8123.44" },
+              { brand: "Google Chrome", version: "152.0.8123.44" },
+            ]
+            : [],
+        };
+      },
+    };
     Object.defineProperties(window.navigator, {
       maxTouchPoints: { configurable: true, get: () => 0 },
       platform: { configurable: true, get: () => "MacIntel" },
+      userAgentData: { configurable: true, get: () => userAgentData },
     });
   });
 }
@@ -137,6 +152,7 @@ test("fresh Mac stays inert until an exact canary invite, then remains data-free
   });
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.evaluate(() => localStorage.setItem("echo-changelog-seen", CHANGELOG_LATEST));
 
   const consentModal = page.locator("#diagnostics-consent-modal");
   await expect(consentModal).toBeHidden();
@@ -145,6 +161,7 @@ test("fresh Mac stays inert until an exact canary invite, then remains data-free
   expect(diagnosticsState(await readStorage(page))).toEqual({});
   expect(versionRequests).toHaveLength(0);
   expect(diagnosticsUploads).toHaveLength(0);
+  expect(await page.evaluate(() => window.__echoUaHintRequests)).toBe(0);
 
   await page.goto("/?echoWebDiagnosticsCanary=1&echoWebDiagnosticsCanary=1", {
     waitUntil: "domcontentloaded",
@@ -171,11 +188,12 @@ test("fresh Mac stays inert until an exact canary invite, then remains data-free
     consent: "unset",
     platform: "MacIntel",
     touchPoints: 0,
-    userAgent: MAC_SAFARI_USER_AGENT,
+    userAgent: MAC_CHROME_USER_AGENT,
   });
   expect(diagnosticsState(await readStorage(page))).toEqual({});
   expect(versionRequests).toHaveLength(0);
   expect(diagnosticsUploads).toHaveLength(0);
+  expect(await page.evaluate(() => window.__echoUaHintRequests)).toBe(0);
   expect(new URL(page.url()).searchParams.get("echoWebDiagnosticsCanary")).toBe("1");
 
   await page.getByRole("button", { name: "Keep Off" }).click();
@@ -199,6 +217,7 @@ test("fresh Mac stays inert until an exact canary invite, then remains data-free
   });
   expect(versionRequests).toHaveLength(0);
   expect(diagnosticsUploads).toHaveLength(0);
+  expect(await page.evaluate(() => window.__echoUaHintRequests)).toBe(0);
 
   const storageBeforeEnable = await readStorage(page);
   await page.evaluate(() => setSettingsPanelOpen(true));
@@ -208,13 +227,14 @@ test("fresh Mac stays inert until an exact canary invite, then remains data-free
   await expect(page.locator("#diagnostics-action-status")).toHaveText("Diagnostics are on.");
   await expect(page.locator("#diagnostics-enabled-toggle")).toBeChecked();
   await expect.poll(() => versionRequests.length).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__echoUaHintRequests)).toBe(1);
 
   const storageAfterEnable = await readStorage(page);
   const changedKeys = Array.from(new Set([
     ...Object.keys(storageBeforeEnable),
     ...Object.keys(storageAfterEnable),
   ])).filter((key) => storageBeforeEnable[key] !== storageAfterEnable[key]);
-  expect(changedKeys.every((key) => key.startsWith(DIAGNOSTICS_PREFIX))).toBe(true);
+  expect(changedKeys.filter((key) => !key.startsWith(DIAGNOSTICS_PREFIX))).toEqual([]);
 
   const enabledState = diagnosticsState(storageAfterEnable);
   expect(Object.keys(enabledState).sort()).toEqual([

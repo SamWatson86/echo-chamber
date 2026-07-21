@@ -5,7 +5,7 @@ Release impact: coordinated control-plane, server-served viewer, and admin-stati
 
 ## Purpose and status
 
-This is the go/no-go checklist for the first approved desktop Safari canary of
+This is the go/no-go checklist for the first approved desktop Chrome canary of
 Echo's private web diagnostics. It covers the browser collector, private owner
 page, and control-plane boundary as one release unit.
 
@@ -23,7 +23,7 @@ uses the private owner page to find the matching structured incident.
 | Area | Canary behavior |
 | --- | --- |
 | Enrollment | Disabled by default; one profile is invited with the exact non-secret `?echoWebDiagnosticsCanary=1` flag |
-| Browser | Enrolled desktop macOS browsers; the first real-engine canary is Safari |
+| Browser | Enrolled desktop macOS browsers; the first real-engine canary is current Chrome, with Safari as a separate follow-up |
 | Consent | Off until the tester explicitly accepts; reversible in Settings |
 | Collection | Closed-schema browser/session, JavaScript, permission/media, and connection/reconnect events |
 | Upload | Only after a current authenticated participant heartbeat |
@@ -38,16 +38,16 @@ normal viewer URL remains completely inert: no prompt, settings section,
 diagnostics storage, version lookup, or upload. After **Allow Diagnostics** or
 **Keep Off**, the exact existing consent value becomes that profile's durable
 enrollment marker and the invitation flag is removed from the URL. Do not
-publish or broadly share the canary link. Once invited, this code supports any
-desktop macOS browser, not only Safari.
+publish or broadly share the canary link. Once invited, this code supports other
+desktop macOS browsers too; each engine still needs its own physical canary.
 
 The web fallback deliberately cannot provide native/Tauri/Rust panic capture,
 an Application Support crash spool, updater/notarization evidence, DMG launch
 coverage, exact Apple Silicon architecture, or the exact macOS build. Record
-the Mac model/chip and OS build manually. Safari also cannot promise lossless
-multi-tab storage coordination, so use exactly one Echo tab for the primary
-canary. System-audio, native screen-capture, and output-device behavior remain
-browser capability questions rather than diagnostics guarantees.
+the Mac model/chip and OS build manually. Use exactly one Echo tab in a fresh,
+persistent Chrome profile for the primary canary. Screen-share system audio may
+work in Chrome, but capture and output-device behavior remain browser capability
+questions rather than diagnostics guarantees.
 
 ## Information required before scheduling
 
@@ -59,15 +59,15 @@ Record these facts before the outage or tester session:
 | Primary tester | |
 | Mac model and Apple chip | |
 | Exact macOS version/build | |
-| Exact Safari version | |
-| Tester comfortable opening Safari Web Inspector? | |
+| Exact Chrome version (`chrome://version`) | |
+| Tester comfortable opening Chrome DevTools? | |
 | Test room and participant display name | |
 | Planned deployed Echo version and Git SHA | |
 | Exact invited canary URL and approved recipients | |
 | Any prior ungated collector exposure/accounted profiles | |
 | Rollback control binary, viewer snapshot, and admin snapshot/path | |
 
-Use a fresh Safari profile or a dedicated macOS test account for the initial
+Use a fresh persistent Chrome profile or a dedicated macOS test account for the initial
 consent pass. Do not clear all site data from a tester's normal profile. The
 unclean-session scenario must use a normal persistent profile, not a private
 window whose storage disappears when the window closes.
@@ -108,9 +108,9 @@ duplicate/idempotent, rate-limited, redacted, download, deletion,
 storage-isolation, owner-auth, and client participant/origin queue-scoping
 cases. Do not replay hostile or load-oriented variants against production.
 
-Playwright runs Chromium. Its consent test uses a Safari user agent and Mac
-platform values to exercise the browser gate, but that is not Safari/WebKit
-evidence. The controlled pass on the physical Mac is the real Safari gate.
+Playwright runs Chromium, but it cannot prove physical-Mac permissions, capture,
+or process behavior. The controlled pass in current Chrome on the physical Mac
+is the real Chrome/macOS gate. Safari/WebKit remains a separate follow-up.
 
 ## 2. Approved-window deployment gate
 
@@ -164,7 +164,7 @@ This is a no-go if any of the following is true:
   been approved;
 - any prior ungated collector exposure is unknown or its enrolled profiles are
   unaccounted for;
-- the primary tester cannot perform the required Safari Web Inspector privacy
+- the primary tester cannot perform the required Chrome DevTools privacy
   check with Sam's guidance;
 - a complete rollback unit is not ready;
 - the offline readiness gate is not green.
@@ -200,17 +200,18 @@ After the coordinated restart, but before inviting a tester:
 Do not place the owner secret in command-line probes. Enter it only into the
 dedicated page over the verified HTTPS origin.
 
-## 4. One-tab Safari canary
+## 4. One-tab Chrome canary
 
 Keep the owner page on Sam's machine and the viewer on the tester's Mac. Record
 UTC timestamps and incident IDs throughout.
 
 ### A. Consent stays off
 
-1. Open the normal `/viewer/` HTTPS URL in a fresh desktop Safari profile with
-   one Echo tab. Confirm there is no diagnostics prompt or Settings section and
-   no `echo-web-diagnostics-*` browser storage.
-2. In Safari Web Inspector's Network view, confirm neither `/api/version` nor
+1. Open the normal `/viewer/` HTTPS URL in a fresh desktop Chrome profile with
+   one Echo tab. Confirm there is no diagnostics prompt and no
+   `echo-web-diagnostics-*` browser storage. The bottom **Output** control is not
+   active before connecting, so inspect Settings only after step 6.
+2. In Chrome DevTools' Network view, confirm neither `/api/version` nor
    `/api/diagnostics/v1/envelopes` was initiated by `diagnostics-client.js`.
    Other existing viewer code may independently check `/api/version`.
 3. Open the explicitly approved invitation by appending the exact flag to the
@@ -227,29 +228,31 @@ UTC timestamps and incident IDs throughout.
    remains in the URL so an undecided reload can show the invitation again.
 5. Select **Keep Off**. Confirm the flag disappears while any unrelated query
    parameters and fragment remain, then reload the normal `/viewer/` URL.
-6. In Settings, confirm **Private Web Diagnostics** remains enrolled but off,
-   with zero queued reports and no successful delivery status.
+6. Join the designated room once with the normal microphone/camera choices so
+   Echo's bottom controls are active. Click **Output** at the bottom; it opens
+   **Settings** directly.
+7. Confirm **Private Web Diagnostics** remains enrolled but off, with delivery
+   status **Never** and **0 reports** queued.
 
 ### B. Opt in and baseline delivery
 
-1. Turn on **Send technical diagnostics to Sam's Echo server** in Settings.
-2. Join the designated room. On the first microphone permission request, choose
-   Safari's deny option and record the UTC time for section C. Echo requests the
-   camera separately immediately afterward; allow that camera request. Then
-   wait for the normal Echo heartbeat to succeed.
+1. While still in **Settings**, turn on **Send technical diagnostics to Sam's
+   Echo server**.
+2. Close **Settings**, leave, and rejoin the designated room. Allow microphone
+   and camera, then wait for the normal Echo heartbeat to succeed.
 3. Wait for **Accepted** or **Already received**. If the queued count is still
    nonzero and **Send Now** is enabled, select it; an already drained queue is
    success and does not require Send Now.
 4. In the owner page, refresh and open the matching `session.start` incident.
-   Confirm the Echo version, exact Git SHA, Safari/LiveKit versions, `macos`,
+   Confirm the Echo version, exact Git SHA, Chrome/LiveKit versions, `macos`,
    participant, and timestamps are coherent. Architecture may correctly be
    `unknown`; compare against the manually recorded hardware facts.
 
 ### C. Permission denial
 
-1. Inspect the permission denial created during the baseline join. If Safari
-   did not prompt because the origin already had a decision, reset only that
-   origin's microphone permission, reload, and repeat the join/deny action.
+1. In Chrome's site settings for the Echo origin, reset only microphone access,
+   reload, rejoin, and choose **Block** at the microphone prompt. Record the UTC
+   time. Leave camera access unchanged.
 2. Wait for heartbeat, then select **Send Now** only if the queued count is
    nonzero and the button is enabled.
 3. Confirm the owner detail contains a microphone/permission denied event with
@@ -258,7 +261,8 @@ UTC timestamps and incident IDs throughout.
 
 ### D. JavaScript privacy canary
 
-With diagnostics on and Web Inspector open, run exactly this synthetic error:
+With diagnostics on and Chrome DevTools' **Console** open, run exactly this
+synthetic error:
 
 ```javascript
 setTimeout(() => { throw new TypeError("ECHO_CANARY_DO_NOT_STORE"); }, 0)
@@ -286,12 +290,12 @@ absent. Any appearance of that marker or message is an immediate stop/rollback.
    five minutes, and confirm the prior clean session does not produce
    `session.unclean_shutdown`.
 2. Confirm diagnostics are on, the tester is authenticated, and a heartbeat
-   has succeeded in a persistent Safari profile. Save/close unrelated Safari
-   work because the next command terminates every Safari process immediately.
+   has succeeded in a persistent Chrome profile. Save/close unrelated Chrome
+   work because the next command terminates every Chrome process immediately.
 3. In Terminal on the tester's Mac, perform the exact hard kill:
 
    ```bash
-   killall -9 Safari
+   killall -9 "Google Chrome"
    ```
 
    A normal tab close or Command-Q is a clean shutdown and is not this test.
@@ -302,7 +306,7 @@ absent. Any appearance of that marker or message is an immediate stop/rollback.
    server-derived authenticated participant, but the event details must not
    contain a URL, window/tab title, or raw browser-provided identity.
 
-This sentinel is intentionally best effort because Safari owns process and
+This sentinel is intentionally best effort because the browser owns process and
 storage semantics. Record whether it appeared, but absence by itself is not a
 release blocker when all hard gates pass. Cross-user attribution, upload before
 heartbeat, or leaked raw data is always a blocker.
@@ -322,7 +326,7 @@ heartbeat, or leaked raw data is always a blocker.
 4. Sign out and confirm the private list/detail disappears and a new owner
    login is required.
 
-### H. Safari product smoke and soak
+### H. Chrome product smoke and soak
 
 Diagnostics are useful only if the browser fallback itself remains usable.
 Reset the test origin's microphone permission and allow it; confirm camera
@@ -337,12 +341,12 @@ complete:
 - when a Jam source is available, join, hear it, and exercise the controls
   permitted to that participant;
 - sleep/wake the Mac once and confirm the viewer reconnects;
-- record Safari's system-output selection behavior and screen-share video
-  behavior without treating unsupported output selection or missing system
-  audio as a diagnostics failure.
+- record Chrome's system-output selection and screen-share video/audio behavior
+  without treating unsupported output selection or missing system audio as a
+  diagnostics failure.
 
 Successful receive, chat, and Jam actions often produce no diagnostic event;
-that absence is expected. Safari screen publishing, system audio, and output
+that absence is expected. Browser screen publishing, system audio, and output
 device selection are capability-limited and non-blocking when the UI explains
 the limitation. Failure of core join, microphone, camera, receive, chat, or
 reconnect behavior is blocking. Record Jam as N/A only when no test source is
@@ -351,9 +355,10 @@ available.
 ### I. Existing-user isolation
 
 Use a tester-owned Windows browser session, not SAM-PC and not a shared client.
-Confirm the normal viewer shows no diagnostics prompt or Settings section,
-creates no `echo-web-diagnostics-*` keys or diagnostics requests, and still
-connects, publishes microphone/camera, receives media, and uses chat normally.
+Confirm the normal viewer shows no diagnostics prompt and creates no
+`echo-web-diagnostics-*` keys or diagnostics requests. Join, click bottom
+**Output** to open **Settings**, and confirm there is no diagnostics section.
+Then confirm microphone/camera publishing, media receive, and chat still work.
 Do not close, reload, or alter Sam's local Echo client without separate explicit
 approval.
 
@@ -378,7 +383,7 @@ privacy canary fields rather than treating a digest as raw identity leakage.
 | Unclean session (best effort) | | | Observed/not observed | |
 | Delete queued data and opt-out | | N/A | | |
 | Owner download/delete/sign-out | | | | |
-| Safari product smoke and 30-minute soak | | N/A | | |
+| Chrome product smoke and 30-minute soak | | N/A | | |
 | Tester-owned Windows isolation/regression | | N/A | | |
 | Existing admin regression check | | N/A | | |
 
@@ -398,7 +403,7 @@ or viewer/admin regression.
    closing the current Echo tab. While offline, have the tester turn diagnostics
    off and confirm its queue is empty; do not ask them to collect files or edit
    browser storage. Keep the Mac offline until Sam clears the incident response.
-   If the toggle cannot be reached, close Safari while still offline and do not
+   If the toggle cannot be reached, close Chrome while still offline and do not
    reopen the canary profile until Sam decides how to handle its queue.
 2. To disable server ingestion and owner access while retaining automatic
    pruning, remove `CORE_DIAGNOSTICS_OWNER_SECRET` from the protected control

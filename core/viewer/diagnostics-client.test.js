@@ -305,6 +305,156 @@ function interceptNextStorageMutation(storage, method, key, afterMutation) {
   };
 }
 
+test("Chrome diagnostics prefer the full UA Client Hints version", async () => {
+  const requestedHints = [];
+  const navigatorObject = {
+    userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36",
+    userAgentData: {
+      async getHighEntropyValues(hints) {
+        requestedHints.push(hints);
+        return {
+          fullVersionList: [
+            { brand: "Not_A Brand", version: "99.0.0.0" },
+            { brand: "Chromium", version: "152.0.8123.44" },
+            { brand: "Google Chrome", version: "152.0.8123.44" },
+          ],
+        };
+      },
+    },
+  };
+
+  assert.deepEqual(
+    await diagnostics.detectBrowserRuntimeWithClientHints(navigatorObject, { version: "2.17.0" }),
+    {
+      browser_name: "Chrome",
+      browser_version: "152.0.8123.44",
+      livekit_version: "2.17.0",
+    },
+  );
+  assert.deepEqual(requestedHints, [["fullVersionList"]]);
+});
+
+test("Chrome diagnostics safely fall back to the reduced UA version", async () => {
+  const navigatorObject = {
+    userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36",
+    userAgentData: {
+      async getHighEntropyValues() {
+        throw new Error("client hints unavailable");
+      },
+    },
+  };
+
+  assert.deepEqual(
+    await diagnostics.detectBrowserRuntimeWithClientHints(navigatorObject, null),
+    { browser_name: "Chrome", browser_version: "152" },
+  );
+});
+
+test("Chrome diagnostics ignore malformed client-hint versions", async () => {
+  const navigatorObject = {
+    userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36",
+    userAgentData: {
+      async getHighEntropyValues() {
+        return {
+          fullVersionList: [
+            { brand: "Google Chrome", version: "152.0.8123.44/forbidden" },
+          ],
+        };
+      },
+    },
+  };
+
+  assert.deepEqual(
+    await diagnostics.detectBrowserRuntimeWithClientHints(navigatorObject, null),
+    { browser_name: "Chrome", browser_version: "152" },
+  );
+});
+
+test("Chrome diagnostics collapse IP-shaped versions instead of weakening server redaction", async () => {
+  const navigatorObject = {
+    userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36",
+    userAgentData: {
+      async getHighEntropyValues() {
+        return {
+          fullVersionList: [
+            { brand: "Google Chrome", version: "192.0.2.77" },
+          ],
+        };
+      },
+    },
+  };
+
+  assert.deepEqual(
+    await diagnostics.detectBrowserRuntimeWithClientHints(navigatorObject, null),
+    { browser_name: "Chrome", browser_version: "192" },
+  );
+
+  const metadata = validMetadata();
+  metadata.app.runtimes.browser_version = "192.0.2.77";
+  assert.equal(diagnostics.safeMetadata(metadata).app.runtimes.browser_version, "192");
+});
+
+test("browser metadata provider waits for and uses Chrome's full client-hint version", async () => {
+  let resolveHints;
+  let requestedHints;
+  let settled = false;
+  const environment = {
+    apiUrl(pathname) { return `https://echo.example.test${pathname}`; },
+    async fetch(url, init) {
+      assert.equal(url, "https://echo.example.test/api/version");
+      assert.deepEqual(init, { cache: "no-store" });
+      return {
+        ok: true,
+        async json() {
+          return { version: "0.6.33", git_sha: "abcdef123456" };
+        },
+      };
+    },
+    navigator: {
+      userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36",
+      userAgentData: {
+        getHighEntropyValues(hints) {
+          requestedHints = hints;
+          return new Promise((resolve) => { resolveHints = resolve; });
+        },
+      },
+    },
+    LivekitClient: { version: "2.17.0" },
+  };
+
+  const pending = diagnostics.browserMetadataProvider(environment)();
+  pending.then(() => { settled = true; });
+  while (!resolveHints) await Promise.resolve();
+  assert.equal(settled, false);
+  assert.deepEqual(requestedHints, ["fullVersionList"]);
+  resolveHints({
+    fullVersionList: [
+      { brand: "Chromium", version: "152.0.8123.44" },
+      { brand: "Google Chrome", version: "152.0.8123.44" },
+    ],
+  });
+
+  const metadata = await pending;
+  assert.equal(settled, true);
+  assert.deepEqual(metadata, {
+    app: {
+      version: "0.6.33",
+      git_sha: "abcdef123456",
+      channel: "web-canary",
+      runtimes: {
+        browser_name: "Chrome",
+        browser_version: "152.0.8123.44",
+        livekit_version: "2.17.0",
+      },
+    },
+    platform: {
+      client_kind: "browser",
+      operating_system: "macos",
+      architecture: "unknown",
+    },
+  });
+});
+
 function utf8Bytes(value) {
   return new TextEncoder().encode(value).length;
 }
@@ -1380,6 +1530,13 @@ test("exported sealed-body validator accepts the deterministic JS fixture", () =
   const parsed = JSON.parse(body);
   parsed.events[0].message = "FORBIDDEN";
   assert.equal(diagnostics.validateSealedBody(JSON.stringify(parsed), uuidFor(200)), false);
+
+  const ipShapedVersion = JSON.parse(body);
+  ipShapedVersion.app.runtimes.browser_version = "192.0.2.77";
+  assert.equal(
+    diagnostics.validateSealedBody(JSON.stringify(ipShapedVersion), uuidFor(200)),
+    false,
+  );
 });
 
 test("the shared browser envelope fixture matches the JS wire contract", () => {

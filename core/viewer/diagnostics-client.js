@@ -176,9 +176,11 @@
     if (["Browser", "Edge", "Chrome", "Firefox", "Safari"].indexOf(sourceRuntimes.browser_name) >= 0) {
       runtimes.browser_name = sourceRuntimes.browser_name;
     }
-    if (typeof sourceRuntimes.browser_version === "string" &&
-        (/^[0-9]+(?:\.[0-9]+){0,5}$/.test(sourceRuntimes.browser_version) || sourceRuntimes.browser_version === "unknown")) {
-      runtimes.browser_version = sourceRuntimes.browser_version;
+    if (sourceRuntimes.browser_version === "unknown") {
+      runtimes.browser_version = "unknown";
+    } else {
+      var safeBrowserVersion = browserVersionForDiagnostics(sourceRuntimes.browser_version);
+      if (safeBrowserVersion) runtimes.browser_version = safeBrowserVersion;
     }
     if (typeof sourceRuntimes.livekit_version === "string" &&
         /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(sourceRuntimes.livekit_version)) {
@@ -1140,8 +1142,70 @@
     else if ((match = userAgent.match(/Chrome\/([0-9.]+)/))) { browserName = "Chrome"; browserVersion = match[1]; }
     else if ((match = userAgent.match(/Firefox\/([0-9.]+)/))) { browserName = "Firefox"; browserVersion = match[1]; }
     else if ((match = userAgent.match(/Version\/([0-9.]+).*Safari/))) { browserName = "Safari"; browserVersion = match[1]; }
-    var runtimes = { browser_name: browserName, browser_version: browserVersion };
+    var safeBrowserVersion = browserVersion === "unknown"
+      ? "unknown"
+      : browserVersionForDiagnostics(browserVersion);
+    var runtimes = { browser_name: browserName, browser_version: safeBrowserVersion || "unknown" };
     if (livekit && typeof livekit.version === "string") runtimes.livekit_version = livekit.version;
+    return runtimes;
+  }
+
+  function validBrowserVersion(value) {
+    return typeof value === "string" && value.length <= 64 &&
+      /^[0-9]+(?:\.[0-9]+){0,5}$/.test(value);
+  }
+
+  function browserVersionForDiagnostics(value) {
+    if (!validBrowserVersion(value)) return null;
+    var components = value.split(".");
+    if (components.length === 4 && components.every(function (component) {
+      return Number(component) <= 255;
+    })) {
+      // A numeric four-part version can be indistinguishable from an IPv4
+      // address. Keep only the browser major rather than weakening the server's
+      // generic IP redaction boundary. Current Chromium full builds normally
+      // contain a build component above 255; reduced UA values become major-only.
+      return components[0];
+    }
+    return value;
+  }
+
+  function fullVersionFromClientHints(browserName, fullVersionList) {
+    if (!Array.isArray(fullVersionList)) return null;
+    var preferredBrands = browserName === "Edge"
+      ? ["Microsoft Edge"]
+      : browserName === "Chrome"
+        ? ["Google Chrome", "Chromium"]
+        : [];
+    for (var preferredIndex = 0; preferredIndex < preferredBrands.length; preferredIndex += 1) {
+      for (var entryIndex = 0; entryIndex < fullVersionList.length; entryIndex += 1) {
+        var entry = fullVersionList[entryIndex];
+        var safeVersion = entry && entry.brand === preferredBrands[preferredIndex]
+          ? browserVersionForDiagnostics(entry.version)
+          : null;
+        if (safeVersion) {
+          return safeVersion;
+        }
+      }
+    }
+    return null;
+  }
+
+  async function detectBrowserRuntimeWithClientHints(navigatorObject, livekit) {
+    var runtimes = detectBrowserRuntime(navigatorObject, livekit);
+    var userAgentData = navigatorObject && navigatorObject.userAgentData;
+    if ((runtimes.browser_name !== "Chrome" && runtimes.browser_name !== "Edge") ||
+        !userAgentData || typeof userAgentData.getHighEntropyValues !== "function") {
+      return runtimes;
+    }
+    try {
+      var hints = await userAgentData.getHighEntropyValues(["fullVersionList"]);
+      var fullVersion = fullVersionFromClientHints(
+        runtimes.browser_name,
+        hints && hints.fullVersionList,
+      );
+      if (fullVersion) runtimes.browser_version = fullVersion;
+    } catch (_) {}
     return runtimes;
   }
 
@@ -1156,7 +1220,10 @@
           version: payload.version,
           git_sha: payload.git_sha,
           channel: "web-canary",
-          runtimes: detectBrowserRuntime(environment.navigator, environment.LivekitClient),
+          runtimes: await detectBrowserRuntimeWithClientHints(
+            environment.navigator,
+            environment.LivekitClient,
+          ),
         },
         platform: { client_kind: "browser", operating_system: "macos", architecture: "unknown" },
       };
@@ -1286,6 +1353,8 @@
     isWebDiagnosticsCanaryEnrolled: isWebDiagnosticsCanaryEnrolled,
     clearWebDiagnosticsCanaryInvite: clearWebDiagnosticsCanaryInvite,
     detectBrowserRuntime: detectBrowserRuntime,
+    detectBrowserRuntimeWithClientHints: detectBrowserRuntimeWithClientHints,
+    browserMetadataProvider: browserMetadataProvider,
     safeMetadata: safeMetadata,
     sanitizeEvent: sanitizeEvent,
     validateSealedBody: validateSealedBody,
