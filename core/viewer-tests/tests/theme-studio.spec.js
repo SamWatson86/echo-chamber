@@ -223,6 +223,70 @@ test("Theme Studio separates Core Looks from lightweight Animated Worlds", async
   ]);
 });
 
+test("Animated World cards preview motion without starting extra renderers", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openViewer(page);
+  await openThemeStudio(page);
+  await page.locator('.theme-motion-option[data-motion="full"]').click();
+
+  const previewMotion = await page.evaluate(() => {
+    function animationNames(themeId) {
+      const preview = document.querySelector(
+        `.theme-card[data-theme="${themeId}"] .theme-preview`,
+      );
+      return {
+        after: getComputedStyle(preview, "::after").animationName,
+        before: getComputedStyle(preview, "::before").animationName,
+        background: getComputedStyle(preview).backgroundImage,
+      };
+    }
+    return Object.fromEntries(
+      ["matrix", "event-horizon", "tempest", "abyss", "neon-wilds", "ultra-instinct"]
+        .map((themeId) => [themeId, animationNames(themeId)]),
+    );
+  });
+
+  expect(previewMotion.matrix.before).toBe("ec-preview-matrix-rain");
+  expect(previewMotion["event-horizon"].before).toBe("ec-preview-star-orbit");
+  expect(previewMotion.tempest.before).toBe("ec-preview-tempest-rain");
+  expect(previewMotion.tempest.after).toBe("ec-preview-lightning");
+  expect(previewMotion.abyss.before).toBe("ec-preview-current");
+  expect(previewMotion.abyss.after).toBe("ec-preview-bubbles");
+  expect(previewMotion["neon-wilds"].before).toBe("ec-preview-foliage");
+  expect(previewMotion["neon-wilds"].after).toBe("ec-preview-fireflies");
+  expect(previewMotion["ultra-instinct"].background).toContain("ultrainstinct.gif");
+  await expect(page.locator("[data-theme-effect]")).toHaveCount(0);
+  await page.locator('.theme-card[data-theme="matrix"]').hover();
+  await expect(page.locator(
+    '.theme-card[data-theme="matrix"] .theme-preview',
+  )).toHaveCSS("animation-name", "none");
+
+  await page.locator('.theme-motion-option[data-motion="still"]').click();
+  const stillMotion = await page.locator(
+    '[data-theme-collection="animated"] .theme-preview',
+  ).evaluateAll((previews) => previews.map((preview) => ({
+    after: getComputedStyle(preview, "::after").animationName,
+    before: getComputedStyle(preview, "::before").animationName,
+    own: getComputedStyle(preview).animationName,
+  })));
+  expect(stillMotion).toEqual(
+    Array.from({ length: 6 }, () => ({ after: "none", before: "none", own: "none" })),
+  );
+  expect(await page.locator(
+    '.theme-card[data-theme="ultra-instinct"] .theme-preview',
+  ).evaluate((element) => getComputedStyle(element).backgroundImage))
+    .not.toContain("ultrainstinct.gif");
+
+  await page.locator('.theme-motion-option[data-motion="full"]').click();
+  await selectGlobalTheme(page, "matrix");
+  await page.locator("#theme-panel .theme-studio-close").click();
+  await expect(page.locator("#theme-panel")).toHaveAttribute("aria-hidden", "true");
+  expect(await page.locator(
+    '.theme-card[data-theme="matrix"] .theme-preview',
+  ).evaluate((element) => getComputedStyle(element, "::before").animationName)).toBe("none");
+});
+
 test("the global theme contract reaches every Echo module, including the dynamic Capture Picker", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 1280, height: 720 });

@@ -2325,16 +2325,20 @@ body[data-theme] .capture-source-thumb {
   }
 }
 
-:root[data-theme-motion-effective="ambient"] .theme-card:is(:hover, :focus-visible, [aria-pressed="true"]) .theme-preview::before {
+:root[data-theme-motion-effective="ambient"] .theme-panel[aria-hidden="false"] [data-theme-collection="core"] .theme-card:is(:hover, :focus-visible, [aria-pressed="true"]) .theme-preview::before {
   animation: ec-preview-grid 9s linear infinite;
 }
 
-:root[data-theme-motion-effective="full"] .theme-card:is(:hover, :focus-visible, [aria-pressed="true"]) .theme-preview::before {
+:root[data-theme-motion-effective="full"] .theme-panel[aria-hidden="false"] [data-theme-collection="core"] .theme-card:is(:hover, :focus-visible, [aria-pressed="true"]) .theme-preview::before {
   animation: ec-preview-grid 4.5s linear infinite;
 }
 
-:root[data-theme-motion-effective="full"] .theme-card:is(:hover, :focus-visible) .theme-preview {
+:root[data-theme-motion-effective="full"] .theme-panel[aria-hidden="false"] [data-theme-collection="core"] .theme-card:is(:hover, :focus-visible) .theme-preview {
   animation: ec-preview-pop 1.5s ease-in-out infinite alternate;
+}
+
+.theme-panel [data-theme-collection="animated"] .theme-card:hover .theme-preview {
+  animation: none;
 }
 
 @keyframes ec-preview-grid {
@@ -2344,6 +2348,151 @@ body[data-theme] .capture-source-thumb {
 
 @keyframes ec-preview-pop {
   to { filter: brightness(1.09) saturate(1.12); }
+}
+
+/*
+ * Animated World cards use compositor-friendly CSS layers rather than mini
+ * canvases. The selectors require the open studio and an effective motion
+ * level, so the previews stop when the dialog closes or motion is disabled.
+ */
+:root[data-theme-motion-effective="ambient"] .theme-panel[aria-hidden="false"] {
+  --ec-preview-matrix-duration: 7.2s;
+  --ec-preview-orbit-duration: 28s;
+  --ec-preview-rain-duration: 2.8s;
+  --ec-preview-lightning-duration: 8.5s;
+  --ec-preview-current-duration: 7s;
+  --ec-preview-bubbles-duration: 8.5s;
+  --ec-preview-foliage-duration: 5.8s;
+  --ec-preview-fireflies-duration: 6.8s;
+}
+
+:root[data-theme-motion-effective="full"] .theme-panel[aria-hidden="false"] {
+  --ec-preview-matrix-duration: 3.8s;
+  --ec-preview-orbit-duration: 16s;
+  --ec-preview-rain-duration: 1.45s;
+  --ec-preview-lightning-duration: 5.8s;
+  --ec-preview-current-duration: 4.2s;
+  --ec-preview-bubbles-duration: 5s;
+  --ec-preview-foliage-duration: 3.8s;
+  --ec-preview-fireflies-duration: 4.4s;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="matrix"] .theme-preview::before {
+  inset: -42% -8%;
+  opacity: 0.78;
+  background:
+    repeating-linear-gradient(
+      180deg,
+      transparent 0 8px,
+      rgb(72 255 123 / 0.76) 9px 10px,
+      transparent 11px 21px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 10px,
+      rgb(25 161 63 / 0.35) 11px 12px,
+      transparent 13px 22px
+    );
+  background-size: 17px 21px, 22px 100%;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 22%, #000 82%, transparent 100%);
+  animation: ec-preview-matrix-rain var(--ec-preview-matrix-duration) linear infinite;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="event-horizon"] .theme-preview::before {
+  transform-origin: 73% 50%;
+  animation: ec-preview-star-orbit var(--ec-preview-orbit-duration) linear infinite;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="tempest"] .theme-preview::before {
+  animation: ec-preview-tempest-rain var(--ec-preview-rain-duration) linear infinite;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="tempest"] .theme-preview::after {
+  animation: ec-preview-lightning var(--ec-preview-lightning-duration) linear infinite;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="abyss"] .theme-preview::before {
+  animation: ec-preview-current var(--ec-preview-current-duration) ease-in-out infinite alternate;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="abyss"] .theme-preview::after {
+  animation: ec-preview-bubbles var(--ec-preview-bubbles-duration) ease-in-out infinite;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="neon-wilds"] .theme-preview::before {
+  transform-origin: 50% 100%;
+  animation: ec-preview-foliage var(--ec-preview-foliage-duration) ease-in-out infinite alternate;
+}
+
+:root:is(
+  [data-theme-motion-effective="ambient"],
+  [data-theme-motion-effective="full"]
+) .theme-panel[aria-hidden="false"] .theme-card[data-theme="neon-wilds"] .theme-preview::after {
+  animation: ec-preview-fireflies var(--ec-preview-fireflies-duration) ease-in-out infinite;
+}
+
+@keyframes ec-preview-matrix-rain {
+  from { transform: translate3d(0, -18%, 0); }
+  to { transform: translate3d(0, 18%, 0); }
+}
+
+@keyframes ec-preview-star-orbit {
+  from { transform: rotate(0deg) scale(1.03); }
+  to { transform: rotate(360deg) scale(1.03); }
+}
+
+@keyframes ec-preview-tempest-rain {
+  from { transform: translate3d(-3%, -12%, 0); }
+  to { transform: translate3d(3%, 14%, 0); }
+}
+
+@keyframes ec-preview-lightning {
+  0%, 68%, 72%, 76%, 100% { opacity: 0.16; }
+  69%, 73% { opacity: 1; }
+  70%, 74% { opacity: 0.42; }
+}
+
+@keyframes ec-preview-current {
+  from { transform: translate3d(-3%, -1%, 0) rotate(-5deg) scale(1.12); }
+  to { transform: translate3d(3%, 1%, 0) rotate(3deg) scale(1.16); }
+}
+
+@keyframes ec-preview-bubbles {
+  0% { opacity: 0.34; transform: translate3d(0, 10%, 0) scale(0.94); }
+  48% { opacity: 0.82; }
+  100% { opacity: 0.18; transform: translate3d(-6%, -28%, 0) scale(1.06); }
+}
+
+@keyframes ec-preview-foliage {
+  from { transform: rotate(-1.5deg) scale(1.08); }
+  to { transform: rotate(1.8deg) scale(1.11); }
+}
+
+@keyframes ec-preview-fireflies {
+  0%, 100% { opacity: 0.52; transform: translate3d(-6%, 8%, 0) scale(0.92); }
+  38% { opacity: 1; transform: translate3d(5%, -12%, 0) scale(1.08); }
+  68% { opacity: 0.68; transform: translate3d(-2%, -20%, 0) scale(0.98); }
 }
 
 /* Motion selector */
