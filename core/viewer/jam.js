@@ -1561,16 +1561,32 @@ function onJamVolumeChange(e) {
 
 function showJamToast(message) {
   var existing = document.querySelector(".jam-toast");
-  if (existing) existing.remove();
+  if (existing) {
+    releaseJamToastTheme(existing);
+    existing.remove();
+  }
   var toast = document.createElement("div");
   toast.className = "jam-toast";
   toast.textContent = message;
   document.body.appendChild(toast);
+  if (window.EchoTheme && typeof window.EchoTheme.bindModule === "function") {
+    toast._echoThemeUnbind = window.EchoTheme.bindModule("jam", toast);
+  }
   setTimeout(function() { toast.classList.add("jam-toast-visible"); }, 10);
   setTimeout(function() {
     toast.classList.remove("jam-toast-visible");
-    setTimeout(function() { toast.remove(); }, 400);
+    setTimeout(function() {
+      toast.remove();
+      releaseJamToastTheme(toast);
+    }, 400);
   }, 4000);
+}
+
+function releaseJamToastTheme(toast) {
+  if (toast && typeof toast._echoThemeUnbind === "function") {
+    toast._echoThemeUnbind();
+    toast._echoThemeUnbind = null;
+  }
 }
 
 function showJamError(msg) {

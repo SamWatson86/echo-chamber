@@ -378,13 +378,16 @@ test("utility navigation uses stable Tools labels instead of changing meanings",
 
 test("Ultra Instinct keeps the Goku GIF visible through the Phase 2 stage", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   await openPhaseTwoViewer(page, { screenShares: 0 });
   await page.evaluate(() => applyTheme("ultra-instinct"));
 
   const presentation = await page.evaluate(() => {
     const bodyStyle = getComputedStyle(document.body);
     const stageStyle = getComputedStyle(document.querySelector(".room-main"));
-    const alphaMatch = stageStyle.backgroundColor.match(/rgba\([^,]+,[^,]+,[^,]+,\s*([0-9.]+)\)/);
+    const alphaMatch = stageStyle.backgroundColor.match(
+      /(?:rgba\([^,]+,[^,]+,[^,]+,\s*|\/\s*)([0-9.]+)\s*\)/
+    );
     return {
       bodyBackground: bodyStyle.backgroundImage,
       particleCanvases: document.querySelectorAll("#ui-particles").length,
