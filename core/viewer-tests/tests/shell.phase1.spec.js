@@ -101,6 +101,17 @@ async function settleResize(page, viewport, expectedMode) {
   await expect(page.locator("html")).toHaveAttribute("data-ui-mode", expectedMode);
 }
 
+async function resolveThemeColor(page, declaration) {
+  return page.evaluate((value) => {
+    const probe = document.createElement("span");
+    probe.style.color = value;
+    document.body.appendChild(probe);
+    const resolved = getComputedStyle(probe).color;
+    probe.remove();
+    return resolved;
+  }, declaration);
+}
+
 async function expectCanonicalStructure(page) {
   for (const selector of shellSelectors) {
     await expect(page.locator(selector), `${selector} must be unique`).toHaveCount(1);
@@ -879,11 +890,15 @@ test("publisher microphone badges stay truthful and visible in avatar and camera
 
   const cameraBadge = cameraCard.locator(".participant-mic-state");
   const avatarBadge = avatarCard.locator(".participant-mic-state");
+  const mutedBorderColor = await resolveThemeColor(
+    page,
+    "color-mix(in srgb, var(--ec-danger) 58%, transparent)",
+  );
   await expect(cameraCard).toHaveClass(/is-publisher-mic-off/);
   await expect(avatarCard).toHaveClass(/is-publisher-mic-off/);
-  await expect(cameraCard).toHaveCSS("border-color", "rgba(229, 106, 106, 0.58)");
+  await expect(cameraCard).toHaveCSS("border-color", mutedBorderColor);
   await cameraCard.hover();
-  await expect(cameraCard).toHaveCSS("border-color", "rgba(229, 106, 106, 0.58)");
+  await expect(cameraCard).toHaveCSS("border-color", mutedBorderColor);
   await expect(cameraBadge).toBeVisible();
   await expect(cameraBadge).toContainText("Muted");
   await expect(cameraBadge).toHaveAccessibleName(/Muted.*Friend 2/i);
@@ -1573,13 +1588,26 @@ test("every member can hide and restore any shared screen on their own Stage", a
   await expectNoOverlap(remoteSharingBadge, remoteCard.locator(".participant-mic-state"));
   await expectNoOverlap(remoteSharingBadge, remoteCard.locator(".participant-settings-toggle"));
 
+  const sharingBorderColor = await resolveThemeColor(
+    page,
+    "color-mix(in srgb, var(--ec-accent) 70%, transparent)",
+  );
+  const speakingBorderColor = await resolveThemeColor(
+    page,
+    "color-mix(in srgb, var(--ec-live) 72%, transparent)",
+  );
+  const mutedBorderColor = await resolveThemeColor(
+    page,
+    "color-mix(in srgb, var(--ec-danger) 58%, transparent)",
+  );
+
   await page.evaluate((identity) => {
     window.EchoLayoutTestScenario.setParticipantMicrophoneState(identity, {
       published: true,
       muted: false,
     });
   }, remoteIdentity);
-  await expect(remoteCard).toHaveCSS("border-color", "rgba(201, 168, 106, 0.72)");
+  await expect(remoteCard).toHaveCSS("border-color", sharingBorderColor);
 
   await page.evaluate((identity) => {
     const state = participantState.get(identity);
@@ -1587,7 +1615,7 @@ test("every member can hide and restore any shared screen on their own Stage", a
     lastActiveSpeakerEvent = Number.NEGATIVE_INFINITY;
     updateActiveSpeakerUi();
   }, remoteIdentity);
-  await expect(remoteCard).toHaveCSS("border-color", "rgba(79, 195, 200, 0.72)");
+  await expect(remoteCard).toHaveCSS("border-color", speakingBorderColor);
 
   await page.evaluate((identity) => {
     window.EchoLayoutTestScenario.setParticipantMicrophoneState(identity, {
@@ -1597,7 +1625,7 @@ test("every member can hide and restore any shared screen on their own Stage", a
   }, remoteIdentity);
   await expect(remoteCard).toHaveClass(/is-publisher-mic-off/);
   await expect(remoteCard).toHaveClass(/is-screen-sharing/);
-  await expect(remoteCard).toHaveCSS("border-color", "rgba(229, 106, 106, 0.58)");
+  await expect(remoteCard).toHaveCSS("border-color", mutedBorderColor);
   await expect(remoteSharingBadge).toBeVisible();
   await expectNoOverlap(remoteSharingBadge, remoteCard.locator(".participant-mic-state"));
 

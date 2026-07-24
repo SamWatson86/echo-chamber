@@ -2,8 +2,8 @@
    THEME — Theme switching, special effects, and UI opacity
    ========================================================= */
 
-// ── Version info + Update button at bottom of settings ──
-// Called after room connect so it appears at the bottom (after device/NC/chime sections)
+// Version info + Update button at bottom of settings.
+// Called after room connect so it appears after the device/NC/chime sections.
 function shouldShowDesktopUpdater(options) {
   var opts = options || {};
   return opts.nativeShell === true && opts.hasIpc === true;
@@ -11,7 +11,7 @@ function shouldShowDesktopUpdater(options) {
 
 function buildVersionSection() {
   if (!settingsDevicePanel) return;
-  if (document.getElementById("version-settings-section")) return; // already built
+  if (document.getElementById("version-settings-section")) return;
   var section = document.createElement("div");
   section.id = "version-settings-section";
   section.className = "chime-settings-section";
@@ -39,7 +39,6 @@ function buildVersionSection() {
   section.appendChild(versionRow);
   settingsDevicePanel.appendChild(section);
 
-  // Populate version from Tauri IPC or fallback
   (async function() {
     try {
       if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
@@ -58,7 +57,6 @@ function buildVersionSection() {
     return;
   }
 
-  // Check for updates — query server /api/version then try Tauri auto-update
   updateBtn.addEventListener("click", async function() {
     updateBtn.disabled = true;
     updateStatus.textContent = "Checking...";
@@ -80,7 +78,6 @@ function buildVersionSection() {
       }
       if (latestClient && currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "..." && isNewerVersion(latestClient, currentVer)) {
         updateStatus.textContent = "Update available: v" + latestClient + "!";
-        // Try Tauri auto-update if available
         if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
           try {
             var result = await tauriInvoke("check_for_updates");
@@ -93,18 +90,17 @@ function buildVersionSection() {
         }
       } else if (currentVer && currentVer !== "browser" && currentVer !== "unknown" && currentVer !== "...") {
         updateStatus.textContent = "You're on the latest version!";
-      } else {
-        // Fallback for browser viewer or unknown version
-        if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
-          var result = await tauriInvoke("check_for_updates");
-          if (result === "local_test_build") {
-            updateStatus.textContent = "Local test build — auto-update disabled.";
-          } else {
-            updateStatus.textContent = result === "up_to_date" ? "You're on the latest version!" : "Installing... app will restart.";
-          }
+      } else if (window.__ECHO_NATIVE__ && hasTauriIPC()) {
+        var fallbackResult = await tauriInvoke("check_for_updates");
+        if (fallbackResult === "local_test_build") {
+          updateStatus.textContent = "Local test build — auto-update disabled.";
         } else {
-          updateStatus.textContent = "Version check not available in browser.";
+          updateStatus.textContent = fallbackResult === "up_to_date"
+            ? "You're on the latest version!"
+            : "Installing... app will restart.";
         }
+      } else {
+        updateStatus.textContent = "Version check not available in browser.";
       }
     } catch (e) {
       debugLog("[updater] check failed: " + (e.message || e));
@@ -114,293 +110,497 @@ function buildVersionSection() {
   });
 }
 
-// ═══════════════════════════════════════════
-// THEME SYSTEM
-// ═══════════════════════════════════════════
+// ============================================================================
+// THEME EFFECTS
+// ============================================================================
 
-let matrixCanvas = null;
-let matrixAnimationId = null;
-let matrixResizeHandler = null;
-
-function startMatrixRain() {
-  if (matrixCanvas) return;
-  matrixCanvas = document.createElement("canvas");
-  matrixCanvas.id = "matrix-rain";
-  document.body.prepend(matrixCanvas);
-  const ctx = matrixCanvas.getContext("2d");
-  const resize = () => {
-    matrixCanvas.width = window.innerWidth;
-    matrixCanvas.height = window.innerHeight;
-  };
-  resize();
-  matrixResizeHandler = resize;
-  window.addEventListener("resize", matrixResizeHandler);
-  const fontSize = 14;
-  let columns = Math.floor(matrixCanvas.width / fontSize);
-  let drops = new Array(columns).fill(0).map(() => Math.random() * -50);
-  const chars = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEF";
-  function draw() {
-    const cols = Math.floor(matrixCanvas.width / fontSize);
-    if (cols !== columns) {
-      columns = cols;
-      drops = new Array(columns).fill(0).map(() => Math.random() * -50);
-    }
-    ctx.fillStyle = "rgba(0, 0, 0, 0.05)";
-    ctx.fillRect(0, 0, matrixCanvas.width, matrixCanvas.height);
-    ctx.fillStyle = "#00ff41";
-    ctx.font = `${fontSize}px monospace`;
-    for (let i = 0; i < drops.length; i++) {
-      const char = chars[Math.floor(Math.random() * chars.length)];
-      const x = i * fontSize;
-      const y = drops[i] * fontSize;
-      ctx.globalAlpha = 0.8 + Math.random() * 0.2;
-      ctx.fillText(char, x, y);
-      if (y > matrixCanvas.height && Math.random() > 0.975) {
-        drops[i] = 0;
-      }
-      drops[i]++;
-    }
-    ctx.globalAlpha = 1;
-    matrixAnimationId = requestAnimationFrame(draw);
-  }
-  draw();
+var themeEffectController = null;
+if (
+  window.EchoThemeEffects &&
+  typeof window.EchoThemeEffects.createThemeEffectController === "function"
+) {
+  themeEffectController = window.EchoThemeEffects.createThemeEffectController({
+    document: document,
+    window: window,
+  });
 }
 
-function stopMatrixRain() {
-  if (matrixAnimationId) {
-    cancelAnimationFrame(matrixAnimationId);
-    matrixAnimationId = null;
-  }
-  if (matrixResizeHandler) {
-    window.removeEventListener("resize", matrixResizeHandler);
-    matrixResizeHandler = null;
-  }
-  if (matrixCanvas) {
-    matrixCanvas.remove();
-    matrixCanvas = null;
-  }
+function stopActiveThemeEffect() {
+  if (themeEffectController) themeEffectController.stop();
 }
 
-// ── Ultra Instinct energy particles ──
-let uiParticleCanvas = null;
-let uiParticleAnimationId = null;
-let uiParticleResizeHandler = null;
+function syncThemeEffects(state) {
+  if (themeEffectController) themeEffectController.sync(state);
+}
 
-function startUltraInstinctParticles() {
-  if (uiParticleCanvas) return;
-  uiParticleCanvas = document.createElement("canvas");
-  uiParticleCanvas.id = "ui-particles";
-  document.body.prepend(uiParticleCanvas);
-  const ctx = uiParticleCanvas.getContext("2d");
+window.EchoThemeEffectDiagnostics = Object.freeze({
+  getMetrics: function () {
+    return themeEffectController
+      ? themeEffectController.getMetrics()
+      : Object.freeze({ active: false });
+  },
+});
 
-  let w, h;
+// ============================================================================
+// THEME STUDIO
+// ============================================================================
 
-  // ── Sparkle particles (overlay on top of GIF background) ──
-  const PARTICLE_COUNT = 80;
-  const particles = [];
+var THEME_PRESENTATION = {
+  frost: {
+    badge: "Default",
+    vibe: "Cobalt glass, electric cyan, clean depth.",
+  },
+  cyberpunk: {
+    badge: "Pop",
+    vibe: "Hot pink, aqua, and a hit of acid energy.",
+  },
+  aurora: {
+    badge: "Flow",
+    vibe: "Emerald light folding through deep indigo.",
+  },
+  ember: {
+    badge: "Warm",
+    vibe: "Coral glow, amber sparks, and dark plum.",
+  },
+  matrix: {
+    badge: "Digital",
+    vibe: "Falling code, phosphor glow, and the classic digital rain.",
+  },
+  "event-horizon": {
+    badge: "Cosmic",
+    vibe: "Violet nebulae, cold starlight, and impossible depth.",
+  },
+  tempest: {
+    badge: "Storm",
+    vibe: "Slate clouds, cold rain, and distant electric light.",
+  },
+  abyss: {
+    badge: "Ocean",
+    vibe: "Deep water, bioluminescent currents, and drifting light.",
+  },
+  "neon-wilds": {
+    badge: "Living",
+    vibe: "Midnight foliage, luminous moss, and wandering fireflies.",
+  },
+  midnight: {
+    badge: "Quiet",
+    vibe: "Graphite, soft silver, and restrained lilac.",
+  },
+  "ultra-instinct": {
+    badge: "Autonomous",
+    vibe: "It's astounding! This mortal really is something else...Look at that brilliant form...There can be no doubt! This is the true power, complete in all its majesty! This is... AUTONOMOUS ULTRA INSTINCT!!!!",
+  },
+};
 
-  function spawnParticle() {
-    const type = Math.random();
-    if (type < 0.55) {
-      // White sparks — fast rising
-      return {
-        x: Math.random() * w,
-        y: h + Math.random() * 30,
-        vx: (Math.random() - 0.5) * 1.0,
-        vy: -(1.0 + Math.random() * 2.0),
-        size: 1 + Math.random() * 1.5,
-        life: 1,
-        decay: 0.005 + Math.random() * 0.006,
-        kind: "spark",
-      };
-    } else if (type < 0.8) {
-      // Silver orbs — slow drift
-      return {
-        x: Math.random() * w,
-        y: h + Math.random() * 60,
-        vx: (Math.random() - 0.5) * 0.4,
-        vy: -(0.3 + Math.random() * 0.6),
-        size: 2 + Math.random() * 3,
-        life: 1,
-        decay: 0.001 + Math.random() * 0.002,
-        kind: "orb",
-      };
+var MOTION_PRESENTATION = {
+  still: "Zero decorative animation.",
+  ambient: "Slow, restrained atmosphere.",
+  full: "Complete theme effects.",
+};
+
+var MODULE_PRESENTATION = {
+  stage: "Workspace and shared media",
+  people: "Participant rail",
+  chat: "Conversation panel",
+  jam: "Shared listening",
+  camera: "Pre-stage camera view",
+  soundboard: "Compact and editor views",
+  settings: "Device and app controls",
+  capture: "Window and screen picker",
+};
+
+var themeRuntime = window.EchoThemeRuntime;
+var themeController = null;
+var themeStudioLastFocus = null;
+var themeStudioStatus = document.getElementById("theme-status");
+var themeStudioScrim = document.getElementById("theme-studio-scrim");
+var themeStudioGrid = document.getElementById("theme-grid");
+var themeCoreGrid = document.getElementById("theme-core-grid");
+var themeAnimatedGrid = document.getElementById("theme-animated-grid");
+var themeMotionOptions = document.getElementById("theme-motion-options");
+var themeModuleGrid = document.getElementById("theme-module-grid");
+var themeResetModules = document.getElementById("theme-reset-modules");
+var themePortalButton = document.getElementById("open-theme-portal");
+
+function themeLabel(themeId) {
+  if (!themeController) return themeId;
+  var match = themeController.getCatalog().find(function (theme) {
+    return theme.id === themeId;
+  });
+  return match ? match.label : themeId;
+}
+
+function announceThemeStatus(message, tone) {
+  if (!themeStudioStatus) return;
+  themeStudioStatus.textContent = message || "";
+  themeStudioStatus.classList.remove("is-success", "is-warning", "is-error");
+  if (tone) themeStudioStatus.classList.add("is-" + tone);
+}
+
+function createThemeCard(theme) {
+  var presentation = THEME_PRESENTATION[theme.id] || {};
+  var card = document.createElement("button");
+  card.type = "button";
+  card.className = "theme-card";
+  card.dataset.theme = theme.id;
+  card.setAttribute("aria-label", "Use " + theme.label + " everywhere");
+  card.setAttribute("aria-pressed", "false");
+
+  var preview = document.createElement("span");
+  preview.className = "theme-preview " + theme.id + "-preview";
+  preview.dataset.theme = theme.id;
+  preview.setAttribute("aria-hidden", "true");
+
+  var copy = document.createElement("span");
+  copy.className = "theme-card-copy";
+  var name = document.createElement("span");
+  name.className = "theme-name";
+  name.textContent = theme.label;
+  var badge = document.createElement("span");
+  badge.className = "theme-badge";
+  badge.textContent = presentation.badge || "Theme";
+  var vibe = document.createElement("span");
+  vibe.className = "theme-vibe";
+  vibe.textContent = presentation.vibe || "A complete Echo look.";
+  copy.appendChild(name);
+  copy.appendChild(badge);
+  copy.appendChild(vibe);
+  card.appendChild(preview);
+  card.appendChild(copy);
+
+  card.addEventListener("click", function () {
+    applyTheme(theme.id);
+    announceThemeStatus(theme.label + " now flows through all of Echo.", "success");
+  });
+  return card;
+}
+
+function createMotionOption(motion) {
+  var option = document.createElement("button");
+  option.type = "button";
+  option.className = "theme-motion-option";
+  option.dataset.motion = motion.id;
+  option.setAttribute("aria-pressed", "false");
+  var name = document.createElement("strong");
+  name.className = "theme-motion-option-name";
+  name.textContent = motion.label;
+  var copy = document.createElement("small");
+  copy.className = "theme-motion-option-copy";
+  copy.textContent = MOTION_PRESENTATION[motion.id] || "";
+  option.appendChild(name);
+  option.appendChild(copy);
+  option.addEventListener("click", function () {
+    applyMotionPreference(motion.id);
+    var state = themeController.getState();
+    if (state.reducedMotion && motion.id !== "still") {
+      announceThemeStatus(
+        motion.label + " is saved. Your system reduced-motion setting keeps Echo still for now.",
+        "warning"
+      );
     } else {
-      // Blue-silver wisps
-      return {
-        x: Math.random() * w,
-        y: h + Math.random() * 80,
-        vx: (Math.random() - 0.5) * 0.6,
-        vy: -(0.4 + Math.random() * 0.8),
-        size: 2 + Math.random() * 3,
-        life: 1,
-        decay: 0.002 + Math.random() * 0.003,
-        kind: "wisp",
-      };
+      announceThemeStatus("Motion set to " + motion.label + ".", "success");
     }
-  }
-
-  const resize = () => {
-    w = uiParticleCanvas.width = window.innerWidth;
-    h = uiParticleCanvas.height = window.innerHeight;
-  };
-  resize();
-  uiParticleResizeHandler = resize;
-  window.addEventListener("resize", uiParticleResizeHandler);
-
-  for (let i = 0; i < PARTICLE_COUNT; i++) {
-    const p = spawnParticle();
-    p.y = Math.random() * h;
-    p.life = 0.3 + Math.random() * 0.7;
-    particles.push(p);
-  }
-
-  let lastTime = performance.now();
-
-  function draw(now) {
-    const dt = Math.min((now - lastTime) / 16.667, 3);
-    lastTime = now;
-    ctx.clearRect(0, 0, w, h);
-
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.life -= p.decay * dt;
-
-      if (p.kind === "wisp") {
-        p.x += Math.sin(now * 0.001 + i) * 0.2 * dt;
-      }
-
-      if (p.life <= 0 || p.y < -20) {
-        particles[i] = spawnParticle();
-        continue;
-      }
-
-      const alpha = p.life * (p.kind === "spark" ? 0.85 : 0.5);
-
-      if (p.kind === "orb") {
-        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 3);
-        grad.addColorStop(0, `rgba(225, 230, 240, ${alpha})`);
-        grad.addColorStop(0.4, `rgba(200, 208, 220, ${alpha * 0.5})`);
-        grad.addColorStop(1, `rgba(180, 188, 200, 0)`);
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * 3, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (p.kind === "spark") {
-        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 2);
-        grad.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
-        grad.addColorStop(0.5, `rgba(215, 225, 245, ${alpha * 0.4})`);
-        grad.addColorStop(1, `rgba(190, 205, 235, 0)`);
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * 2, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 4);
-        grad.addColorStop(0, `rgba(150, 195, 250, ${alpha * 0.6})`);
-        grad.addColorStop(0.5, `rgba(120, 165, 235, ${alpha * 0.25})`);
-        grad.addColorStop(1, `rgba(90, 135, 215, 0)`);
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * 4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    uiParticleAnimationId = requestAnimationFrame(draw);
-  }
-
-  uiParticleAnimationId = requestAnimationFrame(draw);
+  });
+  return option;
 }
 
-function stopUltraInstinctParticles() {
-  if (uiParticleAnimationId) {
-    cancelAnimationFrame(uiParticleAnimationId);
-    uiParticleAnimationId = null;
+function createModuleRow(moduleDefinition, themes) {
+  var row = document.createElement("label");
+  row.className = "theme-module-row";
+  row.dataset.themeModule = moduleDefinition.id;
+
+  var copy = document.createElement("span");
+  copy.className = "theme-module-copy";
+  var name = document.createElement("strong");
+  name.textContent = moduleDefinition.label;
+  var description = document.createElement("small");
+  description.textContent = MODULE_PRESENTATION[moduleDefinition.id] || "Echo space";
+  copy.appendChild(name);
+  copy.appendChild(description);
+
+  var select = document.createElement("select");
+  select.className = "theme-module-select";
+  select.dataset.themeModuleSelect = moduleDefinition.id;
+  select.setAttribute("aria-label", moduleDefinition.label + " theme");
+  var followGlobal = document.createElement("option");
+  followGlobal.value = "global";
+  followGlobal.textContent = "Follow global";
+  select.appendChild(followGlobal);
+  [
+    { id: "core", label: "Core Looks" },
+    { id: "animated", label: "Animated Worlds" },
+  ].forEach(function (collection) {
+    var group = document.createElement("optgroup");
+    group.label = collection.label;
+    themes.forEach(function (theme) {
+      if ((theme.collection || "core") !== collection.id) return;
+      var option = document.createElement("option");
+      option.value = theme.id;
+      option.textContent = theme.label;
+      group.appendChild(option);
+    });
+    select.appendChild(group);
+  });
+  select.addEventListener("change", function () {
+    var selected = select.value;
+    applyModuleTheme(moduleDefinition.id, selected);
+    if (selected === "global") {
+      announceThemeStatus(moduleDefinition.label + " is following the global look again.", "success");
+    } else {
+      announceThemeStatus(
+        moduleDefinition.label + " now uses " + themeLabel(selected) + ".",
+        "success"
+      );
+    }
+  });
+
+  row.appendChild(copy);
+  row.appendChild(select);
+  return row;
+}
+
+function buildThemeStudio() {
+  if (!themeController) return;
+  var themes = themeController.getCatalog();
+
+  if (themeCoreGrid && themeAnimatedGrid) {
+    themeCoreGrid.textContent = "";
+    themeAnimatedGrid.textContent = "";
+    themes.forEach(function (theme) {
+      var target = theme.collection === "animated"
+        ? themeAnimatedGrid
+        : themeCoreGrid;
+      target.appendChild(createThemeCard(theme));
+    });
   }
-  if (uiParticleResizeHandler) {
-    window.removeEventListener("resize", uiParticleResizeHandler);
-    uiParticleResizeHandler = null;
+
+  if (themeMotionOptions) {
+    themeMotionOptions.textContent = "";
+    themeController.getMotionLevels().forEach(function (motion) {
+      themeMotionOptions.appendChild(createMotionOption(motion));
+    });
   }
-  if (uiParticleCanvas) {
-    uiParticleCanvas.remove();
-    uiParticleCanvas = null;
+
+  if (themeModuleGrid) {
+    themeModuleGrid.textContent = "";
+    themeController.getModules().forEach(function (moduleDefinition) {
+      themeModuleGrid.appendChild(createModuleRow(moduleDefinition, themes));
+    });
+  }
+}
+
+function syncThemeStudio(state) {
+  if (!state) return;
+  if (themeStudioGrid) {
+    themeStudioGrid.querySelectorAll(".theme-card").forEach(function (card) {
+      var active = card.dataset.theme === state.globalTheme;
+      card.classList.toggle("is-active", active);
+      card.setAttribute("aria-pressed", String(active));
+    });
+  }
+  if (themeMotionOptions) {
+    themeMotionOptions.querySelectorAll(".theme-motion-option").forEach(function (option) {
+      var active = option.dataset.motion === state.requestedMotion;
+      option.classList.toggle("is-active", active);
+      option.setAttribute("aria-pressed", String(active));
+    });
+  }
+  if (themeModuleGrid) {
+    themeModuleGrid.querySelectorAll("[data-theme-module-select]").forEach(function (select) {
+      var moduleId = select.dataset.themeModuleSelect;
+      select.value = state.overrides[moduleId] || "global";
+      if (select.options.length) {
+        select.options[0].textContent = "Follow global · " + themeLabel(state.globalTheme);
+      }
+    });
+  }
+  if (themeResetModules) {
+    themeResetModules.disabled = Object.keys(state.overrides).length === 0;
+  }
+}
+
+function isThemeStudioOpen() {
+  return !!themePanel && !themePanel.classList.contains("hidden");
+}
+
+function setThemeStudioOpen(open) {
+  if (!themePanel) return;
+  var shouldOpen = open === true;
+  if (shouldOpen === isThemeStudioOpen()) return;
+
+  if (shouldOpen) themeStudioLastFocus = document.activeElement;
+  themePanel.classList.toggle("hidden", !shouldOpen);
+  themePanel.setAttribute("aria-hidden", String(!shouldOpen));
+  if (themeStudioScrim) {
+    themeStudioScrim.classList.toggle("hidden", !shouldOpen);
+    themeStudioScrim.setAttribute("aria-hidden", String(!shouldOpen));
+  }
+  [openThemeButton, themePortalButton].forEach(function (opener) {
+    if (opener) opener.setAttribute("aria-expanded", String(shouldOpen));
+  });
+
+  if (shouldOpen) {
+    var state = themeController ? themeController.getState() : null;
+    syncThemeStudio(state);
+    if (state && state.reducedMotion && state.requestedMotion !== "still") {
+      announceThemeStatus(
+        "System reduced motion is active. Your saved motion choice will return when that setting is off.",
+        "warning"
+      );
+    }
+    requestAnimationFrame(function () {
+      var selectedCard = themePanel.querySelector('.theme-card[aria-pressed="true"]');
+      (selectedCard || closeThemeButton || themePanel).focus();
+    });
+  } else {
+    announceThemeStatus("");
+    if (
+      themeStudioLastFocus &&
+      themeStudioLastFocus.isConnected &&
+      typeof themeStudioLastFocus.focus === "function"
+    ) {
+      themeStudioLastFocus.focus();
+    }
+    themeStudioLastFocus = null;
+  }
+}
+
+function trapThemeStudioFocus(event) {
+  if (!isThemeStudioOpen()) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setThemeStudioOpen(false);
+    return;
+  }
+  if (event.key !== "Tab") return;
+  var focusable = Array.prototype.filter.call(
+    themePanel.querySelectorAll(
+      'button:not([disabled]), select:not([disabled]), input:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
+    ),
+    function (element) {
+      return element.getClientRects().length > 0;
+    }
+  );
+  if (!focusable.length) {
+    event.preventDefault();
+    themePanel.focus();
+    return;
+  }
+  var first = focusable[0];
+  var last = focusable[focusable.length - 1];
+  if (!themePanel.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
 }
 
 function applyTheme(name, skipSave) {
-  document.body.dataset.theme = name;
-  if (!skipSave) echoSet(THEME_STORAGE_KEY, name);
-  // Toggle matrix rain
-  if (name === "matrix") {
-    startMatrixRain();
-  } else {
-    stopMatrixRain();
-  }
-  // Toggle ultra instinct particles
-  if (name === "ultra-instinct") {
-    startUltraInstinctParticles();
-  } else {
-    stopUltraInstinctParticles();
-  }
-  // Update active state on theme cards
-  if (themePanel) {
-    themePanel.querySelectorAll(".theme-card").forEach((card) => {
-      card.classList.toggle("is-active", card.dataset.theme === name);
-    });
-  }
+  if (!themeController) return false;
+  return themeController.setGlobalTheme(name, { persist: skipSave !== true });
+}
+
+function applyMotionPreference(level) {
+  return themeController ? themeController.setMotion(level) : false;
+}
+
+function applyModuleTheme(moduleId, themeId) {
+  return themeController ? themeController.setModuleTheme(moduleId, themeId) : false;
+}
+
+function reloadThemePreferences() {
+  return themeController ? themeController.reloadFromSettings() : null;
 }
 
 function initTheme() {
-  const saved = echoGet(THEME_STORAGE_KEY) || "frost";
-  // skipSave=true: don't overwrite saved settings before loadAllSettings() finishes
-  applyTheme(saved, true);
+  return reloadThemePreferences();
 }
 
-// Theme panel open/close
+if (themeRuntime && typeof themeRuntime.createThemeController === "function") {
+  themeController = themeRuntime.createThemeController({
+    document: document,
+    matchMedia: window.matchMedia ? window.matchMedia.bind(window) : null,
+    readSetting: echoGet,
+    writeSetting: echoSet,
+    syncEffects: syncThemeEffects,
+  });
+  window.EchoTheme = themeController;
+  buildThemeStudio();
+  syncThemeStudio(themeController.getState());
+  themeController.subscribe(syncThemeStudio);
+}
+
 if (openThemeButton && themePanel) {
-  openThemeButton.addEventListener("click", () => {
-    themePanel.classList.toggle("hidden");
+  openThemeButton.addEventListener("click", function () {
+    setThemeStudioOpen(true);
   });
 }
-
+if (themePortalButton && themePanel) {
+  themePortalButton.addEventListener("click", function () {
+    setThemeStudioOpen(true);
+  });
+}
 if (closeThemeButton && themePanel) {
-  closeThemeButton.addEventListener("click", () => {
-    themePanel.classList.add("hidden");
+  closeThemeButton.addEventListener("click", function () {
+    setThemeStudioOpen(false);
   });
 }
-
-// Theme card clicks
-if (themePanel) {
-  themePanel.querySelectorAll(".theme-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      const theme = card.dataset.theme;
-      if (theme) applyTheme(theme);
-    });
+if (themeStudioScrim) {
+  themeStudioScrim.addEventListener("click", function () {
+    setThemeStudioOpen(false);
   });
 }
+if (themeResetModules) {
+  themeResetModules.addEventListener("click", function () {
+    if (!themeController) return;
+    themeController.clearModuleOverrides();
+    announceThemeStatus("Every space is following the global look.", "success");
+  });
+}
+document.addEventListener("keydown", trapThemeStudioFocus);
+window.addEventListener("pagehide", stopActiveThemeEffect);
+window.addEventListener("pageshow", function () {
+  if (
+    themeController &&
+    (
+      typeof themeController.isDestroyed !== "function" ||
+      !themeController.isDestroyed()
+    )
+  ) {
+    syncThemeEffects(themeController.getState());
+  }
+});
 
-// Initialize theme on load
-initTheme();
+// ============================================================================
+// UI TRANSPARENCY
+// ============================================================================
 
-// ── UI Transparency slider ──
-function applyUiOpacity(val) {
-  const clamped = Math.max(20, Math.min(100, val));
+function applyUiOpacity(value, skipSave) {
+  var parsed = Number(value);
+  if (!Number.isFinite(parsed)) parsed = 100;
+  var clamped = Math.max(20, Math.min(100, Math.round(parsed)));
   document.documentElement.style.setProperty("--ui-bg-alpha", clamped / 100);
-  echoSet(UI_OPACITY_KEY, clamped);
-  if (uiOpacityValue) uiOpacityValue.textContent = `${clamped}%`;
+  document.documentElement.style.setProperty(
+    "--theme-opacity-progress",
+    (((clamped - 20) / 80) * 100) + "%"
+  );
+  if (skipSave !== true) echoSet(UI_OPACITY_KEY, clamped);
+  if (uiOpacityValue) uiOpacityValue.textContent = clamped + "%";
   if (uiOpacitySlider && parseInt(uiOpacitySlider.value, 10) !== clamped) {
     uiOpacitySlider.value = clamped;
   }
+  return clamped;
 }
 
-// Init from saved value
-applyUiOpacity(parseInt(echoGet(UI_OPACITY_KEY) || "100", 10));
+applyUiOpacity(parseInt(echoGet(UI_OPACITY_KEY) || "100", 10), true);
 
 if (uiOpacitySlider) {
-  uiOpacitySlider.addEventListener("input", (e) => {
-    applyUiOpacity(parseInt(e.target.value, 10));
+  uiOpacitySlider.addEventListener("input", function (event) {
+    applyUiOpacity(parseInt(event.target.value, 10));
   });
 }

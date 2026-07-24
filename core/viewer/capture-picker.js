@@ -42,7 +42,10 @@ function showCapturePicker() {
 function _buildPickerModal() {
     // Remove existing picker if any
     var existing = document.getElementById('capture-picker-overlay');
-    if (existing) existing.remove();
+    if (existing) {
+        _releaseCapturePickerThemeBinding(existing);
+        existing.remove();
+    }
 
     var overlay = document.createElement('div');
     overlay.id = 'capture-picker-overlay';
@@ -54,7 +57,7 @@ function _buildPickerModal() {
                 '<button class="capture-picker-close" id="cp-close">&times;</button>' +
             '</div>' +
             '<div class="capture-picker-body" id="cp-body">' +
-                '<div style="text-align:center;padding:40px;color:rgba(255,255,255,0.5)">Loading sources...</div>' +
+                '<div class="capture-source-loading">Loading sources...</div>' +
             '</div>' +
             '<div class="capture-picker-footer">' +
                 '<button class="capture-picker-btn secondary" id="cp-cancel">Cancel</button>' +
@@ -63,6 +66,9 @@ function _buildPickerModal() {
         '</div>';
 
     document.body.appendChild(overlay);
+    if (window.EchoTheme && typeof window.EchoTheme.bindModule === 'function') {
+        overlay._echoThemeUnbind = window.EchoTheme.bindModule('capture', overlay);
+    }
 
     // Animate in
     requestAnimationFrame(function() {
@@ -121,7 +127,17 @@ function _closePicker() {
     var overlay = document.getElementById('capture-picker-overlay');
     if (overlay) {
         overlay.classList.remove('visible');
-        setTimeout(function() { overlay.remove(); }, 200);
+        setTimeout(function() {
+            overlay.remove();
+            _releaseCapturePickerThemeBinding(overlay);
+        }, 200);
+    }
+}
+
+function _releaseCapturePickerThemeBinding(overlay) {
+    if (overlay && typeof overlay._echoThemeUnbind === 'function') {
+        overlay._echoThemeUnbind();
+        overlay._echoThemeUnbind = null;
     }
 }
 

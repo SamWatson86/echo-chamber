@@ -27,7 +27,8 @@ var _settingsLoaded = false;
 var _settingsSaveTimer = null;
 
 var _SETTINGS_KEYS = [
-  "echo-core-theme", "echo-core-ui-opacity",
+  "echo-core-theme", "echo-core-theme-overrides", "echo-core-theme-motion",
+  "echo-core-ui-opacity",
   "echo-core-soundboard-volume", "echo-core-soundboard-clip-volume",
   "echo-soundboard-favorites", "echo-soundboard-order",
   "echo-noise-cancel", "echo-nc-level",
@@ -129,14 +130,20 @@ function getParticipantVolume(identity) {
 
 function _reapplySettingsAfterLoad() {
   // Theme
-  var savedTheme = echoGet(THEME_STORAGE_KEY);
-  if (savedTheme && savedTheme !== document.body.dataset.theme) {
-    debugLog("[settings] reapplying theme: " + savedTheme);
-    applyTheme(savedTheme, true);
+  if (typeof reloadThemePreferences === "function") {
+    reloadThemePreferences();
+  } else if (typeof applyTheme === "function") {
+    var savedTheme = echoGet(THEME_STORAGE_KEY);
+    if (savedTheme && savedTheme !== document.body.dataset.theme) {
+      debugLog("[settings] reapplying theme: " + savedTheme);
+      applyTheme(savedTheme, true);
+    }
   }
   // UI opacity
   var savedOpacity = echoGet(UI_OPACITY_KEY);
-  if (savedOpacity) applyUiOpacity(parseInt(savedOpacity, 10));
+  if (savedOpacity && typeof applyUiOpacity === "function") {
+    applyUiOpacity(parseInt(savedOpacity, 10), true);
+  }
   // Name + password in lobby
   var savedName = echoGet(REMEMBER_NAME_KEY);
   if (savedName && nameInput) nameInput.value = savedName;

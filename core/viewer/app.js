@@ -514,6 +514,7 @@ document.addEventListener("click", function(event) {
 });
 
 document.addEventListener("keydown", function(event) {
+  if (event.defaultPrevented) return;
   if (settingsModalActive && settingsPanel && !settingsPanel.classList.contains("hidden")) {
     if (event.key === "Escape") {
       event.preventDefault();

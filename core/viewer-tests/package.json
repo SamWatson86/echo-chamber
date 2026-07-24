@@ -8,6 +8,7 @@
   },
   "scripts": {
     "browser:install": "playwright install chromium",
+    "preview:themes": "node ./scripts/serve-theme-preview.mjs",
     "test": "playwright test",
     "test:all": "playwright test",
     "test:headed": "playwright test --headed"

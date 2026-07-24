@@ -6,10 +6,43 @@
     <title>Echo Chamber</title>
     <script src="layout-policy.js?v=0.6.11.1777930912"></script>
     <script src="ui-shell.js?v=0.6.11.1777930912"></script>
+    <script src="theme-runtime.js?v=0.6.11.1777930912"></script>
+    <script>
+      (function () {
+        try {
+          var runtime = window.EchoThemeRuntime;
+          if (!runtime) return;
+          var savedTheme = localStorage.getItem("echo-core-theme");
+          var savedMotion = localStorage.getItem("echo-core-theme-motion");
+          var theme = runtime.normalizeThemeId(savedTheme, "frost");
+          var requestedMotion = runtime.normalizeMotionLevel(savedMotion, "full");
+          var reducedMotion = window.matchMedia &&
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          document.documentElement.dataset.echoTheme = theme;
+          document.documentElement.dataset.themeMotionRequested = requestedMotion;
+          document.documentElement.dataset.themeMotionEffective =
+            runtime.resolveEffectiveMotion(requestedMotion, reducedMotion);
+        } catch (_error) {
+          var fallbackMotion = "full";
+          try {
+            if (
+              window.matchMedia &&
+              window.matchMedia("(prefers-reduced-motion: reduce)").matches
+            ) {
+              fallbackMotion = "still";
+            }
+          } catch (_motionError) {}
+          document.documentElement.dataset.echoTheme = "frost";
+          document.documentElement.dataset.themeMotionRequested = "full";
+          document.documentElement.dataset.themeMotionEffective = fallbackMotion;
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="style.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="jam.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="capture-picker.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="clubhouse-shell.css?v=0.6.11.1777930912" />
+    <link rel="stylesheet" href="themes.css?v=0.6.11.1777930912" />
   </head>
   <body>
     <main id="ui-root" class="app">
@@ -33,6 +66,9 @@
           <div class="portal-orb portal-orb-2"></div>
           <div class="portal-orb portal-orb-3"></div>
         </div>
+        <button id="open-theme-portal" class="portal-theme-button" type="button" aria-controls="theme-panel" aria-haspopup="dialog" aria-expanded="false">
+          Personalize
+        </button>
 
         <!-- Hero section -->
         <div class="portal-hero">
@@ -177,7 +213,7 @@
               <div class="sidebar-title-row">
                 <h2>Active Users</h2>
                 <div class="sidebar-actions">
-                  <button id="refresh-videos" type="button" class="hidden" style="background: #10b981; color: white;">Enable Videos</button>
+                  <button id="refresh-videos" type="button" class="hidden">Enable Videos</button>
                   <button id="open-chat" type="button" disabled>Chat<span id="chat-badge" class="chat-badge hidden"></span></button>
                   <button id="toggle-room-audio" type="button" disabled>Mute All</button>
                   <button id="toggle-pg13" type="button" disabled>PG-13</button>
@@ -185,7 +221,7 @@
                 <div class="sidebar-actions">
                   <button id="open-soundboard" type="button" disabled>Soundboard</button>
                   <button id="open-camera-lobby" type="button" disabled>Camera Lobby</button>
-                  <button id="open-theme" type="button">Theme</button>
+                  <button id="open-theme" type="button" aria-controls="theme-panel" aria-haspopup="dialog" aria-expanded="false">Theme</button>
                   <button id="open-jam" type="button" disabled>Jam</button>
                 </div>
               </div>
@@ -337,48 +373,88 @@
         </div>
         <div id="camera-lobby-grid" class="camera-lobby-grid"></div>
       </div>
-      <div id="theme-panel" class="theme-panel hidden" role="dialog" aria-label="Theme">
-        <div class="theme-header">
-          <h3>Theme</h3>
-          <button id="close-theme" type="button">Close</button>
-        </div>
-        <div class="theme-grid">
-          <button class="theme-card" data-theme="frost">
-            <div class="theme-preview frost-preview"></div>
-            <span class="theme-name">Frost</span>
-          </button>
-          <button class="theme-card" data-theme="cyberpunk">
-            <div class="theme-preview cyberpunk-preview"></div>
-            <span class="theme-name">Cyberpunk</span>
-          </button>
-          <button class="theme-card" data-theme="aurora">
-            <div class="theme-preview aurora-preview"></div>
-            <span class="theme-name">Aurora</span>
-          </button>
-          <button class="theme-card" data-theme="ember">
-            <div class="theme-preview ember-preview"></div>
-            <span class="theme-name">Ember</span>
-          </button>
-          <button class="theme-card" data-theme="matrix">
-            <div class="theme-preview matrix-preview"></div>
-            <span class="theme-name">Matrix</span>
-          </button>
-          <button class="theme-card" data-theme="midnight">
-            <div class="theme-preview midnight-preview"></div>
-            <span class="theme-name">Midnight</span>
-          </button>
-          <button class="theme-card" data-theme="ultra-instinct">
-            <div class="theme-preview ultra-instinct-preview"></div>
-            <span class="theme-name">Ultra Instinct</span>
-          </button>
-        </div>
-        <div class="theme-opacity">
-          <div class="theme-opacity-label">UI Transparency</div>
-          <div class="theme-opacity-row">
-            <input id="ui-opacity-slider" type="range" min="20" max="100" value="100" />
-            <span id="ui-opacity-value" class="theme-opacity-value">100%</span>
+      <div id="theme-studio-scrim" class="theme-studio-scrim hidden" aria-hidden="true"></div>
+      <div id="theme-panel" class="theme-panel theme-studio hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="theme-studio-title" tabindex="-1">
+        <div class="theme-studio-hero">
+          <div>
+            <div class="theme-studio-kicker">Your Echo</div>
+            <h3 id="theme-studio-title">Theme Studio</h3>
+            <p>Build a look that feels like yours. Start coherent, then mix individual spaces if you want to get weird.</p>
           </div>
+          <button id="close-theme" class="theme-studio-close" type="button">Close</button>
         </div>
+        <div class="theme-studio-scroll">
+          <section class="theme-section" aria-labelledby="theme-global-heading">
+            <div class="theme-section-header">
+              <div>
+                <div class="theme-section-eyebrow">Global look</div>
+                <h4 id="theme-global-heading">Choose your world</h4>
+              </div>
+              <p>Applies across the entire app unless a module override is enabled below.</p>
+            </div>
+            <div id="theme-grid" class="theme-collections">
+              <section class="theme-collection" aria-labelledby="theme-core-looks-heading">
+                <div class="theme-collection-header">
+                  <div>
+                    <span class="theme-collection-kicker">Core Looks</span>
+                    <h5 id="theme-core-looks-heading">Clean by design</h5>
+                  </div>
+                  <span>Polished palettes with minimal motion.</span>
+                </div>
+                <div id="theme-core-grid" class="theme-grid" data-theme-collection="core"></div>
+              </section>
+              <section class="theme-collection theme-collection-animated" aria-labelledby="theme-animated-worlds-heading">
+                <div class="theme-collection-header">
+                  <div>
+                    <span class="theme-collection-kicker">Animated Worlds</span>
+                    <h5 id="theme-animated-worlds-heading">Make Echo feel alive</h5>
+                  </div>
+                  <span>Lightweight procedural atmosphere. One world runs at a time.</span>
+                </div>
+                <div id="theme-animated-grid" class="theme-grid" data-theme-collection="animated"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="theme-section theme-motion-section" aria-labelledby="theme-motion-heading">
+            <div class="theme-section-header">
+              <div>
+                <div class="theme-section-eyebrow">Motion</div>
+                <h4 id="theme-motion-heading">Set the energy</h4>
+              </div>
+              <p>Still removes decorative motion. Ambient keeps it restrained. Full unlocks the complete effect package.</p>
+            </div>
+            <div id="theme-motion-options" class="theme-motion-options" role="group" aria-label="Theme motion"></div>
+          </section>
+
+          <details id="theme-module-customizer" class="theme-section theme-module-customizer">
+            <summary>
+              <span>
+                <span class="theme-section-eyebrow">Mix &amp; Match</span>
+                <strong>Theme individual spaces</strong>
+              </span>
+              <span class="theme-module-summary-note">Optional</span>
+            </summary>
+            <p class="theme-module-intro">Every space follows the global look until you give it its own theme.</p>
+            <div id="theme-module-grid" class="theme-module-grid"></div>
+            <button id="theme-reset-modules" class="theme-module-reset" type="button">Reset all spaces to global</button>
+          </details>
+
+          <section class="theme-section theme-opacity" aria-labelledby="theme-opacity-heading">
+            <div class="theme-section-header">
+              <div>
+                <div class="theme-section-eyebrow">Glass</div>
+                <h4 id="theme-opacity-heading">UI transparency</h4>
+              </div>
+              <p>Adjust the surface opacity without changing your selected colors.</p>
+            </div>
+            <div class="theme-opacity-row">
+              <input id="ui-opacity-slider" type="range" min="20" max="100" value="100" aria-label="UI transparency" />
+              <span id="ui-opacity-value" class="theme-opacity-value">100%</span>
+            </div>
+          </section>
+        </div>
+        <div id="theme-status" class="theme-status" role="status" aria-live="polite"></div>
       </div>
   <div id="bug-report-modal" class="bug-report-modal hidden" role="dialog" aria-label="Send Feedback">
     <div class="bug-report-content">
@@ -562,6 +638,7 @@
     <script src="room-status.js?v=0.6.11.1777930912"></script>
     <script src="auth.js?v=0.6.11.1777930912"></script>
     <script src="admin-panel.js?v=0.6.2.1775659895"></script>
+    <script src="theme-effects.js?v=0.6.11.1777930912"></script>
     <script src="theme.js?v=0.6.11.1777930912"></script>
     <script src="chat.js?v=0.6.11.1777930912"></script>
     <script src="soundboard.js?v=0.6.11.1777930912"></script>
