@@ -420,8 +420,8 @@ function applyJamContractToControls() {
   var endBtn = document.getElementById("jam-end-btn");
   var skipBtn = document.getElementById("jam-skip-btn");
   var searchInput = document.getElementById("jam-search-input");
-  var searchSection = document.getElementById("jam-search-section");
-  var queueSection = document.getElementById("jam-queue-section");
+  var importBtn = document.getElementById("jam-import-spotify");
+  var playlistAddBtn = document.getElementById("jam-playlist-add-all");
 
   if (connectBtn) connectBtn.disabled = !contract.compatible;
   if (startBtn) {
@@ -453,14 +453,12 @@ function applyJamContractToControls() {
       : contract.compatibilityMessage;
   }
   if (skipBtn) skipBtn.disabled = !contract.canControl || !contract.active;
-  if (searchInput) searchInput.disabled = !contract.canControl;
+  if (searchInput) searchInput.disabled = !contract.compatible || !contract.spotifyConnected;
+  if (importBtn) importBtn.disabled = _jamImportPending || !contract.compatible || !contract.spotifyConnected;
+  if (playlistAddBtn) playlistAddBtn.disabled = _jamPlaylistQueuePending || !contract.canControl;
   document.querySelectorAll(".jam-result-add").forEach(function(button) {
     button.disabled = !contract.canControl;
   });
-  if (!contract.canControl) {
-    if (searchSection) searchSection.style.display = "none";
-    if (queueSection) queueSection.style.display = "none";
-  }
 
   syncJamButtonsFromState();
 }
@@ -923,72 +921,1151 @@ async function skipTrack() {
 // Search
 // ──────────────────────────────────────────
 
+var JAM_CATALOG_PAGE_SIZE = 10;
+var JAM_LIBRARY_PAGE_SIZE = 20;
+var JAM_PLAYLIST_PAGE_SIZE = 20;
+var JAM_HISTORY_PAGE_SIZE = 20;
 var _searchTimer = null;
+var _jamActiveView = "search";
+var _jamSearchKind = "track";
+var _jamSearchQuery = "";
+var _jamSearchOffset = 0;
+var _jamSearchTotal = 0;
+var _jamSearchNextOffset = null;
+var _jamSearchItems = [];
+var _jamSearchController = null;
+var _jamSearchRequestSeq = 0;
+var _jamLibraryOffset = 0;
+var _jamLibraryTotal = 0;
+var _jamLibraryNextOffset = null;
+var _jamLibraryItems = [];
+var _jamLibraryLoaded = false;
+var _jamLibraryController = null;
+var _jamLibraryRequestSeq = 0;
+var _jamHistoryOffset = 0;
+var _jamHistoryTotal = 0;
+var _jamHistoryNextOffset = null;
+var _jamHistoryLoaded = false;
+var _jamHistoryController = null;
+var _jamHistoryRequestSeq = 0;
+var _jamPlaylist = null;
+var _jamPlaylistItems = [];
+var _jamPlaylistNextOffset = null;
+var _jamPlaylistTotal = 0;
+var _jamPlaylistController = null;
+var _jamPlaylistRequestSeq = 0;
+var _jamPlaylistLoading = false;
+var _jamPlaylistQueuePending = false;
+var _jamPlaylistReturnView = "search";
+var _jamPlaylistOpener = null;
+var _jamFavoritePending = Object.create(null);
+var _jamImportPending = false;
+
+function jamSafeString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function jamSafeInteger(value, fallback) {
+  var parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : (fallback || 0);
+}
+
+function jamSafeOptionalInteger(value) {
+  if (value === null || value === undefined || value === "") return null;
+  var parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+function jamSafeArtworkUrl(value) {
+  var candidate = jamSafeString(value);
+  if (!candidate) return "";
+  try {
+    var parsed = new URL(candidate, window.location.href);
+    return parsed.protocol === "https:" ? parsed.href : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function jamNormalizeContributor(value) {
+  if (typeof value === "string") {
+    var text = value.trim();
+    return text ? { actor_id: text, display_name: text } : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  var actorId = jamSafeString(value.actor_id || value.id || value.identity || value.display_name || value.name);
+  var displayName = jamSafeString(value.display_name || value.name || value.identity || value.actor_id || value.id);
+  if (!actorId && !displayName) return null;
+  return {
+    actor_id: actorId || displayName,
+    display_name: displayName || actorId,
+    added_at_ms: jamSafeInteger(value.added_at_ms, 0),
+    source: jamSafeString(value.source),
+    count: jamSafeInteger(value.count, 0)
+  };
+}
+
+function jamNormalizeContributors(value) {
+  var source = Array.isArray(value) ? value : [];
+  var seen = Object.create(null);
+  var result = [];
+  source.forEach(function(entry) {
+    var contributor = jamNormalizeContributor(entry);
+    if (!contributor) return;
+    var key = contributor.actor_id.toLowerCase();
+    if (seen[key]) return;
+    seen[key] = true;
+    result.push(contributor);
+  });
+  return result;
+}
+
+function jamSpotifyIdentity(raw, expectedKind) {
+  var input = raw && typeof raw === "object" ? raw : {};
+  var kind = jamSafeString(input.kind || expectedKind).toLowerCase();
+  if (kind !== "track" && kind !== "playlist") return null;
+  if (expectedKind && kind !== expectedKind) return null;
+
+  var id = jamSafeString(input.spotify_id || input.id || input.spotify_track_id || input.spotify_playlist_id);
+  var candidates = [input.spotify_uri, input.uri];
+  for (var i = 0; !id && i < candidates.length; i++) {
+    var uri = jamSafeString(candidates[i]);
+    var uriMatch = /^spotify:(track|playlist):([A-Za-z0-9]{22})$/.exec(uri);
+    if (uriMatch && uriMatch[1] === kind) id = uriMatch[2];
+  }
+  if (!id) {
+    var url = jamSafeString(input.spotify_url || input.url || input.external_url);
+    try {
+      var parsed = new URL(url);
+      var parts = parsed.pathname.split("/").filter(Boolean);
+      if (parsed.protocol === "https:" && parsed.hostname === "open.spotify.com" &&
+          parts.length === 2 && parts[0] === kind) {
+        id = parts[1];
+      }
+    } catch (_) {
+      id = "";
+    }
+  }
+  if (!/^[A-Za-z0-9]{22}$/.test(id)) return null;
+  return {
+    kind: kind,
+    spotify_id: id,
+    uri: "spotify:" + kind + ":" + id,
+    url: "https://open.spotify.com/" + kind + "/" + id
+  };
+}
+
+function normalizeSpotifyCatalogItem(raw, expectedKind) {
+  if (!raw || typeof raw !== "object") return null;
+  var identity = jamSpotifyIdentity(raw, expectedKind);
+  if (!identity) return null;
+  var attributions = jamNormalizeContributors(raw.attributions || raw.favorited_by || raw.contributors);
+  var contributorCount = jamSafeInteger(
+    raw.favorite_contributor_count !== undefined ? raw.favorite_contributor_count : raw.contributor_count,
+    attributions.length
+  );
+  if (contributorCount < attributions.length) contributorCount = attributions.length;
+  var artwork = raw.artwork_url || raw.album_art_url;
+  if (!artwork && Array.isArray(raw.images) && raw.images[0]) artwork = raw.images[0].url;
+  var owner = raw.owner;
+  if (owner && typeof owner === "object") owner = owner.display_name || owner.name || owner.id;
+  var item = {
+    kind: identity.kind,
+    spotify_id: identity.spotify_id,
+    uri: identity.uri,
+    url: identity.url,
+    spotify_uri: identity.uri,
+    name: jamSafeString(raw.name) || (identity.kind === "playlist" ? "Untitled playlist" : "Unknown track"),
+    artist: jamSafeString(raw.artist || raw.artist_name),
+    owner: jamSafeString(owner),
+    description: jamSafeString(raw.description),
+    artwork_url: jamSafeArtworkUrl(artwork),
+    album_art_url: jamSafeArtworkUrl(artwork),
+    duration_ms: jamSafeInteger(raw.duration_ms, 0),
+    item_count: jamSafeOptionalInteger(raw.item_count !== undefined ? raw.item_count : (raw.track_count !== undefined ? raw.track_count : raw.total_tracks)),
+    snapshot_id: jamSafeString(raw.snapshot_id),
+    attributions: attributions,
+    contributor_count: contributorCount,
+    favorite_contributor_count: contributorCount,
+    favorited_by_me: raw.favorited_by_me === true
+  };
+  return item;
+}
+
+function jamNormalizeCatalogItems(items, expectedKind) {
+  var result = [];
+  (Array.isArray(items) ? items : []).forEach(function(raw) {
+    var item = normalizeSpotifyCatalogItem(raw, expectedKind);
+    if (item) result.push(item);
+  });
+  return result;
+}
+
+function jamItemKey(item) {
+  return item.kind + ":" + item.spotify_id;
+}
+
+function jamDuration(durationMs) {
+  var seconds = Math.floor(jamSafeInteger(durationMs, 0) / 1000);
+  return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+}
+
+function jamSetViewStatus(id, message, tone) {
+  var element = document.getElementById(id);
+  if (!element) return;
+  element.textContent = message || "";
+  element.className = "jam-view-status" + (tone ? " " + tone : "");
+}
+
+async function jamApiErrorMessage(response, action) {
+  var payload = {};
+  try { payload = await response.clone().json(); } catch (_) { payload = {}; }
+  var serverMessage = jamSafeString(payload.message || (payload.error && payload.error.message)).slice(0, 240);
+  if (response.status === 401) return "Your Echo session expired. Sign in again.";
+  if (response.status === 403) {
+    if (action === "import Spotify favorites") return "Spotify access needs refreshing. Use Refresh Spotify Access, then import again.";
+    if (payload.error === "playlist_items_forbidden" && serverMessage) return serverMessage;
+    return serverMessage || "You don't have permission to " + action + ".";
+  }
+  if (response.status === 429) {
+    var retryAfter = jamSafeString(
+      (response.headers && response.headers.get("Retry-After")) || payload.retry_after || payload.retry_after_seconds
+    );
+    return (serverMessage ? serverMessage + " " : "Spotify is rate limiting requests. ") + "Try again" + (retryAfter ? " in " + retryAfter + " seconds" : " shortly") + ".";
+  }
+  if (serverMessage) return serverMessage;
+  return "Could not " + action + " (status " + response.status + ").";
+}
+
+function jamSetBusy(containerId, busy) {
+  var element = document.getElementById(containerId);
+  if (element) element.setAttribute("aria-busy", busy ? "true" : "false");
+}
+
+function jamSetPager(prefix, offset, limit, total, nextOffset, noun, busy) {
+  var previous = document.getElementById(prefix + "-prev");
+  var next = document.getElementById(prefix + "-next");
+  var summary = document.getElementById(prefix + "-page");
+  var page = total ? Math.floor(offset / limit) + 1 : 0;
+  var pages = total ? Math.max(1, Math.ceil(total / limit)) : 0;
+  if (previous) previous.disabled = !!busy || offset <= 0;
+  if (next) next.disabled = !!busy || nextOffset === null || nextOffset === undefined;
+  if (summary) summary.textContent = total + " " + noun + (total === 1 ? "" : "s") + (total ? " \u00b7 " + page + " of " + pages : "");
+}
+
+function jamCreateArtwork(item, className) {
+  if (!item.artwork_url) {
+    var placeholder = document.createElement("span");
+    placeholder.className = (className || "jam-result-art") + " jam-art-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    return placeholder;
+  }
+  var image = document.createElement("img");
+  image.className = className || "jam-result-art";
+  image.src = item.artwork_url;
+  image.alt = "";
+  image.loading = "lazy";
+  image.decoding = "async";
+  return image;
+}
+
+function jamCreateSpotifyLink(item, label, className) {
+  var link = document.createElement("a");
+  link.className = className || "jam-spotify-link";
+  link.href = item.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = label;
+  link.title = "Open in Spotify";
+  link.onclick = function(event) { openSpotifyItem(item, event); };
+  return link;
+}
+
+async function openSpotifyItem(raw, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  var item = normalizeSpotifyCatalogItem(raw, raw && raw.kind);
+  if (!item) {
+    showJamError("That Spotify link is invalid.");
+    return false;
+  }
+  var nativeAvailable = typeof tauriInvoke === "function" &&
+    typeof hasTauriIPC === "function" && hasTauriIPC();
+  if (nativeAvailable) {
+    try {
+      await tauriInvoke("open_spotify_uri", { uri: item.uri, url: item.url });
+      return true;
+    } catch (_) {
+      try {
+        await tauriInvoke("open_external_url", { url: item.url });
+        return true;
+      } catch (fallbackError) {
+        debugLog("[jam] native Spotify open failed: " + fallbackError);
+      }
+    }
+  }
+  var opened = window.open(item.url, "_blank", "noopener,noreferrer");
+  if (opened) opened.opener = null;
+  return !!opened;
+}
+
+function jamTabKeydown(event, selector, activate) {
+  if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) === -1) return;
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(selector));
+  var index = tabs.indexOf(event.currentTarget);
+  if (index < 0 || !tabs.length) return;
+  event.preventDefault();
+  if (event.key === "Home") index = 0;
+  else if (event.key === "End") index = tabs.length - 1;
+  else index = (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[index].focus();
+  activate(tabs[index]);
+}
+
+function setJamView(view, focusTab) {
+  if (["library", "search", "queue", "history"].indexOf(view) === -1) return;
+  _jamActiveView = view;
+  var detail = document.getElementById("jam-playlist-detail");
+  if (detail) detail.hidden = true;
+  document.querySelectorAll(".jam-browser-tab").forEach(function(tab) {
+    var active = tab.getAttribute("data-jam-view") === view;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focusTab) tab.focus();
+  });
+  ["library", "search", "queue", "history"].forEach(function(name) {
+    var panel = document.getElementById("jam-" + name + "-section");
+    if (panel) panel.hidden = name !== view;
+  });
+  if (view === "library") loadJamLibrary(0);
+  if (view === "history") loadJamHistory(0);
+}
+
+function setJamSearchKind(kind, focusTab) {
+  if (kind !== "track" && kind !== "playlist") return;
+  clearTimeout(_searchTimer);
+  _searchTimer = null;
+  _jamSearchKind = kind;
+  document.querySelectorAll(".jam-search-kind-tab").forEach(function(tab) {
+    var active = tab.getAttribute("data-jam-search-kind") === kind;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focusTab) tab.focus();
+  });
+  var input = document.getElementById("jam-search-input");
+  if (input) input.placeholder = kind === "track" ? "Search for a song..." : "Search for a playlist...";
+  if (_jamSearchController) _jamSearchController.abort();
+  _jamSearchRequestSeq += 1;
+  _jamSearchOffset = 0;
+  _jamSearchTotal = 0;
+  _jamSearchNextOffset = null;
+  renderSearchResults([]);
+  if (input && input.value.trim().length >= 2) searchSpotify(input.value, 0);
+}
 
 function onSearchInput(e) {
   clearTimeout(_searchTimer);
-  var val = e.target.value;
-  _searchTimer = setTimeout(function() { searchSpotify(val); }, 300);
+  if (_jamSearchController) _jamSearchController.abort();
+  _jamSearchRequestSeq += 1;
+  var value = e.target.value;
+  if (value.trim().length < 2) {
+    _jamSearchQuery = value.trim();
+    _jamSearchOffset = 0;
+    _jamSearchTotal = 0;
+    _jamSearchNextOffset = null;
+    renderSearchResults([]);
+    jamSetViewStatus("jam-search-status", value.trim() ? "Type at least 2 characters." : "");
+    return;
+  }
+  jamSetViewStatus("jam-search-status", "Waiting for you to finish typing...");
+  _searchTimer = setTimeout(function() { searchSpotify(value, 0); }, 300);
 }
 
-async function searchSpotify(query) {
-  if (!query || query.length < 2) {
+async function searchSpotify(query, offset) {
+  var normalizedQuery = jamSafeString(query);
+  if (normalizedQuery.length < 2) {
     renderSearchResults([]);
     return;
   }
-  if (!jamActionAllowed("control")) {
-    renderSearchResults([]);
-    return;
-  }
+  if (_jamSearchController) _jamSearchController.abort();
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  _jamSearchController = controller;
+  var requestId = ++_jamSearchRequestSeq;
+  var requestedOffset = jamSafeInteger(offset, 0);
+  _jamSearchQuery = normalizedQuery;
+  jamSetBusy("jam-results", true);
+  jamSetViewStatus("jam-search-status", "Searching Spotify...");
+  jamSetPager("jam-search", requestedOffset, JAM_CATALOG_PAGE_SIZE, _jamSearchTotal, null, "result", true);
   try {
-    var resp = await fetch(apiUrl("/api/jam/search"), {
+    var options = {
       method: "POST",
-      headers: { "Authorization": "Bearer " + adminToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ query: query })
-    });
+      headers: jamActorHeaders(),
+      body: JSON.stringify({
+        kind: _jamSearchKind,
+        query: normalizedQuery,
+        offset: requestedOffset,
+        limit: JAM_CATALOG_PAGE_SIZE
+      })
+    };
+    if (controller) options.signal = controller.signal;
+    var resp = await fetch(apiUrl("/api/jam/catalog/search"), options);
+    if (requestId !== _jamSearchRequestSeq) return;
     if (!resp.ok) {
-      debugLog("[jam] search failed: " + resp.status);
+      _jamSearchItems = [];
+      _jamSearchOffset = requestedOffset;
+      _jamSearchTotal = 0;
+      _jamSearchNextOffset = null;
+      renderSearchResults([]);
+      jamSetViewStatus("jam-search-status", await jamApiErrorMessage(resp, "search Spotify"), "error");
       return;
     }
     var data = await resp.json();
-    renderSearchResults(Array.isArray(data) ? data : (data.tracks || []));
-  } catch (e) {
-    debugLog("[jam] search error: " + e);
+    if (requestId !== _jamSearchRequestSeq) return;
+    var rawItems = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : (data.tracks || data.playlists || []));
+    _jamSearchItems = jamNormalizeCatalogItems(rawItems, _jamSearchKind);
+    _jamSearchOffset = jamSafeInteger(data.offset, requestedOffset);
+    _jamSearchTotal = jamSafeInteger(data.total, _jamSearchItems.length);
+    var suppliedNext = data && data.next_offset;
+    _jamSearchNextOffset = suppliedNext === null || suppliedNext === undefined
+      ? (_jamSearchOffset + _jamSearchItems.length < _jamSearchTotal ? _jamSearchOffset + JAM_CATALOG_PAGE_SIZE : null)
+      : jamSafeInteger(suppliedNext, 0);
+    renderSearchResults(_jamSearchItems);
+    jamSetViewStatus(
+      "jam-search-status",
+      _jamSearchItems.length ? "Spotify " + (_jamSearchKind === "track" ? "songs" : "playlists") + " found." : "No Spotify " + (_jamSearchKind === "track" ? "songs" : "playlists") + " matched that search."
+    );
+  } catch (error) {
+    if (requestId !== _jamSearchRequestSeq || (error && error.name === "AbortError")) return;
+    _jamSearchItems = [];
+    _jamSearchOffset = requestedOffset;
+    _jamSearchTotal = 0;
+    _jamSearchNextOffset = null;
+    renderSearchResults([]);
+    jamSetViewStatus("jam-search-status", "Spotify search is unavailable right now.", "error");
+    debugLog("[jam] catalog search error: " + error);
+  } finally {
+    if (requestId === _jamSearchRequestSeq) {
+      jamSetBusy("jam-results", false);
+      jamSetPager("jam-search", _jamSearchOffset, JAM_CATALOG_PAGE_SIZE, _jamSearchTotal, _jamSearchNextOffset, "result", false);
+    }
   }
 }
 
-function renderSearchResults(tracks) {
+function jamFavoriteSummary(item) {
+  var names = item.attributions.map(function(entry) { return entry.display_name; }).filter(Boolean);
+  if (names.length) return "Saved to Echo by " + names.join(", ");
+  var count = jamSafeInteger(item.favorite_contributor_count, 0);
+  return count ? "Saved to Echo by " + count + (count === 1 ? " person" : " people") : "";
+}
+
+function jamCreateCatalogCard(item, context) {
+  var card = document.createElement("div");
+  card.className = "jam-result-item jam-catalog-item jam-catalog-" + item.kind;
+  card.setAttribute("role", "listitem");
+  card.setAttribute("data-jam-item-key", jamItemKey(item));
+  card.appendChild(jamCreateArtwork(item, "jam-result-art"));
+
+  var info = document.createElement("div");
+  info.className = "jam-result-info";
+  info.appendChild(jamCreateSpotifyLink(item, item.name, "jam-result-name jam-spotify-link"));
+  var meta = document.createElement("div");
+  meta.className = "jam-result-artist";
+  if (item.kind === "track") {
+    meta.textContent = (item.artist || "Unknown artist") + (item.duration_ms ? " \u00b7 " + jamDuration(item.duration_ms) : "");
+  } else {
+    var playlistMeta = [];
+    if (item.owner) playlistMeta.push("By " + item.owner);
+    if (item.item_count || item.item_count === 0) playlistMeta.push(item.item_count + (item.item_count === 1 ? " song" : " songs"));
+    meta.textContent = playlistMeta.join(" \u00b7 ");
+  }
+  info.appendChild(meta);
+  var favoriteSummary = jamFavoriteSummary(item);
+  if (favoriteSummary) {
+    var attribution = document.createElement("div");
+    attribution.className = "jam-favorite-summary";
+    attribution.setAttribute("data-jam-favorite-key", jamItemKey(item));
+    attribution.textContent = "\u2605 " + favoriteSummary;
+    info.appendChild(attribution);
+  }
+  if (item.kind === "playlist" && item.description && context === "detail-summary") {
+    var description = document.createElement("div");
+    description.className = "jam-playlist-description";
+    description.textContent = item.description;
+    info.appendChild(description);
+  }
+  card.appendChild(info);
+
+  var actions = document.createElement("div");
+  actions.className = "jam-card-actions";
+  var favorite = document.createElement("button");
+  favorite.type = "button";
+  favorite.className = "jam-favorite-btn";
+  favorite.setAttribute("data-jam-favorite-key", jamItemKey(item));
+  favorite.setAttribute("aria-pressed", item.favorited_by_me ? "true" : "false");
+  favorite.setAttribute("aria-label", (item.favorited_by_me ? "Remove from Echo Favorites: " : "Add to Echo Favorites: ") + item.name);
+  favorite.textContent = item.favorited_by_me ? "\u2605" : "\u2606";
+  favorite.title = item.favorited_by_me ? "Remove from Echo Favorites" : "Add to Echo Favorites";
+  favorite.disabled = !!_jamFavoritePending[jamItemKey(item)];
+  favorite.onclick = function() { toggleJamFavorite(item); };
+  actions.appendChild(favorite);
+
+  if (item.kind === "track" && context === "search") {
+    var add = document.createElement("button");
+    add.type = "button";
+    add.className = "jam-result-add";
+    add.textContent = "+";
+    add.title = "Add to queue";
+    add.setAttribute("aria-label", "Add " + item.name + " by " + (item.artist || "unknown artist") + " to queue");
+    add.disabled = !_jamContract || !_jamContract.canControl;
+    add.onclick = function() { addToQueue(item); };
+    actions.appendChild(add);
+  } else if (item.kind === "playlist" && context !== "detail-summary") {
+    var inspect = document.createElement("button");
+    inspect.type = "button";
+    inspect.className = "jam-secondary-btn jam-inspect-btn";
+    inspect.textContent = "Open";
+    inspect.setAttribute("aria-label", "View " + item.name + " playlist songs");
+    inspect.onclick = function(event) { openJamPlaylistDetail(item, event.currentTarget); };
+    actions.appendChild(inspect);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function renderSearchResults(items) {
   var container = document.getElementById("jam-results");
   if (!container) return;
   container.innerHTML = "";
-  tracks.forEach(function(t) {
-    var item = document.createElement("div");
-    item.className = "jam-result-item";
-    // Format duration
-    var mins = Math.floor(t.duration_ms / 60000);
-    var secs = Math.floor((t.duration_ms % 60000) / 1000);
-    item.innerHTML =
-      '<img class="jam-result-art" src="' + escapeHtml(t.album_art_url || "") + '" alt="">' +
-      '<div class="jam-result-info">' +
-        '<div class="jam-result-name">' + escapeHtml(t.name) + '</div>' +
-        '<div class="jam-result-artist">' + escapeHtml(t.artist) + ' \u00b7 ' + mins + ':' + String(secs).padStart(2, '0') + '</div>' +
-      '</div>' +
-      '<button class="jam-result-add" title="Add to queue">+</button>';
-    var addBtn = item.querySelector(".jam-result-add");
-    var resultName = item.querySelector(".jam-result-name");
-    var resultArtist = item.querySelector(".jam-result-artist");
-    if (resultName) resultName.title = t.name || "";
-    if (resultArtist) resultArtist.title = t.artist || "";
-    addBtn.setAttribute("aria-label", "Add " + (t.name || "track") + " by " + (t.artist || "unknown artist") + " to queue");
-    addBtn.onclick = function() { addToQueue(t); };
-    addBtn.disabled = !_jamContract || !_jamContract.canControl;
-    container.appendChild(item);
+  _jamSearchItems = jamNormalizeCatalogItems(items, _jamSearchKind);
+  _jamSearchItems.forEach(function(item) {
+    container.appendChild(jamCreateCatalogCard(item, "search"));
   });
+  jamSetPager("jam-search", _jamSearchOffset, JAM_CATALOG_PAGE_SIZE, _jamSearchTotal, _jamSearchNextOffset, "result", false);
+}
+
+function jamUpdateContributorOptions(contributors, items) {
+  var select = document.getElementById("jam-library-contributor");
+  if (!select) return;
+  var selected = select.value;
+  var all = jamNormalizeContributors(contributors);
+  if (!all.length) {
+    var combined = [];
+    (items || []).forEach(function(item) { combined = combined.concat(item.attributions || []); });
+    all = jamNormalizeContributors(combined);
+  }
+  select.innerHTML = "";
+  var everyone = document.createElement("option");
+  everyone.value = "";
+  everyone.textContent = "Everyone";
+  select.appendChild(everyone);
+  all.sort(function(a, b) { return a.display_name.localeCompare(b.display_name); }).forEach(function(contributor) {
+    var option = document.createElement("option");
+    option.value = contributor.actor_id;
+    option.textContent = contributor.display_name + (contributor.count ? " (" + contributor.count + ")" : "");
+    select.appendChild(option);
+  });
+  if (Array.prototype.some.call(select.options, function(option) { return option.value === selected; })) select.value = selected;
+}
+
+async function loadJamLibrary(offset) {
+  if (_jamLibraryController) _jamLibraryController.abort();
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  _jamLibraryController = controller;
+  var requestId = ++_jamLibraryRequestSeq;
+  var requestedOffset = jamSafeInteger(offset, 0);
+  var kind = document.getElementById("jam-library-kind");
+  var contributor = document.getElementById("jam-library-contributor");
+  var sort = document.getElementById("jam-library-sort");
+  var direction = document.getElementById("jam-library-direction");
+  var query = "?kind=" + encodeURIComponent(kind ? kind.value : "all") +
+    (contributor && contributor.value ? "&actor_id=" + encodeURIComponent(contributor.value) : "") +
+    "&sort=" + encodeURIComponent(sort ? sort.value : "added_at") +
+    "&direction=" + encodeURIComponent(direction ? direction.value : "desc") +
+    "&offset=" + requestedOffset + "&limit=" + JAM_LIBRARY_PAGE_SIZE;
+  jamSetBusy("jam-library-list", true);
+  jamSetViewStatus("jam-library-status", "Loading Echo Favorites...");
+  jamSetPager("jam-library", requestedOffset, JAM_LIBRARY_PAGE_SIZE, _jamLibraryTotal, null, "favorite", true);
+  try {
+    var options = { headers: jamActorHeaders() };
+    if (controller) options.signal = controller.signal;
+    var response = await fetch(apiUrl("/api/jam/favorites" + query), options);
+    if (requestId !== _jamLibraryRequestSeq) return;
+    if (!response.ok) {
+      jamSetViewStatus("jam-library-status", await jamApiErrorMessage(response, "load favorites"), "error");
+      return;
+    }
+    var data = await response.json();
+    if (requestId !== _jamLibraryRequestSeq) return;
+    var unique = Object.create(null);
+    _jamLibraryItems = jamNormalizeCatalogItems(data.items || []).filter(function(item) {
+      var key = jamItemKey(item);
+      if (unique[key]) return false;
+      unique[key] = true;
+      return true;
+    });
+    _jamLibraryOffset = jamSafeInteger(data.offset, requestedOffset);
+    _jamLibraryTotal = jamSafeInteger(data.total, _jamLibraryItems.length);
+    var suppliedNext = data.next_offset;
+    _jamLibraryNextOffset = suppliedNext === null || suppliedNext === undefined
+      ? (_jamLibraryOffset + _jamLibraryItems.length < _jamLibraryTotal ? _jamLibraryOffset + JAM_LIBRARY_PAGE_SIZE : null)
+      : jamSafeInteger(suppliedNext, 0);
+    _jamLibraryLoaded = true;
+    jamUpdateContributorOptions(data.contributors || (data.counts && data.counts.contributors), _jamLibraryItems);
+    renderJamLibrary();
+    jamSetViewStatus("jam-library-status", _jamLibraryItems.length ? "Echo Favorites loaded." : "No Echo Favorites match these filters.");
+  } catch (error) {
+    if (requestId !== _jamLibraryRequestSeq || (error && error.name === "AbortError")) return;
+    jamSetViewStatus("jam-library-status", "Echo Favorites are unavailable right now.", "error");
+    debugLog("[jam] favorites load error: " + error);
+  } finally {
+    if (requestId === _jamLibraryRequestSeq) {
+      jamSetBusy("jam-library-list", false);
+      jamSetPager("jam-library", _jamLibraryOffset, JAM_LIBRARY_PAGE_SIZE, _jamLibraryTotal, _jamLibraryNextOffset, "favorite", false);
+    }
+  }
+}
+
+function renderJamLibrary() {
+  var container = document.getElementById("jam-library-list");
+  if (!container) return;
+  container.innerHTML = "";
+  _jamLibraryItems.forEach(function(item) { container.appendChild(jamCreateCatalogCard(item, "library")); });
+}
+
+function jamApplyFavoriteState(item, favorited, normalizedResponse) {
+  var responseItem = normalizedResponse || item;
+  var previousCount = jamSafeInteger(item.favorite_contributor_count, 0);
+  item.favorited_by_me = favorited;
+  item.attributions = normalizedResponse ? normalizedResponse.attributions : (favorited ? item.attributions : []);
+  item.favorite_contributor_count = normalizedResponse
+    ? normalizedResponse.favorite_contributor_count
+    : Math.max(0, previousCount + (favorited ? 1 : -1));
+  item.contributor_count = item.favorite_contributor_count;
+  [_jamSearchItems, _jamLibraryItems, _jamPlaylistItems].forEach(function(collection) {
+    collection.forEach(function(candidate) {
+      if (jamItemKey(candidate) !== jamItemKey(item)) return;
+      candidate.favorited_by_me = item.favorited_by_me;
+      candidate.attributions = item.attributions;
+      candidate.favorite_contributor_count = item.favorite_contributor_count;
+      candidate.contributor_count = item.contributor_count;
+    });
+  });
+  if (_jamPlaylist && jamItemKey(_jamPlaylist) === jamItemKey(item)) {
+    _jamPlaylist.favorited_by_me = item.favorited_by_me;
+    _jamPlaylist.attributions = item.attributions;
+    _jamPlaylist.favorite_contributor_count = item.favorite_contributor_count;
+  }
+  document.querySelectorAll("[data-jam-favorite-key]").forEach(function(element) {
+    if (element.getAttribute("data-jam-favorite-key") !== jamItemKey(item)) return;
+    if (element.tagName === "BUTTON") {
+      element.setAttribute("aria-pressed", favorited ? "true" : "false");
+      element.setAttribute("aria-label", (favorited ? "Remove from Echo Favorites: " : "Add to Echo Favorites: ") + item.name);
+      element.textContent = favorited ? "\u2605" : "\u2606";
+      element.title = favorited ? "Remove from Echo Favorites" : "Add to Echo Favorites";
+    } else {
+      var summary = jamFavoriteSummary(item);
+      element.textContent = summary ? "\u2605 " + summary : "";
+    }
+  });
+  var detailFavorite = document.getElementById("jam-playlist-favorite");
+  if (_jamPlaylist && jamItemKey(_jamPlaylist) === jamItemKey(item) && detailFavorite) {
+    detailFavorite.setAttribute("aria-pressed", favorited ? "true" : "false");
+    detailFavorite.textContent = favorited ? "Remove from Echo Favorites" : "Save to Echo";
+  }
+}
+
+async function toggleJamFavorite(rawItem) {
+  var item = normalizeSpotifyCatalogItem(rawItem, rawItem && rawItem.kind);
+  if (!item) return;
+  var key = jamItemKey(item);
+  if (_jamFavoritePending[key]) return;
+  _jamFavoritePending[key] = true;
+  document.querySelectorAll("[data-jam-favorite-key]").forEach(function(element) {
+    if (element.getAttribute("data-jam-favorite-key") === key && element.tagName === "BUTTON") element.disabled = true;
+  });
+  var favorited = !rawItem.favorited_by_me;
+  try {
+    var response = await fetch(apiUrl("/api/jam/favorites/" + encodeURIComponent(item.kind) + "/" + encodeURIComponent(item.spotify_id)), {
+      method: favorited ? "PUT" : "DELETE",
+      headers: jamActorHeaders()
+    });
+    if (!response.ok) {
+      showJamError(await jamApiErrorMessage(response, favorited ? "add to Echo Favorites" : "remove from Echo Favorites"));
+      return;
+    }
+    var data = await response.json().catch(function() { return {}; });
+    var normalized = data.item ? normalizeSpotifyCatalogItem(data.item, item.kind) : null;
+    jamApplyFavoriteState(rawItem, favorited, normalized);
+    _jamLibraryLoaded = false;
+    if (_jamActiveView === "library") loadJamLibrary(_jamLibraryOffset);
+  } catch (error) {
+    showJamError("Could not update Echo Favorites.");
+    debugLog("[jam] favorite update error: " + error);
+  } finally {
+    delete _jamFavoritePending[key];
+    document.querySelectorAll("[data-jam-favorite-key]").forEach(function(element) {
+      if (element.getAttribute("data-jam-favorite-key") === key && element.tagName === "BUTTON") element.disabled = false;
+    });
+  }
+}
+
+async function importSpotifyFavorites() {
+  if (_jamImportPending) return;
+  _jamImportPending = true;
+  applyJamContractToControls();
+  jamSetViewStatus("jam-library-status", "Importing your Spotify saved songs and playlists...");
+  try {
+    var response = await fetch(apiUrl("/api/jam/favorites/import-spotify"), {
+      method: "POST",
+      headers: jamActorHeaders(),
+      body: JSON.stringify({})
+    });
+    if (!response.ok) {
+      jamSetViewStatus("jam-library-status", await jamApiErrorMessage(response, "import Spotify favorites"), "error");
+      return;
+    }
+    var data = await response.json();
+    var tracks = jamSafeInteger(data.tracks_seen !== undefined ? data.tracks_seen : (data.tracks || data.track_count || data.tracks_imported), 0);
+    var playlists = jamSafeInteger(data.playlists_seen !== undefined ? data.playlists_seen : (data.playlists || data.playlist_count || data.playlists_imported), 0);
+    var skipped = jamSafeInteger(data.skipped, 0);
+    var created = jamSafeOptionalInteger(data.items_created);
+    var attributionsAdded = jamSafeOptionalInteger(data.attributions_added);
+    var importMessage = "Scanned " + tracks + " songs and " + playlists + " playlists";
+    if (created !== null) importMessage += "; created " + created + " new favorites";
+    if (attributionsAdded !== null) importMessage += "; added " + attributionsAdded + " attributions";
+    if (skipped) importMessage += "; skipped " + skipped;
+    var truncated = data.partial === true || data.truncated === true;
+    if (truncated) importMessage += "; import stopped at Spotify's safety limit";
+    _jamLibraryLoaded = false;
+    await loadJamLibrary(0);
+    jamSetViewStatus("jam-library-status", importMessage + ".", truncated ? "warning" : "success");
+  } catch (error) {
+    jamSetViewStatus("jam-library-status", "Spotify import failed. Try again.", "error");
+    debugLog("[jam] Spotify import error: " + error);
+  } finally {
+    _jamImportPending = false;
+    applyJamContractToControls();
+  }
 }
 
 // ──────────────────────────────────────────
 // Queue
 // ──────────────────────────────────────────
+
+function renderJamPlaylistSummary() {
+  var container = document.getElementById("jam-playlist-summary");
+  var favorite = document.getElementById("jam-playlist-favorite");
+  var addAll = document.getElementById("jam-playlist-add-all");
+  if (!container || !_jamPlaylist) return;
+  container.innerHTML = "";
+  var header = document.createElement("div");
+  header.className = "jam-playlist-header";
+  header.appendChild(jamCreateArtwork(_jamPlaylist, "jam-playlist-art"));
+  var info = document.createElement("div");
+  info.className = "jam-playlist-header-info";
+  var title = document.createElement("h3");
+  title.id = "jam-playlist-detail-title";
+  title.appendChild(jamCreateSpotifyLink(_jamPlaylist, _jamPlaylist.name, "jam-spotify-link"));
+  info.appendChild(title);
+  var meta = document.createElement("div");
+  meta.className = "jam-result-artist";
+  var parts = [];
+  if (_jamPlaylist.owner) parts.push("By " + _jamPlaylist.owner);
+  var knownCount = _jamPlaylistTotal !== null && _jamPlaylistTotal !== undefined
+    ? _jamPlaylistTotal
+    : _jamPlaylist.item_count;
+  if (knownCount !== null && knownCount !== undefined) parts.push(knownCount + (knownCount === 1 ? " song" : " songs"));
+  meta.textContent = parts.join(" \u00b7 ");
+  info.appendChild(meta);
+  if (_jamPlaylist.description) {
+    var description = document.createElement("p");
+    description.className = "jam-playlist-description";
+    description.textContent = _jamPlaylist.description;
+    info.appendChild(description);
+  }
+  header.appendChild(info);
+  container.appendChild(header);
+  if (favorite) {
+    favorite.setAttribute("aria-pressed", _jamPlaylist.favorited_by_me ? "true" : "false");
+    favorite.textContent = _jamPlaylist.favorited_by_me ? "Remove from Echo Favorites" : "Save to Echo";
+    favorite.disabled = !!_jamFavoritePending[jamItemKey(_jamPlaylist)];
+  }
+  if (addAll) {
+    var countKnown = knownCount !== null && knownCount !== undefined;
+    var overLimit = countKnown && knownCount > 50;
+    addAll.disabled = _jamPlaylistQueuePending || _jamPlaylistLoading || overLimit || !_jamContract || !_jamContract.canControl;
+    addAll.title = overLimit ? "Echo can add at most 50 playlist songs at once" : "Add this playlist as one queue batch";
+  }
+}
+
+function openJamPlaylistDetail(rawPlaylist, opener) {
+  var playlist = normalizeSpotifyCatalogItem(rawPlaylist, "playlist");
+  if (!playlist) {
+    showJamError("That playlist is unavailable.");
+    return;
+  }
+  if (_jamPlaylistController) _jamPlaylistController.abort();
+  _jamPlaylistRequestSeq += 1;
+  _jamPlaylistLoading = false;
+  _jamPlaylist = playlist;
+  _jamPlaylistItems = [];
+  _jamPlaylistTotal = playlist.item_count;
+  _jamPlaylistNextOffset = 0;
+  _jamPlaylistReturnView = _jamActiveView;
+  _jamPlaylistOpener = opener || document.activeElement;
+  ["library", "search", "queue", "history"].forEach(function(name) {
+    var panel = document.getElementById("jam-" + name + "-section");
+    if (panel) panel.hidden = true;
+  });
+  var detail = document.getElementById("jam-playlist-detail");
+  if (detail) detail.hidden = false;
+  renderJamPlaylistSummary();
+  renderJamPlaylistItems();
+  jamSetViewStatus("jam-playlist-status", "Loading playlist songs...");
+  fetchJamPlaylistItems(0, false);
+  var back = document.getElementById("jam-playlist-back");
+  if (back) back.focus();
+}
+
+function closeJamPlaylistDetail() {
+  if (_jamPlaylistController) _jamPlaylistController.abort();
+  _jamPlaylistRequestSeq += 1;
+  _jamPlaylistLoading = false;
+  var opener = _jamPlaylistOpener;
+  setJamView(_jamPlaylistReturnView || "search", false);
+  _jamPlaylistOpener = null;
+  if (opener && document.contains(opener) && typeof opener.focus === "function") opener.focus();
+}
+
+function jamSkippedCount(value) {
+  return Array.isArray(value) ? value.length : jamSafeInteger(value, 0);
+}
+
+async function fetchJamPlaylistItems(offset, append) {
+  if (!_jamPlaylist || _jamPlaylistLoading) return;
+  if (_jamPlaylistController) _jamPlaylistController.abort();
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  _jamPlaylistController = controller;
+  var requestId = ++_jamPlaylistRequestSeq;
+  var requestedOffset = jamSafeInteger(offset, 0);
+  _jamPlaylistLoading = true;
+  renderJamPlaylistSummary();
+  jamSetBusy("jam-playlist-items", true);
+  var loadMore = document.getElementById("jam-playlist-load-more");
+  if (loadMore) loadMore.disabled = true;
+  try {
+    var options = { headers: jamActorHeaders() };
+    if (controller) options.signal = controller.signal;
+    var response = await fetch(apiUrl("/api/jam/playlists/" + encodeURIComponent(_jamPlaylist.spotify_id) + "/items?offset=" + requestedOffset + "&limit=" + JAM_PLAYLIST_PAGE_SIZE), options);
+    if (requestId !== _jamPlaylistRequestSeq) return;
+    if (!response.ok) {
+      jamSetViewStatus("jam-playlist-status", await jamApiErrorMessage(response, "load playlist songs"), "error");
+      return;
+    }
+    var data = await response.json();
+    if (requestId !== _jamPlaylistRequestSeq) return;
+    if (data.playlist) {
+      var returnedPlaylist = normalizeSpotifyCatalogItem(data.playlist, "playlist");
+      if (returnedPlaylist) _jamPlaylist = returnedPlaylist;
+    }
+    var pageItems = jamNormalizeCatalogItems(data.items || [], "track");
+    _jamPlaylistItems = append ? _jamPlaylistItems.concat(pageItems) : pageItems;
+    _jamPlaylistTotal = jamSafeInteger(data.total, _jamPlaylist.item_count || _jamPlaylistItems.length);
+    _jamPlaylist.item_count = _jamPlaylistTotal;
+    var suppliedNext = data.next_offset;
+    _jamPlaylistNextOffset = suppliedNext === null || suppliedNext === undefined
+      ? (requestedOffset + pageItems.length < _jamPlaylistTotal ? requestedOffset + pageItems.length : null)
+      : jamSafeInteger(suppliedNext, 0);
+    renderJamPlaylistSummary();
+    renderJamPlaylistItems();
+    var skipped = jamSkippedCount(data.skipped);
+    jamSetViewStatus(
+      "jam-playlist-status",
+      "Loaded " + _jamPlaylistItems.length + " of " + _jamPlaylistTotal + " songs" + (skipped ? "; " + skipped + " unavailable skipped" : "") + ".",
+      skipped ? "warning" : ""
+    );
+  } catch (error) {
+    if (requestId !== _jamPlaylistRequestSeq || (error && error.name === "AbortError")) return;
+    jamSetViewStatus("jam-playlist-status", "Playlist songs are unavailable right now.", "error");
+    debugLog("[jam] playlist items error: " + error);
+  } finally {
+    if (requestId === _jamPlaylistRequestSeq) {
+      _jamPlaylistLoading = false;
+      renderJamPlaylistSummary();
+      jamSetBusy("jam-playlist-items", false);
+      if (loadMore) {
+        loadMore.disabled = false;
+        loadMore.hidden = _jamPlaylistNextOffset === null;
+      }
+    }
+  }
+}
+
+function renderJamPlaylistItems() {
+  var container = document.getElementById("jam-playlist-items");
+  if (!container) return;
+  container.innerHTML = "";
+  _jamPlaylistItems.forEach(function(item) { container.appendChild(jamCreateCatalogCard(item, "playlist-detail")); });
+  var loadMore = document.getElementById("jam-playlist-load-more");
+  if (loadMore) loadMore.hidden = _jamPlaylistNextOffset === null;
+}
+
+function jamRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+  return "jam-playlist-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+}
+
+async function addPlaylistToQueue() {
+  if (!_jamPlaylist || _jamPlaylistQueuePending || !jamActionAllowed("control")) return;
+  if (_jamPlaylistLoading) {
+    jamSetViewStatus("jam-playlist-status", "Wait for the playlist details to finish loading.");
+    return;
+  }
+  var trackCount = _jamPlaylistTotal !== null && _jamPlaylistTotal !== undefined
+    ? _jamPlaylistTotal
+    : (_jamPlaylist.item_count || 0);
+  if (trackCount > 50) {
+    jamSetViewStatus("jam-playlist-status", "This playlist has " + trackCount + " songs. Echo can add at most 50 at once.", "error");
+    return;
+  }
+  var confirmed = false;
+  if (trackCount > 25) {
+    confirmed = window.confirm("Add all " + trackCount + " songs from " + _jamPlaylist.name + " to the queue?");
+    if (!confirmed) {
+      jamSetViewStatus("jam-playlist-status", "Playlist was not added.");
+      return;
+    }
+  }
+  _jamPlaylistQueuePending = true;
+  renderJamPlaylistSummary();
+  jamSetViewStatus("jam-playlist-status", "Adding playlist to the queue...");
+  try {
+    var requestId = jamRequestId();
+    var response = await fetch(apiUrl("/api/jam/queue/playlist"), {
+      method: "POST",
+      headers: jamActorHeaders(),
+      body: JSON.stringify({
+        generation: _jamState && _jamState.generation,
+        playlist_id: _jamPlaylist.spotify_id,
+        request_id: requestId,
+        confirmed: confirmed
+      })
+    });
+    if (!response.ok) {
+      var rejection = {};
+      try { rejection = await response.clone().json(); } catch (_) { rejection = {}; }
+      if ((rejection.confirmation_required === true || rejection.error === "confirmation_required") && !confirmed) {
+        var serverCount = jamSafeOptionalInteger(rejection.playable_count !== undefined
+          ? rejection.playable_count
+          : (rejection.track_count || rejection.item_count));
+        if (serverCount !== null && serverCount > 50) {
+          jamSetViewStatus("jam-playlist-status", "This playlist has " + serverCount + " songs. Echo can add at most 50 at once.", "error");
+          return;
+        }
+        confirmed = window.confirm("Add all " + (serverCount !== null ? serverCount + " " : "available ") + "songs from " + _jamPlaylist.name + " to the queue?");
+        if (!confirmed) {
+          jamSetViewStatus("jam-playlist-status", "Playlist was not added.");
+          return;
+        }
+        response = await fetch(apiUrl("/api/jam/queue/playlist"), {
+          method: "POST",
+          headers: jamActorHeaders(),
+          body: JSON.stringify({
+            generation: _jamState && _jamState.generation,
+            playlist_id: _jamPlaylist.spotify_id,
+            request_id: requestId,
+            confirmed: true
+          })
+        });
+      }
+    }
+    if (!response.ok) {
+      jamSetViewStatus("jam-playlist-status", await jamApiErrorMessage(response, "add playlist to the queue"), "error");
+      return;
+    }
+    var data = await response.json();
+    var queued = jamSafeInteger(data.queued_count, 0);
+    var skipped = jamSkippedCount(data.skipped);
+    var partial = data.partial === true || data.complete === false || data.ok === false || skipped > 0;
+    var failureObject = data.failure && typeof data.failure === "object" ? data.failure : null;
+    var failure = jamSafeString(failureObject ? failureObject.message : data.failure);
+    var failureRetryAfter = failureObject && failureObject.retry_after !== null && failureObject.retry_after !== undefined
+      ? String(failureObject.retry_after).trim()
+      : "";
+    var retryMessage = failureRetryAfter ? " Try again in " + failureRetryAfter + " seconds." : "";
+    jamSetViewStatus(
+      "jam-playlist-status",
+      "Added " + queued + (queued === 1 ? " song" : " songs") + " to the queue" + (skipped ? "; skipped " + skipped : "") + "." + (partial ? " The playlist was partially added." : "") + (failure ? " " + failure : "") + retryMessage,
+      partial ? "warning" : "success"
+    );
+    showJamToast("Added " + queued + (queued === 1 ? " song" : " songs") + " from " + _jamPlaylist.name);
+    fetchJamState();
+  } catch (error) {
+    jamSetViewStatus("jam-playlist-status", "Could not add that playlist to the queue.", "error");
+    debugLog("[jam] playlist queue error: " + error);
+  } finally {
+    _jamPlaylistQueuePending = false;
+    renderJamPlaylistSummary();
+  }
+}
+
+function jamDateValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  var date;
+  if (typeof value === "number" || /^\d+$/.test(String(value))) {
+    var numeric = Number(value);
+    if (numeric < 100000000000) numeric *= 1000;
+    date = new Date(numeric);
+  } else {
+    date = new Date(value);
+  }
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function jamHistoryEntry(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  var trackSource = raw.track && typeof raw.track === "object" ? Object.assign({}, raw.track) : {
+    kind: "track",
+    spotify_id: raw.spotify_id || raw.track_id || raw.track_spotify_id,
+    spotify_uri: raw.spotify_uri || raw.track_uri,
+    spotify_url: raw.spotify_url || raw.track_url,
+    name: raw.name || raw.track_name,
+    artist: raw.artist || raw.track_artist,
+    artwork_url: raw.artwork_url || raw.album_art_url,
+    duration_ms: raw.duration_ms
+  };
+  trackSource.kind = "track";
+  var track = normalizeSpotifyCatalogItem(trackSource, "track");
+  var playlistSource = raw.playlist && typeof raw.playlist === "object" ? Object.assign({}, raw.playlist) : null;
+  if (!playlistSource && (raw.playlist_id || raw.playlist_spotify_id)) {
+    playlistSource = {
+      kind: "playlist",
+      spotify_id: raw.playlist_id || raw.playlist_spotify_id,
+      spotify_uri: raw.playlist_uri,
+      spotify_url: raw.playlist_url,
+      name: raw.playlist_name || "Playlist"
+    };
+  }
+  if (playlistSource) playlistSource.kind = "playlist";
+  var playlist = playlistSource ? normalizeSpotifyCatalogItem(playlistSource, "playlist") : null;
+  var contributor = jamNormalizeContributor(raw.added_by_name || raw.added_by || raw.added_by_actor_id);
+  return {
+    track: track,
+    track_name: track ? track.name : jamSafeString(raw.track_name || raw.name) || "Unknown track",
+    artist: track ? track.artist : jamSafeString(raw.artist || raw.track_artist),
+    playlist: playlist,
+    added_by: contributor ? contributor.display_name : "Unknown",
+    played_at: jamDateValue(raw.played_at_ms !== undefined ? raw.played_at_ms : raw.played_at),
+    added_at: jamDateValue(raw.added_at_ms !== undefined ? raw.added_at_ms : raw.added_at)
+  };
+}
+
+function jamAppendHistoryTime(parent, label, date) {
+  var row = document.createElement("div");
+  row.className = "jam-history-meta-row";
+  row.appendChild(document.createTextNode(label + " "));
+  if (date) {
+    var time = document.createElement("time");
+    time.dateTime = date.toISOString();
+    time.textContent = date.toLocaleString();
+    row.appendChild(time);
+  } else {
+    row.appendChild(document.createTextNode("Unknown"));
+  }
+  parent.appendChild(row);
+}
+
+function renderJamHistory(items) {
+  var list = document.getElementById("jam-history-list");
+  if (!list) return;
+  list.innerHTML = "";
+  (items || []).forEach(function(raw) {
+    var entry = jamHistoryEntry(raw);
+    if (!entry) return;
+    var row = document.createElement("li");
+    row.className = "jam-history-item";
+    row.appendChild(jamCreateArtwork(entry.track || { artwork_url: "" }, "jam-result-art"));
+    var content = document.createElement("div");
+    content.className = "jam-history-content";
+    if (entry.track) content.appendChild(jamCreateSpotifyLink(entry.track, entry.track_name, "jam-result-name jam-spotify-link"));
+    else {
+      var name = document.createElement("span");
+      name.className = "jam-result-name";
+      name.textContent = entry.track_name;
+      content.appendChild(name);
+    }
+    var artist = document.createElement("div");
+    artist.className = "jam-result-artist";
+    artist.textContent = entry.artist || "Unknown artist";
+    content.appendChild(artist);
+    jamAppendHistoryTime(content, "Played", entry.played_at);
+    jamAppendHistoryTime(content, "Added", entry.added_at);
+    var addedBy = document.createElement("div");
+    addedBy.className = "jam-history-meta-row";
+    addedBy.textContent = "Added by " + entry.added_by;
+    content.appendChild(addedBy);
+    if (entry.playlist) {
+      var provenance = document.createElement("div");
+      provenance.className = "jam-history-meta-row jam-history-playlist";
+      provenance.appendChild(document.createTextNode("From "));
+      provenance.appendChild(jamCreateSpotifyLink(entry.playlist, entry.playlist.name, "jam-spotify-link"));
+      content.appendChild(provenance);
+    }
+    row.appendChild(content);
+    list.appendChild(row);
+  });
+}
+
+async function loadJamHistory(offset) {
+  if (_jamHistoryController) _jamHistoryController.abort();
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  _jamHistoryController = controller;
+  var requestId = ++_jamHistoryRequestSeq;
+  var requestedOffset = jamSafeInteger(offset, 0);
+  var sort = document.getElementById("jam-history-sort");
+  var direction = document.getElementById("jam-history-direction");
+  var query = "?sort=" + encodeURIComponent(sort ? sort.value : "played_at") +
+    "&direction=" + encodeURIComponent(direction ? direction.value : "desc") +
+    "&offset=" + requestedOffset + "&limit=" + JAM_HISTORY_PAGE_SIZE;
+  jamSetBusy("jam-history-list", true);
+  jamSetViewStatus("jam-history-status", "Loading play history...");
+  jamSetPager("jam-history", requestedOffset, JAM_HISTORY_PAGE_SIZE, _jamHistoryTotal, null, "play", true);
+  try {
+    var options = { headers: jamActorHeaders() };
+    if (controller) options.signal = controller.signal;
+    var response = await fetch(apiUrl("/api/jam/history" + query), options);
+    if (requestId !== _jamHistoryRequestSeq) return;
+    if (!response.ok) {
+      jamSetViewStatus("jam-history-status", await jamApiErrorMessage(response, "load play history"), "error");
+      return;
+    }
+    var data = await response.json();
+    if (requestId !== _jamHistoryRequestSeq) return;
+    var items = Array.isArray(data) ? data : (data.items || []);
+    _jamHistoryOffset = jamSafeInteger(data.offset, requestedOffset);
+    _jamHistoryTotal = jamSafeInteger(data.total, items.length);
+    var suppliedNext = data.next_offset;
+    _jamHistoryNextOffset = suppliedNext === null || suppliedNext === undefined
+      ? (_jamHistoryOffset + items.length < _jamHistoryTotal ? _jamHistoryOffset + JAM_HISTORY_PAGE_SIZE : null)
+      : jamSafeInteger(suppliedNext, 0);
+    _jamHistoryLoaded = true;
+    renderJamHistory(items);
+    jamSetViewStatus("jam-history-status", items.length ? "Play history loaded." : "Nothing has played yet.");
+  } catch (error) {
+    if (requestId !== _jamHistoryRequestSeq || (error && error.name === "AbortError")) return;
+    jamSetViewStatus("jam-history-status", "Play history is unavailable right now.", "error");
+    debugLog("[jam] history load error: " + error);
+  } finally {
+    if (requestId === _jamHistoryRequestSeq) {
+      jamSetBusy("jam-history-list", false);
+      jamSetPager("jam-history", _jamHistoryOffset, JAM_HISTORY_PAGE_SIZE, _jamHistoryTotal, _jamHistoryNextOffset, "play", false);
+    }
+  }
+}
 
 async function addToQueue(track) {
   try {
@@ -1174,7 +2251,11 @@ function renderJamPanel() {
   // Connect button visibility
   var connectBtn = document.getElementById("jam-connect-spotify");
   if (connectBtn) {
-    connectBtn.style.display = _jamState.spotify_connected ? "none" : "";
+    connectBtn.style.display = "";
+    connectBtn.textContent = _jamState.spotify_connected ? "Refresh Spotify Access" : "Connect Spotify";
+    connectBtn.title = _jamState.spotify_connected
+      ? "Reauthorize Spotify to refresh playlist and library permissions"
+      : "Connect Spotify";
     connectBtn.disabled = !contract.compatible;
   }
 
@@ -1240,12 +2321,6 @@ function renderJamPanel() {
     if (leaveBtn) leaveBtn.style.display = (isListening && _jamState.active) ? "" : "none";
   }
 
-  // Search + queue sections visible only when spotify connected
-  var searchSection = document.getElementById("jam-search-section");
-  var queueSection = document.getElementById("jam-queue-section");
-  if (searchSection) searchSection.style.display = (_jamState.spotify_connected && contract.canControl) ? "" : "none";
-  if (queueSection) queueSection.style.display = (_jamState.spotify_connected && contract.canControl) ? "" : "none";
-
   // Jam actions visible only when jam is active
   var actionsSection = document.getElementById("jam-actions-section");
   if (actionsSection) actionsSection.style.display = (_jamState.active && contract.compatible) ? "" : "none";
@@ -1269,20 +2344,38 @@ function renderNowPlaying(np) {
     return;
   }
   var progress = np.duration_ms > 0 ? Math.min(100, (np.progress_ms / np.duration_ms) * 100) : 0;
-  container.innerHTML =
-    '<img class="jam-now-playing-art" src="' + escapeHtml(np.album_art_url || "") + '" alt="">' +
-    '<div class="jam-now-playing-info">' +
-      '<div class="jam-now-playing-name">' + escapeHtml(np.name) + '</div>' +
-      '<div class="jam-now-playing-artist">' + escapeHtml(np.artist) + '</div>' +
-    '</div>' +
-    '<div class="jam-progress"><div class="jam-progress-bar" style="width:' + progress.toFixed(1) + '%"></div></div>';
+  var track = normalizeSpotifyCatalogItem(Object.assign({}, np, { kind: "track" }), "track");
+  container.innerHTML = "";
+  container.appendChild(jamCreateArtwork({ artwork_url: jamSafeArtworkUrl(np.album_art_url || np.artwork_url) }, "jam-now-playing-art"));
+  var info = document.createElement("div");
+  info.className = "jam-now-playing-info";
+  var title = track
+    ? jamCreateSpotifyLink(track, jamSafeString(np.name), "jam-now-playing-name jam-spotify-link")
+    : document.createElement("div");
+  if (!track) {
+    title.className = "jam-now-playing-name";
+    title.textContent = jamSafeString(np.name);
+  }
+  info.appendChild(title);
+  var artist = document.createElement("div");
+  artist.className = "jam-now-playing-artist";
+  artist.textContent = jamSafeString(np.artist);
+  info.appendChild(artist);
+  container.appendChild(info);
+  var progressTrack = document.createElement("div");
+  progressTrack.className = "jam-progress";
+  var progressBar = document.createElement("div");
+  progressBar.className = "jam-progress-bar";
+  progressBar.style.width = progress.toFixed(1) + "%";
+  progressTrack.appendChild(progressBar);
+  container.appendChild(progressTrack);
   var nowPlayingName = container.querySelector(".jam-now-playing-name");
   var nowPlayingArtist = container.querySelector(".jam-now-playing-artist");
   if (nowPlayingName) nowPlayingName.title = np.name || "";
   if (nowPlayingArtist) nowPlayingArtist.title = np.artist || "";
 
   // Click now-playing card to join jam if not already listening
-  if (!_jamAudioWs && _jamState && _jamState.active) {
+  if (!_jamAudioWs && _jamState && _jamState.active && !track) {
     container.style.cursor = "pointer";
     container.title = "Join the Jam";
     container.setAttribute("role", "button");
@@ -1313,19 +2406,42 @@ function renderQueue(queue) {
     return;
   }
   container.innerHTML = "";
-  queue.forEach(function(t) {
+  queue.forEach(function(track) {
+    var normalizedTrack = normalizeSpotifyCatalogItem(Object.assign({}, track, { kind: "track" }), "track");
     var item = document.createElement("div");
     item.className = "jam-queue-item";
-    item.innerHTML =
-      '<img class="jam-result-art" src="' + escapeHtml(t.album_art_url || "") + '" alt="">' +
-      '<div class="jam-result-info">' +
-        '<div class="jam-result-name">' + escapeHtml(t.name) + '</div>' +
-        '<div class="jam-result-artist">' + escapeHtml(t.artist) + ' \u00b7 Added by ' + escapeHtml(t.added_by) + '</div>' +
-      '</div>';
-    var queueName = item.querySelector(".jam-result-name");
-    var queueArtist = item.querySelector(".jam-result-artist");
-    if (queueName) queueName.title = t.name || "";
-    if (queueArtist) queueArtist.title = (t.artist || "") + (t.added_by ? " · Added by " + t.added_by : "");
+    item.setAttribute("role", "listitem");
+    item.appendChild(jamCreateArtwork({ artwork_url: jamSafeArtworkUrl(track.album_art_url || track.artwork_url) }, "jam-result-art"));
+    var info = document.createElement("div");
+    info.className = "jam-result-info";
+    var trackName = jamSafeString(track.name) || "Unknown track";
+    var name = normalizedTrack
+      ? jamCreateSpotifyLink(normalizedTrack, trackName, "jam-result-name jam-spotify-link")
+      : document.createElement("div");
+    if (!normalizedTrack) {
+      name.className = "jam-result-name";
+      name.textContent = trackName;
+    }
+    info.appendChild(name);
+    var artist = document.createElement("div");
+    artist.className = "jam-result-artist";
+    var addedBy = jamSafeString(track.added_by_name || track.added_by || track.added_by_actor_id);
+    artist.textContent = (jamSafeString(track.artist) || "Unknown artist") + (addedBy ? " \u00b7 Added by " + addedBy : "");
+    info.appendChild(artist);
+    var playlistRaw = track.playlist && typeof track.playlist === "object"
+      ? Object.assign({}, track.playlist, { kind: "playlist" })
+      : null;
+    var playlist = playlistRaw ? normalizeSpotifyCatalogItem(playlistRaw, "playlist") : null;
+    if (playlist) {
+      var provenance = document.createElement("div");
+      provenance.className = "jam-queue-provenance";
+      provenance.appendChild(document.createTextNode("From "));
+      provenance.appendChild(jamCreateSpotifyLink(playlist, playlist.name, "jam-spotify-link"));
+      info.appendChild(provenance);
+    }
+    item.appendChild(info);
+    name.title = name.textContent;
+    artist.title = artist.textContent;
     container.appendChild(item);
   });
 }
@@ -1668,6 +2784,77 @@ function handleJamDataMessage(payload) {
 // Init
 // ──────────────────────────────────────────
 
+function bindJamCatalogControls() {
+  document.querySelectorAll(".jam-browser-tab").forEach(function(tab) {
+    tab.onclick = function() { setJamView(tab.getAttribute("data-jam-view"), false); };
+    tab.onkeydown = function(event) {
+      jamTabKeydown(event, ".jam-browser-tab", function(nextTab) {
+        setJamView(nextTab.getAttribute("data-jam-view"), false);
+      });
+    };
+  });
+  document.querySelectorAll(".jam-search-kind-tab").forEach(function(tab) {
+    tab.onclick = function() { setJamSearchKind(tab.getAttribute("data-jam-search-kind"), false); };
+    tab.onkeydown = function(event) {
+      jamTabKeydown(event, ".jam-search-kind-tab", function(nextTab) {
+        setJamSearchKind(nextTab.getAttribute("data-jam-search-kind"), false);
+      });
+    };
+  });
+
+  var searchInput = document.getElementById("jam-search-input");
+  if (searchInput) searchInput.oninput = onSearchInput;
+  var searchPrevious = document.getElementById("jam-search-prev");
+  if (searchPrevious) searchPrevious.onclick = function() {
+    searchSpotify(_jamSearchQuery, Math.max(0, _jamSearchOffset - JAM_CATALOG_PAGE_SIZE));
+  };
+  var searchNext = document.getElementById("jam-search-next");
+  if (searchNext) searchNext.onclick = function() {
+    if (_jamSearchNextOffset !== null) searchSpotify(_jamSearchQuery, _jamSearchNextOffset);
+  };
+
+  ["jam-library-kind", "jam-library-contributor", "jam-library-sort", "jam-library-direction"].forEach(function(id) {
+    var control = document.getElementById(id);
+    if (control) control.onchange = function() { loadJamLibrary(0); };
+  });
+  var libraryPrevious = document.getElementById("jam-library-prev");
+  if (libraryPrevious) libraryPrevious.onclick = function() {
+    loadJamLibrary(Math.max(0, _jamLibraryOffset - JAM_LIBRARY_PAGE_SIZE));
+  };
+  var libraryNext = document.getElementById("jam-library-next");
+  if (libraryNext) libraryNext.onclick = function() {
+    if (_jamLibraryNextOffset !== null) loadJamLibrary(_jamLibraryNextOffset);
+  };
+  var importButton = document.getElementById("jam-import-spotify");
+  if (importButton) importButton.onclick = importSpotifyFavorites;
+
+  var playlistBack = document.getElementById("jam-playlist-back");
+  if (playlistBack) playlistBack.onclick = closeJamPlaylistDetail;
+  var playlistFavorite = document.getElementById("jam-playlist-favorite");
+  if (playlistFavorite) playlistFavorite.onclick = function() {
+    if (_jamPlaylist) toggleJamFavorite(_jamPlaylist);
+  };
+  var playlistAddAll = document.getElementById("jam-playlist-add-all");
+  if (playlistAddAll) playlistAddAll.onclick = addPlaylistToQueue;
+  var playlistLoadMore = document.getElementById("jam-playlist-load-more");
+  if (playlistLoadMore) playlistLoadMore.onclick = function() {
+    if (_jamPlaylistNextOffset !== null) fetchJamPlaylistItems(_jamPlaylistNextOffset, true);
+  };
+
+  ["jam-history-sort", "jam-history-direction"].forEach(function(id) {
+    var control = document.getElementById(id);
+    if (control) control.onchange = function() { loadJamHistory(0); };
+  });
+  var historyPrevious = document.getElementById("jam-history-prev");
+  if (historyPrevious) historyPrevious.onclick = function() {
+    loadJamHistory(Math.max(0, _jamHistoryOffset - JAM_HISTORY_PAGE_SIZE));
+  };
+  var historyNext = document.getElementById("jam-history-next");
+  if (historyNext) historyNext.onclick = function() {
+    if (_jamHistoryNextOffset !== null) loadJamHistory(_jamHistoryNextOffset);
+  };
+}
+
 function initJam() {
   if (_jamInited) return;
   _jamInited = true;
@@ -1702,8 +2889,9 @@ function initJam() {
   var leaveBtn = document.getElementById("jam-leave-btn");
   if (leaveBtn) leaveBtn.onclick = leaveJam;
 
-  var searchInput = document.getElementById("jam-search-input");
-  if (searchInput) searchInput.oninput = onSearchInput;
+  bindJamCatalogControls();
+  setJamView(_jamActiveView, false);
+  setJamSearchKind(_jamSearchKind, false);
 
   var volumeInput = document.getElementById("jam-volume-slider");
   if (volumeInput) volumeInput.oninput = onJamVolumeChange;
@@ -1729,6 +2917,24 @@ function cleanupJam() {
     clearInterval(_spotifyPollTimer);
     _spotifyPollTimer = null;
   }
+  clearTimeout(_searchTimer);
+  _searchTimer = null;
+  [_jamSearchController, _jamLibraryController, _jamPlaylistController, _jamHistoryController].forEach(function(controller) {
+    if (controller) controller.abort();
+  });
+  _jamSearchController = null;
+  _jamLibraryController = null;
+  _jamPlaylistController = null;
+  _jamHistoryController = null;
+  _jamSearchRequestSeq += 1;
+  _jamLibraryRequestSeq += 1;
+  _jamPlaylistRequestSeq += 1;
+  _jamHistoryRequestSeq += 1;
+  _jamPlaylistLoading = false;
+  _jamPlaylistQueuePending = false;
+  _jamImportPending = false;
+  _jamLibraryLoaded = false;
+  _jamHistoryLoaded = false;
   stopBannerPolling();
   updateNowPlayingBanner(null);
   _jamState = null;
@@ -1757,37 +2963,45 @@ function updateNowPlayingBanner(state) {
     banner.removeAttribute("role");
     banner.removeAttribute("tabindex");
     banner.removeAttribute("aria-label");
+    banner.style.cursor = "";
     return;
   }
 
   var np = state.now_playing;
-  banner.innerHTML =
-    '<img class="jam-banner-art" src="' + escapeHtml(np.album_art_url || "") + '" alt="">' +
-    '<div class="jam-banner-info">' +
-      '<div class="jam-banner-title">' + escapeHtml(np.name) + '</div>' +
-      '<div class="jam-banner-artist">' + escapeHtml(np.artist) + '</div>' +
-    '</div>' +
-    '<span class="jam-banner-live">JAM</span>';
-  banner.classList.remove("hidden");
-  banner.setAttribute("role", "button");
-  banner.setAttribute("tabindex", "0");
-  banner.setAttribute("aria-label", "Open Jam — now playing " + np.name + " by " + np.artist);
-
-  // Click banner to open jam panel and auto-join
-  if (!banner._jamClickBound) {
-    banner.style.cursor = "pointer";
-    banner.addEventListener("click", function() {
-      openJamPanel(banner);
-      // Auto-join if not already listening
-      if (_jamState && _jamState.active && !_jamAudioWs) joinJam();
-    });
-    banner.addEventListener("keydown", function(event) {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      banner.click();
-    });
-    banner._jamClickBound = true;
+  var track = normalizeSpotifyCatalogItem(Object.assign({}, np, { kind: "track" }), "track");
+  banner.innerHTML = "";
+  banner.appendChild(jamCreateArtwork({ artwork_url: jamSafeArtworkUrl(np.album_art_url || np.artwork_url) }, "jam-banner-art"));
+  var info = document.createElement("div");
+  info.className = "jam-banner-info";
+  var title = track
+    ? jamCreateSpotifyLink(track, jamSafeString(np.name), "jam-banner-title jam-spotify-link")
+    : document.createElement("div");
+  if (!track) {
+    title.className = "jam-banner-title";
+    title.textContent = jamSafeString(np.name);
   }
+  info.appendChild(title);
+  var artist = document.createElement("div");
+  artist.className = "jam-banner-artist";
+  artist.textContent = jamSafeString(np.artist);
+  info.appendChild(artist);
+  banner.appendChild(info);
+  var live = document.createElement("button");
+  live.type = "button";
+  live.className = "jam-banner-live jam-banner-open";
+  live.textContent = "JAM";
+  live.setAttribute("aria-label", "Open Jam and listen");
+  live.onclick = function(event) {
+    event.stopPropagation();
+    openJamPanel(live);
+    if (_jamState && _jamState.active && !_jamAudioWs) joinJam();
+  };
+  banner.appendChild(live);
+  banner.classList.remove("hidden");
+  banner.setAttribute("role", "group");
+  banner.removeAttribute("tabindex");
+  banner.setAttribute("aria-label", "Now playing " + np.name + " by " + np.artist);
+  banner.style.cursor = "";
 }
 
 // Lightweight poll for banner — runs independently of the Jam panel

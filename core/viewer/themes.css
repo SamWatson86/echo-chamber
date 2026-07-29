@@ -1420,27 +1420,55 @@ body [data-module-theme] .chat-emoji:hover {
 }
 
 /* Jam */
-:root[data-echo-theme] body :is(.jam-now-playing, .jam-source-local-card),
-body[data-theme] :is(.jam-now-playing, .jam-source-local-card),
-body [data-module-theme] :is(.jam-now-playing, .jam-source-local-card) {
+:root[data-echo-theme] body :is(.jam-now-playing, .jam-source-local-card, .jam-playlist-header),
+body[data-theme] :is(.jam-now-playing, .jam-source-local-card, .jam-playlist-header),
+body [data-module-theme] :is(.jam-now-playing, .jam-source-local-card, .jam-playlist-header) {
   color: var(--ec-text);
   border-color: var(--ec-border);
   background: var(--ec-surface);
   box-shadow: inset 0 1px rgb(255 255 255 / 0.035);
 }
 
-:root[data-echo-theme] body :is(.jam-result-item, .jam-queue-item):hover,
-body[data-theme] :is(.jam-result-item, .jam-queue-item):hover,
-body [data-module-theme] :is(.jam-result-item, .jam-queue-item):hover {
+:root[data-echo-theme] body :is(.jam-result-item, .jam-queue-item, .jam-history-item):hover,
+body[data-theme] :is(.jam-result-item, .jam-queue-item, .jam-history-item):hover,
+body [data-module-theme] :is(.jam-result-item, .jam-queue-item, .jam-history-item):hover {
   background: var(--ec-surface-hover);
 }
 
-:root[data-echo-theme] body :is(.jam-start-btn, .jam-result-add),
-body[data-theme] :is(.jam-start-btn, .jam-result-add),
-body [data-module-theme] :is(.jam-start-btn, .jam-result-add) {
+:root[data-echo-theme] body :is(.jam-start-btn, .jam-result-add, .jam-primary-btn),
+body[data-theme] :is(.jam-start-btn, .jam-result-add, .jam-primary-btn),
+body [data-module-theme] :is(.jam-start-btn, .jam-result-add, .jam-primary-btn) {
   color: var(--ec-canvas);
   background: linear-gradient(135deg, var(--ec-accent-bright), var(--ec-accent));
   box-shadow: 0 8px 22px var(--ec-accent-soft);
+}
+
+:root[data-echo-theme] body :is(.jam-browser-tab, .jam-search-kind-tab, .jam-secondary-btn, .jam-favorite-btn, .jam-filter-field select, .jam-search-input),
+body[data-theme] :is(.jam-browser-tab, .jam-search-kind-tab, .jam-secondary-btn, .jam-favorite-btn, .jam-filter-field select, .jam-search-input),
+body [data-module-theme] :is(.jam-browser-tab, .jam-search-kind-tab, .jam-secondary-btn, .jam-favorite-btn, .jam-filter-field select, .jam-search-input) {
+  color: var(--ec-text);
+  border-color: var(--ec-border);
+  background: var(--ec-surface);
+}
+
+:root[data-echo-theme] body :is(.jam-browser-tab, .jam-search-kind-tab).active,
+body[data-theme] :is(.jam-browser-tab, .jam-search-kind-tab).active,
+body [data-module-theme] :is(.jam-browser-tab, .jam-search-kind-tab).active {
+  color: var(--ec-text);
+  border-color: var(--ec-accent);
+  background: var(--ec-accent-soft);
+}
+
+:root[data-echo-theme] body .jam-spotify-link:hover,
+body[data-theme] .jam-spotify-link:hover,
+body [data-module-theme] .jam-spotify-link:hover {
+  color: var(--ec-accent-bright);
+}
+
+:root[data-echo-theme] body :is(.jam-favorite-btn, .jam-favorite-summary),
+body[data-theme] :is(.jam-favorite-btn, .jam-favorite-summary),
+body [data-module-theme] :is(.jam-favorite-btn, .jam-favorite-summary) {
+  color: var(--ec-warning, #fbbf24);
 }
 
 :root[data-echo-theme] body :is(.jam-stop-btn, .jam-leave-btn),

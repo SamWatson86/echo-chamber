@@ -1,4 +1,4 @@
-use crate::config::{now_ts, Config};
+use crate::config::{now_ts, random_secret, Config};
 use crate::AppState;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
@@ -6,15 +6,22 @@ use axum::{
     extract::{Json, State},
     http::{HeaderMap, StatusCode},
 };
+use hmac::{Hmac, Mac};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::{
     collections::{HashMap, HashSet},
+    fs::{self, OpenOptions},
+    io::{self, Write},
     net::SocketAddr,
+    path::Path,
     time::{Duration, Instant},
 };
 use tracing::{info, warn};
+
+pub(crate) const MAX_JAM_ACTOR_DISPLAY_NAME_CHARS: usize = 128;
 
 // ── Structs ───────────────────────────────────────────────────────────────
 
@@ -66,6 +73,12 @@ pub struct LiveKitClaims {
         skip_serializing_if = "Option::is_none"
     )]
     pub echo_participant_auth_id: Option<String>,
+    #[serde(
+        default,
+        rename = "echoActorId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub echo_actor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub video: LiveKitVideoGrant,
@@ -87,6 +100,23 @@ pub(crate) struct AuthenticatedParticipant {
     pub(crate) name: String,
     pub(crate) room: String,
     pub(crate) participant_auth_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JamActor {
+    pub(crate) actor_id: String,
+    pub(crate) display_name: String,
+}
+
+pub(crate) fn bounded_jam_actor_display_name(name: Option<&str>, fallback: &str) -> String {
+    let candidate = name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| fallback.trim());
+    candidate
+        .chars()
+        .take(MAX_JAM_ACTOR_DISPLAY_NAME_CHARS)
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,6 +193,51 @@ fn participant_auth_keys_equal(left: &str, right: &str) -> bool {
         .zip(right.bytes())
         .fold(0_u8, |different, (a, b)| different | (a ^ b))
         == 0
+}
+
+pub(crate) fn derive_echo_actor_id(server_secret: &[u8], participant_auth_key: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(server_secret)
+        .expect("HMAC accepts arbitrary-length server secrets");
+    mac.update(b"echo-actor-v1\0");
+    mac.update(participant_auth_key.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let encoded = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("ea1_{encoded}")
+}
+
+pub(crate) fn load_or_create_jam_actor_secret(path: &Path) -> io::Result<Vec<u8>> {
+    fn read_secret(path: &Path) -> io::Result<Vec<u8>> {
+        let secret = fs::read(path)?;
+        if secret.len() != 64 || !secret.iter().all(u8::is_ascii_hexdigit) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Jam actor secret has an invalid format",
+            ));
+        }
+        Ok(secret)
+    }
+
+    match read_secret(path) {
+        Ok(secret) => return Ok(secret),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let secret = random_secret();
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(secret.as_bytes())?;
+            file.sync_all()?;
+            Ok(secret.into_bytes())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read_secret(path),
+        Err(error) => Err(error),
+    }
 }
 
 fn new_participant_auth_id() -> String {
@@ -368,6 +443,14 @@ pub async fn issue_token(
         payload.room, payload.identity
     );
     ensure_admin(&state, &headers)?;
+    if payload.name.as_deref().is_some_and(|name| {
+        name.chars()
+            .take(MAX_JAM_ACTOR_DISPLAY_NAME_CHARS + 1)
+            .count()
+            > MAX_JAM_ACTOR_DISPLAY_NAME_CHARS
+    }) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let now = now_ts();
     let exp = now + state.config.livekit_token_ttl_secs;
@@ -408,6 +491,13 @@ pub async fn issue_token(
         iat: now as usize,
         exp: exp as usize,
         echo_participant_auth_id: participant_auth_id,
+        echo_actor_id: payload.participant_auth_key.as_deref().and_then(|key| {
+            state
+                .jam_actor_secret
+                .as_ref()
+                .as_ref()
+                .map(|secret| derive_echo_actor_id(secret, key))
+        }),
         name: payload.name.clone(),
         video: livekit_video_grant(payload.room.clone(), companion_kind),
     };
@@ -598,6 +688,29 @@ pub(crate) fn ensure_jam_participant(
     ensure_current_participant_claims(state, claims, &identity)
 }
 
+pub(crate) fn jam_actor_from_claims(claims: &LiveKitClaims) -> Result<JamActor, StatusCode> {
+    let actor_id = claims
+        .echo_actor_id
+        .as_deref()
+        .filter(|actor_id| !actor_id.trim().is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok(JamActor {
+        actor_id: actor_id.to_string(),
+        display_name: bounded_jam_actor_display_name(claims.name.as_deref(), &claims.sub),
+    })
+}
+
+pub(crate) fn ensure_jam_actor(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<JamActor, StatusCode> {
+    if state.jam_actor_secret.as_ref().is_none() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let claims = ensure_jam_participant(state, headers, None)?;
+    jam_actor_from_claims(&claims)
+}
+
 pub(crate) fn ensure_jam_participant_token(
     state: &AppState,
     token: &str,
@@ -643,9 +756,71 @@ mod tests {
             exp: usize::MAX,
             iat: 1,
             echo_participant_auth_id: Some(auth_id.to_string()),
+            echo_actor_id: Some("ea1_test".to_string()),
             name: Some("Sam".to_string()),
             video: livekit_video_grant("main".to_string(), None),
         }
+    }
+
+    #[test]
+    fn stable_actor_id_is_opaque_and_scoped_to_the_server_secret() {
+        let first = derive_echo_actor_id(b"server-a", &"a".repeat(64));
+        let repeated = derive_echo_actor_id(b"server-a", &"a".repeat(64));
+        let other_install = derive_echo_actor_id(b"server-a", &"b".repeat(64));
+        let other_server = derive_echo_actor_id(b"server-b", &"a".repeat(64));
+
+        assert_eq!(first, repeated);
+        assert!(first.starts_with("ea1_"));
+        assert_eq!(first.len(), 68);
+        assert_ne!(first, other_install);
+        assert_ne!(first, other_server);
+        assert!(!first.contains(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn jam_actor_secret_is_persisted_across_restarts() {
+        let dir = std::env::temp_dir().join(format!("echo-actor-key-{}", random_secret()));
+        let path = dir.join("actor-key-v1");
+        let first = load_or_create_jam_actor_secret(&path).unwrap();
+        let repeated = load_or_create_jam_actor_secret(&path).unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(first.len(), 64);
+        assert!(first.iter().all(u8::is_ascii_hexdigit));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn jam_actor_requires_a_non_empty_signed_actor_claim() {
+        let mut claims = participant_claims("sam-7475", "epoch-a");
+        let actor = jam_actor_from_claims(&claims).unwrap();
+        assert_eq!(actor.actor_id, "ea1_test");
+        assert_eq!(actor.display_name, "Sam");
+
+        claims.echo_actor_id = None;
+        assert_eq!(
+            jam_actor_from_claims(&claims).unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        claims.echo_actor_id = Some(String::new());
+        assert_eq!(
+            jam_actor_from_claims(&claims).unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        claims.echo_actor_id = Some("   ".to_string());
+        assert_eq!(
+            jam_actor_from_claims(&claims).unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        claims.echo_actor_id = Some("ea1_test".to_string());
+        claims.name = Some("x".repeat(MAX_JAM_ACTOR_DISPLAY_NAME_CHARS + 1));
+        let actor = jam_actor_from_claims(&claims).unwrap();
+        assert_eq!(
+            actor.display_name.chars().count(),
+            MAX_JAM_ACTOR_DISPLAY_NAME_CHARS
+        );
     }
 
     #[test]

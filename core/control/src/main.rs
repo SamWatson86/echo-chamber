@@ -7,6 +7,8 @@ mod diagnostics_api;
 mod diagnostics_auth;
 pub mod file_serving;
 mod jam_bot;
+mod jam_history;
+mod jam_library;
 mod jam_session;
 mod jam_source;
 mod rooms;
@@ -20,6 +22,8 @@ use config::*;
 use diagnostics_api::*;
 use diagnostics_auth::*;
 use file_serving::*;
+use jam_history::*;
+use jam_library::*;
 use jam_session::*;
 use jam_source::*;
 use rooms::*;
@@ -29,7 +33,7 @@ use soundboard::*;
 use axum::http::{HeaderName, HeaderValue};
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
@@ -71,10 +75,18 @@ pub(crate) struct AppState {
     pub(crate) jam_bot: Arc<tokio::sync::Mutex<Option<jam_bot::JamBot>>>,
     pub(crate) jam_source: jam_source::JamSourceRegistry,
     pub(crate) jam_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) jam_queue_lifecycle: Arc<tokio::sync::Mutex<()>>,
     pub(crate) jam_state_refresh: Arc<tokio::sync::Mutex<()>>,
     pub(crate) spotify_client_id: String,
     pub(crate) spotify_pending: Arc<Mutex<Option<SpotifyPending>>>,
     pub(crate) spotify_token_file: PathBuf,
+    pub(crate) spotify_token_storage_enabled: bool,
+    pub(crate) jam_actor_secret: Arc<Option<Vec<u8>>>,
+    pub(crate) jam_favorites: Arc<jam_library::FavoriteStore>,
+    pub(crate) jam_history: Arc<jam_history::JamHistoryStore>,
+    pub(crate) spotify_request_limit: Arc<tokio::sync::Semaphore>,
+    pub(crate) spotify_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) spotify_rate_limit_until: Arc<Mutex<Option<Instant>>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) viewer_stamp: Arc<RwLock<String>>,
     pub(crate) login_attempts: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
@@ -365,7 +377,71 @@ async fn main() {
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .join("spotify-token.json");
-    let persisted_spotify_token = if spotify_token_file.exists() {
+    let jam_library_dir = session_log_dir.join("jam-library");
+    let jam_favorites_file = jam_library_dir.join("favorites-v1.json");
+    let jam_history_dir = session_log_dir.join("jam-history");
+    let static_roots = [
+        viewer_dir.as_path(),
+        admin_dir.as_path(),
+        config.chat_dir.as_path(),
+        config.chat_uploads_dir.as_path(),
+        config.soundboard_dir.as_path(),
+        avatars_dir.as_path(),
+        chimes_dir.as_path(),
+    ];
+    let private_path_isolated =
+        |label: &str, path: &std::path::Path| match diagnostics::storage_path_overlaps(
+            path,
+            &static_roots,
+        ) {
+            Ok(false) => true,
+            Ok(true) => {
+                if path.exists() {
+                    panic!(
+                        "refusing to start: existing {} path overlaps a web-served root",
+                        label
+                    );
+                }
+                warn!(
+                    "{} disabled: private path overlaps a web-served root",
+                    label
+                );
+                false
+            }
+            Err(error) => {
+                if path.exists() {
+                    panic!(
+                        "refusing to start: existing {} path isolation could not be validated: {}",
+                        label, error
+                    );
+                }
+                warn!(
+                    "{} disabled: private path isolation failed: {}",
+                    label, error
+                );
+                false
+            }
+        };
+    let jam_library_isolated = private_path_isolated("Jam library", &jam_library_dir);
+    let jam_history_isolated = private_path_isolated("Jam history", &jam_history_dir);
+    let jam_storage_isolated = jam_library_isolated && jam_history_isolated;
+    let spotify_token_storage_enabled =
+        private_path_isolated("Spotify token persistence", &spotify_token_file);
+    let jam_actor_secret = if jam_storage_isolated {
+        match load_or_create_jam_actor_secret(&jam_library_dir.join("actor-key-v1")) {
+            Ok(secret) => Some(secret),
+            Err(error) => {
+                warn!(
+                    "Jam actor-dependent library and history features disabled: stable actor key unavailable: {}",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let persisted_spotify_token = if spotify_token_storage_enabled && spotify_token_file.exists() {
         match fs::read_to_string(&spotify_token_file) {
             Ok(contents) => match serde_json::from_str::<SpotifyToken>(&contents) {
                 Ok(token) => {
@@ -393,6 +469,34 @@ async fn main() {
     if let Some(token) = persisted_spotify_token {
         initial_jam.spotify_token = Some(token);
     }
+    let jam_favorites = if !jam_storage_isolated {
+        jam_library::FavoriteStore::disabled(jam_favorites_file.clone())
+    } else {
+        match jam_library::FavoriteStore::open(jam_favorites_file.clone()) {
+            Ok(store) => store,
+            Err(error) => {
+                warn!(
+                "Jam favorites primary store could not be loaded; preserving it and disabling writes: {}",
+                error
+            );
+                jam_library::FavoriteStore::recover_read_only(jam_favorites_file)
+            }
+        }
+    };
+    let jam_history = if !jam_storage_isolated {
+        jam_history::JamHistoryStore::disabled(jam_history_dir.clone())
+    } else {
+        match jam_history::JamHistoryStore::open(jam_history_dir.clone(), now_ts_ms()) {
+            Ok(store) => store,
+            Err(error) => {
+                warn!(
+                    "Jam history disabled because its store could not be opened: {}",
+                    error
+                );
+                jam_history::JamHistoryStore::disabled(jam_history_dir)
+            }
+        }
+    };
 
     // Viewer cache-busting stamp — unique per server start
     let viewer_stamp = format!(
@@ -434,14 +538,38 @@ async fn main() {
         jam_bot: Arc::new(tokio::sync::Mutex::new(None)),
         jam_source: jam_source::JamSourceRegistry::new(jam_source_configured),
         jam_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+        jam_queue_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         jam_state_refresh: Arc::new(tokio::sync::Mutex::new(())),
         spotify_token_file,
+        spotify_token_storage_enabled,
+        jam_actor_secret: Arc::new(jam_actor_secret),
+        jam_favorites: Arc::new(jam_favorites),
+        jam_history: Arc::new(jam_history),
+        spotify_request_limit: Arc::new(tokio::sync::Semaphore::new(4)),
+        spotify_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        spotify_rate_limit_until: Arc::new(Mutex::new(None)),
         http_client,
         viewer_stamp: Arc::new(RwLock::new(viewer_stamp.clone())),
         login_attempts: Arc::new(Mutex::new(HashMap::new())),
         owner_login_attempts: Arc::new(Mutex::new(OwnerLoginLimiter::default())),
         diagnostics,
     };
+
+    {
+        let history = Arc::clone(&state.jam_history);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+                let history = Arc::clone(&history);
+                let result = tokio::task::spawn_blocking(move || history.prune(now_ts_ms())).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => warn!("Jam history retention failed: {}", error),
+                    Err(error) => warn!("Jam history retention task failed: {}", error),
+                }
+            }
+        });
+    }
 
     // Enforce age retention even when the service is idle or receives only
     // duplicate uploads. Store locking serializes this with ingest and owner
@@ -767,7 +895,20 @@ async fn main() {
         .route("/api/jam/stop", post(jam_stop))
         .route("/api/jam/state", get(jam_state))
         .route("/api/jam/search", post(jam_search))
+        .route("/api/jam/catalog/search", post(jam_catalog_search))
+        .route("/api/jam/playlists/:id/items", get(jam_playlist_items))
+        .route("/api/jam/favorites", get(jam_favorites_list))
+        .route("/api/jam/history", get(jam_history_list))
+        .route(
+            "/api/jam/favorites/import-spotify",
+            post(jam_favorites_import_spotify),
+        )
+        .route(
+            "/api/jam/favorites/:kind/:id",
+            put(jam_favorite_put).delete(jam_favorite_delete),
+        )
         .route("/api/jam/queue", post(jam_queue_add))
+        .route("/api/jam/queue/playlist", post(jam_queue_playlist))
         .route("/api/jam/playback/stop", post(jam_stop_playback))
         .route("/api/jam/skip", post(jam_skip))
         .route("/api/jam/join", post(jam_join))
