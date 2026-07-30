@@ -15,7 +15,10 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Mutex,
+    },
 };
 use tracing::warn;
 
@@ -77,6 +80,7 @@ pub(crate) struct JamHistoryStore {
     dir: PathBuf,
     enabled: bool,
     lock: Mutex<()>,
+    revision: AtomicU64,
 }
 
 impl JamHistoryStore {
@@ -87,6 +91,7 @@ impl JamHistoryStore {
             dir,
             enabled: true,
             lock: Mutex::new(()),
+            revision: AtomicU64::new(0),
         };
         store.prune(now_ms)?;
         Ok(store)
@@ -97,7 +102,12 @@ impl JamHistoryStore {
             dir,
             enabled: false,
             lock: Mutex::new(()),
+            revision: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(AtomicOrdering::Relaxed)
     }
 
     pub(crate) fn append_observation(
@@ -135,6 +145,7 @@ impl JamHistoryStore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         file.write_all(b"\n")?;
         file.sync_data()?;
+        self.revision.fetch_add(1, AtomicOrdering::Relaxed);
         Ok(entry)
     }
 
@@ -287,28 +298,42 @@ fn replace_jsonl(path: &Path, lines: &[String]) -> io::Result<()> {
 pub(crate) struct HistoryObservation {
     pub(crate) spotify_id: String,
     pub(crate) queued_track: Option<QueuedTrack>,
+    pub(crate) echo_run: bool,
 }
 
 /// Decide whether a bound-device observation starts a new Spotify run. Every
 /// playing Spotify ID advances the run, but only matching Echo entries persist.
 pub(crate) fn new_history_observation(
     last_spotify_id: Option<&str>,
+    last_run_was_echo: bool,
     observed_spotify_id: Option<&str>,
     queued_track: Option<&QueuedTrack>,
     is_playing: bool,
+    same_track_occurrence_restarted: bool,
 ) -> Option<HistoryObservation> {
     if !is_playing {
         return None;
     }
     let spotify_id = observed_spotify_id.filter(|id| !id.is_empty())?;
-    if last_spotify_id == Some(spotify_id) {
+    let matching_echo_track = queued_track
+        .filter(|track| track.spotify_id == spotify_id)
+        .cloned();
+    let same_spotify_id = last_spotify_id == Some(spotify_id);
+    let external_run_became_echo =
+        same_spotify_id && !last_run_was_echo && matching_echo_track.is_some();
+    if same_spotify_id && !same_track_occurrence_restarted && !external_run_became_echo {
         return None;
     }
+    let echo_run = matching_echo_track.is_some();
+    // Consecutive Echo occurrences of the same song stay one history run, even
+    // when they were intentionally queued twice. A confirmed external->Echo
+    // boundary for the same URI is persisted because the prior run was not an
+    // Echo queue occurrence.
+    let queued_track = matching_echo_track.filter(|_| !same_spotify_id || !last_run_was_echo);
     Some(HistoryObservation {
         spotify_id: spotify_id.to_string(),
-        queued_track: queued_track
-            .filter(|track| track.spotify_id == spotify_id)
-            .cloned(),
+        queued_track,
+        echo_run,
     })
 }
 
@@ -495,6 +520,7 @@ mod tests {
             added_by_actor_id: "ea1_actor".to_string(),
             added_by_name: "Sam".to_string(),
             playlist: None,
+            playlist_position: None,
             added_by: "Sam".to_string(),
         }
     }
@@ -504,16 +530,22 @@ mod tests {
         let a = track("AAAAAAAAAAAAAAAAAAAAAA");
         let b = track("BBBBBBBBBBBBBBBBBBBBBB");
         let mut last = None::<String>;
+        let mut last_was_echo = false;
         let mut recorded = Vec::new();
         for current in [&a, &a, &a, &b, &a] {
             if let Some(observed) = new_history_observation(
                 last.as_deref(),
+                last_was_echo,
                 Some(&current.spotify_id),
                 Some(current),
                 true,
+                false,
             ) {
                 last = Some(observed.spotify_id.clone());
-                recorded.push(observed.spotify_id);
+                last_was_echo = observed.echo_run;
+                if observed.queued_track.is_some() {
+                    recorded.push(observed.spotify_id);
+                }
             }
         }
         assert_eq!(
@@ -529,39 +561,106 @@ mod tests {
     #[test]
     fn pause_and_resume_do_not_create_a_second_history_row() {
         let a = track("AAAAAAAAAAAAAAAAAAAAAA");
-        let first = new_history_observation(None, Some(&a.spotify_id), Some(&a), true).unwrap();
+        let first =
+            new_history_observation(None, false, Some(&a.spotify_id), Some(&a), true, false)
+                .unwrap();
         let last = Some(first.spotify_id);
-        assert!(
-            new_history_observation(last.as_deref(), Some(&a.spotify_id), Some(&a), false)
-                .is_none()
-        );
-        assert!(
-            new_history_observation(last.as_deref(), Some(&a.spotify_id), Some(&a), true).is_none()
-        );
-        assert!(new_history_observation(last.as_deref(), None, None, true).is_none());
+        assert!(new_history_observation(
+            last.as_deref(),
+            true,
+            Some(&a.spotify_id),
+            Some(&a),
+            false,
+            false,
+        )
+        .is_none());
+        assert!(new_history_observation(
+            last.as_deref(),
+            true,
+            Some(&a.spotify_id),
+            Some(&a),
+            true,
+            false,
+        )
+        .is_none());
+        assert!(new_history_observation(last.as_deref(), true, None, None, true, false).is_none());
     }
 
     #[test]
     fn external_track_breaks_an_echo_track_run_without_being_persisted() {
         let a = track("AAAAAAAAAAAAAAAAAAAAAA");
-        let first = new_history_observation(None, Some(&a.spotify_id), Some(&a), true).unwrap();
+        let first =
+            new_history_observation(None, false, Some(&a.spotify_id), Some(&a), true, false)
+                .unwrap();
         assert!(first.queued_track.is_some());
         let external = new_history_observation(
             Some(&first.spotify_id),
+            first.echo_run,
             Some("BBBBBBBBBBBBBBBBBBBBBB"),
             None,
             true,
+            false,
         )
         .unwrap();
         assert!(external.queued_track.is_none());
+        assert!(!external.echo_run);
         let repeated_a = new_history_observation(
             Some(&external.spotify_id),
+            external.echo_run,
             Some(&a.spotify_id),
             Some(&a),
             true,
+            false,
         )
         .unwrap();
         assert!(repeated_a.queued_track.is_some());
+    }
+
+    #[test]
+    fn external_same_track_then_queued_echo_occurrence_is_persisted_once() {
+        let a = track("AAAAAAAAAAAAAAAAAAAAAA");
+        let external =
+            new_history_observation(None, false, Some(&a.spotify_id), None, true, false).unwrap();
+        assert!(!external.echo_run);
+        assert!(external.queued_track.is_none());
+
+        let queued_echo = new_history_observation(
+            Some(&external.spotify_id),
+            external.echo_run,
+            Some(&a.spotify_id),
+            Some(&a),
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(queued_echo.echo_run);
+        assert_eq!(
+            queued_echo
+                .queued_track
+                .as_ref()
+                .map(|track| track.queue_entry_id.as_str()),
+            Some(a.queue_entry_id.as_str())
+        );
+    }
+
+    #[test]
+    fn confirmed_echo_same_song_restart_updates_the_run_without_persisting_again() {
+        let a = track("AAAAAAAAAAAAAAAAAAAAAA");
+        let first =
+            new_history_observation(None, false, Some(&a.spotify_id), Some(&a), true, false)
+                .unwrap();
+        let looped = new_history_observation(
+            Some(&first.spotify_id),
+            first.echo_run,
+            Some(&a.spotify_id),
+            Some(&a),
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert!(looped.echo_run);
+        assert!(looped.queued_track.is_none());
     }
 
     #[test]
@@ -578,6 +677,31 @@ mod tests {
         let entries = store.list(now).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].spotify_id, "AAAAAAAAAAAAAAAAAAAAAA");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn store_revision_advances_only_after_successful_appends() {
+        let dir = std::env::temp_dir().join(format!("echo-jam-history-{}", random_secret()));
+        let now = 50 * DAY_MS;
+        let store = JamHistoryStore::open(dir.clone(), now).unwrap();
+        assert_eq!(store.revision(), 0);
+
+        store
+            .append_observation(&track("AAAAAAAAAAAAAAAAAAAAAA"), now)
+            .unwrap();
+        assert_eq!(store.revision(), 1);
+        assert_eq!(store.list(now).unwrap().len(), 1);
+        assert_eq!(
+            store.revision(),
+            1,
+            "reads do not invalidate viewer history"
+        );
+
+        store
+            .append_observation(&track("BBBBBBBBBBBBBBBBBBBBBB"), now + 1)
+            .unwrap();
+        assert_eq!(store.revision(), 2);
         let _ = fs::remove_dir_all(dir);
     }
 

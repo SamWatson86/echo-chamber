@@ -114,6 +114,21 @@ test("Jam protocol v3 rejects missing and mismatched server contracts", () => {
   assert.match(mismatched.compatibilityMessage, /viewer v3, server v1/);
 });
 
+test("playlist selection requires an explicit server capability", () => {
+  const base = {
+    jam_protocol_version: 3,
+    active: true,
+    source_enabled: true,
+    source_availability_known: true,
+    source_status: "live",
+  };
+  assert.equal(evaluateJamContract(base).playlistSelectionSupported, false);
+  assert.equal(evaluateJamContract({
+    ...base,
+    playlist_selection_supported: true,
+  }).playlistSelectionSupported, true);
+});
+
 test("ready, live, and silent sources are capture-ready for a new Jam", () => {
   for (const source_status of ["ready", "live", "silent"]) {
     const contract = evaluateJamContract({
@@ -260,6 +275,34 @@ test("Stop Music remains available when capture fails but Spotify is playing", (
     });
     assert.equal(contract.canStopPlayback, true, source_status);
   }
+});
+
+test("skip reconciliation pauses queue controls without hiding emergency Jam controls", () => {
+  const base = {
+    jam_protocol_version: 3,
+    spotify_connected: true,
+    playback_stop_supported: true,
+    active: true,
+    source_enabled: true,
+    source_availability_known: true,
+    source_status: "live",
+  };
+
+  const pending = evaluateJamContract({
+    ...base,
+    skip_reconciliation_pending: true,
+  });
+  assert.equal(pending.skipReconciliationPending, true);
+  assert.equal(pending.canControl, false);
+  assert.equal(pending.canStopPlayback, true);
+
+  const resolved = evaluateJamContract({
+    ...base,
+    skip_reconciliation_pending: false,
+  });
+  assert.equal(resolved.skipReconciliationPending, false);
+  assert.equal(resolved.canControl, true);
+  assert.equal(resolved.canStopPlayback, true);
 });
 
 test("Stop Music is capability and generation-state gated, not observation gated", () => {

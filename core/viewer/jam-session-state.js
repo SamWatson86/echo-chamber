@@ -172,6 +172,8 @@
     const spotifyConnected = input.spotify_connected === true;
     const spotifyIsPlaying = input.spotify_is_playing === true;
     const playbackStopSupported = input.playback_stop_supported === true;
+    const playlistSelectionSupported = input.playlist_selection_supported === true;
+    const skipReconciliationPending = input.skip_reconciliation_pending === true;
     const sourceError = typeof input.source_error === "string" ? input.source_error.trim() : "";
 
     let sourceTone = "waiting";
@@ -231,6 +233,8 @@
       spotifyConnected,
       spotifyIsPlaying,
       playbackStopSupported,
+      playlistSelectionSupported,
+      skipReconciliationPending,
       sourceEnabled,
       sourceAvailabilityKnown,
       sourceStatus,
@@ -245,7 +249,10 @@
       // New listeners fail closed on stalled PCM. Queue/skip intentionally stay
       // available against the current source so they can recover Spotify playback.
       canJoin: compatible && active && sourceReady,
-      canControl: compatible && active && sourceControlReady,
+      // Spotify may have accepted a Skip even when its response was interrupted.
+      // Freeze all queue-shaping controls until the server reconciles that result,
+      // preventing a second mutation from racing the unknown playback state.
+      canControl: compatible && active && sourceControlReady && !skipReconciliationPending,
       // Stopping Spotify playback does not depend on capture health or a fresh
       // playback observation. Pause is idempotent and exact-device fenced, so
       // keep this emergency control available for the whole active Jam.

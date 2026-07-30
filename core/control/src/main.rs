@@ -9,11 +9,13 @@ pub mod file_serving;
 mod jam_bot;
 mod jam_history;
 mod jam_library;
+mod jam_playlist_cache;
 mod jam_session;
 mod jam_source;
 mod rooms;
 pub mod sfu_proxy;
 mod soundboard;
+mod spotify_public_catalog;
 
 use admin::*;
 use auth::*;
@@ -83,6 +85,8 @@ pub(crate) struct AppState {
     pub(crate) spotify_token_storage_enabled: bool,
     pub(crate) jam_actor_secret: Arc<Option<Vec<u8>>>,
     pub(crate) jam_favorites: Arc<jam_library::FavoriteStore>,
+    pub(crate) jam_playlist_cache: Arc<jam_playlist_cache::PlaylistItemsCache>,
+    pub(crate) jam_playlist_cache_refresh: Arc<tokio::sync::Mutex<()>>,
     pub(crate) jam_history: Arc<jam_history::JamHistoryStore>,
     pub(crate) spotify_request_limit: Arc<tokio::sync::Semaphore>,
     pub(crate) spotify_refresh_lock: Arc<tokio::sync::Mutex<()>>,
@@ -379,6 +383,7 @@ async fn main() {
         .join("spotify-token.json");
     let jam_library_dir = session_log_dir.join("jam-library");
     let jam_favorites_file = jam_library_dir.join("favorites-v1.json");
+    let jam_playlist_cache_file = jam_library_dir.join("playlist-items-cache-v2.json");
     let jam_history_dir = session_log_dir.join("jam-history");
     let static_roots = [
         viewer_dir.as_path(),
@@ -497,6 +502,20 @@ async fn main() {
             }
         }
     };
+    let jam_playlist_cache = if !jam_storage_isolated {
+        jam_playlist_cache::PlaylistItemsCache::disabled(jam_playlist_cache_file.clone())
+    } else {
+        match jam_playlist_cache::PlaylistItemsCache::open(jam_playlist_cache_file.clone()) {
+            Ok(store) => store,
+            Err(error) => {
+                warn!(
+                    "Jam playlist-items cache primary store could not be loaded; preserving it and disabling writes: {}",
+                    error
+                );
+                jam_playlist_cache::PlaylistItemsCache::recover_read_only(jam_playlist_cache_file)
+            }
+        }
+    };
 
     // Viewer cache-busting stamp — unique per server start
     let viewer_stamp = format!(
@@ -544,6 +563,8 @@ async fn main() {
         spotify_token_storage_enabled,
         jam_actor_secret: Arc::new(jam_actor_secret),
         jam_favorites: Arc::new(jam_favorites),
+        jam_playlist_cache: Arc::new(jam_playlist_cache),
+        jam_playlist_cache_refresh: Arc::new(tokio::sync::Mutex::new(())),
         jam_history: Arc::new(jam_history),
         spotify_request_limit: Arc::new(tokio::sync::Semaphore::new(4)),
         spotify_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -908,7 +929,12 @@ async fn main() {
             put(jam_favorite_put).delete(jam_favorite_delete),
         )
         .route("/api/jam/queue", post(jam_queue_add))
+        .route("/api/jam/queue/remove", post(jam_queue_remove))
         .route("/api/jam/queue/playlist", post(jam_queue_playlist))
+        .route(
+            "/api/jam/queue/playlist/selection",
+            post(jam_queue_playlist_selection),
+        )
         .route("/api/jam/playback/stop", post(jam_stop_playback))
         .route("/api/jam/skip", post(jam_skip))
         .route("/api/jam/join", post(jam_join))

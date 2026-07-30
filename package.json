@@ -4,7 +4,7 @@
   "description": "Echo Chamber repo metadata. Active development lives under core/.",
   "scripts": {
     "verify:guardrails": "node tools/verify/guardrails.mjs",
-    "verify:viewer": "node --check core/viewer/app.js && node --check core/viewer/jam.js && node --check core/viewer/ui-shell.js && node --check core/viewer/theme-runtime.js && node --check core/viewer/theme-effects.js && node --check core/viewer/theme.js && node --check core/viewer/capture-picker.js && node --check core/admin/diagnostics/diagnostics.js && node --test core/viewer/*.test.js",
+    "verify:viewer": "node --check core/viewer/app.js && node --check core/viewer/jam-visualizer.js && node --check core/viewer/jam.js && node --check core/viewer/ui-shell.js && node --check core/viewer/theme-runtime.js && node --check core/viewer/theme-effects.js && node --check core/viewer/theme.js && node --check core/viewer/capture-picker.js && node --check core/admin/diagnostics/diagnostics.js && node --test core/viewer/*.test.js",
     "verify:viewer:layout": "npm --prefix core/viewer-tests test",
     "verify:quick": "npm run verify:guardrails && npm run verify:viewer"
   }

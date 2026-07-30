@@ -1746,21 +1746,21 @@
   border-radius: var(--club-radius-panel);
 }
 
-/* Portaled Jam follows the same rail / drawer / full-workspace geometry. */
+/* Jam is a feature-dense workspace; People and Chat keep the utility rail. */
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool {
   position: fixed;
-  top: var(--club-workspace-top);
-  right: var(--club-safe-right);
-  bottom: var(--club-workspace-bottom);
-  left: auto;
+  top: max(var(--club-workspace-top), calc(50vh - 420px));
+  right: auto;
+  bottom: max(var(--club-workspace-bottom), calc(50vh - 420px));
+  left: 50%;
   z-index: var(--club-layer-utility);
-  width: clamp(320px, 24vw, 360px);
+  width: min(1120px, calc(100vw - var(--club-safe-left) - var(--club-safe-right)));
   height: auto;
   max-height: none;
   margin: 0;
-  padding: 12px;
-  gap: 10px;
-  transform: none;
+  padding: 16px;
+  gap: 12px;
+  transform: translateX(-50%);
   container-type: inline-size;
   overflow: hidden;
   border: 1px solid var(--club-border-strong);
@@ -1772,14 +1772,18 @@
 }
 
 :root[data-ui-shell="v2"][data-ui-mode="lounge"] .jam-panel.clubhouse-utility-tool {
-  width: clamp(320px, 42vw, 380px);
+  width: min(1080px, calc(100vw - var(--club-safe-left) - var(--club-safe-right)));
 }
 
 :root[data-ui-shell="v2"][data-ui-mode="compact"] .jam-panel.clubhouse-utility-tool,
 :root[data-ui-shell="v2"][data-ui-mode="mini"] .jam-panel.clubhouse-utility-tool {
+  top: var(--club-workspace-top);
   right: var(--club-safe-right);
+  bottom: var(--club-workspace-bottom);
   left: var(--club-safe-left);
   width: auto;
+  max-width: none;
+  transform: none;
 }
 
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-header {
@@ -1817,6 +1821,12 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scroll-padding-top: 58px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-session-overview {
+  display: contents;
+  min-width: 0;
+  min-height: 0;
 }
 
 :root[data-ui-shell="v2"] .utility-host :where(button, input, textarea, select),
@@ -2017,9 +2027,63 @@
   gap: 8px;
 }
 
+:root[data-ui-shell="v2"][data-ui-very-short] .jam-panel.clubhouse-utility-tool .jam-audio-visualizer {
+  height: 44px;
+  flex-basis: 44px;
+}
+
+:root[data-ui-shell="v2"][data-ui-very-short] .jam-panel.clubhouse-utility-tool .jam-audio-visualizer-chrome {
+  top: 5px;
+}
+
 @container (min-width: 620px) {
   :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-search-queue-row {
     flex-direction: row;
+  }
+}
+
+@container (min-width: 820px) {
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-body {
+    display: grid;
+    grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+    align-items: stretch;
+    gap: 18px;
+    padding-right: 1px;
+    overflow: hidden;
+  }
+
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-session-overview,
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser {
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-session-overview {
+    display: flex;
+    padding-right: 6px;
+  }
+
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser {
+    padding: 0 6px 8px 2px;
+    border-top: 0;
+  }
+
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser-tabs {
+    position: sticky;
+    top: 0;
+  }
+}
+
+@container (min-width: 1040px) {
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-library-section > .jam-filter-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-history-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

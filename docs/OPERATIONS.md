@@ -89,12 +89,49 @@ start it, join it, search, add songs, skip, and use **Stop Music** from Echo's J
 do not need Spotify accounts and should add their songs through Echo, not through
 their own Spotify apps. Spotify playback is always targeted back to the one
 configured desktop device and Premium host account. Echo does
-not offer a fake queue-removal control because Spotify's API cannot remove an
-individual queued item. The configured source PC has local-only **Allow Echo
-Jam to use Spotify on this PC** and **Hear Jam on this PC** switches before Echo
-login and in the Jam panel. Hear Jam uses the independent Jam Volume without
-changing anyone else's level. Stop Music pauses playback for everyone but
-preserves the active Jam, queue, listeners, capture route, and audio sockets.
+not offer a fake removal control for entries already handed to Spotify because
+Spotify's API cannot delete an individual queued item. Echo keeps later entries
+pending behind a bounded Spotify frontier; any current Jam participant may
+remove one or many pending occurrences, while committed or ambiguous entries
+remain locked and the current track may be skipped. The configured source PC
+has local-only **Allow Echo Jam to use Spotify on this PC** and **Hear Jam on
+this PC** switches before Echo login and in the Jam panel. Hear Jam uses the
+independent Jam Volume without changing anyone else's level. Stop Music pauses
+playback for everyone and prevents automatic frontier promotion, but preserves
+the active Jam, pending queue, listeners, capture route, and audio sockets. An
+explicit later queue add resumes playback as before. Skip while stopped may
+advance Spotify's paused selection, but it does not resume audio or promote a
+new pending frontier entry. A timeout or source-safety loss during a Spotify
+mutation also marks that Jam generation stopped after Echo's best-effort device
+pause, preventing a later state poll from silently resuming or replacing the
+uncertain occurrence. Successful Skip retires the exactly observed Echo front
+and refills the bounded Spotify frontier before another Skip can run. A
+committed front observed stopped at its natural end (or followed by Spotify's
+no-content state after enough elapsed play time) is retired, so a later explicit
+add starts or resumes instead of being stranded behind a stale occurrence. That
+add-time retirement requires either an exact stopped-at-duration observation or
+a prior playing trajectory that corroborates the no-content transition; a
+legitimately paused near-end track is preserved and an explicit add resumes it
+before queueing the new track. Skip unlocks exactly the first queued-next
+accepted successor occurrence. An ambiguous successor remains non-removable,
+unmatched, and locked until the Jam ends. Playback URI/progress alone never
+promotes `commit_unknown`, and new track/playlist adds return
+`queue_commit_unknown` with instructions to end and restart the Jam; pending
+tail removal remains available.
+
+Skip performs a fresh bound-device preflight. If adjacent same-URI occurrences
+are ambiguous, Echo also requires Spotify's current/next queue observation
+before calling `/next`. A transport error, timeout, or Spotify 5xx after that
+mutation is treated as an unknown Skip result: Echo best-effort pauses the
+device, exposes `skip_reconciliation_pending`, and blocks another Skip, queue
+add, or playback resume. A later bound-device player/queue observation resolves
+accepted versus rejected exactly once. Spotify player `204 No Content` is not
+acceptance proof and leaves the fence in place; ending the Jam clears it.
+Skip also fails before `/next` whenever its authoritative current candidate is
+`commit_unknown`, regardless of whether Spotify reports a different next item,
+no next item, or Echo last observed a different predecessor. This prevents an
+external same-URI occurrence from inheriting Echo queue or Play History
+provenance.
 
 The shared Echo Favorites layer and 30-day Play History are defined in
 `docs/JAM-LIBRARY-HISTORY.md`. Playlists are always expanded server-side into
@@ -102,6 +139,18 @@ ordinary track queue entries; the queue and source protocol never contain a
 playlist object. Favorite removal never removes queued Spotify items. History
 records only Echo queue entries that Spotify is subsequently observed playing,
 with consecutive repeats collapsed until a different track plays.
+
+Restricted public playlists are cataloged only after a participant opens or
+queues them, in fixed 50-position requests. The normalized, snapshot-keyed
+cache is private at `session-logs/jam-library/playlist-items-cache-v2.json` and
+uses the same atomic primary/backup recovery model as Echo Favorites. Do not
+place that file under the viewer/admin/static roots. It contains track metadata,
+not Spotify credentials; the anonymous public-catalog token remains memory-only.
+Echo stops restricted public-catalog paging at 1,000 positions, disables bulk
+queueing for a larger playlist, and keeps selection available for the cached
+first 1,000. All public and supported Spotify requests share the same in-process
+429 cooldown. The 50-position boundary is an operational guardrail, not a
+policy-compliance guarantee.
 
 Listener audio uses `/api/jam/audio?jam_protocol_version=3&generation=...`.
 Credentials are not placed in that URL: the listener's first WebSocket frame is
