@@ -80,6 +80,8 @@ test.beforeEach(async ({ page }) => {
     errors,
     expectedConfirmationConflict: false,
     expectedPlaylistForbidden: false,
+    favoriteItems: null,
+    favoriteQueries: [],
     forceConfirmation: false,
     forbidPlaylistItems: false,
     queuePlaylistBodies: [],
@@ -170,6 +172,42 @@ test.beforeEach(async ({ page }) => {
     }
     if (url.pathname === "/api/jam/favorites" && request.method() === "GET") {
       increment(model, key);
+      model.favoriteQueries.push(Object.fromEntries(url.searchParams));
+      if (model.favoriteItems) {
+        const kind = url.searchParams.get("kind") || "all";
+        const actorId = url.searchParams.get("actor_id") || "";
+        const facetItems = model.favoriteItems.filter((item) => kind === "all" || item.kind === kind);
+        const contributors = new Map();
+        for (const attribution of facetItems.flatMap((item) => item.attributions || [])) {
+          const current = contributors.get(attribution.actor_id) || {
+            actor_id: attribution.actor_id,
+            display_name: attribution.display_name,
+            count: 0,
+          };
+          current.count += 1;
+          contributors.set(attribution.actor_id, current);
+        }
+        const items = facetItems.filter((item) => !actorId || (item.attributions || []).some((entry) => entry.actor_id === actorId));
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            schema_version: 1,
+            items,
+            contributors: Array.from(contributors.values()),
+            counts: {
+              tracks: items.filter((item) => item.kind === "track").length,
+              playlists: items.filter((item) => item.kind === "playlist").length,
+              contributors: contributors.size,
+            },
+            offset: Number(url.searchParams.get("offset") || 0),
+            limit: 20,
+            total: items.length,
+            next_offset: null,
+          }),
+        });
+        return;
+      }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -998,6 +1036,47 @@ test("Jam browser tabs are keyboard navigable and history remains available whil
   }));
   expect(overflow.browser).toBeLessThanOrEqual(1);
   expect(overflow.document).toBeLessThanOrEqual(1);
+});
+
+test("zero-match kind keeps the selected favorite contributor and truthful empty results", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  const model = apiModels.get(page);
+  model.favoriteItems = [
+    {
+      kind: "track",
+      spotify_id: trackId,
+      spotify_uri: `spotify:track:${trackId}`,
+      spotify_url: `https://open.spotify.com/track/${trackId}`,
+      name: "Friend Track",
+      artist: "Fixture Artist",
+      attributions: [{ actor_id: "friend", display_name: "Friend", added_at_ms: 200, source: "manual" }],
+      contributor_count: 1,
+      favorited_by_me: false,
+    },
+    {
+      ...model.playlist,
+      name: "Sam Playlist",
+      attributions: [{ actor_id: "sam", display_name: "Sam", added_at_ms: 100, source: "manual" }],
+      contributor_count: 1,
+      favorited_by_me: true,
+    },
+  ];
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  await page.locator("#jam-view-library-tab").click();
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(2);
+
+  const contributor = page.locator("#jam-library-contributor");
+  await contributor.selectOption("friend");
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(1);
+  await expect(page.locator("#jam-library-list")).toContainText("Friend Track");
+
+  await page.locator("#jam-library-kind").selectOption("playlist");
+  await expect(contributor).toHaveValue("friend");
+  await expect(contributor.locator('option[value="friend"]')).toHaveText("Friend (0)");
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(0);
+  await expect(page.locator("#jam-library-status")).toHaveText("No Echo Favorites match these filters.");
+  expect(model.favoriteQueries.at(-1)).toMatchObject({ kind: "playlist", actor_id: "friend" });
 });
 
 test("catalog search aborts and rejects stale results", async ({ page }) => {

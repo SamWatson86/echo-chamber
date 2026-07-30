@@ -1451,6 +1451,10 @@ function jamUpdateContributorOptions(contributors, items) {
   var select = document.getElementById("jam-library-contributor");
   if (!select) return;
   var selected = select.value;
+  var selectedOption = select.options[select.selectedIndex];
+  var selectedName = selectedOption
+    ? jamSafeString(selectedOption.getAttribute("data-jam-contributor-name") || selectedOption.textContent).replace(/\s+\(\d+\)$/, "")
+    : "";
   var all = jamNormalizeContributors(contributors);
   if (!all.length) {
     var combined = [];
@@ -1466,8 +1470,16 @@ function jamUpdateContributorOptions(contributors, items) {
     var option = document.createElement("option");
     option.value = contributor.actor_id;
     option.textContent = contributor.display_name + (contributor.count ? " (" + contributor.count + ")" : "");
+    option.setAttribute("data-jam-contributor-name", contributor.display_name);
     select.appendChild(option);
   });
+  if (selected && !Array.prototype.some.call(select.options, function(option) { return option.value === selected; })) {
+    var selectedZero = document.createElement("option");
+    selectedZero.value = selected;
+    selectedZero.textContent = (selectedName || "Selected contributor") + " (0)";
+    selectedZero.setAttribute("data-jam-contributor-name", selectedName || "Selected contributor");
+    select.appendChild(selectedZero);
+  }
   if (Array.prototype.some.call(select.options, function(option) { return option.value === selected; })) select.value = selected;
 }
 
