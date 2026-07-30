@@ -1077,6 +1077,12 @@ test("zero-match kind keeps the selected favorite contributor and truthful empty
   await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(0);
   await expect(page.locator("#jam-library-status")).toHaveText("No Echo Favorites match these filters.");
   expect(model.favoriteQueries.at(-1)).toMatchObject({ kind: "playlist", actor_id: "friend" });
+
+  await contributor.selectOption("");
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(1);
+  await expect(page.locator("#jam-library-list")).toContainText("Sam Playlist");
+  expect(model.favoriteQueries.at(-1)).toMatchObject({ kind: "playlist" });
+  expect(model.favoriteQueries.at(-1).actor_id).toBeUndefined();
 });
 
 test("catalog search aborts and rejects stale results", async ({ page }) => {
