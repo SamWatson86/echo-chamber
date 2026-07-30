@@ -36,6 +36,18 @@ npm test
 
 From the repository root, use `npm run verify:viewer:layout` after setup.
 
+For a clearly labeled, disconnected Jam workspace preview on Windows:
+
+```powershell
+$env:ECHO_JAM_PREVIEW = "1"
+node .\scripts\serve-viewer.mjs
+```
+
+Then open `http://127.0.0.1:4175/?echo-ui-shell-v2=1`. The fixture uses mock
+Jam state and never connects to production or Spotify. Echo Pulse therefore
+shows its truthful static **Join Jam to activate** state in this preview; the
+reactive spectrum requires a joined Jam audio stream.
+
 Known legacy failures at `960x540`, `640x480`, and narrow Chat execute on every
 run under the explicit `?echo-ui-shell-v2=0` override. They retain the legacy
 rollback baseline while separate V2 tests assert a usable participant region

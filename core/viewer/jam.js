@@ -17,6 +17,10 @@ var _bannerPollTimer = null;  // lightweight poll for now-playing banner (runs e
 var _jamAudioWs = null;        // WebSocket connection
 var _jamAudioCtx = null;       // AudioContext for playback
 var _jamGainNode = null;       // GainNode for volume control
+var _jamAudioAnalysisGraph = null; // Muted pre-gain branch for Echo Pulse
+var _jamAudioStreamReady = false;
+var _jamAudioVisualizerController = null;
+var _jamAudioVisualizerDisabled = false;
 var _jamNextPlayTime = 0;      // next scheduled buffer start time
 var _jamReconnectTimer = null;
 var _jamRejoinPromise = null;
@@ -43,6 +47,76 @@ var _jamStateRequestGate = (window.EchoJamSessionState && window.EchoJamSessionS
 var _jamSessionState = (window.EchoJamSessionState && window.EchoJamSessionState.createJamSessionState)
   ? window.EchoJamSessionState.createJamSessionState({ reconnectBaseMs: 500, reconnectMaxMs: 8000 })
   : null;
+
+function ensureJamAudioVisualizer() {
+  if (_jamAudioVisualizerDisabled) return null;
+  if (_jamAudioVisualizerController) return _jamAudioVisualizerController;
+  if (!window.EchoJamVisualizer || typeof window.EchoJamVisualizer.createJamVisualizerController !== "function") {
+    return null;
+  }
+  try {
+    _jamAudioVisualizerController = window.EchoJamVisualizer.createJamVisualizerController();
+  } catch (error) {
+    disableJamAudioVisualizer(error);
+  }
+  return _jamAudioVisualizerController;
+}
+
+function disableJamAudioVisualizer(error) {
+  _jamAudioVisualizerDisabled = true;
+  if (_jamAudioVisualizerController && typeof _jamAudioVisualizerController.destroy === "function") {
+    try { _jamAudioVisualizerController.destroy(); } catch (_destroyError) {}
+  }
+  _jamAudioVisualizerController = null;
+  var surface = document.getElementById("jam-audio-visualizer");
+  if (surface) surface.hidden = true;
+  if (typeof debugLog === "function") {
+    debugLog("[jam] Echo Pulse disabled: " + ((error && error.message) || "visualizer failure"));
+  }
+}
+
+function syncJamAudioVisualizer(nowPlaying) {
+  if (_jamAudioVisualizerDisabled) return;
+  if (!_jamInited && !_jamAudioVisualizerController) return;
+  try {
+    var controller = ensureJamAudioVisualizer();
+    if (!controller) return;
+    var current = nowPlaying === undefined
+      ? (_jamState && _jamState.now_playing)
+      : nowPlaying;
+    controller.update({
+      playing: !!(current && current.name && current.is_playing),
+      streamReady: _jamAudioStreamReady,
+      streamConnecting: !!_jamAudioWs || !!_jamReconnectTimer || !!_jamRejoinPromise,
+      analyser: _jamAudioAnalysisGraph && _jamAudioAnalysisGraph.available
+        ? _jamAudioAnalysisGraph.analyser
+        : null,
+      audioContext: _jamAudioCtx,
+    });
+  } catch (error) {
+    disableJamAudioVisualizer(error);
+  }
+}
+
+function pauseJamAudioVisualizer() {
+  if (_jamAudioVisualizerController && typeof _jamAudioVisualizerController.pause === "function") {
+    try { _jamAudioVisualizerController.pause(); } catch (error) { disableJamAudioVisualizer(error); }
+  }
+}
+
+function destroyJamAudioVisualizer() {
+  if (_jamAudioVisualizerController && typeof _jamAudioVisualizerController.destroy === "function") {
+    try { _jamAudioVisualizerController.destroy(); } catch (_error) {}
+  }
+  _jamAudioVisualizerController = null;
+}
+
+function destroyJamAudioAnalysisGraph() {
+  if (_jamAudioAnalysisGraph && typeof _jamAudioAnalysisGraph.destroy === "function") {
+    try { _jamAudioAnalysisGraph.destroy(); } catch (_error) {}
+  }
+  _jamAudioAnalysisGraph = null;
+}
 
 function jamActorHeaders(participantToken) {
   return {
@@ -304,6 +378,8 @@ function evaluateJamServerContract(state) {
     spotifyConnected: false,
     spotifyIsPlaying: false,
     playbackStopSupported: false,
+    playlistSelectionSupported: false,
+    skipReconciliationPending: false,
     sourceEnabled: false,
     sourceAvailabilityKnown: false,
     sourceStatus: "unknown",
@@ -346,6 +422,15 @@ function ensureJamSourceStatusElement() {
 
 function renderJamContractStatus() {
   var contract = _jamContract || evaluateJamServerContract(null);
+  var reconciliationWarning = document.getElementById("jam-skip-reconciliation-warning");
+  if (reconciliationWarning) {
+    var reconciliationPending = contract.skipReconciliationPending === true;
+    reconciliationWarning.hidden = !reconciliationPending;
+    reconciliationWarning.textContent = reconciliationPending
+      ? "Echo is confirming the last Skip with Spotify. Skip and queue changes are paused until that check finishes."
+      : "";
+  }
+
   var el = ensureJamSourceStatusElement();
   if (!el) return;
 
@@ -415,6 +500,7 @@ function jamActionAllowed(action) {
 function applyJamContractToControls() {
   var contract = _jamContract || evaluateJamServerContract(null);
   var connectBtn = document.getElementById("jam-connect-spotify");
+  var libraryRefreshBtn = document.getElementById("jam-library-refresh-spotify");
   var startBtn = document.getElementById("jam-start-btn");
   var stopBtn = document.getElementById("jam-stop-music-btn");
   var endBtn = document.getElementById("jam-end-btn");
@@ -422,8 +508,11 @@ function applyJamContractToControls() {
   var searchInput = document.getElementById("jam-search-input");
   var importBtn = document.getElementById("jam-import-spotify");
   var playlistAddBtn = document.getElementById("jam-playlist-add-all");
+  var playlistAddSelectedBtn = document.getElementById("jam-playlist-add-selected");
 
+  var libraryAccess = jamSpotifyLibraryAccessState();
   if (connectBtn) connectBtn.disabled = !contract.compatible;
+  if (libraryRefreshBtn) libraryRefreshBtn.disabled = _jamImportPending || !contract.compatible;
   if (startBtn) {
     startBtn.disabled = !contract.canStart;
     startBtn.title = contract.canStart
@@ -454,13 +543,86 @@ function applyJamContractToControls() {
   }
   if (skipBtn) skipBtn.disabled = !contract.canControl || !contract.active;
   if (searchInput) searchInput.disabled = !contract.compatible || !contract.spotifyConnected;
-  if (importBtn) importBtn.disabled = _jamImportPending || !contract.compatible || !contract.spotifyConnected;
-  if (playlistAddBtn) playlistAddBtn.disabled = _jamPlaylistQueuePending || !contract.canControl;
-  document.querySelectorAll(".jam-result-add").forEach(function(button) {
-    button.disabled = !contract.canControl;
+  if (importBtn) {
+    importBtn.disabled = _jamImportPending || !contract.compatible ||
+      !contract.spotifyConnected || libraryAccess === "required";
+    importBtn.title = libraryAccess === "required"
+      ? "Grant Spotify Library access before copying your saves"
+      : _jamLibraryKnownEmpty === true
+        ? "Copy your Spotify Liked Songs and saved playlists into Echo Favorites"
+        : "Check Spotify for newly liked songs and saved playlists";
+  }
+  if (playlistAddBtn) playlistAddBtn.disabled = jamPlaylistQueuePending() || _jamPlaylistLoading ||
+    !!_jamPlaylistAccessError || !contract.canControl;
+  if (playlistAddSelectedBtn) playlistAddSelectedBtn.disabled = true;
+  document.querySelectorAll(".jam-result-add, .jam-library-queue-btn, .jam-history-queue-btn").forEach(function(button) {
+    button.disabled = jamTrackQueuePending() || !contract.canControl;
+  });
+  document.querySelectorAll(".jam-history-queue-btn").forEach(function(button) {
+    var description = jamHistoryQueueActionTitle(contract);
+    button.title = description;
+    button.setAttribute("aria-description", description);
   });
 
+  renderJamLibrarySetup();
+  renderJamPlaylistSelectionControls();
+  renderJamQueueRemovalControls((_jamState && _jamState.queue) || []);
+  syncJamQueueInteractiveState();
+
   syncJamButtonsFromState();
+}
+
+function jamSpotifyLibraryAccessState() {
+  if (!_jamState || _jamState.spotify_connected !== true) return "disconnected";
+  if (_jamState.spotify_library_authorized === true) return "authorized";
+  if (_jamState.spotify_library_authorized === false) return "required";
+  return "unknown";
+}
+
+function renderJamLibrarySetup() {
+  var card = document.getElementById("jam-library-import-card");
+  var refresh = document.getElementById("jam-library-refresh-spotify");
+  var importButton = document.getElementById("jam-import-spotify");
+  var copy = card && card.querySelector(".jam-library-import-copy");
+  var title = copy && copy.querySelector("strong");
+  var description = copy && copy.querySelector("p");
+  var access = jamSpotifyLibraryAccessState();
+  if (!card || !refresh || !importButton || !title || !description) return;
+
+  var firstUse = access === "authorized" && _jamLibraryKnownEmpty === true;
+  var compact = access === "authorized" && !firstUse;
+
+  card.classList.toggle("needs-access", access === "required");
+  card.classList.toggle("first-use", firstUse);
+  card.classList.toggle("compact", compact);
+  refresh.hidden = access === "authorized";
+  importButton.hidden = access !== "authorized";
+  importButton.classList.toggle("jam-primary-btn", firstUse);
+  importButton.classList.toggle("jam-secondary-btn", !firstUse);
+  refresh.textContent = access === "disconnected"
+    ? "Connect Spotify"
+    : access === "required"
+      ? "Grant Spotify Library Access"
+      : "Refresh Spotify Access";
+
+  if (access === "required") {
+    title.textContent = "Spotify Library access required";
+    description.textContent = "Grant read access to copy your Liked Songs and saved playlists into shared Echo Favorites.";
+  } else if (access === "disconnected") {
+    title.textContent = "Connect your Spotify Library";
+    description.textContent = "Connect Spotify to copy your Liked Songs and saved playlists into shared Echo Favorites.";
+  } else if (firstUse) {
+    title.textContent = "Bring in your Spotify saves";
+    description.textContent = "Copy your Liked Songs and saved playlists into shared Echo Favorites.";
+    importButton.textContent = "Copy Spotify saves";
+  } else if (access === "authorized") {
+    title.textContent = "Spotify saves";
+    description.textContent = "Already saved more music in Spotify? Copy the new items into Echo Favorites.";
+    importButton.textContent = "Check for new Spotify saves";
+  } else {
+    title.textContent = "Refresh Spotify Library access";
+    description.textContent = "Refresh Spotify access before copying your Liked Songs and saved playlists into shared Echo Favorites.";
+  }
 }
 
 function stopJamForCompatibilityFailure() {
@@ -625,6 +787,7 @@ function openJamPanel(opener) {
       window.EchoClubhouseUtility.open("jam", opener || document.activeElement);
     if (!handledByClubhouse) panel.classList.remove("hidden");
     initJam();
+    syncJamAudioVisualizer();
   }
 }
 
@@ -634,6 +797,7 @@ function closeJamPanel(options) {
   var handledByClubhouse = window.EchoClubhouseUtility &&
     window.EchoClubhouseUtility.close("jam", options);
   if (!handledByClubhouse) panel.classList.add("hidden");
+  pauseJamAudioVisualizer();
 }
 
 // ──────────────────────────────────────────
@@ -735,8 +899,7 @@ async function connectSpotify() {
           setTimeout(function() { showJamStatus(""); }, 3000);
           fetchJamState();
         } else {
-          var tokenErr = await tokenResp.text();
-          showJamError("Token exchange failed: " + tokenErr);
+          showJamError(await jamApiErrorMessage(tokenResp, "connect Spotify"));
         }
       } catch (e) {
         debugLog("[jam] spotify poll error: " + e);
@@ -923,8 +1086,11 @@ async function skipTrack() {
 
 var JAM_CATALOG_PAGE_SIZE = 10;
 var JAM_LIBRARY_PAGE_SIZE = 20;
-var JAM_PLAYLIST_PAGE_SIZE = 20;
+var JAM_PLAYLIST_PAGE_SIZE = 50;
+var JAM_PLAYLIST_MAX_QUEUE_TRACKS = 1000;
 var JAM_HISTORY_PAGE_SIZE = 20;
+var JAM_PLAYLIST_AMBIGUOUS_STORAGE_KEY = "echo-jam-playlist-ambiguous-v1";
+var JAM_TRACK_AMBIGUOUS_STORAGE_KEY = "echo-jam-track-ambiguous-v1";
 var _searchTimer = null;
 var _jamActiveView = "search";
 var _jamSearchKind = "track";
@@ -940,12 +1106,14 @@ var _jamLibraryTotal = 0;
 var _jamLibraryNextOffset = null;
 var _jamLibraryItems = [];
 var _jamLibraryLoaded = false;
+var _jamLibraryKnownEmpty = null;
 var _jamLibraryController = null;
 var _jamLibraryRequestSeq = 0;
 var _jamHistoryOffset = 0;
 var _jamHistoryTotal = 0;
 var _jamHistoryNextOffset = null;
 var _jamHistoryLoaded = false;
+var _jamHistoryLoadedRevision = null;
 var _jamHistoryController = null;
 var _jamHistoryRequestSeq = 0;
 var _jamPlaylist = null;
@@ -955,11 +1123,25 @@ var _jamPlaylistTotal = 0;
 var _jamPlaylistController = null;
 var _jamPlaylistRequestSeq = 0;
 var _jamPlaylistLoading = false;
-var _jamPlaylistQueuePending = false;
+var _jamPlaylistQueueEpoch = 0;
+var _jamPlaylistQueueOperation = null;
+var _jamPlaylistAccessError = null;
+var _jamPlaylistFailedOffset = 0;
+var _jamPlaylistCacheTruncated = false;
+var _jamPlaylistCachePositionLimit = JAM_PLAYLIST_MAX_QUEUE_TRACKS;
+var _jamPlaylistSelectedPositions = new Set();
+var _jamPlaylistResumeRequired = false;
+var _jamPlaylistAmbiguousRequests = null;
 var _jamPlaylistReturnView = "search";
 var _jamPlaylistOpener = null;
 var _jamFavoritePending = Object.create(null);
 var _jamImportPending = false;
+var _jamTrackQueueEpoch = 0;
+var _jamTrackQueueOperation = null;
+var _jamTrackAmbiguousRequests = null;
+var _jamQueueSelectedEntryIds = new Set();
+var _jamQueueRemovalPending = false;
+var _jamQueueRenderKey = null;
 
 function jamSafeString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -1083,6 +1265,7 @@ function normalizeSpotifyCatalogItem(raw, expectedKind) {
     album_art_url: jamSafeArtworkUrl(artwork),
     duration_ms: jamSafeInteger(raw.duration_ms, 0),
     item_count: jamSafeOptionalInteger(raw.item_count !== undefined ? raw.item_count : (raw.track_count !== undefined ? raw.track_count : raw.total_tracks)),
+    playlist_position: jamSafeOptionalInteger(raw.playlist_position),
     snapshot_id: jamSafeString(raw.snapshot_id),
     attributions: attributions,
     contributor_count: contributorCount,
@@ -1123,7 +1306,9 @@ async function jamApiErrorMessage(response, action) {
   var serverMessage = jamSafeString(payload.message || (payload.error && payload.error.message)).slice(0, 240);
   if (response.status === 401) return "Your Echo session expired. Sign in again.";
   if (response.status === 403) {
-    if (action === "import Spotify favorites") return "Spotify access needs refreshing. Use Refresh Spotify Access, then import again.";
+    if (payload.error === "spotify_library_scope_required") {
+      return serverMessage || "Spotify access needs refreshing. Grant Spotify Library access, then copy your saves again.";
+    }
     if (payload.error === "playlist_items_forbidden" && serverMessage) return serverMessage;
     return serverMessage || "You don't have permission to " + action + ".";
   }
@@ -1153,19 +1338,27 @@ function jamSetPager(prefix, offset, limit, total, nextOffset, noun, busy) {
   if (summary) summary.textContent = total + " " + noun + (total === 1 ? "" : "s") + (total ? " \u00b7 " + page + " of " + pages : "");
 }
 
+function jamCreateArtworkPlaceholder(className) {
+  var placeholder = document.createElement("span");
+  placeholder.className = (className || "jam-result-art") + " jam-art-placeholder";
+  placeholder.setAttribute("aria-hidden", "true");
+  return placeholder;
+}
+
 function jamCreateArtwork(item, className) {
-  if (!item.artwork_url) {
-    var placeholder = document.createElement("span");
-    placeholder.className = (className || "jam-result-art") + " jam-art-placeholder";
-    placeholder.setAttribute("aria-hidden", "true");
-    return placeholder;
-  }
+  if (!item.artwork_url) return jamCreateArtworkPlaceholder(className);
   var image = document.createElement("img");
   image.className = className || "jam-result-art";
   image.src = item.artwork_url;
   image.alt = "";
   image.loading = "lazy";
   image.decoding = "async";
+  image.referrerPolicy = "no-referrer";
+  image.addEventListener("error", function() {
+    if (image.parentNode) {
+      image.parentNode.replaceChild(jamCreateArtworkPlaceholder(className), image);
+    }
+  }, { once: true });
   return image;
 }
 
@@ -1178,6 +1371,16 @@ function jamCreateSpotifyLink(item, label, className) {
   link.textContent = label;
   link.title = "Open in Spotify";
   link.onclick = function(event) { openSpotifyItem(item, event); };
+  return link;
+}
+
+function jamCreateSpotifyAction(item) {
+  var link = jamCreateSpotifyLink(
+    item,
+    "Open in Spotify",
+    "jam-secondary-btn jam-spotify-link jam-spotify-action"
+  );
+  link.setAttribute("aria-label", "Open " + item.name + " in Spotify");
   return link;
 }
 
@@ -1224,10 +1427,15 @@ function jamTabKeydown(event, selector, activate) {
   activate(tabs[index]);
 }
 
-function setJamView(view, focusTab) {
+function setJamView(view, focusTab, options) {
   if (["library", "search", "queue", "history"].indexOf(view) === -1) return;
-  _jamActiveView = view;
+  options = options || {};
   var detail = document.getElementById("jam-playlist-detail");
+  if (jamPlaylistQueuePending() && detail && !detail.hidden) {
+    jamSetViewStatus("jam-playlist-status", "Wait for the playlist queue operation to finish before leaving this playlist.", "warning");
+    return;
+  }
+  _jamActiveView = view;
   if (detail) detail.hidden = true;
   document.querySelectorAll(".jam-browser-tab").forEach(function(tab) {
     var active = tab.getAttribute("data-jam-view") === view;
@@ -1240,7 +1448,8 @@ function setJamView(view, focusTab) {
     var panel = document.getElementById("jam-" + name + "-section");
     if (panel) panel.hidden = name !== view;
   });
-  if (view === "library") loadJamLibrary(0);
+  if (view === "library" && !(options.preserveContent && _jamLibraryLoaded)) loadJamLibrary(0);
+  if (view === "queue") renderQueue((_jamState && _jamState.queue) || []);
   if (view === "history") loadJamHistory(0);
 }
 
@@ -1365,8 +1574,35 @@ function jamFavoriteSummary(item) {
 function jamCreateCatalogCard(item, context) {
   var card = document.createElement("div");
   card.className = "jam-result-item jam-catalog-item jam-catalog-" + item.kind;
+  var explicitActions = context === "library" || (context === "search" && item.kind === "playlist");
+  if (explicitActions) card.classList.add("jam-catalog-item-with-explicit-actions");
   card.setAttribute("role", "listitem");
   card.setAttribute("data-jam-item-key", jamItemKey(item));
+  if (item.kind === "track" && context === "playlist-detail") {
+    var position = jamSafeOptionalInteger(item.playlist_position);
+    var choice = document.createElement("label");
+    choice.className = "jam-playlist-track-choice";
+    choice.hidden = !jamPlaylistSelectionAvailable();
+    var checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "jam-playlist-track-select";
+    checkbox.setAttribute("data-jam-playlist-position", position === null ? "" : String(position));
+    checkbox.setAttribute(
+      "aria-label",
+      "Select " + item.name + " by " + (item.artist || "unknown artist") +
+        (position === null ? "" : ", playlist position " + (position + 1))
+    );
+    checkbox.checked = position !== null && _jamPlaylistSelectedPositions.has(position);
+    checkbox.disabled = position === null || jamPlaylistQueuePending() || !_jamContract || !_jamContract.canControl;
+    checkbox.onchange = function() {
+      if (position === null) return;
+      if (checkbox.checked) _jamPlaylistSelectedPositions.add(position);
+      else _jamPlaylistSelectedPositions.delete(position);
+      renderJamPlaylistSelectionControls();
+    };
+    choice.appendChild(checkbox);
+    card.appendChild(choice);
+  }
   card.appendChild(jamCreateArtwork(item, "jam-result-art"));
 
   var info = document.createElement("div");
@@ -1413,22 +1649,33 @@ function jamCreateCatalogCard(item, context) {
   favorite.onclick = function() { toggleJamFavorite(item); };
   actions.appendChild(favorite);
 
-  if (item.kind === "track" && context === "search") {
+  if (explicitActions) actions.appendChild(jamCreateSpotifyAction(item));
+
+  if (item.kind === "track" && context === "library") {
+    var libraryAdd = document.createElement("button");
+    libraryAdd.type = "button";
+    libraryAdd.className = "jam-primary-btn jam-library-queue-btn";
+    libraryAdd.textContent = "Add to queue";
+    libraryAdd.setAttribute("aria-label", "Add " + item.name + " by " + (item.artist || "unknown artist") + " to queue");
+    libraryAdd.disabled = jamTrackQueuePending() || !_jamContract || !_jamContract.canControl;
+    libraryAdd.onclick = function() { addToQueue(item); };
+    actions.appendChild(libraryAdd);
+  } else if (item.kind === "track" && context === "search") {
     var add = document.createElement("button");
     add.type = "button";
     add.className = "jam-result-add";
     add.textContent = "+";
     add.title = "Add to queue";
     add.setAttribute("aria-label", "Add " + item.name + " by " + (item.artist || "unknown artist") + " to queue");
-    add.disabled = !_jamContract || !_jamContract.canControl;
+    add.disabled = jamTrackQueuePending() || !_jamContract || !_jamContract.canControl;
     add.onclick = function() { addToQueue(item); };
     actions.appendChild(add);
   } else if (item.kind === "playlist" && context !== "detail-summary") {
     var inspect = document.createElement("button");
     inspect.type = "button";
     inspect.className = "jam-secondary-btn jam-inspect-btn";
-    inspect.textContent = "Open";
-    inspect.setAttribute("aria-label", "View " + item.name + " playlist songs");
+    inspect.textContent = "Choose songs";
+    inspect.setAttribute("aria-label", "Choose songs from " + item.name);
     inspect.onclick = function(event) { openJamPlaylistDetail(item, event.currentTarget); };
     actions.appendChild(inspect);
   }
@@ -1441,6 +1688,8 @@ function renderSearchResults(items) {
   if (!container) return;
   container.innerHTML = "";
   _jamSearchItems = jamNormalizeCatalogItems(items, _jamSearchKind);
+  if (_jamSearchItems.length) container.setAttribute("role", "list");
+  else container.removeAttribute("role");
   _jamSearchItems.forEach(function(item) {
     container.appendChild(jamCreateCatalogCard(item, "search"));
   });
@@ -1521,6 +1770,10 @@ async function loadJamLibrary(offset) {
     });
     _jamLibraryOffset = jamSafeInteger(data.offset, requestedOffset);
     _jamLibraryTotal = jamSafeInteger(data.total, _jamLibraryItems.length);
+    if ((!kind || kind.value === "all") && (!contributor || !contributor.value)) {
+      _jamLibraryKnownEmpty = _jamLibraryTotal === 0;
+    }
+    renderJamLibrarySetup();
     var suppliedNext = data.next_offset;
     _jamLibraryNextOffset = suppliedNext === null || suppliedNext === undefined
       ? (_jamLibraryOffset + _jamLibraryItems.length < _jamLibraryTotal ? _jamLibraryOffset + JAM_LIBRARY_PAGE_SIZE : null)
@@ -1528,7 +1781,14 @@ async function loadJamLibrary(offset) {
     _jamLibraryLoaded = true;
     jamUpdateContributorOptions(data.contributors || (data.counts && data.counts.contributors), _jamLibraryItems);
     renderJamLibrary();
-    jamSetViewStatus("jam-library-status", _jamLibraryItems.length ? "Echo Favorites loaded." : "No Echo Favorites match these filters.");
+    jamSetViewStatus(
+      "jam-library-status",
+      _jamLibraryItems.length
+        ? "Echo Favorites loaded."
+        : _jamLibraryKnownEmpty === true
+          ? "No Echo Favorites yet. Copy your Spotify saves above, or use Search and press ☆."
+          : "No Echo Favorites match these filters."
+    );
   } catch (error) {
     if (requestId !== _jamLibraryRequestSeq || (error && error.name === "AbortError")) return;
     jamSetViewStatus("jam-library-status", "Echo Favorites are unavailable right now.", "error");
@@ -1545,7 +1805,17 @@ function renderJamLibrary() {
   var container = document.getElementById("jam-library-list");
   if (!container) return;
   container.innerHTML = "";
+  if (_jamLibraryItems.length) container.setAttribute("role", "list");
+  else container.removeAttribute("role");
   _jamLibraryItems.forEach(function(item) { container.appendChild(jamCreateCatalogCard(item, "library")); });
+  if (!_jamLibraryItems.length) {
+    var empty = document.createElement("div");
+    empty.className = "jam-library-empty";
+    empty.textContent = _jamLibraryKnownEmpty === true
+      ? "Your shared Echo Favorites library is empty."
+      : "Nothing matches the current Library filters.";
+    container.appendChild(empty);
+  }
 }
 
 function jamApplyFavoriteState(item, favorited, normalizedResponse) {
@@ -1612,8 +1882,11 @@ async function toggleJamFavorite(rawItem) {
     var data = await response.json().catch(function() { return {}; });
     var normalized = data.item ? normalizeSpotifyCatalogItem(data.item, item.kind) : null;
     jamApplyFavoriteState(rawItem, favorited, normalized);
-    _jamLibraryLoaded = false;
-    if (_jamActiveView === "library") loadJamLibrary(_jamLibraryOffset);
+    _jamLibraryKnownEmpty = favorited ? false : null;
+    var playlistDetail = document.getElementById("jam-playlist-detail");
+    var preservingLibraryDetail = _jamPlaylistReturnView === "library" && playlistDetail && !playlistDetail.hidden;
+    if (!preservingLibraryDetail) _jamLibraryLoaded = false;
+    if (_jamActiveView === "library" && !preservingLibraryDetail) loadJamLibrary(_jamLibraryOffset);
   } catch (error) {
     showJamError("Could not update Echo Favorites.");
     debugLog("[jam] favorite update error: " + error);
@@ -1629,7 +1902,7 @@ async function importSpotifyFavorites() {
   if (_jamImportPending) return;
   _jamImportPending = true;
   applyJamContractToControls();
-  jamSetViewStatus("jam-library-status", "Importing your Spotify saved songs and playlists...");
+  jamSetViewStatus("jam-library-status", "Checking Spotify for Liked Songs and saved playlists...");
   try {
     var response = await fetch(apiUrl("/api/jam/favorites/import-spotify"), {
       method: "POST",
@@ -1637,7 +1910,16 @@ async function importSpotifyFavorites() {
       body: JSON.stringify({})
     });
     if (!response.ok) {
-      jamSetViewStatus("jam-library-status", await jamApiErrorMessage(response, "import Spotify favorites"), "error");
+      var importPayload = {};
+      try { importPayload = await response.clone().json(); } catch (_) { importPayload = {}; }
+      var importError = await jamApiErrorMessage(response, "import Spotify favorites");
+      if (importPayload.error === "spotify_library_scope_required" && _jamState) {
+        _jamState.spotify_library_authorized = false;
+        renderJamLibrarySetup();
+      }
+      _jamLibraryLoaded = false;
+      await loadJamLibrary(0);
+      jamSetViewStatus("jam-library-status", importError, "error");
       return;
     }
     var data = await response.json();
@@ -1646,12 +1928,21 @@ async function importSpotifyFavorites() {
     var skipped = jamSafeInteger(data.skipped, 0);
     var created = jamSafeOptionalInteger(data.items_created);
     var attributionsAdded = jamSafeOptionalInteger(data.attributions_added);
-    var importMessage = "Scanned " + tracks + " songs and " + playlists + " playlists";
-    if (created !== null) importMessage += "; created " + created + " new favorites";
-    if (attributionsAdded !== null) importMessage += "; added " + attributionsAdded + " attributions";
-    if (skipped) importMessage += "; skipped " + skipped;
+    var importMessage = "Checked " + tracks + " Liked Song" + (tracks === 1 ? "" : "s") +
+      " and " + playlists + " saved playlist" + (playlists === 1 ? "" : "s");
+    if (created !== null) {
+      importMessage += "; added " + created + " new Echo Favorite" + (created === 1 ? "" : "s");
+    }
+    if (attributionsAdded !== null && created !== null && attributionsAdded > created) {
+      var existingAttributions = attributionsAdded - created;
+      importMessage += "; credited you on " + existingAttributions + " existing favorite" +
+        (existingAttributions === 1 ? "" : "s");
+    }
+    if (skipped) importMessage += "; skipped " + skipped + " unavailable item" + (skipped === 1 ? "" : "s");
     var truncated = data.partial === true || data.truncated === true;
     if (truncated) importMessage += "; import stopped at Spotify's safety limit";
+    if (_jamState) _jamState.spotify_library_authorized = true;
+    _jamLibraryKnownEmpty = null;
     _jamLibraryLoaded = false;
     await loadJamLibrary(0);
     jamSetViewStatus("jam-library-status", importMessage + ".", truncated ? "warning" : "success");
@@ -1667,6 +1958,93 @@ async function importSpotifyFavorites() {
 // ──────────────────────────────────────────
 // Queue
 // ──────────────────────────────────────────
+
+function jamSelectedPlaylistPositions() {
+  return Array.from(_jamPlaylistSelectedPositions).sort(function(a, b) { return a - b; });
+}
+
+function jamPlaylistQueuePending() {
+  return !!_jamPlaylistQueueOperation;
+}
+
+function jamBeginPlaylistQueueOperation(context) {
+  if (jamPlaylistQueuePending()) return null;
+  var operation = Object.freeze({
+    epoch: _jamPlaylistQueueEpoch,
+    context: context
+  });
+  _jamPlaylistQueueOperation = operation;
+  return operation;
+}
+
+function jamPlaylistQueueOperationIsCurrent(operation) {
+  return !!operation && operation.epoch === _jamPlaylistQueueEpoch &&
+    _jamPlaylistQueueOperation === operation;
+}
+
+function jamFinishPlaylistQueueOperation(operation) {
+  if (!jamPlaylistQueueOperationIsCurrent(operation)) return false;
+  _jamPlaylistQueueOperation = null;
+  renderJamPlaylistSummary();
+  return true;
+}
+
+function invalidateJamPlaylistQueueLifecycle() {
+  _jamPlaylistQueueEpoch += 1;
+  _jamPlaylistQueueOperation = null;
+  renderJamPlaylistSummary();
+  renderJamPlaylistSelectionControls();
+}
+
+function jamPlaylistSelectionAvailable() {
+  return !!_jamContract && _jamContract.playlistSelectionSupported === true &&
+    !!_jamPlaylist && !_jamPlaylistAccessError && !!jamSafeString(_jamPlaylist.snapshot_id);
+}
+
+function renderJamPlaylistSelectionControls() {
+  var selected = jamSelectedPlaylistPositions();
+  var count = selected.length;
+  var countLabel = document.getElementById("jam-playlist-selection-count");
+  var clear = document.getElementById("jam-playlist-clear-selection");
+  var addSelected = document.getElementById("jam-playlist-add-selected");
+  var loadMore = document.getElementById("jam-playlist-load-more");
+  var selectionGroup = document.querySelector(".jam-playlist-selection");
+  var canControl = !!_jamContract && _jamContract.canControl;
+  var selectionAvailable = jamPlaylistSelectionAvailable();
+  if (selectionGroup) selectionGroup.hidden = !selectionAvailable;
+  if (!selectionAvailable && _jamPlaylistSelectedPositions.size) {
+    _jamPlaylistSelectedPositions.clear();
+    _jamPlaylistResumeRequired = false;
+    selected = [];
+    count = 0;
+  }
+  if (countLabel) countLabel.textContent = count + (count === 1 ? " song selected" : " songs selected");
+  if (clear) clear.disabled = !selectionAvailable || jamPlaylistQueuePending() || count === 0;
+  if (addSelected) {
+    addSelected.disabled = !selectionAvailable || jamPlaylistQueuePending() || _jamPlaylistLoading || count === 0 || !canControl;
+    addSelected.title = count
+      ? "Add the selected playlist songs as one queue batch"
+      : "Select one or more playlist songs first";
+  }
+  if (loadMore) loadMore.disabled = jamPlaylistQueuePending() || _jamPlaylistLoading || !!_jamPlaylistAccessError;
+  document.querySelectorAll(".jam-playlist-track-select").forEach(function(input) {
+    var position = jamSafeOptionalInteger(input.getAttribute("data-jam-playlist-position"));
+    var choice = input.closest(".jam-playlist-track-choice");
+    if (choice) choice.hidden = !selectionAvailable;
+    input.checked = position !== null && _jamPlaylistSelectedPositions.has(position);
+    input.disabled = !selectionAvailable || position === null || jamPlaylistQueuePending() || !canControl;
+  });
+}
+
+function clearJamPlaylistSelection() {
+  if (jamPlaylistQueuePending() || !_jamPlaylistSelectedPositions.size) return;
+  _jamPlaylistSelectedPositions.clear();
+  if (_jamPlaylistResumeRequired) {
+    _jamPlaylistResumeRequired = false;
+    jamSetViewStatus("jam-playlist-status", "Remaining-song recovery was cleared. Adding the entire playlist again can duplicate songs already queued.", "warning");
+  }
+  renderJamPlaylistSelectionControls();
+}
 
 function renderJamPlaylistSummary() {
   var container = document.getElementById("jam-playlist-summary");
@@ -1707,11 +2085,29 @@ function renderJamPlaylistSummary() {
     favorite.disabled = !!_jamFavoritePending[jamItemKey(_jamPlaylist)];
   }
   if (addAll) {
-    var countKnown = knownCount !== null && knownCount !== undefined;
-    var overLimit = countKnown && knownCount > 50;
-    addAll.disabled = _jamPlaylistQueuePending || _jamPlaylistLoading || overLimit || !_jamContract || !_jamContract.canControl;
-    addAll.title = overLimit ? "Echo can add at most 50 playlist songs at once" : "Add this playlist as one queue batch";
+    var resumeReady = _jamPlaylistResumeRequired && _jamPlaylistSelectedPositions.size > 0;
+    var exceedsBulkLimit = jamSafeInteger(_jamPlaylistTotal, 0) > JAM_PLAYLIST_MAX_QUEUE_TRACKS;
+    addAll.textContent = resumeReady ? "Add remaining songs" : "Add entire playlist";
+    addAll.disabled = jamPlaylistQueuePending() || _jamPlaylistLoading || !!_jamPlaylistAccessError ||
+      !_jamContract || !_jamContract.canControl ||
+      (!resumeReady && exceedsBulkLimit) ||
+      (resumeReady && !jamPlaylistSelectionAvailable());
+    if (_jamPlaylistAccessError) {
+      addAll.title = "Spotify does not allow Echo to read this playlist's songs";
+    } else if (resumeReady) {
+      addAll.title = "Continue the interrupted batch without queueing its successful songs again";
+    } else if (exceedsBulkLimit) {
+      addAll.title = "Echo can queue at most 1,000 songs at once; select a smaller group";
+    } else {
+      addAll.title = "Add every playable song from this playlist as one queue batch";
+    }
   }
+  var back = document.getElementById("jam-playlist-back");
+  if (back) back.disabled = jamPlaylistQueuePending();
+  document.querySelectorAll(".jam-browser-tab").forEach(function(tab) {
+    tab.disabled = jamPlaylistQueuePending();
+  });
+  renderJamPlaylistSelectionControls();
 }
 
 function openJamPlaylistDetail(rawPlaylist, opener) {
@@ -1723,10 +2119,16 @@ function openJamPlaylistDetail(rawPlaylist, opener) {
   if (_jamPlaylistController) _jamPlaylistController.abort();
   _jamPlaylistRequestSeq += 1;
   _jamPlaylistLoading = false;
+  _jamPlaylistAccessError = null;
+  _jamPlaylistFailedOffset = 0;
+  _jamPlaylistCacheTruncated = false;
+  _jamPlaylistCachePositionLimit = JAM_PLAYLIST_MAX_QUEUE_TRACKS;
   _jamPlaylist = playlist;
   _jamPlaylistItems = [];
   _jamPlaylistTotal = playlist.item_count;
   _jamPlaylistNextOffset = 0;
+  _jamPlaylistSelectedPositions.clear();
+  _jamPlaylistResumeRequired = false;
   _jamPlaylistReturnView = _jamActiveView;
   _jamPlaylistOpener = opener || document.activeElement;
   ["library", "search", "queue", "history"].forEach(function(name) {
@@ -1740,15 +2142,27 @@ function openJamPlaylistDetail(rawPlaylist, opener) {
   jamSetViewStatus("jam-playlist-status", "Loading playlist songs...");
   fetchJamPlaylistItems(0, false);
   var back = document.getElementById("jam-playlist-back");
-  if (back) back.focus();
+  if (back) {
+    back.textContent = _jamPlaylistReturnView === "library"
+      ? "Back to Library"
+      : _jamPlaylistReturnView === "search"
+        ? "Back to search results"
+        : "Back to " + _jamPlaylistReturnView.charAt(0).toUpperCase() + _jamPlaylistReturnView.slice(1);
+    back.focus();
+  }
 }
 
 function closeJamPlaylistDetail() {
+  if (jamPlaylistQueuePending()) {
+    jamSetViewStatus("jam-playlist-status", "Wait for the playlist queue operation to finish before leaving this playlist.", "warning");
+    return;
+  }
   if (_jamPlaylistController) _jamPlaylistController.abort();
   _jamPlaylistRequestSeq += 1;
   _jamPlaylistLoading = false;
   var opener = _jamPlaylistOpener;
-  setJamView(_jamPlaylistReturnView || "search", false);
+  var returnView = _jamPlaylistReturnView || "search";
+  setJamView(returnView, false, { preserveContent: returnView === "library" });
   _jamPlaylistOpener = null;
   if (opener && document.contains(opener) && typeof opener.focus === "function") opener.focus();
 }
@@ -1758,12 +2172,14 @@ function jamSkippedCount(value) {
 }
 
 async function fetchJamPlaylistItems(offset, append) {
-  if (!_jamPlaylist || _jamPlaylistLoading) return;
+  if (!_jamPlaylist || _jamPlaylistLoading || _jamPlaylistAccessError) return;
   if (_jamPlaylistController) _jamPlaylistController.abort();
   var controller = typeof AbortController === "function" ? new AbortController() : null;
   _jamPlaylistController = controller;
   var requestId = ++_jamPlaylistRequestSeq;
   var requestedOffset = jamSafeInteger(offset, 0);
+  var expectedSnapshot = jamSafeString(_jamPlaylist.snapshot_id);
+  var reloadForSnapshotChange = false;
   _jamPlaylistLoading = true;
   renderJamPlaylistSummary();
   jamSetBusy("jam-playlist-items", true);
@@ -1775,13 +2191,50 @@ async function fetchJamPlaylistItems(offset, append) {
     var response = await fetch(apiUrl("/api/jam/playlists/" + encodeURIComponent(_jamPlaylist.spotify_id) + "/items?offset=" + requestedOffset + "&limit=" + JAM_PLAYLIST_PAGE_SIZE), options);
     if (requestId !== _jamPlaylistRequestSeq) return;
     if (!response.ok) {
-      jamSetViewStatus("jam-playlist-status", await jamApiErrorMessage(response, "load playlist songs"), "error");
+      var rejection = {};
+      try { rejection = await response.clone().json(); } catch (_) { rejection = {}; }
+      var errorMessage = await jamApiErrorMessage(response, "load playlist songs");
+      if ((response.status === 403 && rejection.error === "playlist_items_forbidden") ||
+          rejection.error === "playlist_catalog_unavailable") {
+        _jamPlaylistAccessError = {
+          code: rejection.error || "playlist_catalog_unavailable",
+          message: errorMessage
+        };
+        _jamPlaylistFailedOffset = requestedOffset;
+        if (!append) _jamPlaylistItems = [];
+        _jamPlaylistNextOffset = requestedOffset;
+        _jamPlaylistSelectedPositions.clear();
+        _jamPlaylistResumeRequired = false;
+        renderJamPlaylistSummary();
+        renderJamPlaylistItems();
+      }
+      jamSetViewStatus("jam-playlist-status", errorMessage, "error");
       return;
     }
     var data = await response.json();
     if (requestId !== _jamPlaylistRequestSeq) return;
+    _jamPlaylistAccessError = null;
+    _jamPlaylistFailedOffset = 0;
+    var returnedPlaylist = data.playlist
+      ? normalizeSpotifyCatalogItem(data.playlist, "playlist")
+      : null;
+    var returnedSnapshot = returnedPlaylist ? jamSafeString(returnedPlaylist.snapshot_id) : "";
+    if (append && (!returnedPlaylist || returnedSnapshot !== expectedSnapshot)) {
+      if (returnedPlaylist) _jamPlaylist = returnedPlaylist;
+      _jamPlaylistItems = [];
+      _jamPlaylistTotal = returnedPlaylist && returnedPlaylist.item_count !== null
+        ? returnedPlaylist.item_count
+        : jamSafeInteger(data.total, 0);
+      _jamPlaylistNextOffset = 0;
+      _jamPlaylistSelectedPositions.clear();
+      _jamPlaylistResumeRequired = false;
+      reloadForSnapshotChange = true;
+      renderJamPlaylistSummary();
+      renderJamPlaylistItems();
+      jamSetViewStatus("jam-playlist-status", "This playlist changed on Spotify. Reloading its songs before you select or queue anything...", "warning");
+      return;
+    }
     if (data.playlist) {
-      var returnedPlaylist = normalizeSpotifyCatalogItem(data.playlist, "playlist");
       if (returnedPlaylist) _jamPlaylist = returnedPlaylist;
     }
     var pageItems = jamNormalizeCatalogItems(data.items || [], "track");
@@ -1789,15 +2242,41 @@ async function fetchJamPlaylistItems(offset, append) {
     _jamPlaylistTotal = jamSafeInteger(data.total, _jamPlaylist.item_count || _jamPlaylistItems.length);
     _jamPlaylist.item_count = _jamPlaylistTotal;
     var suppliedNext = data.next_offset;
-    _jamPlaylistNextOffset = suppliedNext === null || suppliedNext === undefined
-      ? (requestedOffset + pageItems.length < _jamPlaylistTotal ? requestedOffset + pageItems.length : null)
-      : jamSafeInteger(suppliedNext, 0);
+    if (suppliedNext === null) {
+      _jamPlaylistNextOffset = null;
+    } else if (suppliedNext === undefined) {
+      _jamPlaylistNextOffset = requestedOffset + pageItems.length < _jamPlaylistTotal
+        ? requestedOffset + pageItems.length
+        : null;
+    } else {
+      _jamPlaylistNextOffset = jamSafeInteger(suppliedNext, 0);
+    }
     renderJamPlaylistSummary();
     renderJamPlaylistItems();
     var skipped = jamSkippedCount(data.skipped);
+    var localCacheNote = "";
+    if (data.items_source === "local_cache") {
+      var cacheInfo = data.local_cache || {};
+      var cachedCount = jamSafeInteger(cacheInfo.cached_count, _jamPlaylistItems.length);
+      var cacheTotal = jamSafeInteger(cacheInfo.total, _jamPlaylistTotal);
+      _jamPlaylistCacheTruncated = cacheInfo.truncated === true;
+      _jamPlaylistCachePositionLimit = jamSafeInteger(
+        cacheInfo.position_limit,
+        JAM_PLAYLIST_MAX_QUEUE_TRACKS
+      );
+      localCacheNote = " " + cachedCount + " of " + cacheTotal +
+        " songs are cached privately on Echo in 50-song chunks.";
+      if (_jamPlaylistCacheTruncated) {
+        localCacheNote += " Echo exposes the first " + _jamPlaylistCachePositionLimit +
+          " positions; select a smaller group to queue.";
+      }
+    } else {
+      _jamPlaylistCacheTruncated = false;
+      _jamPlaylistCachePositionLimit = JAM_PLAYLIST_MAX_QUEUE_TRACKS;
+    }
     jamSetViewStatus(
       "jam-playlist-status",
-      "Loaded " + _jamPlaylistItems.length + " of " + _jamPlaylistTotal + " songs" + (skipped ? "; " + skipped + " unavailable skipped" : "") + ".",
+      "Loaded " + _jamPlaylistItems.length + " of " + _jamPlaylistTotal + " songs" + (skipped ? "; " + skipped + " unavailable skipped" : "") + "." + localCacheNote,
       skipped ? "warning" : ""
     );
   } catch (error) {
@@ -1811,8 +2290,9 @@ async function fetchJamPlaylistItems(offset, append) {
       jamSetBusy("jam-playlist-items", false);
       if (loadMore) {
         loadMore.disabled = false;
-        loadMore.hidden = _jamPlaylistNextOffset === null;
+        loadMore.hidden = !!_jamPlaylistAccessError || _jamPlaylistNextOffset === null;
       }
+      if (reloadForSnapshotChange) fetchJamPlaylistItems(0, false);
     }
   }
 }
@@ -1821,9 +2301,46 @@ function renderJamPlaylistItems() {
   var container = document.getElementById("jam-playlist-items");
   if (!container) return;
   container.innerHTML = "";
+  if (_jamPlaylistAccessError && _jamPlaylist) {
+    container.removeAttribute("role");
+    var blocked = document.createElement("div");
+    blocked.className = "jam-playlist-access-blocked";
+    blocked.setAttribute("role", "alert");
+    var title = document.createElement("strong");
+    title.textContent = "Echo couldn't load this playlist's next 50 songs";
+    blocked.appendChild(title);
+    var explanation = document.createElement("p");
+    explanation.textContent = "Spotify's normal playlist endpoint blocked this playlist, and Echo's bounded public-catalog fallback did not complete. Retry this 50-song chunk or open the playlist in Spotify.";
+    blocked.appendChild(explanation);
+    var retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "jam-secondary-btn";
+    retry.textContent = "Retry 50-song chunk";
+    retry.addEventListener("click", function() {
+      var retryOffset = _jamPlaylistFailedOffset;
+      _jamPlaylistAccessError = null;
+      _jamPlaylistNextOffset = retryOffset;
+      renderJamPlaylistSummary();
+      renderJamPlaylistItems();
+      fetchJamPlaylistItems(retryOffset, retryOffset > 0);
+    });
+    blocked.appendChild(retry);
+    blocked.appendChild(jamCreateSpotifyAction(_jamPlaylist));
+    container.appendChild(blocked);
+    var blockedLoadMore = document.getElementById("jam-playlist-load-more");
+    if (blockedLoadMore) blockedLoadMore.hidden = true;
+    renderJamPlaylistSelectionControls();
+    return;
+  }
+  if (_jamPlaylistItems.length) container.setAttribute("role", "list");
+  else container.removeAttribute("role");
   _jamPlaylistItems.forEach(function(item) { container.appendChild(jamCreateCatalogCard(item, "playlist-detail")); });
   var loadMore = document.getElementById("jam-playlist-load-more");
-  if (loadMore) loadMore.hidden = _jamPlaylistNextOffset === null;
+  if (loadMore) {
+    loadMore.hidden = _jamPlaylistNextOffset === null;
+    loadMore.textContent = "Load next 50 songs";
+  }
+  renderJamPlaylistSelectionControls();
 }
 
 function jamRequestId() {
@@ -1831,41 +2348,302 @@ function jamRequestId() {
   return "jam-playlist-" + Date.now() + "-" + Math.random().toString(36).slice(2);
 }
 
-async function addPlaylistToQueue() {
-  if (!_jamPlaylist || _jamPlaylistQueuePending || !jamActionAllowed("control")) return;
-  if (_jamPlaylistLoading) {
-    jamSetViewStatus("jam-playlist-status", "Wait for the playlist details to finish loading.");
+function jamTrackQueuePending() {
+  return !!_jamTrackQueueOperation;
+}
+
+function jamTrackQueueFingerprint(track, generation) {
+  return JSON.stringify([generation, track.spotify_uri]);
+}
+
+function jamTrackAmbiguousRequestMap() {
+  if (_jamTrackAmbiguousRequests) return _jamTrackAmbiguousRequests;
+  _jamTrackAmbiguousRequests = new Map();
+  try {
+    var saved = JSON.parse(sessionStorage.getItem(JAM_TRACK_AMBIGUOUS_STORAGE_KEY) || "[]");
+    (Array.isArray(saved) ? saved.slice(-16) : []).forEach(function(entry) {
+      if (!Array.isArray(entry) || entry.length !== 2) return;
+      if (typeof entry[0] !== "string" || typeof entry[1] !== "string") return;
+      if (entry[0].length > 512 || !/^[A-Za-z0-9_-]{8,128}$/.test(entry[1])) return;
+      _jamTrackAmbiguousRequests.set(entry[0], entry[1]);
+    });
+  } catch (_) {}
+  return _jamTrackAmbiguousRequests;
+}
+
+function jamPersistAmbiguousTrackRequests() {
+  try {
+    var entries = Array.from(jamTrackAmbiguousRequestMap().entries()).slice(-16);
+    if (entries.length) sessionStorage.setItem(JAM_TRACK_AMBIGUOUS_STORAGE_KEY, JSON.stringify(entries));
+    else sessionStorage.removeItem(JAM_TRACK_AMBIGUOUS_STORAGE_KEY);
+  } catch (_) {}
+}
+
+function jamTrackQueueRequestRecord(track, generation) {
+  var fingerprint = jamTrackQueueFingerprint(track, generation);
+  var requests = jamTrackAmbiguousRequestMap();
+  return {
+    fingerprint: fingerprint,
+    request_id: requests.get(fingerprint) || jamRequestId()
+  };
+}
+
+function jamRememberAmbiguousTrackRequest(record) {
+  var requests = jamTrackAmbiguousRequestMap();
+  requests.delete(record.fingerprint);
+  requests.set(record.fingerprint, record.request_id);
+  while (requests.size > 16) requests.delete(requests.keys().next().value);
+  jamPersistAmbiguousTrackRequests();
+}
+
+function jamForgetAmbiguousTrackRequest(record) {
+  var requests = jamTrackAmbiguousRequestMap();
+  if (requests.get(record.fingerprint) !== record.request_id) return;
+  requests.delete(record.fingerprint);
+  jamPersistAmbiguousTrackRequests();
+}
+
+function jamBeginTrackQueueOperation(record) {
+  if (jamTrackQueuePending()) return null;
+  var operation = Object.freeze({
+    epoch: _jamTrackQueueEpoch,
+    record: record
+  });
+  _jamTrackQueueOperation = operation;
+  applyJamContractToControls();
+  return operation;
+}
+
+function jamTrackQueueOperationIsCurrent(operation) {
+  return !!operation && operation.epoch === _jamTrackQueueEpoch &&
+    _jamTrackQueueOperation === operation;
+}
+
+function jamFinishTrackQueueOperation(operation) {
+  if (!jamTrackQueueOperationIsCurrent(operation)) return false;
+  _jamTrackQueueOperation = null;
+  applyJamContractToControls();
+  return true;
+}
+
+function invalidateJamTrackQueueLifecycle() {
+  _jamTrackQueueEpoch += 1;
+  _jamTrackQueueOperation = null;
+  applyJamContractToControls();
+}
+
+function jamPlaylistQueueFingerprint(context) {
+  return JSON.stringify([
+    context.generation,
+    context.playlist_id,
+    context.snapshot_id || "",
+    context.selected_positions === null ? null : context.selected_positions
+  ]);
+}
+
+function jamPlaylistAmbiguousRequestMap() {
+  if (_jamPlaylistAmbiguousRequests) return _jamPlaylistAmbiguousRequests;
+  _jamPlaylistAmbiguousRequests = new Map();
+  try {
+    var saved = JSON.parse(sessionStorage.getItem(JAM_PLAYLIST_AMBIGUOUS_STORAGE_KEY) || "[]");
+    (Array.isArray(saved) ? saved.slice(-8) : []).forEach(function(entry) {
+      if (!Array.isArray(entry) || entry.length !== 2) return;
+      if (typeof entry[0] !== "string" || typeof entry[1] !== "string") return;
+      if (entry[0].length > 12000 || !/^[A-Za-z0-9_-]{8,128}$/.test(entry[1])) return;
+      _jamPlaylistAmbiguousRequests.set(entry[0], entry[1]);
+    });
+  } catch (_) {}
+  return _jamPlaylistAmbiguousRequests;
+}
+
+function jamPersistAmbiguousPlaylistRequests() {
+  try {
+    var entries = Array.from(jamPlaylistAmbiguousRequestMap().entries()).slice(-8);
+    if (entries.length) sessionStorage.setItem(JAM_PLAYLIST_AMBIGUOUS_STORAGE_KEY, JSON.stringify(entries));
+    else sessionStorage.removeItem(JAM_PLAYLIST_AMBIGUOUS_STORAGE_KEY);
+  } catch (_) {}
+}
+
+function jamPlaylistRequestRecord(context) {
+  var fingerprint = jamPlaylistQueueFingerprint(context);
+  var requests = jamPlaylistAmbiguousRequestMap();
+  return {
+    fingerprint: fingerprint,
+    request_id: requests.get(fingerprint) || jamRequestId()
+  };
+}
+
+function jamRememberAmbiguousPlaylistRequest(record) {
+  var requests = jamPlaylistAmbiguousRequestMap();
+  requests.delete(record.fingerprint);
+  requests.set(record.fingerprint, record.request_id);
+  while (requests.size > 8) requests.delete(requests.keys().next().value);
+  jamPersistAmbiguousPlaylistRequests();
+}
+
+function jamForgetAmbiguousPlaylistRequest(record) {
+  var requests = jamPlaylistAmbiguousRequestMap();
+  if (requests.get(record.fingerprint) !== record.request_id) return;
+  requests.delete(record.fingerprint);
+  jamPersistAmbiguousPlaylistRequests();
+}
+
+function jamClearAmbiguousPlaylistRequests() {
+  jamPlaylistAmbiguousRequestMap().clear();
+  jamPersistAmbiguousPlaylistRequests();
+}
+
+function jamPlaylistQueueActionContext(selectedPositions) {
+  if (!_jamPlaylist) return null;
+  if (selectedPositions !== null && !jamPlaylistSelectionAvailable()) return null;
+  var positions = selectedPositions === null
+    ? null
+    : Object.freeze(selectedPositions.slice().sort(function(a, b) { return a - b; }));
+  return Object.freeze({
+    generation: _jamState && _jamState.generation,
+    playlist_id: _jamPlaylist.spotify_id,
+    playlist_name: _jamPlaylist.name,
+    snapshot_id: _jamPlaylist.snapshot_id || null,
+    selected_positions: positions,
+    track_count: positions === null
+      ? (_jamPlaylistTotal !== null && _jamPlaylistTotal !== undefined ? _jamPlaylistTotal : (_jamPlaylist.item_count || 0))
+      : positions.length,
+    detail_request_seq: _jamPlaylistRequestSeq,
+    queue_epoch: _jamPlaylistQueueEpoch
+  });
+}
+
+function jamPlaylistQueuePayload(context, requestId, confirmed) {
+  var payload = {
+    generation: context.generation,
+    playlist_id: context.playlist_id,
+    request_id: requestId,
+    confirmed: confirmed,
+    snapshot_id: context.snapshot_id
+  };
+  if (context.selected_positions !== null) payload.selected_positions = context.selected_positions.slice();
+  return payload;
+}
+
+function jamPlaylistActionIsCurrent(context) {
+  return !!_jamPlaylist && _jamPlaylist.spotify_id === context.playlist_id &&
+    _jamPlaylistRequestSeq === context.detail_request_seq &&
+    _jamPlaylistQueueEpoch === context.queue_epoch;
+}
+
+function jamSetPlaylistActionStatus(context, message, tone) {
+  if (jamPlaylistActionIsCurrent(context)) jamSetViewStatus("jam-playlist-status", message, tone);
+}
+
+function jamPlaylistResponsePositions(value) {
+  if (!Array.isArray(value)) return [];
+  var seen = new Set();
+  return value.map(function(entry) {
+    if (!entry || typeof entry !== "object") return jamSafeOptionalInteger(entry);
+    return jamSafeOptionalInteger(entry.position !== undefined ? entry.position : entry.playlist_position);
+  }).filter(function(position) {
+    if (position === null || seen.has(position)) return false;
+    seen.add(position);
+    return true;
+  });
+}
+
+function applyJamPlaylistSelectionReceipt(context, data) {
+  if (context.selected_positions === null || !jamPlaylistActionIsCurrent(context)) return;
+  var submitted = context.selected_positions.slice();
+  var processed = new Set();
+  var skippedPositions = jamPlaylistResponsePositions(data && data.skipped);
+  skippedPositions.forEach(function(position) { processed.add(position); });
+
+  var exactQueued = jamPlaylistResponsePositions(data && data.queued_positions);
+  if (!exactQueued.length) exactQueued = jamPlaylistResponsePositions(data && data.queued);
+  var exactProcessed = jamPlaylistResponsePositions(data && data.processed_positions);
+  exactQueued.concat(exactProcessed).forEach(function(position) { processed.add(position); });
+
+  var complete = data && data.complete === true;
+  var partial = data && (data.partial === true || data.complete === false || data.ok === false);
+  if (complete || !partial) {
+    submitted.forEach(function(position) { processed.add(position); });
+  } else if (!exactQueued.length && !exactProcessed.length) {
+    var queuedRemaining = jamSafeInteger(data && data.queued_count, 0);
+    submitted.forEach(function(position) {
+      if (processed.has(position) || queuedRemaining <= 0) return;
+      processed.add(position);
+      queuedRemaining -= 1;
+    });
+  }
+
+  processed.forEach(function(position) { _jamPlaylistSelectedPositions.delete(position); });
+  if (_jamPlaylistResumeRequired && _jamPlaylistSelectedPositions.size === 0) {
+    _jamPlaylistResumeRequired = false;
+  }
+  renderJamPlaylistSelectionControls();
+}
+
+function applyJamPlaylistEntireReceipt(context, data) {
+  if (context.selected_positions !== null || !jamPlaylistActionIsCurrent(context)) return 0;
+  var remaining = jamPlaylistResponsePositions(data && data.remaining_positions).filter(function(position) {
+    return context.track_count <= 0 || position < context.track_count;
+  });
+  _jamPlaylistSelectedPositions.clear();
+  remaining.forEach(function(position) { _jamPlaylistSelectedPositions.add(position); });
+  _jamPlaylistResumeRequired = remaining.length > 0;
+  renderJamPlaylistSelectionControls();
+  return remaining.length;
+}
+
+function jamPlaylistConfirmationMessage(context, trackCount) {
+  return context.selected_positions === null
+    ? "Add all " + trackCount + " songs from " + context.playlist_name + " to the queue?"
+    : "Add " + trackCount + " selected songs from " + context.playlist_name + " to the queue?";
+}
+
+async function enqueueJamPlaylist(context) {
+  if (!context || jamPlaylistQueuePending() || !jamActionAllowed("control")) return;
+  if (_jamPlaylistAccessError) {
+    jamSetPlaylistActionStatus(context, _jamPlaylistAccessError.message, "error");
     return;
   }
-  var trackCount = _jamPlaylistTotal !== null && _jamPlaylistTotal !== undefined
-    ? _jamPlaylistTotal
-    : (_jamPlaylist.item_count || 0);
-  if (trackCount > 50) {
-    jamSetViewStatus("jam-playlist-status", "This playlist has " + trackCount + " songs. Echo can add at most 50 at once.", "error");
+  if (_jamPlaylistLoading) {
+    jamSetPlaylistActionStatus(context, "Wait for the playlist details to finish loading.");
+    return;
+  }
+  var selectedBatch = context.selected_positions !== null;
+  if (selectedBatch && !jamPlaylistSelectionAvailable()) {
+    jamSetPlaylistActionStatus(context, "Reopen this playlist after Echo finishes updating before adding selected songs.", "error");
+    return;
+  }
+  var trackCount = context.track_count;
+  if (selectedBatch && trackCount === 0) {
+    jamSetPlaylistActionStatus(context, "Select one or more playlist songs first.");
     return;
   }
   var confirmed = false;
   if (trackCount > 25) {
-    confirmed = window.confirm("Add all " + trackCount + " songs from " + _jamPlaylist.name + " to the queue?");
+    confirmed = window.confirm(jamPlaylistConfirmationMessage(context, trackCount));
     if (!confirmed) {
-      jamSetViewStatus("jam-playlist-status", "Playlist was not added.");
+      jamSetPlaylistActionStatus(context, selectedBatch ? "Selected songs were not added." : "Playlist was not added.");
       return;
     }
   }
-  _jamPlaylistQueuePending = true;
+  var operation = jamBeginPlaylistQueueOperation(context);
+  if (!operation) return;
   renderJamPlaylistSummary();
-  jamSetViewStatus("jam-playlist-status", "Adding playlist to the queue...");
+  jamSetPlaylistActionStatus(context, selectedBatch ? "Adding selected songs to the queue..." : "Adding playlist to the queue...");
+  var requestRecord = jamPlaylistRequestRecord(context);
+  var requestId = requestRecord.request_id;
+  // Persist before dispatch. A reload or renderer exit can happen after the
+  // server commits but before fetch rejects, so catch is too late to establish
+  // the idempotency key needed by the next attempt.
+  jamRememberAmbiguousPlaylistRequest(requestRecord);
+  var endpoint = selectedBatch
+    ? "/api/jam/queue/playlist/selection"
+    : "/api/jam/queue/playlist";
   try {
-    var requestId = jamRequestId();
-    var response = await fetch(apiUrl("/api/jam/queue/playlist"), {
+    var response = await fetch(apiUrl(endpoint), {
       method: "POST",
       headers: jamActorHeaders(),
-      body: JSON.stringify({
-        generation: _jamState && _jamState.generation,
-        playlist_id: _jamPlaylist.spotify_id,
-        request_id: requestId,
-        confirmed: confirmed
-      })
+      body: JSON.stringify(jamPlaylistQueuePayload(context, requestId, confirmed))
     });
     if (!response.ok) {
       var rejection = {};
@@ -1874,55 +2652,80 @@ async function addPlaylistToQueue() {
         var serverCount = jamSafeOptionalInteger(rejection.playable_count !== undefined
           ? rejection.playable_count
           : (rejection.track_count || rejection.item_count));
-        if (serverCount !== null && serverCount > 50) {
-          jamSetViewStatus("jam-playlist-status", "This playlist has " + serverCount + " songs. Echo can add at most 50 at once.", "error");
-          return;
-        }
-        confirmed = window.confirm("Add all " + (serverCount !== null ? serverCount + " " : "available ") + "songs from " + _jamPlaylist.name + " to the queue?");
+        confirmed = window.confirm(serverCount !== null
+          ? jamPlaylistConfirmationMessage(context, serverCount)
+          : "Add the available " + (selectedBatch ? "selected songs" : "songs") + " from " + context.playlist_name + " to the queue?");
         if (!confirmed) {
-          jamSetViewStatus("jam-playlist-status", "Playlist was not added.");
+          jamForgetAmbiguousPlaylistRequest(requestRecord);
+          jamSetPlaylistActionStatus(context, selectedBatch ? "Selected songs were not added." : "Playlist was not added.");
           return;
         }
-        response = await fetch(apiUrl("/api/jam/queue/playlist"), {
+        response = await fetch(apiUrl(endpoint), {
           method: "POST",
           headers: jamActorHeaders(),
-          body: JSON.stringify({
-            generation: _jamState && _jamState.generation,
-            playlist_id: _jamPlaylist.spotify_id,
-            request_id: requestId,
-            confirmed: true
-          })
+          body: JSON.stringify(jamPlaylistQueuePayload(context, requestId, true))
         });
       }
     }
     if (!response.ok) {
-      jamSetViewStatus("jam-playlist-status", await jamApiErrorMessage(response, "add playlist to the queue"), "error");
+      jamForgetAmbiguousPlaylistRequest(requestRecord);
+      jamSetPlaylistActionStatus(context, await jamApiErrorMessage(response, selectedBatch ? "add selected songs to the queue" : "add playlist to the queue"), "error");
       return;
     }
     var data = await response.json();
+    if (!jamPlaylistActionIsCurrent(context)) {
+      // Keep the request ID until this exact playlist/snapshot is reopened.
+      // Retrying then retrieves the server's cached receipt instead of
+      // duplicating a batch whose response arrived after disconnect/cleanup.
+      return;
+    }
+    jamForgetAmbiguousPlaylistRequest(requestRecord);
     var queued = jamSafeInteger(data.queued_count, 0);
     var skipped = jamSkippedCount(data.skipped);
-    var partial = data.partial === true || data.complete === false || data.ok === false || skipped > 0;
     var failureObject = data.failure && typeof data.failure === "object" ? data.failure : null;
+    var interrupted = !!failureObject;
     var failure = jamSafeString(failureObject ? failureObject.message : data.failure);
     var failureRetryAfter = failureObject && failureObject.retry_after !== null && failureObject.retry_after !== undefined
       ? String(failureObject.retry_after).trim()
       : "";
     var retryMessage = failureRetryAfter ? " Try again in " + failureRetryAfter + " seconds." : "";
-    jamSetViewStatus(
-      "jam-playlist-status",
-      "Added " + queued + (queued === 1 ? " song" : " songs") + " to the queue" + (skipped ? "; skipped " + skipped : "") + "." + (partial ? " The playlist was partially added." : "") + (failure ? " " + failure : "") + retryMessage,
-      partial ? "warning" : "success"
+    applyJamPlaylistSelectionReceipt(context, data);
+    var remaining = selectedBatch
+      ? _jamPlaylistSelectedPositions.size
+      : applyJamPlaylistEntireReceipt(context, data);
+    var recoveryMessage = interrupted && remaining
+      ? " " + remaining + (remaining === 1 ? " song remains" : " songs remain") +
+        (selectedBatch ? " selected." : " selected; use Add remaining songs to continue without duplicating the successful songs.")
+      : interrupted
+        ? " The batch stopped before Echo could confirm every remaining song."
+        : "";
+    var warning = interrupted || skipped > 0;
+    jamSetPlaylistActionStatus(
+      context,
+      "Added " + queued + (queued === 1 ? " song" : " songs") + " to the queue" + (skipped ? "; skipped " + skipped + " unavailable" : "") + "." + recoveryMessage + (failure ? " " + failure : "") + retryMessage,
+      warning ? "warning" : "success"
     );
-    showJamToast("Added " + queued + (queued === 1 ? " song" : " songs") + " from " + _jamPlaylist.name);
+    showJamToast("Added " + queued + (queued === 1 ? " song" : " songs") + " from " + context.playlist_name);
     fetchJamState();
   } catch (error) {
-    jamSetViewStatus("jam-playlist-status", "Could not add that playlist to the queue.", "error");
+    // This is normally already persisted before dispatch; remembering again
+    // refreshes its bounded recency without changing the request ID.
+    jamRememberAmbiguousPlaylistRequest(requestRecord);
+    jamSetPlaylistActionStatus(context, selectedBatch ? "Could not add the selected songs to the queue." : "Could not add that playlist to the queue.", "error");
     debugLog("[jam] playlist queue error: " + error);
   } finally {
-    _jamPlaylistQueuePending = false;
-    renderJamPlaylistSummary();
+    jamFinishPlaylistQueueOperation(operation);
   }
+}
+
+function addPlaylistToQueue() {
+  return enqueueJamPlaylist(jamPlaylistQueueActionContext(
+    _jamPlaylistResumeRequired ? jamSelectedPlaylistPositions() : null
+  ));
+}
+
+function addSelectedPlaylistTracksToQueue() {
+  return enqueueJamPlaylist(jamPlaylistQueueActionContext(jamSelectedPlaylistPositions()));
 }
 
 function jamDateValue(value) {
@@ -1940,17 +2743,17 @@ function jamDateValue(value) {
 
 function jamHistoryEntry(raw) {
   if (!raw || typeof raw !== "object") return null;
-  var trackSource = raw.track && typeof raw.track === "object" ? Object.assign({}, raw.track) : {
-    kind: "track",
-    spotify_id: raw.spotify_id || raw.track_id || raw.track_spotify_id,
-    spotify_uri: raw.spotify_uri || raw.track_uri,
-    spotify_url: raw.spotify_url || raw.track_url,
-    name: raw.name || raw.track_name,
-    artist: raw.artist || raw.track_artist,
-    artwork_url: raw.artwork_url || raw.album_art_url,
-    duration_ms: raw.duration_ms
-  };
+  var trackSource = raw.track && typeof raw.track === "object" ? Object.assign({}, raw.track) : {};
   trackSource.kind = "track";
+  trackSource.spotify_id = trackSource.spotify_id || raw.spotify_id || raw.track_id || raw.track_spotify_id;
+  trackSource.spotify_uri = trackSource.spotify_uri || trackSource.uri || raw.spotify_uri || raw.track_uri;
+  trackSource.spotify_url = trackSource.spotify_url || trackSource.url || raw.spotify_url || raw.track_url;
+  trackSource.name = trackSource.name || raw.name || raw.track_name;
+  trackSource.artist = trackSource.artist || trackSource.artist_name || raw.artist || raw.track_artist;
+  trackSource.artwork_url = trackSource.artwork_url || trackSource.album_art_url || raw.artwork_url || raw.album_art_url;
+  if (trackSource.duration_ms === undefined || trackSource.duration_ms === null) {
+    trackSource.duration_ms = raw.duration_ms;
+  }
   var track = normalizeSpotifyCatalogItem(trackSource, "track");
   var playlistSource = raw.playlist && typeof raw.playlist === "object" ? Object.assign({}, raw.playlist) : null;
   if (!playlistSource && (raw.playlist_id || raw.playlist_spotify_id)) {
@@ -1991,10 +2794,26 @@ function jamAppendHistoryTime(parent, label, date) {
   parent.appendChild(row);
 }
 
+function jamHistoryEmptyExplanation() {
+  return "Nothing has played through Echo yet. History records only songs added through Echo and then observed playing. Songs opened or played directly in Spotify are not recorded because Echo has no Jam adder attribution.";
+}
+
+function jamHistoryQueueActionTitle(contract) {
+  contract = contract || _jamContract || evaluateJamServerContract(null);
+  if (jamTrackQueuePending()) return "Wait for the current song to finish adding";
+  if (!contract.compatible) return contract.compatibilityMessage || "Queue controls are unavailable until Echo finishes updating";
+  if (!contract.active) return "Start a Jam to add this song to the queue";
+  if (contract.skipReconciliationPending) return "Wait for Echo to finish confirming the last Skip";
+  if (!contract.spotifyConnected) return "Connect Spotify before adding songs to the queue";
+  if (!contract.canControl) return "Queue controls are unavailable until the active Jam is ready";
+  return "Add this song to the active Jam queue";
+}
+
 function renderJamHistory(items) {
   var list = document.getElementById("jam-history-list");
-  if (!list) return;
+  if (!list) return 0;
   list.innerHTML = "";
+  var rendered = 0;
   (items || []).forEach(function(raw) {
     var entry = jamHistoryEntry(raw);
     if (!entry) return;
@@ -2028,8 +2847,36 @@ function renderJamHistory(items) {
       content.appendChild(provenance);
     }
     row.appendChild(content);
+    if (entry.track) {
+      var queueButton = document.createElement("button");
+      queueButton.type = "button";
+      queueButton.className = "jam-primary-btn jam-history-queue-btn";
+      queueButton.textContent = "Add to queue";
+      queueButton.setAttribute(
+        "aria-label",
+        "Add " + entry.track_name + " by " + (entry.artist || "unknown artist") + " to queue"
+      );
+      var contract = _jamContract || evaluateJamServerContract(null);
+      queueButton.disabled = jamTrackQueuePending() || !contract.canControl;
+      queueButton.title = jamHistoryQueueActionTitle(contract);
+      queueButton.setAttribute("aria-description", queueButton.title);
+      queueButton.onclick = async function() {
+        if (await addToQueue(entry.track)) {
+          jamSetViewStatus("jam-history-status", "Added " + entry.track_name + " to the queue.", "success");
+        }
+      };
+      row.appendChild(queueButton);
+    }
     list.appendChild(row);
+    rendered += 1;
   });
+  if (!rendered) {
+    var empty = document.createElement("li");
+    empty.className = "jam-history-empty";
+    empty.textContent = jamHistoryEmptyExplanation();
+    list.appendChild(empty);
+  }
+  return rendered;
 }
 
 async function loadJamHistory(offset) {
@@ -2037,6 +2884,7 @@ async function loadJamHistory(offset) {
   var controller = typeof AbortController === "function" ? new AbortController() : null;
   _jamHistoryController = controller;
   var requestId = ++_jamHistoryRequestSeq;
+  var requestedHistoryRevision = jamSafeOptionalInteger(_jamState && _jamState.history_revision);
   var requestedOffset = jamSafeInteger(offset, 0);
   var sort = document.getElementById("jam-history-sort");
   var direction = document.getElementById("jam-history-direction");
@@ -2065,8 +2913,9 @@ async function loadJamHistory(offset) {
       ? (_jamHistoryOffset + items.length < _jamHistoryTotal ? _jamHistoryOffset + JAM_HISTORY_PAGE_SIZE : null)
       : jamSafeInteger(suppliedNext, 0);
     _jamHistoryLoaded = true;
-    renderJamHistory(items);
-    jamSetViewStatus("jam-history-status", items.length ? "Play history loaded." : "Nothing has played yet.");
+    _jamHistoryLoadedRevision = requestedHistoryRevision;
+    var rendered = renderJamHistory(items);
+    jamSetViewStatus("jam-history-status", rendered ? "Play history loaded." : jamHistoryEmptyExplanation());
   } catch (error) {
     if (requestId !== _jamHistoryRequestSeq || (error && error.name === "AbortError")) return;
     jamSetViewStatus("jam-history-status", "Play history is unavailable right now.", "error");
@@ -2080,29 +2929,51 @@ async function loadJamHistory(offset) {
 }
 
 async function addToQueue(track) {
+  var normalizedTrack = normalizeSpotifyCatalogItem(Object.assign({}, track, { kind: "track" }), "track");
+  if (!normalizedTrack || jamTrackQueuePending() || !jamActionAllowed("control")) return false;
+  var generation = jamSafeOptionalInteger(_jamState && _jamState.generation);
+  if (generation === null) {
+    showJamError("Add to queue is unavailable until the Jam state refreshes.");
+    return false;
+  }
+  var requestRecord = jamTrackQueueRequestRecord(normalizedTrack, generation);
+  var operation = jamBeginTrackQueueOperation(requestRecord);
+  if (!operation) return false;
+  // Persist before dispatch so a renderer exit or interrupted response can
+  // safely retry the same logical add against the server's idempotency cache.
+  jamRememberAmbiguousTrackRequest(requestRecord);
   try {
-    if (!jamActionAllowed("control")) return;
     var resp = await fetch(apiUrl("/api/jam/queue"), {
       method: "POST",
       headers: jamActorHeaders(),
       body: JSON.stringify({
-        spotify_uri: track.spotify_uri,
-        name: track.name,
-        artist: track.artist,
-        album_art_url: track.album_art_url,
-        duration_ms: track.duration_ms,
-        generation: _jamState && _jamState.generation
+        spotify_uri: normalizedTrack.spotify_uri,
+        name: normalizedTrack.name,
+        artist: normalizedTrack.artist,
+        album_art_url: normalizedTrack.artwork_url,
+        duration_ms: normalizedTrack.duration_ms,
+        generation: generation,
+        request_id: requestRecord.request_id
       })
     });
     if (!resp.ok) {
-      var errText = await resp.text().catch(function() { return ""; });
-      showJamError("Add to queue failed" + (errText ? ": " + errText : " (status " + resp.status + ")"));
-      return;
+      if (jamTrackQueueOperationIsCurrent(operation)) jamForgetAmbiguousTrackRequest(requestRecord);
+      showJamError(await jamApiErrorMessage(resp, "add that song to the queue"));
+      return false;
     }
-    fetchJamState();
+    if (!jamTrackQueueOperationIsCurrent(operation)) return false;
+    jamForgetAmbiguousTrackRequest(requestRecord);
+    await fetchJamState();
+    return true;
   } catch (e) {
-    showJamError("Add to queue failed: " + e.message);
+    jamRememberAmbiguousTrackRequest(requestRecord);
+    if (jamTrackQueueOperationIsCurrent(operation)) {
+      showJamError("The add-to-queue response was interrupted. Try the same song again; Echo will reuse its request safely.");
+    }
     debugLog("[jam] addToQueue error: " + e);
+    return false;
+  } finally {
+    jamFinishTrackQueueOperation(operation);
   }
 }
 
@@ -2210,6 +3081,12 @@ async function leaveJam() {
 // State Polling
 // ──────────────────────────────────────────
 
+function jamHistoryNeedsRefresh(state) {
+  var revision = jamSafeOptionalInteger(state && state.history_revision);
+  return _jamActiveView === "history" && _jamHistoryLoaded && revision !== null &&
+    revision !== _jamHistoryLoadedRevision;
+}
+
 async function fetchJamState() {
   // Native source state is local to this PC and intentionally independent of
   // room/login state. Refresh it alongside each server Jam poll.
@@ -2238,6 +3115,7 @@ async function fetchJamState() {
     renderJamPanel();
     updateNowPlayingBanner(_jamState);
     startPendingJamAudioIfNeeded();
+    if (jamHistoryNeedsRefresh(_jamState)) loadJamHistory(_jamHistoryOffset);
   } catch (e) {
     if (!_jamStateRequestGate.isCurrent(requestId)) return;
     _jamState = null;
@@ -2342,6 +3220,7 @@ function renderJamPanel() {
 }
 
 function renderNowPlaying(np) {
+  syncJamAudioVisualizer(np);
   var container = document.getElementById("jam-now-playing");
   if (!container) return;
   if (!np || !np.name || !np.is_playing) {
@@ -2410,19 +3289,141 @@ function renderNowPlaying(np) {
   }
 }
 
+function jamQueueFallbackRenderSignature(queue) {
+  return JSON.stringify((Array.isArray(queue) ? queue : []).map(function(track) {
+    var playlist = track && track.playlist && typeof track.playlist === "object" ? track.playlist : {};
+    return [
+      jamQueueEntryId(track),
+      jamSafeString(track && track.delivery_state),
+      !!(track && track.can_remove),
+      jamSafeString(track && track.spotify_uri),
+      jamSafeString(track && track.name),
+      jamSafeString(track && track.artist),
+      jamSafeString(track && (track.album_art_url || track.artwork_url)),
+      jamSafeString(track && (track.added_by_name || track.added_by || track.added_by_actor_id)),
+      jamSafeString(playlist.spotify_uri || playlist.uri),
+      jamSafeString(playlist.name)
+    ];
+  }));
+}
+
+function jamQueueRenderSignature(queue) {
+  var revision = jamSafeOptionalInteger(_jamState && _jamState.queue_revision);
+  var queueKey = revision === null
+    ? "fallback:" + jamQueueFallbackRenderSignature(queue)
+    : "revision:" + revision;
+  var nowPlaying = _jamState && _jamState.now_playing;
+  return JSON.stringify([
+    jamSafeOptionalInteger(_jamState && _jamState.generation),
+    queueKey,
+    jamSafeString(nowPlaying && nowPlaying.spotify_uri),
+    !!(nowPlaying && nowPlaying.is_playing)
+  ]);
+}
+
+function captureJamQueueFocus(container) {
+  var active = document.activeElement;
+  if (!active || !container.contains(active)) return null;
+  var row = active.closest(".jam-queue-item");
+  if (!row) return null;
+  var rows = Array.prototype.slice.call(container.querySelectorAll(".jam-queue-item"));
+  return {
+    entry_id: jamSafeString(row.getAttribute("data-queue-entry-id")),
+    row_index: rows.indexOf(row),
+    control: jamSafeString(active.getAttribute("data-jam-queue-control"))
+  };
+}
+
+function restoreJamQueueFocus(container, focusState) {
+  if (!focusState) return;
+  var rows = Array.prototype.slice.call(container.querySelectorAll(".jam-queue-item"));
+  var row = rows.find(function(candidate) {
+    return candidate.getAttribute("data-queue-entry-id") === focusState.entry_id;
+  });
+  if (!row && rows.length) row = rows[Math.max(0, Math.min(focusState.row_index, rows.length - 1))];
+  var target = null;
+  if (row && focusState.control) {
+    target = Array.prototype.find.call(row.querySelectorAll("[data-jam-queue-control]"), function(candidate) {
+      return candidate.getAttribute("data-jam-queue-control") === focusState.control && !candidate.disabled;
+    });
+  }
+  if (!target && row) target = row.querySelector("input:not(:disabled), button:not(:disabled), a[href]");
+  if (!target) target = document.getElementById("jam-queue-remove-selected");
+  if (!target || target.disabled) target = document.getElementById("jam-view-queue-tab");
+  if (!target || target.disabled || typeof target.focus !== "function") return;
+  try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); }
+}
+
+function syncJamQueueInteractiveState() {
+  var canControl = !!_jamContract && _jamContract.canControl;
+  document.querySelectorAll("#jam-queue-list .jam-queue-item").forEach(function(row) {
+    var entryId = jamSafeString(row.getAttribute("data-queue-entry-id"));
+    var checkbox = row.querySelector(".jam-queue-select");
+    var removeButton = row.querySelector(".jam-queue-remove-one");
+    if (checkbox) {
+      checkbox.checked = _jamQueueSelectedEntryIds.has(entryId);
+      checkbox.disabled = _jamQueueRemovalPending || !canControl;
+    }
+    if (removeButton) removeButton.disabled = _jamQueueRemovalPending || !canControl;
+  });
+}
+
 function renderQueue(queue) {
   var container = document.getElementById("jam-queue-list");
   if (!container) return;
+  queue = Array.isArray(queue) ? queue : [];
+  pruneJamQueueSelection(queue);
+  renderJamQueueRemovalControls(queue);
+  syncJamQueueInteractiveState();
+  var section = document.getElementById("jam-queue-section");
+  if (section && section.hidden) return;
+  var renderKey = jamQueueRenderSignature(queue);
+  if (_jamQueueRenderKey === renderKey) return;
+  var focusState = captureJamQueueFocus(container);
+  _jamQueueRenderKey = renderKey;
   if (!queue.length) {
-    container.innerHTML = '<div class="jam-queue-empty">Queue is empty</div>';
+    container.setAttribute("role", "list");
+    container.innerHTML = '<div class="jam-queue-empty" role="listitem">Queue is empty</div>';
+    restoreJamQueueFocus(container, focusState);
     return;
   }
+  container.setAttribute("role", "list");
   container.innerHTML = "";
-  queue.forEach(function(track) {
+  queue.forEach(function(track, index) {
     var normalizedTrack = normalizeSpotifyCatalogItem(Object.assign({}, track, { kind: "track" }), "track");
     var item = document.createElement("div");
     item.className = "jam-queue-item";
     item.setAttribute("role", "listitem");
+    var entryId = jamQueueEntryId(track);
+    var removable = jamQueueEntryRemovable(track);
+    if (entryId) item.setAttribute("data-queue-entry-id", entryId);
+    item.classList.toggle("jam-queue-item-removable", removable);
+    item.classList.toggle("jam-queue-item-locked", !removable);
+
+    var choice = document.createElement("label");
+    choice.className = "jam-queue-choice";
+    if (removable) {
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "jam-queue-select";
+      checkbox.checked = _jamQueueSelectedEntryIds.has(entryId);
+      checkbox.disabled = _jamQueueRemovalPending || !(_jamContract && _jamContract.canControl);
+      checkbox.setAttribute("data-jam-queue-control", "select");
+      checkbox.setAttribute("aria-label", jamQueueSelectionLabel(track, index));
+      checkbox.onchange = function() {
+        if (checkbox.checked) _jamQueueSelectedEntryIds.add(entryId);
+        else _jamQueueSelectedEntryIds.delete(entryId);
+        renderJamQueueRemovalControls(queue);
+      };
+      choice.appendChild(checkbox);
+    } else {
+      var lockedIcon = document.createElement("span");
+      lockedIcon.className = "jam-queue-lock-icon";
+      lockedIcon.setAttribute("aria-hidden", "true");
+      lockedIcon.textContent = "\u2022";
+      choice.appendChild(lockedIcon);
+    }
+    item.appendChild(choice);
     item.appendChild(jamCreateArtwork({ artwork_url: jamSafeArtworkUrl(track.album_art_url || track.artwork_url) }, "jam-result-art"));
     var info = document.createElement("div");
     info.className = "jam-result-info";
@@ -2430,6 +3431,7 @@ function renderQueue(queue) {
     var name = normalizedTrack
       ? jamCreateSpotifyLink(normalizedTrack, trackName, "jam-result-name jam-spotify-link")
       : document.createElement("div");
+    if (normalizedTrack) name.setAttribute("data-jam-queue-control", "track-link");
     if (!normalizedTrack) {
       name.className = "jam-result-name";
       name.textContent = trackName;
@@ -2448,14 +3450,206 @@ function renderQueue(queue) {
       var provenance = document.createElement("div");
       provenance.className = "jam-queue-provenance";
       provenance.appendChild(document.createTextNode("From "));
-      provenance.appendChild(jamCreateSpotifyLink(playlist, playlist.name, "jam-spotify-link"));
+      var playlistLink = jamCreateSpotifyLink(playlist, playlist.name, "jam-spotify-link");
+      playlistLink.setAttribute("data-jam-queue-control", "playlist-link");
+      provenance.appendChild(playlistLink);
       info.appendChild(provenance);
     }
+    if (!removable) {
+      var lockedReason = document.createElement("div");
+      lockedReason.className = "jam-queue-lock-reason";
+      lockedReason.textContent = jamQueueLockedReason(track, index);
+      info.appendChild(lockedReason);
+    }
     item.appendChild(info);
+    if (removable) {
+      var removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "jam-secondary-btn jam-queue-remove-one";
+      removeButton.textContent = "Remove";
+      removeButton.disabled = _jamQueueRemovalPending || !(_jamContract && _jamContract.canControl);
+      removeButton.setAttribute("data-jam-queue-control", "remove");
+      removeButton.setAttribute("aria-label", jamQueueRemoveLabel(track, index));
+      removeButton.onclick = function() { removeJamQueueEntries([entryId]); };
+      item.appendChild(removeButton);
+    }
     name.title = name.textContent;
     artist.title = artist.textContent;
     container.appendChild(item);
   });
+  restoreJamQueueFocus(container, focusState);
+}
+
+function jamQueueEntryId(track) {
+  return jamSafeString(track && track.queue_entry_id);
+}
+
+function jamQueueEntryRemovable(track) {
+  return !!track && track.can_remove === true &&
+    jamSafeString(track.delivery_state) === "pending" && !!jamQueueEntryId(track);
+}
+
+function jamQueueTrackDescription(track, index) {
+  var name = jamSafeString(track && track.name) || "Unknown track";
+  var artist = jamSafeString(track && track.artist);
+  return name + (artist ? " by " + artist : "") + ", queue position " + (index + 1);
+}
+
+function jamQueueSelectionLabel(track, index) {
+  return "Select " + jamQueueTrackDescription(track, index) + " for removal";
+}
+
+function jamQueueRemoveLabel(track, index) {
+  return "Remove " + jamQueueTrackDescription(track, index) + " from queue";
+}
+
+function jamQueueLockedReason(track, index) {
+  var deliveryState = jamSafeString(track && track.delivery_state);
+  if (deliveryState === "commit_unknown") {
+    return "Spotify delivery could not be verified. End Jam and start a new one to recover.";
+  }
+  var nowPlayingUri = jamSafeString(_jamState && _jamState.now_playing && _jamState.now_playing.spotify_uri);
+  var trackUri = jamSafeString(track && track.spotify_uri);
+  if (index === 0 && nowPlayingUri && trackUri && nowPlayingUri === trackUri) {
+    return "Currently playing in Spotify; it cannot be removed.";
+  }
+  if (deliveryState === "spotify_committed") {
+    return "Already sent to Spotify; it cannot be removed.";
+  }
+  if (deliveryState === "pending") {
+    return "This pending song is temporarily locked and cannot be removed.";
+  }
+  return "Removal is unavailable until Echo's server update is complete.";
+}
+
+function pruneJamQueueSelection(queue) {
+  var removableIds = new Set();
+  (Array.isArray(queue) ? queue : []).forEach(function(track) {
+    if (jamQueueEntryRemovable(track)) removableIds.add(jamQueueEntryId(track));
+  });
+  _jamQueueSelectedEntryIds.forEach(function(entryId) {
+    if (!removableIds.has(entryId)) _jamQueueSelectedEntryIds.delete(entryId);
+  });
+}
+
+function renderJamQueueRemovalControls(queue) {
+  var count = _jamQueueSelectedEntryIds.size;
+  var countElement = document.getElementById("jam-queue-selection-count");
+  var button = document.getElementById("jam-queue-remove-selected");
+  if (countElement) countElement.textContent = count + " song" + (count === 1 ? "" : "s") + " selected";
+  if (!button) return;
+  var contractCanControl = !!_jamContract && _jamContract.canControl;
+  var hasRemovableEntries = (Array.isArray(queue) ? queue : []).some(jamQueueEntryRemovable);
+  button.disabled = _jamQueueRemovalPending || !contractCanControl || !count || !hasRemovableEntries;
+  button.textContent = _jamQueueRemovalPending ? "Removing..." : "Remove selected";
+  button.title = !contractCanControl
+    ? "Queue removal is unavailable until Jam controls are ready"
+    : count
+      ? "Remove the selected pending songs from Echo's queue"
+      : "Select one or more pending songs first";
+}
+
+function jamQueueRemovalEntries(entryIds) {
+  var selectedIds = new Set(Array.isArray(entryIds) ? entryIds : []);
+  return ((_jamState && Array.isArray(_jamState.queue)) ? _jamState.queue : []).filter(function(track) {
+    return jamQueueEntryRemovable(track) && selectedIds.has(jamQueueEntryId(track));
+  }).map(jamQueueEntryId);
+}
+
+async function removeJamQueueEntries(entryIds) {
+  if (_jamQueueRemovalPending || !jamActionAllowed("control")) return;
+  var generation = jamSafeOptionalInteger(_jamState && _jamState.generation);
+  var queueRevision = jamSafeOptionalInteger(_jamState && _jamState.queue_revision);
+  var removableIds = jamQueueRemovalEntries(entryIds);
+  if (generation === null || queueRevision === null) {
+    jamSetViewStatus("jam-queue-status", "Queue removal is unavailable until Echo's server update is complete.", "warning");
+    return;
+  }
+  if (!removableIds.length) {
+    pruneJamQueueSelection((_jamState && _jamState.queue) || []);
+    renderQueue((_jamState && _jamState.queue) || []);
+    jamSetViewStatus("jam-queue-status", "Those songs are no longer removable. Review the refreshed queue.", "warning");
+    return;
+  }
+
+  _jamQueueRemovalPending = true;
+  renderQueue((_jamState && _jamState.queue) || []);
+  jamSetViewStatus("jam-queue-status", "Removing " + removableIds.length + " song" + (removableIds.length === 1 ? "" : "s") + "...");
+  try {
+    var response = await fetch(apiUrl("/api/jam/queue/remove"), {
+      method: "POST",
+      headers: jamActorHeaders(),
+      body: JSON.stringify({
+        generation: generation,
+        request_id: jamRequestId(),
+        expected_queue_revision: queueRevision,
+        queue_entry_ids: removableIds
+      })
+    });
+    if (!response.ok) {
+      if (response.status === 409) {
+        await fetchJamState();
+        jamSetViewStatus(
+          "jam-queue-status",
+          _jamState
+            ? "The queue changed. Echo refreshed it; review your selections before removing again."
+            : "The queue changed, but Echo could not refresh it. Refresh before trying again.",
+          _jamState ? "warning" : "error"
+        );
+        return;
+      }
+      jamSetViewStatus("jam-queue-status", await jamApiErrorMessage(response, "remove songs from the queue"), "error");
+      return;
+    }
+    var result = await response.json();
+    var removedIds = Array.isArray(result.removed_entry_ids) ? result.removed_entry_ids : removableIds;
+    removedIds.forEach(function(entryId) { _jamQueueSelectedEntryIds.delete(jamSafeString(entryId)); });
+    if (_jamState && Array.isArray(_jamState.queue)) {
+      var removed = new Set(removedIds.map(jamSafeString));
+      _jamState.queue = _jamState.queue.filter(function(track) { return !removed.has(jamQueueEntryId(track)); });
+      if (jamSafeOptionalInteger(result.queue_revision) !== null) _jamState.queue_revision = jamSafeOptionalInteger(result.queue_revision);
+    }
+    renderQueue((_jamState && _jamState.queue) || []);
+    var removedCount = jamSafeOptionalInteger(result.removed_count);
+    if (removedCount === null) removedCount = removedIds.length;
+    jamSetViewStatus("jam-queue-status", "Removed " + removedCount + " song" + (removedCount === 1 ? "" : "s") + " from the queue.", "success");
+    await fetchJamState();
+  } catch (error) {
+    debugLog("[jam] queue removal error: " + error);
+    await fetchJamState();
+    if (_jamState) {
+      var refreshedIds = new Set((Array.isArray(_jamState.queue) ? _jamState.queue : []).map(jamQueueEntryId));
+      var missingCount = removableIds.filter(function(entryId) { return !refreshedIds.has(entryId); }).length;
+      if (missingCount === removableIds.length) {
+        jamSetViewStatus(
+          "jam-queue-status",
+          "The response was interrupted, but Echo refreshed the queue and confirmed " +
+            missingCount + " selected song" + (missingCount === 1 ? " is" : "s are") + " no longer queued.",
+          "success"
+        );
+      } else {
+        jamSetViewStatus(
+          "jam-queue-status",
+          "The response was interrupted. Echo refreshed the queue; review your selections before trying again.",
+          "warning"
+        );
+      }
+    } else {
+      jamSetViewStatus(
+        "jam-queue-status",
+        "The response was interrupted and Echo could not refresh the queue. Do not retry until the queue is available.",
+        "error"
+      );
+    }
+  } finally {
+    _jamQueueRemovalPending = false;
+    if (_jamState) renderQueue(_jamState.queue || []);
+    else renderJamQueueRemovalControls([]);
+  }
+}
+
+function removeSelectedJamQueueEntries() {
+  removeJamQueueEntries(Array.from(_jamQueueSelectedEntryIds));
 }
 
 // ──────────────────────────────────────────
@@ -2470,6 +3664,8 @@ function startJamAudioStream() {
   }
 
   try {
+    _jamAudioStreamReady = false;
+    syncJamAudioVisualizer();
     // Build WebSocket URL from current API base (wss for https, ws for http)
     var base = apiUrl("/api/jam/audio");
     var wsUrl;
@@ -2516,6 +3712,18 @@ function startJamAudioStream() {
       }
 
       _jamGainNode.connect(_jamAudioCtx.destination);
+
+      // Echo Pulse observes the real Jam PCM on a separate muted branch. The
+      // existing playback graph remains source -> Jam gain -> destination, so
+      // visualization setup can never change volume, routing, or reliability.
+      if (window.EchoJamVisualizer && typeof window.EchoJamVisualizer.createAnalysisGraph === "function") {
+        try {
+          _jamAudioAnalysisGraph = window.EchoJamVisualizer.createAnalysisGraph(_jamAudioCtx);
+        } catch (analysisError) {
+          _jamAudioAnalysisGraph = null;
+          disableJamAudioVisualizer(analysisError);
+        }
+      }
     }
 
     if (_jamAudioCtx.state === "suspended") {
@@ -2527,6 +3735,7 @@ function startJamAudioStream() {
     var ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
     _jamAudioWs = ws;
+    syncJamAudioVisualizer();
     var terminalHandled = false;
     var protocolReady = false;
     var readyTimer = null;
@@ -2539,6 +3748,8 @@ function startJamAudioStream() {
         readyTimer = null;
       }
       if (_jamAudioWs === ws) _jamAudioWs = null;
+      _jamAudioStreamReady = false;
+      syncJamAudioVisualizer();
       if (_jamSessionState && _jamSessionState.streamClosedTransient) {
         var closeState = _jamSessionState.streamClosedTransient(reason);
         syncJamButtonsFromState();
@@ -2582,6 +3793,8 @@ function startJamAudioStream() {
             readyTimer = null;
           }
           debugLog("[jam] audio WebSocket authenticated and ready");
+          _jamAudioStreamReady = true;
+          syncJamAudioVisualizer();
           if (_jamSessionState && _jamSessionState.streamOpen) {
             _jamSessionState.streamOpen();
             syncJamButtonsFromState();
@@ -2627,6 +3840,17 @@ function startJamAudioStream() {
       var source = _jamAudioCtx.createBufferSource();
       source.buffer = buffer;
       source.connect(_jamGainNode);
+      var analysisConnected = false;
+      if (_jamAudioAnalysisGraph && _jamAudioAnalysisGraph.available && _jamAudioAnalysisGraph.analyser) {
+        try {
+          source.connect(_jamAudioAnalysisGraph.analyser);
+          analysisConnected = true;
+        } catch (_analysisConnectError) {}
+      }
+      if (_jamAudioAnalysisGraph && _jamAudioAnalysisGraph.available && !analysisConnected) {
+        destroyJamAudioAnalysisGraph();
+        syncJamAudioVisualizer();
+      }
       source.start(schedule.startTime);
       _jamNextPlayTime = Number.isFinite(schedule.nextPlayTime)
         ? schedule.nextPlayTime
@@ -2658,16 +3882,19 @@ function startJamAudioStream() {
 
 function stopJamAudioStream() {
   clearJamReconnectTimer();
+  _jamAudioStreamReady = false;
   if (_jamAudioWs) {
     _jamAudioWs.close();
     _jamAudioWs = null;
   }
+  destroyJamAudioAnalysisGraph();
   if (_jamAudioCtx) {
     _jamAudioCtx.close().catch(function() {});
     _jamAudioCtx = null;
     _jamGainNode = null;
   }
   _jamNextPlayTime = 0;
+  syncJamAudioVisualizer();
 }
 
 // ──────────────────────────────────────────
@@ -2839,6 +4066,8 @@ function bindJamCatalogControls() {
   };
   var importButton = document.getElementById("jam-import-spotify");
   if (importButton) importButton.onclick = importSpotifyFavorites;
+  var libraryRefreshButton = document.getElementById("jam-library-refresh-spotify");
+  if (libraryRefreshButton) libraryRefreshButton.onclick = connectSpotify;
 
   var playlistBack = document.getElementById("jam-playlist-back");
   if (playlistBack) playlistBack.onclick = closeJamPlaylistDetail;
@@ -2848,6 +4077,10 @@ function bindJamCatalogControls() {
   };
   var playlistAddAll = document.getElementById("jam-playlist-add-all");
   if (playlistAddAll) playlistAddAll.onclick = addPlaylistToQueue;
+  var playlistAddSelected = document.getElementById("jam-playlist-add-selected");
+  if (playlistAddSelected) playlistAddSelected.onclick = addSelectedPlaylistTracksToQueue;
+  var playlistClearSelection = document.getElementById("jam-playlist-clear-selection");
+  if (playlistClearSelection) playlistClearSelection.onclick = clearJamPlaylistSelection;
   var playlistLoadMore = document.getElementById("jam-playlist-load-more");
   if (playlistLoadMore) playlistLoadMore.onclick = function() {
     if (_jamPlaylistNextOffset !== null) fetchJamPlaylistItems(_jamPlaylistNextOffset, true);
@@ -2865,6 +4098,8 @@ function bindJamCatalogControls() {
   if (historyNext) historyNext.onclick = function() {
     if (_jamHistoryNextOffset !== null) loadJamHistory(_jamHistoryNextOffset);
   };
+  var queueRemoveSelected = document.getElementById("jam-queue-remove-selected");
+  if (queueRemoveSelected) queueRemoveSelected.onclick = removeSelectedJamQueueEntries;
 }
 
 function initJam() {
@@ -2943,10 +4178,20 @@ function cleanupJam() {
   _jamPlaylistRequestSeq += 1;
   _jamHistoryRequestSeq += 1;
   _jamPlaylistLoading = false;
-  _jamPlaylistQueuePending = false;
+  invalidateJamPlaylistQueueLifecycle();
+  invalidateJamTrackQueueLifecycle();
+  _jamPlaylistAccessError = null;
+  _jamPlaylistFailedOffset = 0;
+  _jamPlaylistSelectedPositions.clear();
+  _jamPlaylistResumeRequired = false;
   _jamImportPending = false;
+  _jamQueueSelectedEntryIds.clear();
+  _jamQueueRemovalPending = false;
+  _jamQueueRenderKey = null;
   _jamLibraryLoaded = false;
+  _jamLibraryKnownEmpty = null;
   _jamHistoryLoaded = false;
+  _jamHistoryLoadedRevision = null;
   stopBannerPolling();
   updateNowPlayingBanner(null);
   _jamState = null;
@@ -2960,6 +4205,7 @@ function cleanupJam() {
   }
   stopJamAudioStream();
   closeJamPanel({ restoreFocus: false });
+  destroyJamAudioVisualizer();
 }
 
 // ──────────────────────────────────────────

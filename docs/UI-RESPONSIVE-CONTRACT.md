@@ -167,6 +167,13 @@ JavaScript must not write per-breakpoint pixel widths, move feature nodes betwee
 alternate parents, or decide which text happens to fit. A component that needs
 local adaptation declares a containment boundary and uses container queries.
 
+Jam's Echo Pulse canvas is a stable child of the session overview rather than
+the polling-rebuilt Now Playing metadata node. Its CSS surface owns width and
+height, remains within the overview or sheet scroll owner, and contracts only
+under the existing `data-ui-very-short` pressure flag. Its backing resolution
+is device-pixel-ratio and pixel-budget capped; resize and motion changes never
+recreate the canvas or alter the Jam audio graph.
+
 The screen-grid allocator calculates media tile geometry inside the stage. It
 receives the stage's available rectangle; it must not duplicate shell
 breakpoints or control utility-panel behavior. A single visible share owns the
@@ -222,8 +229,13 @@ and geometry change together.
 
 - Workspace columns are `minmax(0, 1fr)` plus a utility rail of
   `clamp(320px, 24vw, 360px)` with a `16px` gap.
-- Opening or switching a utility tool reuses the rail; it never adds another
-  workspace column.
+- People and Chat reuse that rail; opening either never adds another workspace
+  column.
+- Jam is the feature-dense exception: it opens as a centered workspace capped
+  at `1120px` wide and `840px` tall. At container widths of at least `820px`,
+  playback/listening controls occupy the left column and
+  Library/Search/Queue/History occupy the flexible right column. The obscured
+  stage is inert behind the utility scrim while the call dock stays available.
 - Closing an optional tool may return its width to the stage. If People is the
   product's persistent default tool, closing another tool returns to People
   rather than leaving an empty rail.
@@ -235,6 +247,8 @@ and geometry change together.
 - The stage owns the full workspace width.
 - The utility host becomes an end-edge drawer with an inline size of
   `clamp(320px, 42vw, 380px)`.
+- Jam keeps its centered workspace treatment where at least `820px` of
+  container width is available; otherwise it falls back to one column.
 - Opening the drawer overlays the stage; it does not resize the stage or trigger
   a media-grid mode change beyond normal occlusion/resize observation.
 - The drawer has a workspace-bounded scrim while open. The obscured stage is
@@ -312,8 +326,9 @@ must not remove the dock and cause the workspace to jump.
 - Tool selection and open/closed state survive geometry-mode transitions.
 - A mode transition changes the host from pinned rail to overlay drawer to
   sheet/full-screen without recreating the active tool.
-- Each tool owns one scrollable body. Its header and critical footer actions
-  remain visible.
+- Each rail or drawer tool owns one scrollable body. Wide Jam may split that
+  ownership into independent session-overview and music-browser scrollers so a
+  long catalog does not push playback controls away. Its header remains visible.
 - Utility rails, drawers, and sheets are not true modal dialogs. When a utility
   surface obscures the stage, only the obscured stage becomes inert; the active
   utility surface and the call dock remain keyboard-operable. Escape closes the
@@ -435,7 +450,8 @@ expected mode is the fresh-document classification without hysteresis history.
 
 | Viewport / condition | Expected mode | Required content case | Expected behavior |
 | --- | --- | --- | --- |
-| `1920 x 1080` | `theater` | Four shares, twelve people, utility open | Rail remains within `320-360px`; stage has no horizontal overflow |
+| `1920 x 1080` | `theater` | Four shares, twelve people, People or Chat open | Rail remains within `320-360px`; stage has no horizontal overflow |
+| `1920 x 1080` | `theater` | Populated Jam open | Jam is centered, at least `840px` and at most `1120px` wide, uses two columns, and leaves the dock interactive |
 | `1366 x 768` | `theater` | Two shares, eight long participant names | Dock stays one row; names truncate; stage remains usable |
 | `1280 x 720` | `theater` on initial load | One ultrawide share, People open | Rail uses its minimum range; share preserves aspect ratio |
 | `1024 x 768` | `lounge` | Two shares, Chat open with draft | Overlay does not shrink stage; draft survives close/reopen |

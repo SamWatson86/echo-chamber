@@ -39,7 +39,7 @@
       })();
     </script>
     <link rel="stylesheet" href="style.css?v=0.6.11.1777930912" />
-    <link rel="stylesheet" href="jam.css?v=0.6.11.1777930912" />
+    <link rel="stylesheet" href="jam.css?v=0.6.34.1785384000" />
     <link rel="stylesheet" href="capture-picker.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="clubhouse-shell.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="themes.css?v=0.6.11.1777930912" />
@@ -497,6 +497,7 @@
           <button id="close-jam" type="button">Close</button>
         </div>
         <div class="jam-body">
+          <div class="jam-session-overview">
           <div class="jam-spotify-row">
             <span id="jam-spotify-status" class="jam-spotify-status">Not Connected</span>
             <button id="jam-connect-spotify" type="button" class="jam-connect-btn">Connect Spotify</button>
@@ -547,6 +548,13 @@
           <div id="jam-now-playing" class="jam-now-playing">
             <div class="jam-now-playing-empty">No music playing</div>
           </div>
+          <div id="jam-audio-visualizer" class="jam-audio-visualizer" data-state="idle" data-motion="full" data-reactive="false" aria-hidden="true" hidden>
+            <canvas id="jam-audio-visualizer-canvas" aria-hidden="true"></canvas>
+            <div class="jam-audio-visualizer-chrome" aria-hidden="true">
+              <span class="jam-audio-visualizer-title"><span class="jam-audio-visualizer-dot"></span>Echo Pulse</span>
+              <span id="jam-audio-visualizer-status" class="jam-audio-visualizer-status">Join Jam to activate</span>
+            </div>
+          </div>
           <div id="jam-actions-section" class="jam-actions" style="display:none">
             <button id="jam-join-btn" type="button" class="jam-join-btn">Join Jam</button>
             <button id="jam-leave-btn" type="button" class="jam-leave-btn" style="display:none">Leave Jam</button>
@@ -558,6 +566,9 @@
               <input id="jam-volume-slider" type="range" min="0" max="100" value="50" />
               <span id="jam-volume-value" class="jam-volume-value">50%</span>
             </div>
+          </div>
+            <div id="jam-status" class="jam-status" role="status" aria-live="polite"></div>
+            <div id="jam-skip-reconciliation-warning" class="jam-reconciliation-warning" role="status" aria-live="polite" hidden></div>
           </div>
           <section id="jam-browser" class="jam-browser" aria-label="Jam library, search, queue, and history">
             <div class="jam-browser-tabs" role="tablist" aria-label="Jam views">
@@ -572,6 +583,17 @@
             </a>
 
             <div id="jam-library-section" class="jam-browser-panel jam-library-section" role="tabpanel" aria-labelledby="jam-view-library-tab" hidden>
+              <div id="jam-library-import-card" class="jam-library-import-card">
+                <div class="jam-library-import-copy">
+                  <strong>Bring in your Spotify saves</strong>
+                  <p>Copy your Liked Songs and saved playlists into shared Echo Favorites.</p>
+                </div>
+                <div class="jam-library-import-actions">
+                  <button id="jam-library-refresh-spotify" type="button" class="jam-secondary-btn">Refresh Spotify Access</button>
+                  <button id="jam-import-spotify" type="button" class="jam-primary-btn">Copy Spotify saves</button>
+                </div>
+                <small>Copies Liked Songs and saved playlists, not the songs inside playlists. Spotify is unchanged, and nothing is added to the Jam queue.</small>
+              </div>
               <div class="jam-filter-grid">
                 <label class="jam-filter-field">Show
                   <select id="jam-library-kind">
@@ -600,9 +622,8 @@
                   </select>
                 </label>
               </div>
-              <button id="jam-import-spotify" type="button" class="jam-secondary-btn">Import to Echo Favorites</button>
               <div id="jam-library-status" class="jam-view-status" role="status" aria-live="polite"></div>
-              <div id="jam-library-list" class="jam-catalog-list" role="list" aria-label="Echo favorite Spotify items"></div>
+              <div id="jam-library-list" class="jam-catalog-list" aria-label="Echo favorite Spotify items"></div>
               <nav class="jam-pager" aria-label="Echo Favorites pages">
                 <button id="jam-library-prev" type="button" class="jam-secondary-btn">Previous</button>
                 <span id="jam-library-page" class="jam-page-summary">0 items</span>
@@ -618,7 +639,7 @@
               <label class="jam-visually-hidden" for="jam-search-input">Search Spotify</label>
               <input id="jam-search-input" type="search" class="jam-search-input" placeholder="Search for a song..." autocomplete="off" />
               <div id="jam-search-status" class="jam-view-status" role="status" aria-live="polite"></div>
-              <div id="jam-results" class="jam-results" role="list" aria-label="Spotify search results"></div>
+              <div id="jam-results" class="jam-results" aria-label="Spotify search results"></div>
               <nav class="jam-pager" aria-label="Spotify search result pages">
                 <button id="jam-search-prev" type="button" class="jam-secondary-btn">Previous</button>
                 <span id="jam-search-page" class="jam-page-summary">0 results</span>
@@ -631,17 +652,29 @@
               <div id="jam-playlist-summary"></div>
               <div class="jam-detail-actions">
                 <button id="jam-playlist-favorite" type="button" class="jam-secondary-btn" aria-pressed="false">Save to Echo</button>
-                <button id="jam-playlist-add-all" type="button" class="jam-primary-btn">Add all to queue</button>
+                <button id="jam-playlist-add-all" type="button" class="jam-primary-btn">Add entire playlist</button>
+              </div>
+              <div class="jam-playlist-selection" role="group" aria-label="Selected playlist songs">
+                <span id="jam-playlist-selection-count" role="status" aria-live="polite">0 songs selected</span>
+                <button id="jam-playlist-clear-selection" type="button" class="jam-secondary-btn" disabled>Clear selection</button>
+                <button id="jam-playlist-add-selected" type="button" class="jam-primary-btn" aria-describedby="jam-playlist-selection-count" disabled>Add selected to queue</button>
               </div>
               <div id="jam-playlist-status" class="jam-view-status" role="status" aria-live="polite"></div>
-              <div id="jam-playlist-items" class="jam-catalog-list" role="list" aria-label="Playlist songs"></div>
-              <button id="jam-playlist-load-more" type="button" class="jam-secondary-btn jam-load-more" hidden>Load more</button>
+              <div id="jam-playlist-items" class="jam-catalog-list" aria-label="Playlist songs"></div>
+              <button id="jam-playlist-load-more" type="button" class="jam-secondary-btn jam-load-more" hidden>Load next 50 songs</button>
             </div>
 
             <div id="jam-queue-section" class="jam-browser-panel jam-queue-section" role="tabpanel" aria-labelledby="jam-view-queue-tab" hidden>
-              <div class="jam-queue-title">Queue</div>
+              <div class="jam-queue-header">
+                <div class="jam-queue-heading">
+                  <div class="jam-queue-title">Queue</div>
+                  <div id="jam-queue-selection-count" class="jam-queue-selection-count" role="status" aria-live="polite">0 songs selected</div>
+                </div>
+                <button id="jam-queue-remove-selected" type="button" class="jam-secondary-btn jam-queue-remove-selected" aria-describedby="jam-queue-selection-count" disabled>Remove selected</button>
+              </div>
+              <div id="jam-queue-status" class="jam-view-status" role="status" aria-live="polite"></div>
               <div id="jam-queue-list" class="jam-queue-list" role="list" aria-label="Jam queue">
-                <div class="jam-queue-empty">Queue is empty</div>
+                <div class="jam-queue-empty" role="listitem">Queue is empty</div>
               </div>
             </div>
 
@@ -673,7 +706,6 @@
               </nav>
             </div>
           </section>
-          <div id="jam-status" class="jam-status" role="status" aria-live="polite"></div>
         </div>
       </div>
       <!-- Dashboard Panel (visible to all connected users) -->
@@ -761,7 +793,8 @@
     <script src="connect.js?v=0.6.11.1777930912"></script>
     <script src="app.js?v=0.6.11.1777930912"></script>
     <script src="capture-picker.js?v=0.6.11.1777930912"></script>
-    <script src="jam.js?v=0.6.11.1777930912"></script>
+    <script src="jam-visualizer.js?v=0.6.34.1785384000"></script>
+    <script src="jam.js?v=0.6.34.1785384000"></script>
     <script src="changelog.js?v=0.6.11.1777930912"></script>
 
     <!-- Admin login modal (hidden by default; toggled by adminLoginBtn) -->

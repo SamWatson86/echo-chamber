@@ -29,6 +29,19 @@ function normalize(raw, expectedKind) {
   return context.result;
 }
 
+function normalizeHistory(raw) {
+  const helpers = section("function jamSafeString(", "function jamNormalizeCatalogItems(");
+  const history = section("function jamDateValue(", "function jamAppendHistoryTime(");
+  const context = {
+    URL,
+    window: { location: { href: "https://echo.test/" } },
+    raw,
+    result: null,
+  };
+  vm.runInNewContext(`${helpers}\n${history}\nresult = jamHistoryEntry(raw);`, context);
+  return context.result;
+}
+
 test("catalog normalization accepts only canonical 22-character Spotify identities", () => {
   const id = "0123456789ABCDEFGHIJKL";
   const item = normalize({
@@ -45,6 +58,13 @@ test("catalog normalization accepts only canonical 22-character Spotify identiti
   assert.equal(item.url, `https://open.spotify.com/playlist/${id}`);
   assert.equal(item.item_count, 37);
   assert.equal(item.favorite_contributor_count, 2);
+  const occurrence = normalize({
+    kind: "track",
+    spotify_id: "1234567890ABCDEFGHIJKL",
+    name: "Repeated Song",
+    playlist_position: 0,
+  }, "track");
+  assert.equal(occurrence.playlist_position, 0, "position zero remains selectable");
   assert.equal(normalize({ kind: "track", spotify_id: "too-short" }, "track"), null);
   assert.equal(normalize({ kind: "track", spotify_url: `https://evil.test/track/${id}` }, "track"), null);
 });
@@ -71,6 +91,25 @@ test("favorite views normalize exact attribution fields defensively", () => {
   assert.doesNotMatch(jamSource, /\\u2665|\\u2661/);
 });
 
+test("history rows normalize every field required by the idempotent track queue path", () => {
+  const item = normalizeHistory({
+    track: {
+      spotify_id: "1234567890ABCDEFGHIJKL",
+      name: "Play It Again",
+    },
+    artist: "Fixture Artist",
+    album_art_url: "https://i.scdn.co/image/history-fixture",
+    duration_ms: 222000,
+    added_by_name: "Sam",
+  });
+
+  assert.equal(item.track.spotify_uri, "spotify:track:1234567890ABCDEFGHIJKL");
+  assert.equal(item.track.name, "Play It Again");
+  assert.equal(item.track.artist, "Fixture Artist");
+  assert.equal(item.track.artwork_url, "https://i.scdn.co/image/history-fixture");
+  assert.equal(item.track.duration_ms, 222000);
+});
+
 test("search uses typed paging with abort and a monotonic stale-response gate", () => {
   const search = section("function onSearchInput(", "function jamFavoriteSummary(");
   assert.match(search, /setTimeout\(function\(\) \{ searchSpotify\(value, 0\); \}, 300\)/);
@@ -91,19 +130,45 @@ test("library omits a blank actor filter and supports import upgrade guidance", 
   assert.match(jamSource, /tracks_seen/);
   assert.match(jamSource, /playlists_seen/);
   assert.match(jamSource, /Refresh Spotify Access/);
+  assert.match(jamSource, /spotify_library_authorized/);
+  assert.match(jamSource, /playlistSelectionSupported/);
+  assert.match(jamSource, /No Echo Favorites yet\. Copy your Spotify saves above/);
+  assert.match(indexSource, /id="jam-library-refresh-spotify"/);
+  assert.match(indexSource, /id="jam-import-spotify"[^>]*>Copy Spotify saves</);
+  assert.match(indexSource, /not the songs inside playlists/);
+  assert.match(indexSource, /Spotify is unchanged, and nothing is added to the Jam queue/);
   assert.match(jamSource, /payload\.retry_after/);
 });
 
-test("playlist enqueue is one batch operation with confirmation and hard-limit guards", () => {
-  const enqueue = section("async function addPlaylistToQueue(", "function jamDateValue(");
-  assert.equal((enqueue.match(/\/api\/jam\/queue\/playlist/g) || []).length, 2, "initial and server-requested confirmation paths use the same batch endpoint");
-  assert.match(enqueue, /trackCount > 50/);
+test("Jam markup separates playback controls from the music browser workspace", () => {
+  const overviewStart = indexSource.indexOf('class="jam-session-overview"');
+  const overviewEnd = indexSource.indexOf("</div>", indexSource.indexOf('id="jam-status"', overviewStart));
+  const browserStart = indexSource.indexOf('id="jam-browser"');
+  assert.notEqual(overviewStart, -1);
+  assert.notEqual(browserStart, -1);
+  assert.ok(overviewEnd < browserStart, "overview and browser are sibling workspace columns");
+});
+
+test("entire and selected playlist enqueue share one provenance-preserving batch operation", () => {
+  const enqueue = section("function jamPlaylistQueueActionContext(", "function jamDateValue(");
+  assert.match(enqueue, /"\/api\/jam\/queue\/playlist\/selection"/);
+  assert.match(enqueue, /"\/api\/jam\/queue\/playlist"/);
   assert.match(enqueue, /trackCount > 25/);
-  assert.match(enqueue, /_jamPlaylistQueuePending/);
+  assert.match(enqueue, /jamBeginPlaylistQueueOperation/);
+  assert.match(enqueue, /jamFinishPlaylistQueueOperation/);
   assert.match(enqueue, /request_id: requestId/);
+  assert.match(enqueue, /snapshot_id: context\.snapshot_id/);
+  assert.match(enqueue, /payload\.selected_positions = context\.selected_positions\.slice\(\)/);
   assert.match(enqueue, /rejection\.error === "confirmation_required"/);
   assert.match(enqueue, /rejection\.playable_count/);
+  assert.match(enqueue, /jamRememberAmbiguousPlaylistRequest/);
+  assert.match(enqueue, /remaining_positions/);
   assert.doesNotMatch(enqueue, /forEach[\s\S]*addToQueue/);
+  assert.doesNotMatch(enqueue, /trackCount > 50/);
+  assert.match(indexSource, /id="jam-playlist-add-all"[^>]*>Add entire playlist</);
+  assert.match(indexSource, /id="jam-playlist-selection-count"[^>]*aria-live="polite"/);
+  assert.match(indexSource, /id="jam-playlist-clear-selection"/);
+  assert.match(indexSource, /id="jam-playlist-add-selected"/);
 });
 
 test("Jam browser markup exposes keyboard tabs and inactive-accessible history", () => {

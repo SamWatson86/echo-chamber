@@ -257,7 +257,6 @@ function syncClubhouseUtilityPresentation() {
     var isV2 = document.documentElement.dataset.uiShell === "v2";
     var mode = document.documentElement.dataset.uiMode;
     var collapsed = shellLayout.classList.contains("utility-collapsed");
-    var overlaysStage = mode === "lounge" || mode === "compact" || mode === "mini";
 
     if (!isV2) {
       if (!collapsed) activeUtilityTool = inferVisibleUtilityTool();
@@ -302,6 +301,8 @@ function syncClubhouseUtilityPresentation() {
       activeUtilityTool = "people";
     }
     activeUtilityTool = normalizeUtilityTool(activeUtilityTool);
+    var overlaysStage = activeUtilityTool === "jam" ||
+      mode === "lounge" || mode === "compact" || mode === "mini";
     shellUtilityHost.dataset.activeTool = activeUtilityTool;
     shellLayout.dataset.activeUtility = activeUtilityTool;
     document.documentElement.dataset.uiUtility = activeUtilityTool;

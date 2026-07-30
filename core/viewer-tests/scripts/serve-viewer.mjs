@@ -9,6 +9,8 @@ const adminRoot = path.resolve(scriptDirectory, "..", "..", "admin");
 const previewFixture = path.resolve(scriptDirectory, "..", "fixtures", "install-scenario.js");
 const port = Number.parseInt(process.env.PORT || "4175", 10);
 const isolatedThemePreview = process.env.ECHO_THEME_PREVIEW === "1";
+const isolatedJamPreview = process.env.ECHO_JAM_PREVIEW === "1";
+const isolatedPreview = isolatedThemePreview || isolatedJamPreview;
 const transparentPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -39,7 +41,7 @@ function send(response, statusCode, body, contentType) {
 function resolveStaticFile(requestUrl) {
   const url = new URL(requestUrl, `http://127.0.0.1:${port}`);
   const pathname = decodeURIComponent(url.pathname);
-  if (isolatedThemePreview && pathname === "/__echo-theme-preview-fixture.js") {
+  if (isolatedPreview && pathname === "/__echo-preview-fixture.js") {
     return previewFixture;
   }
   const isAdminRequest = pathname === "/admin" || pathname.startsWith("/admin/");
@@ -60,7 +62,8 @@ function resolveStaticFile(requestUrl) {
   return candidate;
 }
 
-function injectIsolatedThemePreview(html) {
+function injectIsolatedPreview(html) {
+  const previewName = isolatedJamPreview ? "Isolated Jam Preview" : "Isolated Theme Preview";
   const earlyBootstrap = `
     <script>
       (function () {
@@ -146,14 +149,27 @@ function injectIsolatedThemePreview(html) {
     </style>
   `;
   const banner = `
-    <div id="echo-isolated-preview-banner" role="status" aria-label="Isolated theme preview. Not live Echo.">
-      <span>Isolated Theme Preview</span>
+    <div id="echo-isolated-preview-banner" role="status" aria-label="${previewName}. Not live Echo.">
+      <span>${previewName}</span>
       <strong>Not Live Echo</strong>
       <small>localhost fixture · no production connection</small>
     </div>
   `;
+  const openPreview = isolatedJamPreview
+    ? `
+          if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(false);
+          if (typeof adminToken !== "undefined") adminToken = "isolated-jam-preview-admin";
+          if (typeof currentAccessToken !== "undefined") currentAccessToken = "isolated-jam-preview-participant";
+          var jamButton = document.getElementById("open-jam");
+          if (jamButton) jamButton.disabled = false;
+          if (typeof openJamPanel === "function") openJamPanel(jamButton);
+          if (typeof setJamView === "function") setJamView("library", false);
+      `
+    : `
+          if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(true);
+      `;
   const scenario = `
-    <script src="/__echo-theme-preview-fixture.js"></script>
+    <script src="/__echo-preview-fixture.js"></script>
     <script>
       window.addEventListener("load", function () {
         var fixture = window.EchoLayoutTestScenario;
@@ -164,12 +180,13 @@ function injectIsolatedThemePreview(html) {
           screenShares: 1,
           shareAspects: [16 / 9],
           chatOpen: false,
-          localCamera: true
+          localCamera: true,
+          screenOwners: [0]
         }).then(function () {
           document.documentElement.dataset.echoIsolatedPreviewReady = "true";
-          if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(true);
+          ${openPreview}
         }).catch(function (error) {
-          console.error("[isolated-theme-preview] fixture failed", error);
+          console.error("[isolated-preview] fixture failed", error);
         });
       });
     </script>
@@ -193,7 +210,7 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (isolatedThemePreview) {
+  if (isolatedPreview) {
     const requestUrl = new URL(request.url || "/", `http://127.0.0.1:${port}`);
     if (requestUrl.pathname === "/api/online") {
       send(response, 200, "[]", "application/json; charset=utf-8");
@@ -205,6 +222,52 @@ const server = http.createServer(async (request, response) => {
     }
     if (requestUrl.pathname.startsWith("/api/avatar/")) {
       send(response, 200, transparentPng, "image/png");
+      return;
+    }
+    if (isolatedJamPreview && requestUrl.pathname === "/api/jam/state") {
+      send(response, 200, JSON.stringify({
+        jam_protocol_version: 3,
+        active: true,
+        generation: 7,
+        spotify_connected: true,
+        spotify_library_authorized: false,
+        spotify_is_playing: true,
+        playback_stop_supported: true,
+        playlist_selection_supported: true,
+        source_enabled: true,
+        source_availability_known: true,
+        source_status: "live",
+        source_ready: true,
+        source_last_frame_ms: 18,
+        source_peak: 0.42,
+        host_identity: "layout-fixture-1",
+        listener_count: 1,
+        listeners: ["layout-fixture-1"],
+        now_playing: {
+          spotify_id: "0VjIjW4GlUZAMYd2vXMi3b",
+          spotify_uri: "spotify:track:0VjIjW4GlUZAMYd2vXMi3b",
+          spotify_url: "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+          name: "Blinding Lights",
+          artist: "The Weeknd",
+          duration_ms: 200040,
+          progress_ms: 86000,
+          is_playing: true,
+        },
+        queue: [],
+      }), "application/json; charset=utf-8");
+      return;
+    }
+    if (isolatedJamPreview && requestUrl.pathname === "/api/jam/favorites") {
+      send(response, 200, JSON.stringify({
+        schema_version: 1,
+        items: [],
+        contributors: [],
+        counts: { tracks: 0, playlists: 0, contributors: 0 },
+        offset: 0,
+        limit: 20,
+        total: 0,
+        next_offset: null,
+      }), "application/json; charset=utf-8");
       return;
     }
   }
@@ -226,10 +289,10 @@ const server = http.createServer(async (request, response) => {
     if (!fileStat.isFile()) throw new Error("not a file");
     let body = await readFile(filePath);
     if (
-      isolatedThemePreview &&
+      isolatedPreview &&
       filePath === path.join(viewerRoot, "index.html")
     ) {
-      body = injectIsolatedThemePreview(body.toString("utf8"));
+      body = injectIsolatedPreview(body.toString("utf8"));
     }
     const contentType = contentTypes.get(path.extname(filePath).toLowerCase()) || "application/octet-stream";
     response.writeHead(200, {
@@ -247,7 +310,7 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, "127.0.0.1", () => {
   console.log(
     `[viewer-tests] serving ${viewerRoot} and ${adminRoot} at http://127.0.0.1:${port}` +
-      (isolatedThemePreview ? " [ISOLATED THEME PREVIEW]" : ""),
+      (isolatedJamPreview ? " [ISOLATED JAM PREVIEW]" : isolatedThemePreview ? " [ISOLATED THEME PREVIEW]" : ""),
   );
 });
 
