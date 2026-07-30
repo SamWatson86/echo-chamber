@@ -96,6 +96,13 @@ login and in the Jam panel. Hear Jam uses the independent Jam Volume without
 changing anyone else's level. Stop Music pauses playback for everyone but
 preserves the active Jam, queue, listeners, capture route, and audio sockets.
 
+The shared Echo Favorites layer and 30-day Play History are defined in
+`docs/JAM-LIBRARY-HISTORY.md`. Playlists are always expanded server-side into
+ordinary track queue entries; the queue and source protocol never contain a
+playlist object. Favorite removal never removes queued Spotify items. History
+records only Echo queue entries that Spotify is subsequently observed playing,
+with consecutive repeats collapsed until a different track plays.
+
 Listener audio uses `/api/jam/audio?jam_protocol_version=3&generation=...`.
 Credentials are not placed in that URL: the listener's first WebSocket frame is
 an auth message containing its bound LiveKit token, and the server replies

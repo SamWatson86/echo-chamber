@@ -80,6 +80,23 @@ Prerequisites:
 - `core/client/.tauri-keys` is present on the release machine.
 - Version files and `CHANGELOG.md` are already bumped for the release.
 
+When native Spotify link handling changes, run the ignored Windows smoke once
+for a track and once for a playlist before publishing. Use targets that Sam can
+visually identify, and wait for confirmation after each invocation:
+
+```powershell
+$env:ECHO_SPOTIFY_SMOKE_KIND = "track" # then repeat with "playlist"
+$env:ECHO_SPOTIFY_SMOKE_ID = "PASTE_THE_22_CHARACTER_SPOTIFY_ID"
+cargo test --locked --manifest-path core\Cargo.toml -p echo-core-client `
+  spotify_link::tests::opens_requested_target_in_installed_spotify -- `
+  --ignored --exact --nocapture
+Remove-Item Env:ECHO_SPOTIFY_SMOKE_KIND,Env:ECHO_SPOTIFY_SMOKE_ID
+```
+
+The test must report that Windows accepted the native Spotify URI, and Sam must
+confirm that Spotify opened the intended item. Run only one target at a time so
+the second navigation cannot hide a failure in the first.
+
 Command:
 
 ```powershell

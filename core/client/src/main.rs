@@ -12,6 +12,8 @@ use audio_capture_stub as audio_capture;
 
 #[cfg(target_os = "windows")]
 mod screen_capture;
+#[cfg(any(target_os = "windows", test))]
+mod spotify_link;
 #[cfg(target_os = "windows")]
 mod spotify_output_route;
 
@@ -509,6 +511,12 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 // ── OS Detection ──
 
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn open_spotify_uri(uri: String, url: String) -> Result<(), String> {
+    spotify_link::open_spotify_target(&uri, &url)
+}
+
 #[tauri::command]
 fn get_os_build_number() -> u32 {
     let build = detect_windows_build_number();
@@ -745,6 +753,8 @@ fn main() {
             toggle_fullscreen,
             set_always_on_top,
             open_external_url,
+            #[cfg(target_os = "windows")]
+            open_spotify_uri,
             save_settings,
             load_settings,
             list_capturable_windows,

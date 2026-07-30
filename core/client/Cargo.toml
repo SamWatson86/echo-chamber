@@ -1,6 +1,6 @@
 [package]
 name = "echo-core-client"
-version = "0.6.33"
+version = "0.6.34"
 edition = "2021"
 description = "Echo Chamber native desktop client"
 
@@ -49,6 +49,7 @@ features = [
     "Win32_System_WinRT",
     "Win32_Storage_Packaging_Appx",
     "Win32_Storage_Xps",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Direct3D_Fxc",
 ]

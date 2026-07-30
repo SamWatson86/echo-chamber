@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.34",
+    title: "Shared Jam Library & History",
+    notes: [
+      "Search Spotify tracks and playlists, save them to shared Echo Favorites, and filter the library by who added each item.",
+      "Adding a playlist now expands it into the normal ordered song queue while preserving which playlist each song came from.",
+      "Play History shows the last 30 days with timestamps, contributors, playlist details, and Spotify links while collapsing uninterrupted loop repeats."
+    ]
+  },
+  {
     version: "v0.6.33",
     title: "Truthful Media Presence",
     notes: [

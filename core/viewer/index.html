@@ -559,19 +559,121 @@
               <span id="jam-volume-value" class="jam-volume-value">50%</span>
             </div>
           </div>
-          <div class="jam-search-queue-row">
-            <div id="jam-search-section" class="jam-search-section" style="display:none">
-              <input id="jam-search-input" type="text" class="jam-search-input" placeholder="Search for a song..." />
-              <div id="jam-results" class="jam-results"></div>
+          <section id="jam-browser" class="jam-browser" aria-label="Jam library, search, queue, and history">
+            <div class="jam-browser-tabs" role="tablist" aria-label="Jam views">
+              <button id="jam-view-library-tab" type="button" class="jam-browser-tab" role="tab" aria-selected="false" aria-controls="jam-library-section" tabindex="-1" data-jam-view="library">Library</button>
+              <button id="jam-view-search-tab" type="button" class="jam-browser-tab active" role="tab" aria-selected="true" aria-controls="jam-search-section" tabindex="0" data-jam-view="search">Search</button>
+              <button id="jam-view-queue-tab" type="button" class="jam-browser-tab" role="tab" aria-selected="false" aria-controls="jam-queue-section" tabindex="-1" data-jam-view="queue">Queue</button>
+              <button id="jam-view-history-tab" type="button" class="jam-browser-tab" role="tab" aria-selected="false" aria-controls="jam-history-section" tabindex="-1" data-jam-view="history">History</button>
             </div>
-            <div id="jam-queue-section" class="jam-queue-section" style="display:none">
+            <a class="jam-spotify-attribution" href="https://open.spotify.com/" target="_blank" rel="noopener noreferrer" aria-label="Open Spotify">
+              <span>Music data from</span>
+              <img src="assets/spotify-full-logo-white.svg" alt="Spotify" />
+            </a>
+
+            <div id="jam-library-section" class="jam-browser-panel jam-library-section" role="tabpanel" aria-labelledby="jam-view-library-tab" hidden>
+              <div class="jam-filter-grid">
+                <label class="jam-filter-field">Show
+                  <select id="jam-library-kind">
+                    <option value="all">All Echo favorites</option>
+                    <option value="track">Songs</option>
+                    <option value="playlist">Playlists</option>
+                  </select>
+                </label>
+                <label class="jam-filter-field">Added by
+                  <select id="jam-library-contributor">
+                    <option value="">Everyone</option>
+                  </select>
+                </label>
+                <label class="jam-filter-field">Sort
+                  <select id="jam-library-sort">
+                    <option value="added_at">Date added</option>
+                    <option value="name">Name</option>
+                    <option value="added_by">Added by</option>
+                    <option value="kind">Type</option>
+                  </select>
+                </label>
+                <label class="jam-filter-field">Direction
+                  <select id="jam-library-direction">
+                    <option value="desc">Descending</option>
+                    <option value="asc">Ascending</option>
+                  </select>
+                </label>
+              </div>
+              <button id="jam-import-spotify" type="button" class="jam-secondary-btn">Import to Echo Favorites</button>
+              <div id="jam-library-status" class="jam-view-status" role="status" aria-live="polite"></div>
+              <div id="jam-library-list" class="jam-catalog-list" role="list" aria-label="Echo favorite Spotify items"></div>
+              <nav class="jam-pager" aria-label="Echo Favorites pages">
+                <button id="jam-library-prev" type="button" class="jam-secondary-btn">Previous</button>
+                <span id="jam-library-page" class="jam-page-summary">0 items</span>
+                <button id="jam-library-next" type="button" class="jam-secondary-btn">Next</button>
+              </nav>
+            </div>
+
+            <div id="jam-search-section" class="jam-browser-panel jam-search-section" role="tabpanel" aria-labelledby="jam-view-search-tab">
+              <div class="jam-search-kind-tabs" role="tablist" aria-label="Spotify search type">
+                <button id="jam-search-track-tab" type="button" class="jam-search-kind-tab active" role="tab" aria-selected="true" aria-controls="jam-results" tabindex="0" data-jam-search-kind="track">Songs</button>
+                <button id="jam-search-playlist-tab" type="button" class="jam-search-kind-tab" role="tab" aria-selected="false" aria-controls="jam-results" tabindex="-1" data-jam-search-kind="playlist">Playlists</button>
+              </div>
+              <label class="jam-visually-hidden" for="jam-search-input">Search Spotify</label>
+              <input id="jam-search-input" type="search" class="jam-search-input" placeholder="Search for a song..." autocomplete="off" />
+              <div id="jam-search-status" class="jam-view-status" role="status" aria-live="polite"></div>
+              <div id="jam-results" class="jam-results" role="list" aria-label="Spotify search results"></div>
+              <nav class="jam-pager" aria-label="Spotify search result pages">
+                <button id="jam-search-prev" type="button" class="jam-secondary-btn">Previous</button>
+                <span id="jam-search-page" class="jam-page-summary">0 results</span>
+                <button id="jam-search-next" type="button" class="jam-secondary-btn">Next</button>
+              </nav>
+            </div>
+
+            <div id="jam-playlist-detail" class="jam-browser-panel jam-playlist-detail" role="region" aria-labelledby="jam-playlist-detail-title" hidden>
+              <button id="jam-playlist-back" type="button" class="jam-secondary-btn jam-detail-back">Back to results</button>
+              <div id="jam-playlist-summary"></div>
+              <div class="jam-detail-actions">
+                <button id="jam-playlist-favorite" type="button" class="jam-secondary-btn" aria-pressed="false">Save to Echo</button>
+                <button id="jam-playlist-add-all" type="button" class="jam-primary-btn">Add all to queue</button>
+              </div>
+              <div id="jam-playlist-status" class="jam-view-status" role="status" aria-live="polite"></div>
+              <div id="jam-playlist-items" class="jam-catalog-list" role="list" aria-label="Playlist songs"></div>
+              <button id="jam-playlist-load-more" type="button" class="jam-secondary-btn jam-load-more" hidden>Load more</button>
+            </div>
+
+            <div id="jam-queue-section" class="jam-browser-panel jam-queue-section" role="tabpanel" aria-labelledby="jam-view-queue-tab" hidden>
               <div class="jam-queue-title">Queue</div>
-              <div id="jam-queue-list" class="jam-queue-list">
+              <div id="jam-queue-list" class="jam-queue-list" role="list" aria-label="Jam queue">
                 <div class="jam-queue-empty">Queue is empty</div>
               </div>
             </div>
-          </div>
-          <div id="jam-status" class="jam-status"></div>
+
+            <div id="jam-history-section" class="jam-browser-panel jam-history-section" role="tabpanel" aria-labelledby="jam-view-history-tab" hidden>
+              <div class="jam-filter-grid jam-history-filters">
+                <label class="jam-filter-field">Sort
+                  <select id="jam-history-sort">
+                    <option value="played_at">Played</option>
+                    <option value="added_at">Added</option>
+                    <option value="track">Track</option>
+                    <option value="artist">Artist</option>
+                    <option value="added_by">Added by</option>
+                    <option value="playlist">Playlist</option>
+                  </select>
+                </label>
+                <label class="jam-filter-field">Direction
+                  <select id="jam-history-direction">
+                    <option value="desc">Descending</option>
+                    <option value="asc">Ascending</option>
+                  </select>
+                </label>
+              </div>
+              <div id="jam-history-status" class="jam-view-status" role="status" aria-live="polite"></div>
+              <ol id="jam-history-list" class="jam-history-list" aria-label="Jam play history"></ol>
+              <nav class="jam-pager" aria-label="Play history pages">
+                <button id="jam-history-prev" type="button" class="jam-secondary-btn">Previous</button>
+                <span id="jam-history-page" class="jam-page-summary">0 plays</span>
+                <button id="jam-history-next" type="button" class="jam-secondary-btn">Next</button>
+              </nav>
+            </div>
+          </section>
+          <div id="jam-status" class="jam-status" role="status" aria-live="polite"></div>
         </div>
       </div>
       <!-- Dashboard Panel (visible to all connected users) -->

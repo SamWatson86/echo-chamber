@@ -11,6 +11,8 @@ const transparentPng = Buffer.from(
   "base64",
 );
 const transparentDataUrl = `data:image/png;base64,${transparentPng.toString("base64")}`;
+const trackId = "0123456789ABCDEFGHIJKL";
+const playlistId = "ABCDEFGHIJKL0123456789";
 
 function longText(label) {
   return `${label} ${"Private Clubhouse Fellowship Anthem ".repeat(4).trim()}`;
@@ -34,6 +36,9 @@ function createJamState() {
     listener_count: 2,
     listeners: ["layout-fixture-2", "layout-fixture-3"],
     now_playing: {
+      spotify_id: trackId,
+      spotify_uri: `spotify:track:${trackId}`,
+      spotify_url: `https://open.spotify.com/track/${trackId}`,
       name: longText("Now Playing"),
       artist: longText("The Extremely Long Artist Name"),
       album_art_url: transparentDataUrl,
@@ -54,7 +59,9 @@ function createJamState() {
 
 function createSearchTracks() {
   return Array.from({ length: 6 }, (_, index) => ({
-    spotify_uri: `spotify:track:search-${index + 1}`,
+    kind: "track",
+    spotify_id: `0${String(index + 1).padStart(21, "0")}`,
+    spotify_uri: `spotify:track:0${String(index + 1).padStart(21, "0")}`,
     name: longText(`Search Result ${index + 1}`),
     artist: longText(`Search Artist ${index + 1}`),
     album_art_url: transparentDataUrl,
@@ -71,15 +78,38 @@ test.beforeEach(async ({ page }) => {
   const model = {
     counts: Object.create(null),
     errors,
+    expectedConfirmationConflict: false,
+    expectedPlaylistForbidden: false,
+    favoriteItems: null,
+    favoriteQueries: [],
+    forceConfirmation: false,
+    forbidPlaylistItems: false,
+    queuePlaylistBodies: [],
     searchTracks: createSearchTracks(),
     state: createJamState(),
+    playlist: {
+      kind: "playlist",
+      spotify_id: playlistId,
+      spotify_uri: `spotify:playlist:${playlistId}`,
+      spotify_url: `https://open.spotify.com/playlist/${playlistId}`,
+      name: "Fixture Road Trip",
+      owner: "Fixture Owner",
+      description: "A playlist used to verify the real Jam browser.",
+      track_count: 30,
+      favorited_by_me: false,
+      favorite_contributor_count: 1,
+    },
   };
   runtimeErrors.set(page, errors);
   apiModels.set(page, model);
 
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
   page.on("console", (message) => {
-    if (message.type() === "error") errors.push(`console.error: ${message.text()}`);
+    if (message.type() === "error") {
+      if (model.expectedConfirmationConflict && message.text().includes("409 (Conflict)")) return;
+      if (model.expectedPlaylistForbidden && message.text().includes("403 (Forbidden)")) return;
+      errors.push(`console.error: ${message.text()}`);
+    }
   });
 
   await page.route("**/api/**", async (route) => {
@@ -112,12 +142,188 @@ test.beforeEach(async ({ page }) => {
       });
       return;
     }
-    if (url.pathname === "/api/jam/search" && request.method() === "POST") {
+    if (url.pathname === "/api/jam/catalog/search" && request.method() === "POST") {
+      increment(model, key);
+      const requestBody = request.postDataJSON();
+      const isPlaylist = requestBody.kind === "playlist";
+      const query = requestBody.query;
+      if (query === "slow original") await new Promise((resolve) => setTimeout(resolve, 500));
+      const searchItems = isPlaylist
+        ? [model.playlist]
+        : query === "slow original"
+          ? [{ ...model.searchTracks[0], name: "Stale Result" }]
+          : query === "fresh replacement"
+            ? [{ ...model.searchTracks[1], name: "Fresh Result" }]
+            : model.searchTracks;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema_version: 1,
+          kind: requestBody.kind,
+          items: searchItems,
+          offset: requestBody.offset,
+          limit: requestBody.limit,
+          total: searchItems.length,
+          next_offset: null,
+        }),
+      });
+      return;
+    }
+    if (url.pathname === "/api/jam/favorites" && request.method() === "GET") {
+      increment(model, key);
+      model.favoriteQueries.push(Object.fromEntries(url.searchParams));
+      if (model.favoriteItems) {
+        const kind = url.searchParams.get("kind") || "all";
+        const actorId = url.searchParams.get("actor_id") || "";
+        const facetItems = model.favoriteItems.filter((item) => kind === "all" || item.kind === kind);
+        const contributors = new Map();
+        for (const attribution of facetItems.flatMap((item) => item.attributions || [])) {
+          const current = contributors.get(attribution.actor_id) || {
+            actor_id: attribution.actor_id,
+            display_name: attribution.display_name,
+            count: 0,
+          };
+          current.count += 1;
+          contributors.set(attribution.actor_id, current);
+        }
+        const items = facetItems.filter((item) => !actorId || (item.attributions || []).some((entry) => entry.actor_id === actorId));
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            schema_version: 1,
+            items,
+            contributors: Array.from(contributors.values()),
+            counts: {
+              tracks: items.filter((item) => item.kind === "track").length,
+              playlists: items.filter((item) => item.kind === "playlist").length,
+              contributors: contributors.size,
+            },
+            offset: Number(url.searchParams.get("offset") || 0),
+            limit: 20,
+            total: items.length,
+            next_offset: null,
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema_version: 1,
+          items: [{
+            kind: "track",
+            spotify_id: trackId,
+            spotify_uri: `spotify:track:${trackId}`,
+            spotify_url: `https://open.spotify.com/track/${trackId}`,
+            name: "Shared Favorite",
+            artist: "Fixture Artist",
+            attributions: [{ actor_id: "sam", display_name: "Sam", added_at_ms: 100, source: "manual" }],
+            contributor_count: 1,
+            favorited_by_me: true,
+          }, model.playlist],
+          contributors: [{ actor_id: "sam", display_name: "Sam", count: 1 }],
+          counts: { track: 1, playlist: 1 },
+          offset: Number(url.searchParams.get("offset") || 0),
+          limit: 20,
+          total: 2,
+          next_offset: null,
+        }),
+      });
+      return;
+    }
+    if (url.pathname === `/api/jam/playlists/${playlistId}/items` && request.method() === "GET") {
+      increment(model, key);
+      if (model.forbidPlaylistItems) {
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "playlist_items_forbidden",
+            message: "Spotify only allows this Echo app to expand playlists the connected account owns or collaborates on; other public playlists require Spotify Extended Quota",
+          }),
+        });
+        return;
+      }
+      const items = Array.from({ length: 20 }, (_, index) => ({
+        ...model.searchTracks[index % model.searchTracks.length],
+        spotify_id: `1${String(index + 1).padStart(21, "0")}`,
+        spotify_uri: `spotify:track:1${String(index + 1).padStart(21, "0")}`,
+        name: `Playlist Song ${index + 1}`,
+        playlist_position: index,
+      }));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          schema_version: 1,
+          playlist: model.playlist,
+          items,
+          skipped: [],
+          offset: 0,
+          limit: 20,
+          total: 30,
+          next_offset: 20,
+        }),
+      });
+      return;
+    }
+    if (url.pathname === "/api/jam/queue/playlist" && request.method() === "POST") {
+      increment(model, key);
+      model.queuePlaylistBodies.push(request.postDataJSON());
+      if (model.forbidPlaylistItems) {
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "playlist_items_forbidden",
+            message: "Spotify only allows this Echo app to expand playlists the connected account owns or collaborates on; other public playlists require Spotify Extended Quota",
+          }),
+        });
+        return;
+      }
+      if (model.forceConfirmation && model.queuePlaylistBodies.length === 1) {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "confirmation_required", playable_count: 30, confirmation_threshold: 25 }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, request_id: request.postDataJSON().request_id, queue_batch_id: "batch-1", queued_count: 29, skipped: [{ position: 4, reason: "unavailable" }], partial: true, complete: false, failure: { status: 429, error: "spotify_rate_limited", message: "Spotify rate limit interrupted the batch.", retry_after: "12" } }),
+      });
+      return;
+    }
+    if (url.pathname === "/api/jam/history" && request.method() === "GET") {
       increment(model, key);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ tracks: model.searchTracks }),
+        body: JSON.stringify({
+          schema_version: 1,
+          items: [{
+            history_entry_id: "history-1",
+            spotify_id: trackId,
+            spotify_uri: `spotify:track:${trackId}`,
+            spotify_url: `https://open.spotify.com/track/${trackId}`,
+            name: "Played While Inactive",
+            artist: "Fixture Artist",
+            added_at_ms: 1_700_000_000_000,
+            played_at_ms: 1_700_000_100_000,
+            added_by_actor_id: "sam",
+            added_by_name: "Sam",
+            playlist: model.playlist,
+          }],
+          offset: 0,
+          limit: 20,
+          total: 1,
+          next_offset: null,
+        }),
       });
       return;
     }
@@ -751,7 +957,7 @@ test("populated Jam remains inside the workspace and above the dock at represent
       }
       const targetSizes = Array.from(document.querySelectorAll(
         "#jam-panel button:not(.hidden):not([style*='display:none']):not([style*='display: none'])",
-      )).filter((button) => getComputedStyle(button).display !== "none").map((button) => {
+      )).filter((button) => getComputedStyle(button).display !== "none" && button.getClientRects().length > 0).map((button) => {
         const bounds = button.getBoundingClientRect();
         return { height: bounds.height, id: button.id || button.className, width: bounds.width };
       });
@@ -789,6 +995,186 @@ test("populated Jam remains inside the workspace and above the dock at represent
       expect(target.width, `${target.id} width at ${viewport.width}x${viewport.height}`).toBeGreaterThanOrEqual(39.5);
     }
   }
+});
+
+test("Jam browser tabs are keyboard navigable and history remains available while inactive", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 });
+  const model = apiModels.get(page);
+  model.state.active = false;
+  model.state.spotify_is_playing = false;
+  model.state.now_playing = null;
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+
+  await expect(page.locator("#jam-connect-spotify")).toBeVisible();
+  await expect(page.locator("#jam-connect-spotify")).toHaveText("Refresh Spotify Access");
+  const spotifyAttribution = page.locator(".jam-spotify-attribution");
+  await expect(spotifyAttribution).toHaveAttribute("href", "https://open.spotify.com/");
+  await expect(spotifyAttribution.locator("img")).toHaveAttribute("alt", "Spotify");
+  expect(await spotifyAttribution.locator("img").evaluate((image) => image.getBoundingClientRect().width)).toBeGreaterThanOrEqual(70);
+  const searchTab = page.locator("#jam-view-search-tab");
+  await searchTab.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("#jam-view-library-tab")).toBeFocused();
+  await expect(page.locator("#jam-library-section")).toBeVisible();
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(2);
+  expect(model.counts["GET /api/jam/history"] || 0).toBe(0);
+
+  await page.keyboard.press("End");
+  await expect(page.locator("#jam-view-history-tab")).toBeFocused();
+  await expect(page.locator("#jam-history-section")).toBeVisible();
+  await expect(page.locator("#jam-history-list")).toContainText("Played While Inactive");
+  await expect(page.locator("#jam-history-list")).toContainText("Added by Sam");
+  await expect(page.locator("#jam-history-list .jam-history-playlist a")).toHaveText("Fixture Road Trip");
+  await expect.poll(() => model.counts["GET /api/jam/history"] || 0).toBe(1);
+  await page.evaluate(async () => { await fetchJamState(); });
+  expect(model.counts["GET /api/jam/history"] || 0).toBe(1);
+
+  const overflow = await page.locator("#jam-browser").evaluate((browser) => ({
+    browser: browser.scrollWidth - browser.clientWidth,
+    document: document.documentElement.scrollWidth - window.innerWidth,
+  }));
+  expect(overflow.browser).toBeLessThanOrEqual(1);
+  expect(overflow.document).toBeLessThanOrEqual(1);
+});
+
+test("zero-match kind keeps the selected favorite contributor and truthful empty results", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  const model = apiModels.get(page);
+  model.favoriteItems = [
+    {
+      kind: "track",
+      spotify_id: trackId,
+      spotify_uri: `spotify:track:${trackId}`,
+      spotify_url: `https://open.spotify.com/track/${trackId}`,
+      name: "Friend Track",
+      artist: "Fixture Artist",
+      attributions: [{ actor_id: "friend", display_name: "Friend", added_at_ms: 200, source: "manual" }],
+      contributor_count: 1,
+      favorited_by_me: false,
+    },
+    {
+      ...model.playlist,
+      name: "Sam Playlist",
+      attributions: [{ actor_id: "sam", display_name: "Sam", added_at_ms: 100, source: "manual" }],
+      contributor_count: 1,
+      favorited_by_me: true,
+    },
+  ];
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  await page.locator("#jam-view-library-tab").click();
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(2);
+
+  const contributor = page.locator("#jam-library-contributor");
+  await contributor.selectOption("friend");
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(1);
+  await expect(page.locator("#jam-library-list")).toContainText("Friend Track");
+
+  await page.locator("#jam-library-kind").selectOption("playlist");
+  await expect(contributor).toHaveValue("friend");
+  await expect(contributor.locator('option[value="friend"]')).toHaveText("Friend (0)");
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(0);
+  await expect(page.locator("#jam-library-status")).toHaveText("No Echo Favorites match these filters.");
+  expect(model.favoriteQueries.at(-1)).toMatchObject({ kind: "playlist", actor_id: "friend" });
+
+  await contributor.selectOption("");
+  await expect(page.locator("#jam-library-list .jam-catalog-item")).toHaveCount(1);
+  await expect(page.locator("#jam-library-list")).toContainText("Sam Playlist");
+  expect(model.favoriteQueries.at(-1)).toMatchObject({ kind: "playlist" });
+  expect(model.favoriteQueries.at(-1).actor_id).toBeUndefined();
+});
+
+test("catalog search aborts and rejects stale results", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  const model = apiModels.get(page);
+  await expect(page.locator("#jam-now-playing .jam-now-playing-name")).toHaveAttribute("href", `https://open.spotify.com/track/${trackId}`);
+  await expect(page.locator("#jam-banner .jam-banner-title")).toHaveAttribute("href", `https://open.spotify.com/track/${trackId}`);
+  await expect(page.locator("#jam-now-playing")).not.toHaveAttribute("role", "button");
+  await expect(page.locator("#jam-join-btn")).toBeVisible();
+  await expect(page.locator("#jam-banner")).toHaveAttribute("role", "group");
+  await expect(page.locator("#jam-banner .jam-banner-open")).toHaveRole("button");
+  const input = page.locator("#jam-search-input");
+
+  await input.fill("slow original");
+  await expect.poll(() => model.counts["POST /api/jam/catalog/search"] || 0).toBe(1);
+  await input.fill("fresh replacement");
+  await expect(page.locator("#jam-results")).toContainText("Fresh Result");
+  await page.waitForTimeout(600);
+  await expect(page.locator("#jam-results")).not.toContainText("Stale Result");
+});
+
+test("playlist detail confirms over 25 once and enqueues one locked server batch", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  const model = apiModels.get(page);
+  await page.locator("#jam-search-playlist-tab").click();
+  await page.locator("#jam-search-input").fill("road trip");
+  await expect(page.locator("#jam-results .jam-inspect-btn")).toHaveCount(1);
+  await page.locator("#jam-results .jam-inspect-btn").click();
+  await expect(page.locator("#jam-playlist-items .jam-catalog-item")).toHaveCount(20);
+  await expect(page.locator("#jam-playlist-load-more")).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("30 songs");
+    await dialog.accept();
+  });
+  await page.locator("#jam-playlist-add-all").dblclick();
+  await expect.poll(() => model.counts["POST /api/jam/queue/playlist"] || 0).toBe(1);
+  expect(model.queuePlaylistBodies).toHaveLength(1);
+  expect(model.queuePlaylistBodies[0]).toMatchObject({ playlist_id: playlistId, confirmed: true, generation: 7 });
+  expect(model.queuePlaylistBodies[0].request_id).toBeTruthy();
+  await expect(page.locator("#jam-playlist-status")).toContainText("partially added");
+  await expect(page.locator("#jam-playlist-status")).toContainText("Try again in 12 seconds");
+});
+
+test("unknown playlist count honors the server confirmation_required contract", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  const model = apiModels.get(page);
+  model.forceConfirmation = true;
+  model.expectedConfirmationConflict = true;
+  await page.evaluate((id) => {
+    _jamPlaylist = normalizeSpotifyCatalogItem({ kind: "playlist", spotify_id: id, name: "Unknown Count" }, "playlist");
+    _jamPlaylistTotal = null;
+    _jamPlaylistLoading = false;
+    document.getElementById("jam-search-section").hidden = true;
+    document.getElementById("jam-playlist-detail").hidden = false;
+    renderJamPlaylistSummary();
+  }, playlistId);
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("30 songs");
+    await dialog.accept();
+  });
+  await page.locator("#jam-playlist-add-all").click();
+  await expect.poll(() => model.counts["POST /api/jam/queue/playlist"] || 0).toBe(2);
+  expect(model.queuePlaylistBodies.map((body) => body.confirmed)).toEqual([false, true]);
+  expect(model.queuePlaylistBodies[1].request_id).toBe(model.queuePlaylistBodies[0].request_id);
+});
+
+test("Spotify development-mode playlist restrictions remain actionable in detail and add-all", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  const model = apiModels.get(page);
+  model.forbidPlaylistItems = true;
+  model.expectedPlaylistForbidden = true;
+  await page.locator("#jam-search-playlist-tab").click();
+  await page.locator("#jam-search-input").fill("restricted playlist");
+  await page.locator("#jam-results .jam-inspect-btn").click();
+  const expectedMessage = "only allows this Echo app to expand playlists the connected account owns or collaborates on";
+  await expect(page.locator("#jam-playlist-status")).toContainText(expectedMessage);
+  await expect(page.locator("#jam-playlist-status")).not.toContainText("unavailable right now");
+
+  page.once("dialog", async (dialog) => { await dialog.accept(); });
+  await page.locator("#jam-playlist-add-all").click();
+  await expect.poll(() => model.counts["POST /api/jam/queue/playlist"] || 0).toBe(1);
+  await expect(page.locator("#jam-playlist-status")).toContainText(expectedMessage);
 });
 
 test("Stop Music preserves the Jam while exact-host End Jam remains a distinct destructive action", async ({ page }) => {

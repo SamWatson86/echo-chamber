@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.34
+
+- Jam Library: Search Spotify tracks and playlists, save them as shared Echo Favorites, and filter or sort the library by the people who contributed each item.
+- Queue: Playlists expand on the control server into the existing flat, ordered track queue with playlist provenance, unavailable-track reporting, confirmation above 25 playable tracks, and a 50-item cap.
+- History: The last 30 days of Echo-observed Jam playback now include played time, queue-add time, contributor, playlist provenance, sorting, and Spotify links; consecutive loops collapse until a different track plays.
+- Desktop: Canonical track and playlist links open through the installed Spotify app when available, with the existing HTTPS path retained as a compatibility fallback.
+- Reliability: Spotify metadata is server-canonicalized, queue batches are serialized and idempotent, 429 cooldowns are shared, and private favorite/history storage is fail-closed and recovery-aware.
+- Release: Desktop and control package versions are aligned at 0.6.34.
+
 ## 0.6.33
 
 - Experience: The source PC can allow or deny Echo's Spotify takeover, mute Jam monitoring locally, and set an independent local Jam volume without changing what listeners hear.

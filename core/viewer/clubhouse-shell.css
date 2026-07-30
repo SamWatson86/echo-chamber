@@ -1802,7 +1802,8 @@
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-host-controls button,
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-actions button,
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-connect-btn,
-:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add {
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser button {
   min-width: 40px;
   min-height: 40px;
 }
@@ -1914,14 +1915,54 @@
   flex-direction: column;
 }
 
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser {
+  min-width: 0;
+  gap: 9px;
+  border-color: var(--club-border);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser-tabs {
+  position: relative;
+  z-index: 1;
+  padding: 7px 0;
+  background: rgba(17, 22, 29, 0.97);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool :is(.jam-browser-tab, .jam-search-kind-tab) {
+  padding-inline: 4px;
+  color: var(--club-text-muted);
+  border-color: var(--club-border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool :is(.jam-browser-tab, .jam-search-kind-tab).active {
+  color: var(--club-text);
+  border-color: rgba(87, 177, 255, 0.52);
+  background: rgba(87, 177, 255, 0.14);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-filter-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool :is(.jam-filter-field select, .jam-search-input) {
+  min-width: 0;
+  color: var(--club-text);
+  border-color: var(--club-border);
+  background: rgba(255, 255, 255, 0.035);
+}
+
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-results,
-:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-queue-list {
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-queue-list,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-catalog-list,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-history-list {
   max-height: none;
   overflow: visible;
 }
 
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-item,
-:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-queue-item {
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-queue-item,
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-history-item {
   min-width: 0;
   padding: 8px;
 }
@@ -1940,6 +1981,25 @@
   width: 40px;
   height: 40px;
   flex: 0 0 40px;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-card-actions {
+  max-width: 100%;
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-pager {
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr) minmax(76px, auto);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-playlist-header {
+  min-width: 0;
+  border-color: var(--club-border);
+  border-radius: var(--club-radius-card);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool :is(.jam-page-summary, .jam-view-status, .jam-history-meta-row, .jam-queue-provenance) {
+  color: var(--club-text-muted);
 }
 
 :root[data-ui-shell="v2"] .jam-toast {
@@ -1968,7 +2028,8 @@
   :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-host-controls button,
   :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-actions button,
   :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-connect-btn,
-  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add {
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-result-add,
+  :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser button {
     min-width: 44px;
     min-height: 44px;
   }

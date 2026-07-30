@@ -1,15 +1,21 @@
 use crate::auth::{
-    ensure_admin, ensure_jam_participant, ensure_jam_participant_token, RevokedParticipantBinding,
+    ensure_admin, ensure_jam_actor, ensure_jam_participant, ensure_jam_participant_token, JamActor,
+    RevokedParticipantBinding,
 };
 use crate::config::*;
+use crate::jam_history::new_history_observation;
+use crate::jam_library::{
+    fetch_favorite_summary, fetch_playlist_expansion, valid_spotify_id, FavoriteKind,
+    FavoriteSummary, JamApiError, SkippedPlaylistItem,
+};
 use crate::rooms::schedule_jam_auto_end;
 use crate::AppState;
 
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::{
     extract::{Json, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
+    http::{header::RETRY_AFTER, HeaderMap, HeaderValue, StatusCode},
+    response::{Html, IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -48,6 +54,10 @@ pub(crate) struct JamState {
     pub(crate) host_participant_auth_id: String,
     pub(crate) spotify_token: Option<SpotifyToken>,
     pub(crate) queue: Vec<QueuedTrack>,
+    pub(crate) playlist_queue_receipts: HashMap<String, PlaylistQueueReceipt>,
+    pub(crate) queue_control_epoch: u64,
+    pub(crate) queue_control_stopped: bool,
+    pub(crate) last_history_spotify_id: Option<String>,
     pub(crate) now_playing: Option<NowPlayingInfo>,
     pub(crate) listeners: HashMap<String, String>,
     pub(crate) audio_connections: HashMap<String, JamAudioConnection>,
@@ -66,18 +76,96 @@ pub(crate) struct JamAudioConnection {
     pub(crate) connection_id: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct QueuedTrack {
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct QueuedPlaylistProvenance {
+    pub(crate) spotify_id: String,
     pub(crate) spotify_uri: String,
+    pub(crate) spotify_url: String,
+    pub(crate) name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct QueuedTrack {
+    #[serde(default)]
+    pub(crate) queue_entry_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue_batch_id: Option<String>,
+    #[serde(default)]
+    pub(crate) spotify_id: String,
+    pub(crate) spotify_uri: String,
+    #[serde(default)]
+    pub(crate) spotify_url: String,
     pub(crate) name: String,
     pub(crate) artist: String,
     pub(crate) album_art_url: String,
     pub(crate) duration_ms: u64,
+    #[serde(default)]
+    pub(crate) added_at_ms: u64,
+    #[serde(default)]
+    pub(crate) added_by_actor_id: String,
+    #[serde(default)]
+    pub(crate) added_by_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) playlist: Option<QueuedPlaylistProvenance>,
+    // Kept for compatibility with the existing viewer during rollout.
     pub(crate) added_by: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PlaylistQueueReceipt {
+    actor_id: String,
+    playlist_id: String,
+    generation: u64,
+    created_at_ms: u64,
+    response: PlaylistQueueResponse,
+}
+
+fn insert_playlist_queue_receipt(
+    jam: &mut JamState,
+    request_id: String,
+    receipt: PlaylistQueueReceipt,
+) {
+    if jam.playlist_queue_receipts.len() >= 128 {
+        let oldest = jam
+            .playlist_queue_receipts
+            .iter()
+            .min_by_key(|(_, receipt)| receipt.created_at_ms)
+            .map(|(request_id, _)| request_id.clone());
+        if let Some(oldest) = oldest {
+            jam.playlist_queue_receipts.remove(&oldest);
+        }
+    }
+    jam.playlist_queue_receipts.insert(request_id, receipt);
+}
+
+fn playlist_queue_receipt_response(
+    jam: &JamState,
+    request_id: &str,
+    actor_id: &str,
+    playlist_id: &str,
+    generation: u64,
+) -> Result<Option<PlaylistQueueResponse>, ()> {
+    let Some(receipt) = jam.playlist_queue_receipts.get(request_id) else {
+        return Ok(None);
+    };
+    if receipt.actor_id == actor_id
+        && receipt.playlist_id == playlist_id
+        && receipt.generation == generation
+    {
+        Ok(Some(receipt.response.clone()))
+    } else {
+        Err(())
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NowPlayingInfo {
+    #[serde(default)]
+    pub(crate) spotify_id: String,
+    #[serde(default)]
+    pub(crate) spotify_uri: String,
+    #[serde(default)]
+    pub(crate) spotify_url: String,
     pub(crate) name: String,
     pub(crate) artist: String,
     pub(crate) album_art_url: String,
@@ -127,10 +215,52 @@ pub(crate) struct JamSearchRequest {
 pub(crate) struct JamQueueRequest {
     generation: u64,
     spotify_uri: String,
-    name: String,
-    artist: String,
-    album_art_url: String,
-    duration_ms: u64,
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "artist")]
+    _artist: String,
+    #[serde(rename = "album_art_url")]
+    _album_art_url: String,
+    #[serde(rename = "duration_ms")]
+    _duration_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PlaylistQueueRequest {
+    generation: u64,
+    playlist_id: String,
+    request_id: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PlaylistQueueFailure {
+    status: u16,
+    error: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PlaylistQueueResponse {
+    schema_version: u16,
+    ok: bool,
+    partial: bool,
+    request_id: String,
+    queue_batch_id: String,
+    // Compatibility alias for early clients built during this workstream.
+    batch_id: String,
+    generation: u64,
+    playlist: QueuedPlaylistProvenance,
+    queued: Vec<QueuedTrack>,
+    queued_count: usize,
+    skipped: Vec<SkippedPlaylistItem>,
+    skipped_count: usize,
+    complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<PlaylistQueueFailure>,
 }
 
 #[derive(Deserialize)]
@@ -170,7 +300,7 @@ pub(crate) async fn jam_spotify_init(
         "https://127.0.0.1:{}/api/jam/spotify-callback",
         state.config.port
     );
-    let scopes = "user-read-private user-modify-playback-state user-read-currently-playing user-read-playback-state";
+    let scopes = "user-read-private user-modify-playback-state user-read-currently-playing user-read-playback-state user-library-read playlist-read-private playlist-read-collaborative";
     let auth_url = format!(
         "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
         urlencoded(&client_id),
@@ -299,27 +429,93 @@ pub(crate) async fn jam_spotify_token(
         *pending = None;
     }
 
-    persist_spotify_token(&state.spotify_token_file, &token);
-    info!("Spotify token stored and persisted to disk");
+    let persisted = persist_spotify_token(
+        &state.spotify_token_file,
+        &token,
+        state.spotify_token_storage_enabled,
+    );
+    if persisted {
+        info!("Spotify token stored in memory and persisted to disk");
+    } else {
+        info!("Spotify token stored in memory only");
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-pub(crate) fn persist_spotify_token(path: &std::path::Path, token: &SpotifyToken) {
+pub(crate) fn persist_spotify_token(
+    path: &std::path::Path,
+    token: &SpotifyToken,
+    storage_enabled: bool,
+) -> bool {
+    if !storage_enabled {
+        warn!("Spotify token persistence is disabled because its path is not private");
+        return false;
+    }
     match serde_json::to_string_pretty(token) {
         Ok(json) => {
             if let Err(e) = fs::write(path, &json) {
                 warn!("Failed to persist Spotify token: {}", e);
+                false
             } else {
                 info!("Spotify token persisted to {:?}", path);
+                true
             }
         }
-        Err(e) => warn!("Failed to serialize Spotify token: {}", e),
+        Err(e) => {
+            warn!("Failed to serialize Spotify token: {}", e);
+            false
+        }
     }
 }
 
 // ── Spotify API proxy helper ─────────────────────────────────────────────
 
-async fn spotify_api_request(
+fn spotify_rate_limit_error(state: &AppState) -> Option<(StatusCode, String)> {
+    let seconds = spotify_retry_after_seconds(state)?;
+    Some((
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("Spotify rate limit is active; retry after {seconds} seconds"),
+    ))
+}
+
+fn remember_spotify_rate_limit(state: &AppState, response: &reqwest::Response) {
+    if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return;
+    }
+    let Some(seconds) = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return;
+    };
+    let until = std::time::Instant::now() + Duration::from_secs(seconds.min(24 * 60 * 60));
+    let mut guard = state
+        .spotify_rate_limit_until
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if guard.is_none_or(|current| until > current) {
+        *guard = Some(until);
+    }
+}
+
+pub(crate) fn spotify_retry_after_seconds(state: &AppState) -> Option<String> {
+    let remaining = state
+        .spotify_rate_limit_until
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .and_then(|until| until.checked_duration_since(std::time::Instant::now()))?;
+    Some(
+        remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+            .max(1)
+            .to_string(),
+    )
+}
+
+pub(crate) async fn spotify_api_request(
     state: &AppState,
     method: reqwest::Method,
     url: &str,
@@ -344,10 +540,21 @@ async fn spotify_api_request(
         req = req.header("Content-Length", "0");
     }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if let Some(error) = spotify_rate_limit_error(state) {
+        return Err(error);
+    }
+    let resp = {
+        let _permit = state.spotify_request_limit.acquire().await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Spotify request gate is unavailable".to_string(),
+            )
+        })?;
+        req.send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
+    };
+    remember_spotify_rate_limit(state, &resp);
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // Try refresh
@@ -361,10 +568,24 @@ async fn spotify_api_request(
             } else if method == reqwest::Method::POST || method == reqwest::Method::PUT {
                 retry = retry.header("Content-Length", "0");
             }
-            return retry
+            if let Some(error) = spotify_rate_limit_error(state) {
+                return Err(error);
+            }
+            let _permit = state.spotify_request_limit.acquire().await.map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Spotify request gate is unavailable".to_string(),
+                )
+            })?;
+            let response = retry
                 .send()
                 .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()));
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            remember_spotify_rate_limit(state, &response);
+            return Ok(response);
+        }
+        if let Some(error) = spotify_rate_limit_error(state) {
+            return Err(error);
         }
     }
 
@@ -372,17 +593,38 @@ async fn spotify_api_request(
 }
 
 async fn refresh_spotify_token(state: &AppState, old: &SpotifyToken) -> Option<SpotifyToken> {
-    let resp = state
-        .http_client
-        .post("https://accounts.spotify.com/api/token")
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", &old.refresh_token),
-            ("client_id", &state.spotify_client_id),
-        ])
-        .send()
-        .await
-        .ok()?;
+    let _refresh = state.spotify_refresh_lock.lock().await;
+    let current = {
+        state
+            .jam
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .spotify_token
+            .clone()
+    };
+    if let Some(current) = current {
+        if current.access_token != old.access_token {
+            return Some(current);
+        }
+    }
+    if spotify_rate_limit_error(state).is_some() {
+        return None;
+    }
+    let resp = {
+        let _permit = state.spotify_request_limit.acquire().await.ok()?;
+        state
+            .http_client
+            .post("https://accounts.spotify.com/api/token")
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", &old.refresh_token),
+                ("client_id", &state.spotify_client_id),
+            ])
+            .send()
+            .await
+            .ok()?
+    };
+    remember_spotify_rate_limit(state, &resp);
 
     let data: serde_json::Value = resp.json().await.ok()?;
     let new_token = SpotifyToken {
@@ -396,10 +638,20 @@ async fn refresh_spotify_token(state: &AppState, old: &SpotifyToken) -> Option<S
             + data["expires_in"].as_u64().unwrap_or(3600),
     };
 
-    let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-    jam.spotify_token = Some(new_token.clone());
-    persist_spotify_token(&state.spotify_token_file, &new_token);
-    info!("Spotify token refreshed and persisted");
+    {
+        let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
+        jam.spotify_token = Some(new_token.clone());
+    }
+    let persisted = persist_spotify_token(
+        &state.spotify_token_file,
+        &new_token,
+        state.spotify_token_storage_enabled,
+    );
+    if persisted {
+        info!("Spotify token refreshed and persisted");
+    } else {
+        info!("Spotify token refreshed in memory only");
+    }
     Some(new_token)
 }
 
@@ -586,8 +838,14 @@ async fn spotify_response_error(
                 .map(str::to_string)
         })
         .unwrap_or_else(|| body.chars().take(300).collect());
+    let status = match upstream_status {
+        reqwest::StatusCode::TOO_MANY_REQUESTS => StatusCode::TOO_MANY_REQUESTS,
+        reqwest::StatusCode::FORBIDDEN => StatusCode::FORBIDDEN,
+        reqwest::StatusCode::NOT_FOUND => StatusCode::NOT_FOUND,
+        _ => StatusCode::BAD_GATEWAY,
+    };
     (
-        StatusCode::BAD_GATEWAY,
+        status,
         format!(
             "{} failed (Spotify {}): {}",
             operation, upstream_status, message
@@ -603,12 +861,16 @@ pub(crate) fn clear_active_jam_state(jam: &mut JamState) {
     jam.host_identity.clear();
     jam.host_participant_auth_id.clear();
     jam.queue.clear();
+    jam.playlist_queue_receipts.clear();
+    jam.last_history_spotify_id = None;
     jam.listeners.clear();
     jam.audio_connections.clear();
     jam.now_playing = None;
     jam.spotify_device_id = None;
     jam.spotify_device_name = None;
     jam.spotify_is_playing = false;
+    jam.queue_control_epoch = jam.queue_control_epoch.wrapping_add(1);
+    jam.queue_control_stopped = false;
     jam.audio_expected_since = None;
 }
 
@@ -1114,6 +1376,8 @@ pub(crate) async fn jam_start(
             jam.spotify_device_id = Some(device.id.clone());
             jam.spotify_device_name = Some(device.name.clone());
             jam.spotify_is_playing = spotify_is_playing;
+            jam.queue_control_epoch = jam.queue_control_epoch.wrapping_add(1);
+            jam.queue_control_stopped = false;
             jam.audio_expected_since = spotify_is_playing.then(std::time::Instant::now);
             info!(
                 "Jam session started by {} (auto-joined as listener)",
@@ -1349,6 +1613,8 @@ fn apply_spotify_pause_result(jam: &mut JamState, generation: u64, device: &Spot
     }
 
     jam.spotify_is_playing = false;
+    jam.queue_control_epoch = jam.queue_control_epoch.wrapping_add(1);
+    jam.queue_control_stopped = true;
     jam.audio_expected_since = None;
     jam.last_error = None;
     if let Some(now_playing) = jam.now_playing.as_mut() {
@@ -1474,6 +1740,7 @@ pub(crate) async fn jam_state(
             }
         }
     };
+    let mut history_observation = None;
 
     if let Some((fetch_generation, fetch_device_id)) = playback_fetch {
         let resp_result = spotify_api_request(
@@ -1496,7 +1763,12 @@ pub(crate) async fn jam_state(
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
                     let item = &data["item"];
                     let current_uri = item["uri"].as_str().unwrap_or("").to_string();
+                    let (current_spotify_id, canonical_uri, canonical_url) =
+                        spotify_track_identity(item);
                     let np = NowPlayingInfo {
+                        spotify_id: current_spotify_id.clone(),
+                        spotify_uri: canonical_uri,
+                        spotify_url: canonical_url,
                         name: item["name"].as_str().unwrap_or("").to_string(),
                         artist: item["artists"]
                             .as_array()
@@ -1544,9 +1816,56 @@ pub(crate) async fn jam_state(
                                 removed.name
                             );
                         }
+                        let observed_spotify_id =
+                            (!np.spotify_id.is_empty()).then_some(np.spotify_id.as_str());
+                        let queued_track = jam
+                            .queue
+                            .first()
+                            .filter(|track| track.spotify_uri == current_uri)
+                            .cloned();
+                        history_observation = new_history_observation(
+                            jam.last_history_spotify_id.as_deref(),
+                            observed_spotify_id,
+                            queued_track.as_ref(),
+                            np.is_playing,
+                        )
+                        .map(|observation| (fetch_generation, observation));
                         jam.now_playing = Some(np);
                     }
                 }
+            }
+        }
+    }
+    if let Some((observation_generation, observation)) = history_observation {
+        if let Some(track) = observation.queued_track {
+            let history = std::sync::Arc::clone(&state.jam_history);
+            let jam_state = std::sync::Arc::clone(&state.jam);
+            let observed_spotify_id = observation.spotify_id;
+            let played_at_ms = now_ts_ms();
+            match tokio::task::spawn_blocking(move || {
+                let entry = history.append_observation(&track, played_at_ms)?;
+                let mut jam = jam_state.lock().unwrap_or_else(|error| error.into_inner());
+                if active_generation_matches(&jam, observation_generation) {
+                    jam.last_history_spotify_id = Some(observed_spotify_id);
+                }
+                Ok::<_, std::io::Error>(entry)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    warn!("Jam history observation could not be persisted: {}", error);
+                }
+                Err(error) => {
+                    warn!("Jam history persistence task failed: {}", error);
+                }
+            }
+        } else {
+            // External Spotify playback is a run boundary, but is not itself
+            // part of Echo's history.
+            let mut jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+            if active_generation_matches(&jam, observation_generation) {
+                jam.last_history_spotify_id = Some(observation.spotify_id);
             }
         }
     }
@@ -1701,32 +2020,303 @@ pub(crate) async fn jam_search(
     Ok(Json(serde_json::json!(tracks)))
 }
 
+fn spotify_track_id_from_uri(uri: &str) -> Option<&str> {
+    let id = uri.strip_prefix("spotify:track:")?;
+    valid_spotify_id(id).then_some(id)
+}
+
+fn spotify_track_identity(item: &serde_json::Value) -> (String, String, String) {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("track") {
+        return (String::new(), String::new(), String::new());
+    }
+    let Some(id) = item
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| valid_spotify_id(id))
+    else {
+        return (String::new(), String::new(), String::new());
+    };
+    let uri = format!("spotify:track:{id}");
+    if item.get("uri").and_then(serde_json::Value::as_str) != Some(uri.as_str()) {
+        return (String::new(), String::new(), String::new());
+    }
+    (
+        id.to_string(),
+        uri,
+        format!("https://open.spotify.com/track/{id}"),
+    )
+}
+
+fn cached_queue_mode(
+    expected_control_epoch: u64,
+    current_control_epoch: u64,
+    should_queue: Option<bool>,
+) -> Option<bool> {
+    (current_control_epoch == expected_control_epoch)
+        .then_some(should_queue)
+        .flatten()
+}
+
+fn enqueue_interrupted_by_stop(
+    expected_control_epoch: u64,
+    current_control_epoch: u64,
+    control_stopped: bool,
+) -> bool {
+    current_control_epoch != expected_control_epoch && control_stopped
+}
+
+fn playlist_queue_request_id_valid(request_id: &str) -> bool {
+    (8..=128).contains(&request_id.len())
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn playlist_batch_flags(has_failure: bool, skipped_count: usize) -> (bool, bool) {
+    let partial = has_failure || skipped_count > 0;
+    (partial, !partial)
+}
+
+fn playlist_provenance(summary: &FavoriteSummary) -> QueuedPlaylistProvenance {
+    QueuedPlaylistProvenance {
+        spotify_id: summary.spotify_id.clone(),
+        spotify_uri: summary.spotify_uri.clone(),
+        spotify_url: summary.spotify_url.clone(),
+        name: summary.name.clone(),
+    }
+}
+
+fn queued_track_from_summary(
+    summary: &FavoriteSummary,
+    actor: &JamActor,
+    batch_id: Option<&str>,
+    playlist: Option<&QueuedPlaylistProvenance>,
+    added_at_ms: u64,
+) -> QueuedTrack {
+    QueuedTrack {
+        queue_entry_id: format!("qe1_{}", random_secret()),
+        queue_batch_id: batch_id.map(str::to_string),
+        spotify_id: summary.spotify_id.clone(),
+        spotify_uri: summary.spotify_uri.clone(),
+        spotify_url: summary.spotify_url.clone(),
+        name: summary.name.clone(),
+        artist: summary.artist.clone().unwrap_or_default(),
+        album_art_url: summary.artwork_url.clone().unwrap_or_default(),
+        duration_ms: summary.duration_ms.unwrap_or_default(),
+        added_at_ms,
+        added_by_actor_id: actor.actor_id.clone(),
+        added_by_name: actor.display_name.clone(),
+        playlist: playlist.cloned(),
+        added_by: actor.display_name.clone(),
+    }
+}
+
+async fn spotify_playback_should_queue(
+    state: &AppState,
+    device: &SpotifyDevice,
+) -> Result<bool, (StatusCode, String)> {
+    let response = spotify_api_request(
+        state,
+        reqwest::Method::GET,
+        "https://api.spotify.com/v1/me/player",
+        None,
+    )
+    .await?;
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(false);
+    }
+    if !response.status().is_success() {
+        return Err(spotify_response_error(response, "Read Spotify playback").await);
+    }
+    let playback: serde_json::Value = response.json().await.map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Spotify playback response was invalid: {error}"),
+        )
+    })?;
+    Ok(playback["is_playing"].as_bool().unwrap_or(false)
+        && playback["device"]["id"].as_str() == Some(device.id.as_str()))
+}
+
+async fn place_spotify_track(
+    state: &AppState,
+    device: &SpotifyDevice,
+    spotify_uri: &str,
+    should_queue: bool,
+) -> Result<(), (StatusCode, String)> {
+    if should_queue {
+        let queue_url = format!(
+            "https://api.spotify.com/v1/me/player/queue?uri={}&device_id={}",
+            urlencoded(spotify_uri),
+            urlencoded(&device.id),
+        );
+        let response = spotify_api_request(state, reqwest::Method::POST, &queue_url, None).await?;
+        if !response.status().is_success() {
+            return Err(spotify_response_error(response, "Queue Spotify track").await);
+        }
+        info!("Track queued on configured Spotify device: {spotify_uri}");
+    } else {
+        let play_url = format!(
+            "https://api.spotify.com/v1/me/player/play?device_id={}",
+            urlencoded(&device.id)
+        );
+        let play_body = serde_json::json!({ "uris": [spotify_uri] });
+        let response =
+            spotify_api_request(state, reqwest::Method::PUT, &play_url, Some(play_body)).await?;
+        if !response.status().is_success() {
+            return Err(spotify_response_error(response, "Start Spotify track").await);
+        }
+        info!("Track started on configured Spotify device: {spotify_uri}");
+    }
+    Ok(())
+}
+
+async fn enqueue_playlist_track_guarded(
+    state: &AppState,
+    generation: u64,
+    track: &QueuedTrack,
+    should_queue: Option<bool>,
+    expected_control_epoch: u64,
+) -> Result<u64, (StatusCode, String)> {
+    // Keep the global lifecycle fence to one Spotify mutation. Stop, skip, and
+    // teardown may run between batch entries and the next entry revalidates.
+    let _refresh = state.jam_state_refresh.lock().await;
+    let _lifecycle = state.jam_lifecycle.lock().await;
+    let current_generation = ensure_jam_recovery_controls_ready(state).await?;
+    if current_generation != generation {
+        return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
+    }
+    let (device, control_epoch, control_stopped) = {
+        let jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+        (
+            bound_spotify_device(&jam, generation).ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The active Jam has no bound Spotify device".to_string(),
+            ))?,
+            jam.queue_control_epoch,
+            jam.queue_control_stopped,
+        )
+    };
+    if enqueue_interrupted_by_stop(expected_control_epoch, control_epoch, control_stopped) {
+        return Err((
+            StatusCode::CONFLICT,
+            "Playlist enqueue was interrupted by Stop Music".to_string(),
+        ));
+    }
+    let should_queue = cached_queue_mode(expected_control_epoch, control_epoch, should_queue);
+    run_guarded_spotify_recovery_operation(
+        state,
+        generation,
+        &device,
+        "Queueing a Spotify playlist track",
+        async {
+            let should_queue = match should_queue {
+                Some(should_queue) => should_queue,
+                None => spotify_playback_should_queue(state, &device).await?,
+            };
+            place_spotify_track(state, &device, &track.spotify_uri, should_queue).await
+        },
+    )
+    .await?;
+
+    let applied = {
+        let mut jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+        if !active_generation_matches(&jam, generation)
+            || jam.spotify_device_id.as_deref() != Some(device.id.as_str())
+        {
+            false
+        } else {
+            jam.spotify_device_name = Some(device.name.clone());
+            jam.spotify_is_playing = true;
+            jam.audio_expected_since = Some(std::time::Instant::now());
+            jam.last_error = None;
+            jam.queue_control_stopped = false;
+            jam.queue.push(track.clone());
+            jam.now_playing = None;
+            true
+        }
+    };
+    if !applied {
+        pause_bound_spotify_before_release(state, generation, Some(&device)).await;
+        return Err((
+            StatusCode::CONFLICT,
+            "Jam changed after Spotify accepted a playlist track".to_string(),
+        ));
+    }
+    Ok(control_epoch)
+}
+
 pub(crate) async fn jam_queue_add(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<JamQueueRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    ensure_admin(&state, &headers).map_err(|status| (status, String::new()))?;
-    let actor =
-        ensure_jam_participant(&state, &headers, None).map_err(|status| (status, String::new()))?;
-    let added_by = actor.name.unwrap_or(actor.sub);
-    if !payload.spotify_uri.starts_with("spotify:track:") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Invalid Spotify track URI".to_string(),
+) -> Result<Json<serde_json::Value>, Response> {
+    ensure_admin(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(status, "unauthorized", "Authentication required")
+    })?;
+    let actor = ensure_jam_actor(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(
+            status,
+            "actor_required",
+            "A current Echo participant token is required",
+        )
+    })?;
+    let spotify_id = spotify_track_id_from_uri(&payload.spotify_uri)
+        .ok_or_else(|| {
+            playlist_queue_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_track_uri",
+                "Invalid Spotify track URI",
+            )
+        })?
+        .to_string();
+    let request_control_epoch = state
+        .jam
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .queue_control_epoch;
+    let summary = fetch_favorite_summary(&state, FavoriteKind::Track, &spotify_id)
+        .await
+        .map_err(JamApiError::into_response)?;
+    let _queue_lifecycle = state.jam_queue_lifecycle.lock().await;
+    let _refresh = state.jam_state_refresh.lock().await;
+    let _lifecycle = state.jam_lifecycle.lock().await;
+    let generation =
+        ensure_jam_recovery_controls_ready(&state)
+            .await
+            .map_err(|(status, message)| {
+                spotify_queue_error_response(&state, status, "jam_unavailable", message)
+            })?;
+    if generation != payload.generation {
+        return Err(playlist_queue_error_response(
+            StatusCode::CONFLICT,
+            "generation_changed",
+            "Jam generation changed",
         ));
     }
-    let _lifecycle = state.jam_lifecycle.lock().await;
-    let generation = ensure_jam_recovery_controls_ready(&state).await?;
-    if generation != payload.generation {
-        return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
+    {
+        let jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+        if enqueue_interrupted_by_stop(
+            request_control_epoch,
+            jam.queue_control_epoch,
+            jam.queue_control_stopped,
+        ) {
+            return Err(playlist_queue_error_response(
+                StatusCode::CONFLICT,
+                "queue_interrupted",
+                "Track enqueue was interrupted by Stop Music",
+            ));
+        }
     }
     let device = {
         let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        bound_spotify_device(&jam, generation).ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "The active Jam has no bound Spotify device".to_string(),
-        ))?
+        bound_spotify_device(&jam, generation).ok_or_else(|| {
+            playlist_queue_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "spotify_device_unavailable",
+                "The active Jam has no bound Spotify device",
+            )
+        })?
     };
 
     run_guarded_spotify_recovery_operation(
@@ -1735,76 +2325,16 @@ pub(crate) async fn jam_queue_add(
         &device,
         "Queueing a Spotify track",
         async {
-            let playback_response = spotify_api_request(
-                &state,
-                reqwest::Method::GET,
-                "https://api.spotify.com/v1/me/player",
-                None,
-            )
-            .await?;
-            let should_queue = if playback_response.status() == reqwest::StatusCode::NO_CONTENT {
-                false
-            } else if playback_response.status().is_success() {
-                let playback: serde_json::Value =
-                    playback_response.json().await.map_err(|error| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            format!("Spotify playback response was invalid: {}", error),
-                        )
-                    })?;
-                playback["is_playing"].as_bool().unwrap_or(false)
-                    && playback["device"]["id"].as_str() == Some(device.id.as_str())
-            } else {
-                return Err(
-                    spotify_response_error(playback_response, "Read Spotify playback").await,
-                );
-            };
-
-            if should_queue {
-                let queue_url = format!(
-                    "https://api.spotify.com/v1/me/player/queue?uri={}&device_id={}",
-                    urlencoded(&payload.spotify_uri),
-                    urlencoded(&device.id),
-                );
-                let response =
-                    spotify_api_request(&state, reqwest::Method::POST, &queue_url, None).await?;
-                if !response.status().is_success() {
-                    return Err(spotify_response_error(response, "Queue Spotify track").await);
-                }
-                info!(
-                    "Track queued on configured Spotify device: {}",
-                    payload.spotify_uri
-                );
-            } else {
-                let play_url = format!(
-                    "https://api.spotify.com/v1/me/player/play?device_id={}",
-                    urlencoded(&device.id)
-                );
-                let play_body = serde_json::json!({ "uris": [payload.spotify_uri] });
-                let response =
-                    spotify_api_request(&state, reqwest::Method::PUT, &play_url, Some(play_body))
-                        .await?;
-                if !response.status().is_success() {
-                    return Err(spotify_response_error(response, "Start Spotify track").await);
-                }
-                info!(
-                    "Track started on configured Spotify device: {}",
-                    payload.spotify_uri
-                );
-            }
-            Ok(())
+            let should_queue = spotify_playback_should_queue(&state, &device).await?;
+            place_spotify_track(&state, &device, &payload.spotify_uri, should_queue).await
         },
     )
-    .await?;
+    .await
+    .map_err(|(status, message)| {
+        spotify_queue_error_response(&state, status, "spotify_queue_failed", message)
+    })?;
 
-    let track = QueuedTrack {
-        spotify_uri: payload.spotify_uri,
-        name: payload.name,
-        artist: payload.artist,
-        album_art_url: payload.album_art_url,
-        duration_ms: payload.duration_ms,
-        added_by,
-    };
+    let track = queued_track_from_summary(&summary, &actor, None, None, now_ts_ms());
     let applied = {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
         if !active_generation_matches(&jam, generation)
@@ -1816,28 +2346,283 @@ pub(crate) async fn jam_queue_add(
             jam.spotify_is_playing = true;
             jam.audio_expected_since = Some(std::time::Instant::now());
             jam.last_error = None;
-            jam.queue.push(track);
+            jam.queue_control_stopped = false;
+            jam.queue.push(track.clone());
             jam.now_playing = None;
             true
         }
     };
     if !applied {
         pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
-        return Err((
+        return Err(playlist_queue_error_response(
             StatusCode::CONFLICT,
-            "Jam changed while queueing the Spotify track".to_string(),
+            "generation_changed",
+            "Jam changed while queueing the Spotify track",
         ));
     }
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(serde_json::json!({ "ok": true, "track": track })))
+}
+
+fn playlist_queue_error_response(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": code,
+            "message": message.into(),
+        })),
+    )
+        .into_response()
+}
+
+fn spotify_queue_error_response(
+    state: &AppState,
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    let mut response = playlist_queue_error_response(status, code, message);
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        if let Some(retry_after) = spotify_retry_after_seconds(state) {
+            if let Ok(value) = HeaderValue::from_str(&retry_after) {
+                response.headers_mut().insert(RETRY_AFTER, value);
+            }
+        }
+    }
+    response
+}
+
+fn playlist_queue_failure(
+    state: &AppState,
+    status: StatusCode,
+    message: String,
+) -> PlaylistQueueFailure {
+    let error = match status {
+        StatusCode::TOO_MANY_REQUESTS => "spotify_rate_limited",
+        StatusCode::UNAUTHORIZED => "spotify_unauthorized",
+        StatusCode::FORBIDDEN => "spotify_forbidden",
+        StatusCode::CONFLICT => "jam_conflict",
+        StatusCode::SERVICE_UNAVAILABLE => "jam_unavailable",
+        _ => "spotify_queue_failed",
+    };
+    PlaylistQueueFailure {
+        status: status.as_u16(),
+        error: error.to_string(),
+        message,
+        retry_after: (status == StatusCode::TOO_MANY_REQUESTS)
+            .then(|| spotify_retry_after_seconds(state))
+            .flatten(),
+    }
+}
+
+pub(crate) async fn jam_queue_playlist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<PlaylistQueueRequest>,
+) -> Result<Json<PlaylistQueueResponse>, Response> {
+    ensure_admin(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(status, "unauthorized", "Authentication required")
+    })?;
+    let actor = ensure_jam_actor(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(
+            status,
+            "actor_required",
+            "A current Echo participant token is required",
+        )
+    })?;
+    if !valid_spotify_id(&payload.playlist_id) {
+        return Err(playlist_queue_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_playlist_id",
+            "Invalid Spotify playlist ID",
+        ));
+    }
+    if !playlist_queue_request_id_valid(&payload.request_id) {
+        return Err(playlist_queue_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_id",
+            "request_id must be 8-128 ASCII letters, digits, dashes, or underscores",
+        ));
+    }
+
+    // Serialize enqueue requests without blocking stop/skip/teardown while
+    // Spotify playlist metadata is fetched or a large batch is in progress.
+    let _queue_lifecycle = state.jam_queue_lifecycle.lock().await;
+    let generation =
+        ensure_jam_recovery_controls_ready(&state)
+            .await
+            .map_err(|(status, message)| {
+                playlist_queue_error_response(status, "jam_unavailable", message)
+            })?;
+    if generation != payload.generation {
+        return Err(playlist_queue_error_response(
+            StatusCode::CONFLICT,
+            "generation_changed",
+            "Jam generation changed",
+        ));
+    }
+
+    let cached_receipt = {
+        let jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+        playlist_queue_receipt_response(
+            &jam,
+            &payload.request_id,
+            &actor.actor_id,
+            &payload.playlist_id,
+            generation,
+        )
+    };
+    match cached_receipt {
+        Ok(Some(response)) => return Ok(Json(response)),
+        Ok(None) => {}
+        Err(()) => {
+            return Err(playlist_queue_error_response(
+                StatusCode::CONFLICT,
+                "request_id_conflict",
+                "request_id was already used for a different playlist enqueue",
+            ));
+        }
+    }
+    let request_control_epoch = state
+        .jam
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .queue_control_epoch;
+
+    let expansion = fetch_playlist_expansion(&state, &payload.playlist_id)
+        .await
+        .map_err(JamApiError::into_response)?;
+    if expansion.tracks.is_empty() {
+        return Err(playlist_queue_error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "playlist_has_no_playable_tracks",
+            "Playlist has no playable Spotify tracks",
+        ));
+    }
+    if expansion.tracks.len() > 25 && !payload.confirmed {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "confirmation_required",
+                "confirmation_required": true,
+                "message": "Confirm before queueing more than 25 tracks",
+                "playlist_id": payload.playlist_id,
+                "playable_count": expansion.tracks.len(),
+                "track_count": expansion.tracks.len(),
+                "skipped_count": expansion.skipped.len(),
+                "confirmation_threshold": 25,
+            })),
+        )
+            .into_response());
+    }
+
+    let batch_id = format!("qb1_{}", random_secret());
+    let batch_added_at_ms = now_ts_ms();
+    let provenance = playlist_provenance(&expansion.playlist);
+    let mut queued = Vec::with_capacity(expansion.tracks.len());
+    let mut failure = None;
+    let mut should_queue = None;
+    let mut control_epoch = request_control_epoch;
+    for (_, summary) in &expansion.tracks {
+        let track = queued_track_from_summary(
+            summary,
+            &actor,
+            Some(&batch_id),
+            Some(&provenance),
+            batch_added_at_ms,
+        );
+        let result =
+            enqueue_playlist_track_guarded(&state, generation, &track, should_queue, control_epoch)
+                .await;
+        let observed_control_epoch = match result {
+            Ok(control_epoch) => control_epoch,
+            Err((status, message)) => {
+                if queued.is_empty() {
+                    return Err(spotify_queue_error_response(
+                        &state,
+                        status,
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            "spotify_rate_limited"
+                        } else {
+                            "spotify_queue_failed"
+                        },
+                        message,
+                    ));
+                }
+                failure = Some(playlist_queue_failure(&state, status, message));
+                break;
+            }
+        };
+        queued.push(track);
+        should_queue = Some(true);
+        control_epoch = observed_control_epoch;
+    }
+
+    let _receipt_lifecycle = state.jam_lifecycle.lock().await;
+    let can_store_receipt = {
+        let jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+        active_generation_matches(&jam, generation)
+    };
+    if !can_store_receipt && failure.is_none() {
+        failure = Some(playlist_queue_failure(
+            &state,
+            StatusCode::CONFLICT,
+            "Jam ended before the playlist enqueue receipt was committed".to_string(),
+        ));
+    }
+    let skipped = expansion.skipped;
+    let (partial, complete) = playlist_batch_flags(failure.is_some(), skipped.len());
+    let response = PlaylistQueueResponse {
+        schema_version: 1,
+        ok: true,
+        partial,
+        request_id: payload.request_id.clone(),
+        queue_batch_id: batch_id.clone(),
+        batch_id,
+        generation,
+        playlist: provenance,
+        queued_count: queued.len(),
+        skipped_count: skipped.len(),
+        queued,
+        skipped,
+        complete,
+        failure,
+    };
+    if can_store_receipt {
+        let mut jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+        insert_playlist_queue_receipt(
+            &mut jam,
+            payload.request_id,
+            PlaylistQueueReceipt {
+                actor_id: actor.actor_id,
+                playlist_id: payload.playlist_id,
+                generation,
+                created_at_ms: now_ts_ms(),
+                response: response.clone(),
+            },
+        );
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn jam_stop_playback(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<JamGenerationRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    ensure_admin(&state, &headers).map_err(|status| (status, String::new()))?;
-    ensure_jam_participant(&state, &headers, None).map_err(|status| (status, String::new()))?;
+) -> Result<Json<serde_json::Value>, Response> {
+    ensure_admin(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(status, "unauthorized", "Authentication required")
+    })?;
+    ensure_jam_participant(&state, &headers, None).map_err(|status| {
+        playlist_queue_error_response(
+            status,
+            "participant_required",
+            "A current Echo participant token is required",
+        )
+    })?;
 
     // Fence the Spotify observation used by /api/jam/state. Otherwise an
     // older in-flight GET can arrive after this pause and incorrectly mark
@@ -1851,20 +2636,32 @@ pub(crate) async fn jam_stop_playback(
     let device = {
         let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
         if !active_generation_matches(&jam, payload.generation) {
-            return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
+            return Err(playlist_queue_error_response(
+                StatusCode::CONFLICT,
+                "generation_changed",
+                "Jam generation changed",
+            ));
         }
-        bound_spotify_device(&jam, payload.generation).ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "The active Jam has no bound Spotify device".to_string(),
-        ))?
+        bound_spotify_device(&jam, payload.generation).ok_or_else(|| {
+            playlist_queue_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "spotify_device_unavailable",
+                "The active Jam has no bound Spotify device",
+            )
+        })?
     };
-    pause_spotify_playback_on_device(&state, &device).await?;
+    pause_spotify_playback_on_device(&state, &device)
+        .await
+        .map_err(|(status, message)| {
+            spotify_queue_error_response(&state, status, "spotify_pause_failed", message)
+        })?;
 
     let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
     if !apply_spotify_pause_result(&mut jam, payload.generation, &device) {
-        return Err((
+        return Err(playlist_queue_error_response(
             StatusCode::CONFLICT,
-            "Jam changed while Spotify playback was stopping".to_string(),
+            "generation_changed",
+            "Jam changed while Spotify playback was stopping",
         ));
     }
     info!(
@@ -1882,20 +2679,40 @@ pub(crate) async fn jam_skip(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<JamGenerationRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    ensure_admin(&state, &headers).map_err(|status| (status, String::new()))?;
-    ensure_jam_participant(&state, &headers, None).map_err(|status| (status, String::new()))?;
+) -> Result<Json<serde_json::Value>, Response> {
+    ensure_admin(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(status, "unauthorized", "Authentication required")
+    })?;
+    ensure_jam_participant(&state, &headers, None).map_err(|status| {
+        playlist_queue_error_response(
+            status,
+            "participant_required",
+            "A current Echo participant token is required",
+        )
+    })?;
     let _lifecycle = state.jam_lifecycle.lock().await;
-    let generation = ensure_jam_recovery_controls_ready(&state).await?;
+    let generation =
+        ensure_jam_recovery_controls_ready(&state)
+            .await
+            .map_err(|(status, message)| {
+                spotify_queue_error_response(&state, status, "jam_unavailable", message)
+            })?;
     if generation != payload.generation {
-        return Err((StatusCode::CONFLICT, "Jam generation changed".to_string()));
+        return Err(playlist_queue_error_response(
+            StatusCode::CONFLICT,
+            "generation_changed",
+            "Jam generation changed",
+        ));
     }
     let device = {
         let jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
-        bound_spotify_device(&jam, generation).ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "The active Jam has no bound Spotify device".to_string(),
-        ))?
+        bound_spotify_device(&jam, generation).ok_or_else(|| {
+            playlist_queue_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "spotify_device_unavailable",
+                "The active Jam has no bound Spotify device",
+            )
+        })?
     };
     let spotify_is_playing = run_guarded_spotify_recovery_operation(
         &state,
@@ -1916,7 +2733,10 @@ pub(crate) async fn jam_skip(
             Ok(spotify_is_playing)
         },
     )
-    .await?;
+    .await
+    .map_err(|(status, message)| {
+        spotify_queue_error_response(&state, status, "spotify_skip_failed", message)
+    })?;
 
     let applied = {
         let mut jam = state.jam.lock().unwrap_or_else(|e| e.into_inner());
@@ -1929,15 +2749,18 @@ pub(crate) async fn jam_skip(
             jam.spotify_is_playing = spotify_is_playing;
             jam.audio_expected_since = spotify_is_playing.then(std::time::Instant::now);
             jam.last_error = None;
+            jam.queue_control_epoch = jam.queue_control_epoch.wrapping_add(1);
+            jam.queue_control_stopped = false;
             jam.now_playing = None;
             true
         }
     };
     if !applied {
         pause_bound_spotify_before_release(&state, generation, Some(&device)).await;
-        return Err((
+        return Err(playlist_queue_error_response(
             StatusCode::CONFLICT,
-            "Jam changed while skipping the Spotify track".to_string(),
+            "generation_changed",
+            "Jam changed while skipping the Spotify track",
         ));
     }
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -2347,11 +3170,19 @@ mod tests {
 
     fn queued_track(uri: &str) -> QueuedTrack {
         QueuedTrack {
+            queue_entry_id: format!("qe-{uri}"),
+            queue_batch_id: None,
+            spotify_id: String::new(),
             spotify_uri: uri.to_string(),
+            spotify_url: String::new(),
             name: uri.to_string(),
             artist: "artist".to_string(),
             album_art_url: String::new(),
             duration_ms: 1,
+            added_at_ms: 1,
+            added_by_actor_id: "actor".to_string(),
+            added_by_name: "sam-7475".to_string(),
+            playlist: None,
             added_by: "sam-7475".to_string(),
         }
     }
@@ -2388,6 +3219,9 @@ mod tests {
 
     fn now_playing(is_playing: bool) -> NowPlayingInfo {
         NowPlayingInfo {
+            spotify_id: "0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+            spotify_uri: "spotify:track:0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+            spotify_url: "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b".to_string(),
             name: "Current track".to_string(),
             artist: "Current artist".to_string(),
             album_art_url: String::new(),
@@ -2956,5 +3790,229 @@ mod tests {
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].spotify_uri, "one");
         assert_eq!(queue[0].spotify_uri, "two");
+    }
+
+    #[test]
+    fn playlist_request_ids_and_track_uris_are_strict() {
+        assert!(playlist_queue_request_id_valid("request_123"));
+        assert!(!playlist_queue_request_id_valid("short"));
+        assert!(!playlist_queue_request_id_valid("request with spaces"));
+        assert_eq!(
+            spotify_track_id_from_uri("spotify:track:0VjIjW4GlUZAMYd2vXMi3b"),
+            Some("0VjIjW4GlUZAMYd2vXMi3b")
+        );
+        assert!(spotify_track_id_from_uri("spotify:track:short").is_none());
+        assert!(spotify_track_id_from_uri("https://example.invalid").is_none());
+    }
+
+    #[test]
+    fn queue_entries_use_server_summary_actor_and_playlist_provenance() {
+        let summary = FavoriteSummary {
+            spotify_id: "0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+            spotify_uri: "spotify:track:0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+            spotify_url: "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+            name: "Server name".to_string(),
+            artist: Some("Server artist".to_string()),
+            artwork_url: Some("https://image.example/server.jpg".to_string()),
+            duration_ms: Some(321),
+            ..FavoriteSummary::default()
+        };
+        let actor = JamActor {
+            actor_id: "ea1_actor".to_string(),
+            display_name: "Sam".to_string(),
+        };
+        let playlist = QueuedPlaylistProvenance {
+            spotify_id: "3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+            spotify_uri: "spotify:playlist:3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+            spotify_url: "https://open.spotify.com/playlist/3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+            name: "Mix".to_string(),
+        };
+        let queued =
+            queued_track_from_summary(&summary, &actor, Some("batch"), Some(&playlist), 99);
+        assert_eq!(queued.name, "Server name");
+        assert_eq!(queued.artist, "Server artist");
+        assert_eq!(queued.added_by_actor_id, "ea1_actor");
+        assert_eq!(queued.added_at_ms, 99);
+        assert_eq!(queued.queue_batch_id.as_deref(), Some("batch"));
+        assert_eq!(queued.playlist, Some(playlist));
+    }
+
+    #[test]
+    fn queue_control_change_invalidates_cached_playback_mode() {
+        assert_eq!(cached_queue_mode(4, 4, Some(true)), Some(true));
+        assert_eq!(cached_queue_mode(4, 5, Some(true)), None);
+        assert!(enqueue_interrupted_by_stop(4, 5, true));
+        assert!(!enqueue_interrupted_by_stop(4, 5, false));
+        assert!(!enqueue_interrupted_by_stop(5, 5, true));
+        assert_eq!(playlist_batch_flags(false, 0), (false, true));
+        assert_eq!(playlist_batch_flags(false, 1), (true, false));
+        assert_eq!(playlist_batch_flags(true, 0), (true, false));
+    }
+
+    #[test]
+    fn playlist_queue_response_serializes_ordered_partial_results_and_failure() {
+        let playlist = QueuedPlaylistProvenance {
+            spotify_id: "3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+            spotify_uri: "spotify:playlist:3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+            spotify_url: "https://open.spotify.com/playlist/3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+            name: "Server playlist".to_string(),
+        };
+        let actor = JamActor {
+            actor_id: "ea1_actor".to_string(),
+            display_name: "Sam".to_string(),
+        };
+        let summary = |spotify_id: &str, name: &str| FavoriteSummary {
+            spotify_id: spotify_id.to_string(),
+            spotify_uri: format!("spotify:track:{spotify_id}"),
+            spotify_url: format!("https://open.spotify.com/track/{spotify_id}"),
+            name: name.to_string(),
+            artist: Some("Server artist".to_string()),
+            duration_ms: Some(321),
+            ..FavoriteSummary::default()
+        };
+        let queued = vec![
+            queued_track_from_summary(
+                &summary("0VjIjW4GlUZAMYd2vXMi3b", "First"),
+                &actor,
+                Some("batch-1"),
+                Some(&playlist),
+                99,
+            ),
+            queued_track_from_summary(
+                &summary("3n3Ppam7vgaVa1iaRUc9Lp", "Second"),
+                &actor,
+                Some("batch-1"),
+                Some(&playlist),
+                99,
+            ),
+        ];
+        let response = PlaylistQueueResponse {
+            schema_version: 1,
+            ok: false,
+            partial: true,
+            request_id: "request_123".to_string(),
+            queue_batch_id: "batch-1".to_string(),
+            batch_id: "batch-1".to_string(),
+            generation: 7,
+            playlist,
+            queued,
+            queued_count: 2,
+            skipped: vec![SkippedPlaylistItem {
+                position: 2,
+                reason: "local_track".to_string(),
+            }],
+            skipped_count: 1,
+            complete: false,
+            failure: Some(PlaylistQueueFailure {
+                status: 429,
+                error: "spotify_rate_limited".to_string(),
+                message: "Spotify rate limit reached".to_string(),
+                retry_after: Some("12".to_string()),
+            }),
+        };
+
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["partial"], true);
+        assert_eq!(json["complete"], false);
+        assert_eq!(json["queue_batch_id"], "batch-1");
+        assert_eq!(json["batch_id"], "batch-1");
+        assert_eq!(json["queued_count"], 2);
+        assert_eq!(json["skipped_count"], 1);
+        assert_eq!(json["queued"][0]["name"], "First");
+        assert_eq!(json["queued"][1]["name"], "Second");
+        assert_eq!(json["queued"][0]["added_by_actor_id"], "ea1_actor");
+        assert_eq!(json["queued"][0]["added_by"], "Sam");
+        assert_eq!(json["queued"][0]["playlist"]["name"], "Server playlist");
+        assert_eq!(json["skipped"][0]["position"], 2);
+        assert_eq!(json["skipped"][0]["reason"], "local_track");
+        assert_eq!(json["failure"]["status"], 429);
+        assert_eq!(json["failure"]["error"], "spotify_rate_limited");
+        assert_eq!(json["failure"]["retry_after"], "12");
+    }
+
+    #[test]
+    fn now_playing_identity_is_canonical_and_rejects_mismatches() {
+        let item = serde_json::json!({
+            "type":"track",
+            "id":"0VjIjW4GlUZAMYd2vXMi3b",
+            "uri":"spotify:track:0VjIjW4GlUZAMYd2vXMi3b",
+        });
+        assert_eq!(
+            spotify_track_identity(&item),
+            (
+                "0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+                "spotify:track:0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+                "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b".to_string(),
+            )
+        );
+        let mismatched = serde_json::json!({
+            "type":"track",
+            "id":"0VjIjW4GlUZAMYd2vXMi3b",
+            "uri":"spotify:track:3n3Ppam7vgaVa1iaRUc9Lp",
+        });
+        assert_eq!(
+            spotify_track_identity(&mismatched),
+            (String::new(), String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn playlist_receipt_cache_is_bounded_and_evicts_oldest() {
+        fn response(request_id: String) -> PlaylistQueueResponse {
+            PlaylistQueueResponse {
+                schema_version: 1,
+                ok: true,
+                partial: false,
+                request_id,
+                queue_batch_id: "batch".to_string(),
+                batch_id: "batch".to_string(),
+                generation: 1,
+                playlist: QueuedPlaylistProvenance::default(),
+                queued: Vec::new(),
+                queued_count: 0,
+                skipped: Vec::new(),
+                skipped_count: 0,
+                complete: true,
+                failure: None,
+            }
+        }
+        let mut jam = JamState::default();
+        for index in 0..129u64 {
+            let request_id = format!("request_{index:03}");
+            insert_playlist_queue_receipt(
+                &mut jam,
+                request_id.clone(),
+                PlaylistQueueReceipt {
+                    actor_id: "actor".to_string(),
+                    playlist_id: "3n3Ppam7vgaVa1iaRUc9Lp".to_string(),
+                    generation: 1,
+                    created_at_ms: index,
+                    response: response(request_id),
+                },
+            );
+        }
+        assert_eq!(jam.playlist_queue_receipts.len(), 128);
+        assert!(!jam.playlist_queue_receipts.contains_key("request_000"));
+        assert!(jam.playlist_queue_receipts.contains_key("request_128"));
+        let replay = playlist_queue_receipt_response(
+            &jam,
+            "request_128",
+            "actor",
+            "3n3Ppam7vgaVa1iaRUc9Lp",
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replay.request_id, "request_128");
+        assert!(playlist_queue_receipt_response(
+            &jam,
+            "request_128",
+            "other-actor",
+            "3n3Ppam7vgaVa1iaRUc9Lp",
+            1,
+        )
+        .is_err());
     }
 }
