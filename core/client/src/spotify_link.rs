@@ -64,13 +64,21 @@ fn shell_open(target: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn open_spotify_target(uri: &str, url: &str) -> Result<(), String> {
+    open_spotify_target_with(uri, url, shell_open)
+}
+
+fn open_spotify_target_with(
+    uri: &str,
+    url: &str,
+    mut opener: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
     let target = validate_spotify_target(uri, url)?;
 
-    match shell_open(target.uri) {
+    match opener(target.uri) {
         Ok(()) => Ok(()),
         Err(uri_error) => {
             eprintln!("[spotify] native URI launch failed ({uri_error}); opening HTTPS fallback");
-            shell_open(target.url).map_err(|url_error| {
+            opener(target.url).map_err(|url_error| {
                 format!(
                     "Spotify URI launch failed ({uri_error}); HTTPS fallback failed ({url_error})"
                 )
@@ -191,5 +199,57 @@ mod tests {
         for (uri, url) in cases {
             assert!(validate_spotify_target(&uri, &url).is_err());
         }
+    }
+
+    #[test]
+    fn native_uri_is_preferred_and_https_is_only_a_fallback() {
+        let uri = format!("spotify:track:{TRACK_ID}");
+        let url = format!("https://open.spotify.com/track/{TRACK_ID}");
+        let mut successful_calls = Vec::new();
+        open_spotify_target_with(&uri, &url, |target| {
+            successful_calls.push(target.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(successful_calls, vec![uri.clone()]);
+
+        let mut fallback_calls = Vec::new();
+        open_spotify_target_with(&uri, &url, |target| {
+            fallback_calls.push(target.to_string());
+            if target == uri {
+                Err("no Spotify URI handler".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(fallback_calls, vec![uri, url]);
+    }
+
+    #[test]
+    fn reports_both_native_and_https_launch_failures() {
+        let uri = format!("spotify:playlist:{PLAYLIST_ID}");
+        let url = format!("https://open.spotify.com/playlist/{PLAYLIST_ID}");
+        let error = open_spotify_target_with(&uri, &url, |target| Err(format!("blocked {target}")))
+            .unwrap_err();
+        assert!(error.contains("Spotify URI launch failed"));
+        assert!(error.contains("HTTPS fallback failed"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "opens the installed Spotify app; run manually before a Windows release"]
+    fn opens_requested_target_in_installed_spotify() {
+        let kind = std::env::var("ECHO_SPOTIFY_SMOKE_KIND")
+            .expect("set ECHO_SPOTIFY_SMOKE_KIND to track or playlist");
+        assert!(matches!(kind.as_str(), "track" | "playlist"));
+        let id = std::env::var("ECHO_SPOTIFY_SMOKE_ID")
+            .expect("set ECHO_SPOTIFY_SMOKE_ID to the target's 22-character Spotify ID");
+        let uri = format!("spotify:{kind}:{id}");
+        let url = format!("https://open.spotify.com/{kind}/{id}");
+        let target = validate_spotify_target(&uri, &url).expect("invalid Spotify smoke target");
+
+        shell_open(target.uri).expect("Windows rejected the native Spotify URI");
+        eprintln!("Opened {kind} {id} through the native Spotify URI handler");
     }
 }
