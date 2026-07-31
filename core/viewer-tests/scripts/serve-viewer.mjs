@@ -10,7 +10,8 @@ const previewFixture = path.resolve(scriptDirectory, "..", "fixtures", "install-
 const port = Number.parseInt(process.env.PORT || "4175", 10);
 const isolatedThemePreview = process.env.ECHO_THEME_PREVIEW === "1";
 const isolatedJamPreview = process.env.ECHO_JAM_PREVIEW === "1";
-const isolatedPreview = isolatedThemePreview || isolatedJamPreview;
+const isolatedHistoryPreview = process.env.ECHO_HISTORY_PREVIEW === "1";
+const isolatedPreview = isolatedThemePreview || isolatedJamPreview || isolatedHistoryPreview;
 const transparentPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -27,6 +28,129 @@ const contentTypes = new Map([
   [".svg", "image/svg+xml"],
   [".wasm", "application/wasm"],
 ]);
+
+const historyPreviewNow = Math.floor(Date.now() / 1000);
+const historyPreviewPeople = ["Sam", "David", "Decker", "Zane", "Spencer", "Brad"];
+const historyPreviewOffsets = [
+  45 * 60,
+  2 * 60 * 60,
+  8 * 60 * 60,
+  24 * 60 * 60,
+  2 * 24 * 60 * 60,
+  4 * 24 * 60 * 60,
+  8 * 24 * 60 * 60,
+  18 * 24 * 60 * 60,
+  27 * 24 * 60 * 60,
+  45 * 24 * 60 * 60,
+  75 * 24 * 60 * 60,
+  140 * 24 * 60 * 60,
+  300 * 24 * 60 * 60,
+  430 * 24 * 60 * 60,
+  800 * 24 * 60 * 60,
+];
+const historyPreviewEvents = historyPreviewOffsets.map((offset, index) => ({
+  event_type: index % 2 === 0 ? "join" : "leave",
+  identity: `preview-${index + 1}`,
+  name: historyPreviewPeople[index % historyPreviewPeople.length],
+  room_id: index % 4 === 0 ? "Game Room" : index % 3 === 0 ? "Music Room" : "Main",
+  timestamp: historyPreviewNow - offset,
+  ...(index % 2 === 0 ? {} : { duration_secs: 900 + index * 420 }),
+}));
+
+const historyPreviewHeatmapJoins = [];
+for (let dayOffset = 29; dayOffset >= 0; dayOffset -= 1) {
+  const joinsForDay = 2 + (dayOffset % 4);
+  for (let index = 0; index < joinsForDay; index += 1) {
+    const joinedAt = new Date(historyPreviewNow * 1000);
+    const hour = [8, 12, 18, 21, 23][(dayOffset + index) % 5];
+    joinedAt.setDate(joinedAt.getDate() - dayOffset);
+    joinedAt.setHours(hour, (index * 13 + dayOffset * 3) % 60, 0, 0);
+    const timestamp = Math.floor(joinedAt.getTime() / 1000);
+    if (timestamp <= historyPreviewNow) {
+      historyPreviewHeatmapJoins.push({
+        timestamp,
+        name: historyPreviewPeople[(dayOffset + index) % historyPreviewPeople.length],
+      });
+    }
+  }
+}
+
+function historyPreviewMetricsPayload() {
+  const counts = new Map();
+  historyPreviewHeatmapJoins.forEach((join) => {
+    counts.set(join.name, (counts.get(join.name) || 0) + 1);
+  });
+  const perUser = Array.from(counts.entries())
+    .map(([name, sessionCount], index) => ({
+      identity: `preview-metric-${index + 1}`,
+      name,
+      session_count: sessionCount,
+      total_hours: Math.round(sessionCount * 7.5) / 10,
+    }))
+    .sort((left, right) => right.session_count - left.session_count);
+
+  const localNow = new Date(historyPreviewNow * 1000);
+  const todayStart = Math.floor(new Date(
+    localNow.getFullYear(),
+    localNow.getMonth(),
+    localNow.getDate(),
+  ).getTime() / 1000);
+  const elapsedToday = Math.max(60, historyPreviewNow - todayStart);
+  const timelinePoint = (fraction) => todayStart + Math.floor(elapsedToday * fraction);
+
+  return {
+    summary: {
+      total_sessions: historyPreviewHeatmapJoins.length,
+      unique_users: counts.size,
+      total_hours: Math.round(historyPreviewHeatmapJoins.length * 7.5) / 10,
+      avg_duration_mins: 45,
+    },
+    per_user: perUser,
+    heatmap_joins: historyPreviewHeatmapJoins,
+    timeline_events: [
+      { event_type: "join", identity: "preview-timeline-sam", name: "Sam", timestamp: timelinePoint(0.12) },
+      { event_type: "leave", identity: "preview-timeline-sam", name: "Sam", timestamp: timelinePoint(0.38) },
+      { event_type: "join", identity: "preview-timeline-david", name: "David", timestamp: timelinePoint(0.28) },
+      { event_type: "leave", identity: "preview-timeline-david", name: "David", timestamp: timelinePoint(0.66) },
+      { event_type: "join", identity: "preview-timeline-decker", name: "Decker", timestamp: timelinePoint(0.54) },
+    ],
+  };
+}
+
+function historyPreviewPayload(requestUrl) {
+  const range = requestUrl.searchParams.get("range") || "month";
+  const cursor = requestUrl.searchParams.get("cursor") || "";
+  let filtered = historyPreviewEvents;
+  const rollingDays = { week: 7, month: 30, quarter: 90, year: 365 }[range];
+  if (rollingDays) {
+    const cutoff = historyPreviewNow - rollingDays * 24 * 60 * 60;
+    filtered = filtered.filter((event) => event.timestamp >= cutoff);
+  } else if (range.startsWith("year:")) {
+    const year = Number.parseInt(range.slice(5), 10);
+    filtered = filtered.filter((event) => new Date(event.timestamp * 1000).getUTCFullYear() === year);
+  } else if (range !== "all") {
+    filtered = [];
+  }
+
+  const pageSize = 6;
+  const offset = cursor.startsWith("preview:")
+    ? Math.max(0, Number.parseInt(cursor.slice("preview:".length), 10) || 0)
+    : 0;
+  const events = filtered.slice(offset, offset + pageSize);
+  const nextOffset = offset + events.length;
+  const availableYears = Array.from(new Set(
+    historyPreviewEvents.map((event) => new Date(event.timestamp * 1000).getUTCFullYear()),
+  )).sort((a, b) => b - a);
+
+  return {
+    events,
+    next_cursor: nextOffset < filtered.length ? `preview:${nextOffset}` : null,
+    total_count: filtered.length,
+    available_from: historyPreviewEvents.at(-1)?.timestamp || null,
+    available_to: historyPreviewEvents[0]?.timestamp || null,
+    available_years: availableYears,
+  };
+}
 
 function send(response, statusCode, body, contentType) {
   response.writeHead(statusCode, {
@@ -63,7 +187,11 @@ function resolveStaticFile(requestUrl) {
 }
 
 function injectIsolatedPreview(html) {
-  const previewName = isolatedJamPreview ? "Isolated Jam Preview" : "Isolated Theme Preview";
+  const previewName = isolatedJamPreview
+    ? "Isolated Jam Preview"
+    : isolatedHistoryPreview
+      ? "Isolated Dashboard History Preview"
+      : "Isolated Theme Preview";
   const earlyBootstrap = `
     <script>
       (function () {
@@ -165,7 +293,21 @@ function injectIsolatedPreview(html) {
           if (typeof openJamPanel === "function") openJamPanel(jamButton);
           if (typeof setJamView === "function") setJamView("library", false);
       `
-    : `
+    : isolatedHistoryPreview
+      ? `
+          if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(false);
+          if (typeof adminToken !== "undefined") adminToken = "isolated-history-preview-admin";
+          if (typeof currentAccessToken !== "undefined") currentAccessToken = "isolated-history-preview-participant";
+          var dashboardPanel = document.getElementById("admin-dash-panel");
+          if (dashboardPanel && dashboardPanel.classList.contains("hidden") && typeof toggleAdminDash === "function") {
+            toggleAdminDash();
+          }
+          var historyTab = document.getElementById("admin-dash-history-tab");
+          if (historyTab && typeof switchAdminTab === "function") {
+            switchAdminTab(historyTab, "admin-dash-history");
+          }
+      `
+      : `
           if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(true);
       `;
   const scenario = `
@@ -218,6 +360,30 @@ const server = http.createServer(async (request, response) => {
     }
     if (requestUrl.pathname === "/api/version") {
       send(response, 200, JSON.stringify({ latest_client: "" }), "application/json; charset=utf-8");
+      return;
+    }
+    if (isolatedHistoryPreview && requestUrl.pathname === "/admin/api/dashboard") {
+      send(response, 200, JSON.stringify({
+        rooms: [],
+        total_online: 6,
+        server_version: "history-preview",
+      }), "application/json; charset=utf-8");
+      return;
+    }
+    if (isolatedHistoryPreview && requestUrl.pathname === "/admin/api/sessions") {
+      send(response, 200, JSON.stringify(historyPreviewPayload(requestUrl)), "application/json; charset=utf-8");
+      return;
+    }
+    if (isolatedHistoryPreview && requestUrl.pathname === "/admin/api/metrics/dashboard") {
+      send(response, 200, JSON.stringify(historyPreviewMetricsPayload()), "application/json; charset=utf-8");
+      return;
+    }
+    if (isolatedHistoryPreview && requestUrl.pathname === "/admin/api/metrics") {
+      send(response, 200, JSON.stringify({ users: [] }), "application/json; charset=utf-8");
+      return;
+    }
+    if (isolatedHistoryPreview && requestUrl.pathname === "/admin/api/bugs") {
+      send(response, 200, JSON.stringify({ reports: [] }), "application/json; charset=utf-8");
       return;
     }
     if (requestUrl.pathname.startsWith("/api/avatar/")) {
@@ -308,9 +474,15 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
+  const previewLabel = isolatedJamPreview
+    ? " [ISOLATED JAM PREVIEW]"
+    : isolatedThemePreview
+      ? " [ISOLATED THEME PREVIEW]"
+      : isolatedHistoryPreview
+        ? " [ISOLATED HISTORY PREVIEW]"
+        : "";
   console.log(
-    `[viewer-tests] serving ${viewerRoot} and ${adminRoot} at http://127.0.0.1:${port}` +
-      (isolatedJamPreview ? " [ISOLATED JAM PREVIEW]" : isolatedThemePreview ? " [ISOLATED THEME PREVIEW]" : ""),
+    `[viewer-tests] serving ${viewerRoot} and ${adminRoot} at http://127.0.0.1:${port}${previewLabel}`,
   );
 });
 

@@ -38,7 +38,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="style.css?v=0.6.11.1777930912" />
+    <link rel="stylesheet" href="style.css?v=0.6.34.1785470400" />
     <link rel="stylesheet" href="jam.css?v=0.6.34.1785384000" />
     <link rel="stylesheet" href="capture-picker.css?v=0.6.11.1777930912" />
     <link rel="stylesheet" href="clubhouse-shell.css?v=0.6.11.1777930912" />
@@ -712,17 +712,42 @@
       <div id="admin-dash-panel" class="hidden admin-dash-panel">
         <div class="admin-dash-header">
           <h3>Dashboard</h3>
-          <button type="button" class="admin-dash-close" onclick="toggleAdminDash()">&times;</button>
+          <button type="button" class="admin-dash-close" aria-label="Close Dashboard" onclick="toggleAdminDash()">&times;</button>
         </div>
         <div class="admin-dash-tabs">
           <button type="button" class="adm-tab active" onclick="switchAdminTab(this,'admin-dash-live')">Live</button>
-          <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-history')">History</button>
+          <button id="admin-dash-history-tab" type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-history')">History</button>
           <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-metrics')">Metrics</button>
           <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-bugs')">Bugs</button>
           <button type="button" class="adm-tab" onclick="switchAdminTab(this,'admin-dash-deploys')">Deploys</button>
         </div>
         <div id="admin-dash-live" class="admin-dash-content"><div class="adm-empty">Loading...</div></div>
-        <div id="admin-dash-history" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
+        <div id="admin-dash-history" class="admin-dash-content hidden">
+          <div class="adm-history-toolbar">
+            <label for="admin-history-range">Time range</label>
+            <select id="admin-history-range" aria-controls="admin-history-results">
+              <optgroup label="Rolling ranges">
+                <option value="week">Last 7 days</option>
+                <option value="month" selected>Last 30 days</option>
+                <option value="quarter">Last 90 days</option>
+                <option value="year">Last 365 days</option>
+              </optgroup>
+              <option value="all">All history</option>
+              <optgroup id="admin-history-years" label="Calendar years"></optgroup>
+            </select>
+          </div>
+          <div id="admin-history-status" class="adm-history-status" role="status" aria-live="polite">Loading session history...</div>
+          <div id="admin-history-error" class="adm-history-error" role="alert" hidden>
+            <span id="admin-history-error-message">Session history could not be loaded.</span>
+            <button id="admin-history-retry" type="button">Retry</button>
+          </div>
+          <div id="admin-history-results" class="adm-history-results" aria-label="Session history results" aria-busy="true">
+            <div class="adm-empty">Loading...</div>
+          </div>
+          <div class="adm-history-footer">
+            <button id="admin-history-load-more" type="button" hidden>Load older</button>
+          </div>
+        </div>
         <div id="admin-dash-metrics" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
         <div id="admin-dash-bugs" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
         <div id="admin-dash-deploys" class="admin-dash-content hidden"><div class="adm-empty">Loading...</div></div>
@@ -789,7 +814,8 @@
     <script src="participants.js?v=0.6.11.1777930912"></script>
     <script src="audio-routing.js?v=0.6.11.1777930912"></script>
     <script src="media-controls.js?v=0.6.11.1777930912"></script>
-    <script src="admin.js?v=0.6.11.1777930912"></script>
+    <script src="admin-history.js?v=0.6.34.1785470400"></script>
+    <script src="admin.js?v=0.6.34.1785470400"></script>
     <script src="connect.js?v=0.6.11.1777930912"></script>
     <script src="app.js?v=0.6.11.1777930912"></script>
     <script src="capture-picker.js?v=0.6.11.1777930912"></script>

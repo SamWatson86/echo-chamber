@@ -267,6 +267,81 @@ Service-started production logs are written under `C:\ProgramData\Echo Chamber\l
 - `turn.out.log`
 - `turn.err.log`
 
+## Durable Dashboard History
+
+Dashboard session history is durable application data, not a release artifact.
+Production `CORE_SESSION_LOG_DIR` must point at the stable data root
+`C:\ProgramData\Echo Chamber\data\sessions`. The data root must disable inherited
+permissions and grant access only to `SYSTEM`, local Administrators, and the
+designated Echo operator; never place `spotify-token.json` or the Jam actor key
+under a broadly readable runtime directory. A release candidate may use an isolated
+session directory while it is being tested, but promoting that candidate must
+not leave production pointed at the candidate directory. Doing so makes the
+Dashboard appear to lose its history even though the earlier daily JSON files
+still exist.
+
+The session files are UTC-day arrays named exactly
+`sessions-YYYY-MM-DD.json`. `stats-YYYY-MM-DD.json`, `jam-history/`, and
+`jam-library/` share the parent directory but are separate stores. Never merge
+those through the session-history tool.
+
+Use the merge utility to preview and recover split session stores. Preview is
+the default and does not write anything:
+
+```powershell
+& .\core\deploy\merge-session-history.ps1 `
+  -SourceDirectory @(
+    "F:\Codex AI\The Echo Chamber\core\logs\sessions",
+    "C:\ProgramData\Echo Chamber\private-web-diagnostics\candidates\<candidate>\data\sessions"
+  ) `
+  -DestinationDirectory "C:\ProgramData\Echo Chamber\data\sessions"
+```
+
+Review the JSON summary, especially `unique_source_events_added`,
+`exact_duplicates`, `filename_date_mismatches`, and every entry under
+`changes`. Do not add worktree-local, `core\control\logs`, or discarded test
+candidate directories merely because they contain session-shaped files; those
+are developer/test records unless an incident audit proves otherwise.
+
+For an approved recovery outage:
+
+1. Run the Echo preflight and record the active `control_env_file` and its
+   `CORE_SESSION_LOG_DIR`.
+2. Stop `EchoCoreHost`; the utility deliberately never stops or starts the
+   service and must not race the control plane's read-modify-write logger.
+3. Rerun the reviewed command with `-Apply` and, preferably, an explicit new
+   `-BackupDirectory`. The tool snapshots and hashes every existing destination
+   session file before any destination write, deduplicates exact events, routes
+   them by UTC date, and replaces each changed file atomically.
+4. Set the production environment's `CORE_SESSION_LOG_DIR` to the restricted,
+   stable data root as a separate, reviewed configuration change. The merge tool
+   never mutates service configuration. Keep private web diagnostics at its own
+   stable restricted root so its existing identity key is never replaced by a
+   release candidate's key.
+5. Start `EchoCoreHost`, confirm the control log reports the stable session
+   directory, then verify `/api/version`, `/health`, and Dashboard History.
+
+Candidate promotion can fork more than Dashboard History. Audit every mutable
+path in the candidate environment, including `CORE_SOUNDBOARD_DIR`,
+`CORE_CHAT_DIR`, `CORE_CHAT_UPLOADS_DIR`, `CORE_SESSION_LOG_DIR`, and
+`CORE_DIAGNOSTICS_DIR`, before switching production. Candidate-owned
+`jam-history/`, `jam-library/`, playlist caches, and the newest Spotify token
+also require their own feature-aware, backed-up migration during the controlled
+stop. The session-history utility intentionally does not copy or merge any of
+that state.
+
+Rollback is mechanical, but restoring the original files alone is incomplete
+when the merge created new UTC-day files. Stop the service and first verify that
+`manifest.json`'s `destination` is the exact intended session directory. For
+each entry in `created_paths`, require a plain leaf name matching exactly
+`sessions-YYYY-MM-DD.json`, verify it resolves directly under that destination,
+and remove only that exact file. Never use a glob or recursive deletion for this
+step. Then hash-verify every backup named in `destination_files`, restore it to
+the destination (prefer a same-directory staged atomic replacement), and verify
+the restored SHA-256 values plus the absence of every `created_paths` entry.
+Restore the prior environment file if it changed, then start and verify the
+service. Source files are read-only and remain untouched throughout recovery.
+
 ## Quick incident flow
 
 1. Confirm health endpoint and viewer/admin reachability.

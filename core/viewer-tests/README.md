@@ -48,6 +48,17 @@ Jam state and never connects to production or Spotify. Echo Pulse therefore
 shows its truthful static **Join Jam to activate** state in this preview; the
 reactive spectrum requires a joined Jam audio stream.
 
+For a disconnected Dashboard History preview with synthetic multi-year data:
+
+```powershell
+$env:ECHO_HISTORY_PREVIEW = "1"
+node .\scripts\serve-viewer.mjs
+```
+
+Open the same local URL. The fixture opens Dashboard History automatically and
+supports rolling ranges, calendar years, and paged loading without reading or
+changing production session logs.
+
 Known legacy failures at `960x540`, `640x480`, and narrow Chat execute on every
 run under the explicit `?echo-ui-shell-v2=0` override. They retain the legacy
 rollback baseline while separate V2 tests assert a usable participant region

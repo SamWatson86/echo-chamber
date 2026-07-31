@@ -6,14 +6,14 @@ use crate::rooms::SessionEvent;
 use crate::AppState;
 
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Query, State},
     http::{HeaderMap, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
@@ -314,6 +314,109 @@ pub(crate) struct AdminParticipantInfo {
 #[derive(Serialize)]
 pub(crate) struct AdminSessionsResponse {
     events: Vec<SessionEvent>,
+    next_cursor: Option<String>,
+    total_count: usize,
+    available_from: Option<u64>,
+    available_to: Option<u64>,
+    available_years: Vec<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AdminSessionsQuery {
+    #[serde(rename = "range")]
+    range_name: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+struct SessionEventKey {
+    timestamp: u64,
+    event_type: String,
+    identity: String,
+    name: String,
+    room_id: String,
+    duration_secs: Option<u64>,
+}
+
+impl From<&SessionEvent> for SessionEventKey {
+    fn from(event: &SessionEvent) -> Self {
+        Self {
+            timestamp: event.timestamp,
+            event_type: event.event_type.clone(),
+            identity: event.identity.clone(),
+            name: event.name.clone(),
+            room_id: event.room_id.clone(),
+            duration_secs: event.duration_secs,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionHistoryRange {
+    RelativeDays(u64),
+    All,
+    CalendarYear(u32),
+}
+
+impl SessionHistoryRange {
+    fn parse(value: Option<&str>) -> Result<Self, StatusCode> {
+        let value = value.unwrap_or("month");
+        match value {
+            "week" => Ok(Self::RelativeDays(7)),
+            "month" => Ok(Self::RelativeDays(30)),
+            "quarter" => Ok(Self::RelativeDays(90)),
+            "year" => Ok(Self::RelativeDays(365)),
+            "all" => Ok(Self::All),
+            _ => {
+                let year = value
+                    .strip_prefix("year:")
+                    .filter(|raw| raw.len() == 4 && raw.bytes().all(|byte| byte.is_ascii_digit()))
+                    .and_then(|raw| raw.parse::<u32>().ok())
+                    .filter(|year| (1970..=9999).contains(year))
+                    .ok_or(StatusCode::BAD_REQUEST)?;
+                Ok(Self::CalendarYear(year))
+            }
+        }
+    }
+
+    fn cursor_scope(&self) -> String {
+        match self {
+            Self::RelativeDays(7) => "week".to_string(),
+            Self::RelativeDays(30) => "month".to_string(),
+            Self::RelativeDays(90) => "quarter".to_string(),
+            Self::RelativeDays(365) => "year".to_string(),
+            Self::RelativeDays(days) => format!("days:{days}"),
+            Self::All => "all".to_string(),
+            Self::CalendarYear(year) => format!("year:{year:04}"),
+        }
+    }
+
+    fn includes(&self, timestamp: u64, now: u64) -> bool {
+        match self {
+            Self::RelativeDays(days) => {
+                timestamp >= now.saturating_sub(days.saturating_mul(86_400)) && timestamp <= now
+            }
+            Self::All => true,
+            Self::CalendarYear(year) => {
+                let Some(start) = unix_timestamp_for_date(*year, 1, 1) else {
+                    return false;
+                };
+                let Some(end) = unix_timestamp_for_date(year.saturating_add(1), 1, 1) else {
+                    return false;
+                };
+                timestamp >= start && timestamp < end
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionHistoryCursor {
+    version: u8,
+    range: String,
+    event: SessionEventKey,
 }
 
 #[derive(Serialize)]
@@ -432,34 +535,243 @@ pub(crate) async fn admin_dashboard(
 pub(crate) async fn admin_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<AdminSessionsQuery>,
 ) -> Result<Json<AdminSessionsResponse>, StatusCode> {
     ensure_admin(&state, &headers)?;
-
-    // Read today's and yesterday's session logs
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let today_days = now / 86400;
-    let mut all_events = Vec::new();
+    load_admin_sessions(&state.session_log_dir, query, now).map(Json)
+}
 
-    for offset in 0..30 {
-        let days = today_days - offset;
-        let (year, month, day) = epoch_days_to_date(days);
-        let file_name = format!("sessions-{:04}-{:02}-{:02}.json", year, month, day);
-        let file_path = state.session_log_dir.join(&file_name);
-        if let Ok(data) = fs::read_to_string(&file_path) {
-            if let Ok(events) = serde_json::from_str::<Vec<SessionEvent>>(&data) {
-                all_events.extend(events);
-            }
-        }
+const ADMIN_SESSIONS_DEFAULT_LIMIT: usize = 1_000;
+const ADMIN_SESSIONS_MAX_LIMIT: usize = 1_000;
+const ADMIN_SESSIONS_MAX_CURSOR_BYTES: usize = 4_096;
+
+fn load_admin_sessions(
+    session_log_dir: &Path,
+    query: AdminSessionsQuery,
+    now: u64,
+) -> Result<AdminSessionsResponse, StatusCode> {
+    let range = SessionHistoryRange::parse(query.range_name.as_deref())?;
+    let limit = query.limit.unwrap_or(ADMIN_SESSIONS_DEFAULT_LIMIT);
+    if limit == 0 || limit > ADMIN_SESSIONS_MAX_LIMIT {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Sort by timestamp descending (most recent first), limit to 1000
-    all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    all_events.truncate(1000);
+    let mut all_events = read_session_history_files(session_log_dir);
+    let mut seen = HashSet::new();
+    all_events.retain(|event| seen.insert(SessionEventKey::from(&*event)));
+    sort_session_events(&mut all_events);
 
-    Ok(Json(AdminSessionsResponse { events: all_events }))
+    let available_from = all_events.iter().map(|event| event.timestamp).min();
+    let available_to = all_events.iter().map(|event| event.timestamp).max();
+    let mut available_years: Vec<u32> = all_events
+        .iter()
+        .filter_map(|event| year_from_unix_timestamp(event.timestamp))
+        .collect();
+    available_years.sort_unstable_by(|a, b| b.cmp(a));
+    available_years.dedup();
+
+    let mut events: Vec<SessionEvent> = all_events
+        .into_iter()
+        .filter(|event| range.includes(event.timestamp, now))
+        .collect();
+    let total_count = events.len();
+    let range_scope = range.cursor_scope();
+
+    let start = if let Some(raw_cursor) = query.cursor.as_deref() {
+        let cursor = decode_session_cursor(raw_cursor)?;
+        if cursor.range != range_scope {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        events
+            .iter()
+            .position(|event| SessionEventKey::from(event) == cursor.event)
+            .map(|index| index + 1)
+            .ok_or(StatusCode::BAD_REQUEST)?
+    } else {
+        0
+    };
+
+    if start > events.len() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let end = start.saturating_add(limit).min(events.len());
+    let page_events: Vec<SessionEvent> = events.drain(start..end).collect();
+    let next_cursor = if end < total_count {
+        page_events.last().map(|event| {
+            encode_session_cursor(&SessionHistoryCursor {
+                version: 1,
+                range: range_scope,
+                event: SessionEventKey::from(event),
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(AdminSessionsResponse {
+        events: page_events,
+        next_cursor,
+        total_count,
+        available_from,
+        available_to,
+        available_years,
+    })
+}
+
+fn read_session_history_files(session_log_dir: &Path) -> Vec<SessionEvent> {
+    let entries = match fs::read_dir(session_log_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            warn!(
+                "failed to read session history directory {:?}: {}",
+                session_log_dir, error
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(parse_session_history_file_name)
+                .is_some()
+        })
+        .map(|entry| entry.path())
+        .collect();
+    files.sort();
+
+    let mut events = Vec::new();
+    for file_path in files {
+        let file_name = file_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<invalid>");
+        match fs::read_to_string(&file_path) {
+            Ok(contents) => match serde_json::from_str::<Vec<SessionEvent>>(&contents) {
+                Ok(mut file_events) => events.append(&mut file_events),
+                Err(error) => warn!(
+                    "ignoring malformed session history file {}: {}",
+                    file_name, error
+                ),
+            },
+            Err(error) => warn!(
+                "failed to read session history file {}: {}",
+                file_name, error
+            ),
+        }
+    }
+    events
+}
+
+fn parse_session_history_file_name(file_name: &str) -> Option<(u32, u32, u32)> {
+    let raw_date = file_name.strip_prefix("sessions-")?.strip_suffix(".json")?;
+    if raw_date.len() != 10 {
+        return None;
+    }
+    let bytes = raw_date.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let year = raw_date[..4].parse::<u32>().ok()?;
+    let month = raw_date[5..7].parse::<u32>().ok()?;
+    let day = raw_date[8..].parse::<u32>().ok()?;
+    unix_days_for_date(year, month, day)?;
+    Some((year, month, day))
+}
+
+fn sort_session_events(events: &mut [SessionEvent]) {
+    events.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| a.event_type.cmp(&b.event_type))
+            .then_with(|| a.identity.cmp(&b.identity))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.room_id.cmp(&b.room_id))
+            .then_with(|| a.duration_secs.cmp(&b.duration_secs))
+    });
+}
+
+fn encode_session_cursor(cursor: &SessionHistoryCursor) -> String {
+    let bytes = serde_json::to_vec(cursor).expect("session cursor serialization cannot fail");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn decode_session_cursor(raw_cursor: &str) -> Result<SessionHistoryCursor, StatusCode> {
+    if raw_cursor.is_empty() || raw_cursor.len() > ADMIN_SESSIONS_MAX_CURSOR_BYTES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw_cursor)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let cursor: SessionHistoryCursor =
+        serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if cursor.version != 1 || encode_session_cursor(&cursor) != raw_cursor {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(cursor)
+}
+
+fn unix_timestamp_for_date(year: u32, month: u32, day: u32) -> Option<u64> {
+    unix_days_for_date(year, month, day)?.checked_mul(86_400)
+}
+
+fn unix_days_for_date(year: u32, month: u32, day: u32) -> Option<u64> {
+    if !(1970..=10_000).contains(&year) || !(1..=12).contains(&month) {
+        return None;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day == 0 || day > days_in_month {
+        return None;
+    }
+
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_prime = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let unix_days = era * 146_097 + day_of_era - 719_468;
+    u64::try_from(unix_days).ok()
+}
+
+fn year_from_unix_timestamp(timestamp: u64) -> Option<u32> {
+    let unix_days = i64::try_from(timestamp / 86_400).ok()?;
+    let shifted = unix_days.checked_add(719_468)?;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    u32::try_from(year).ok().filter(|year| *year <= 9999)
 }
 
 pub(crate) async fn admin_dashboard_metrics(
@@ -1437,6 +1749,266 @@ pub(crate) async fn admin_force_reload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SESSION_HISTORY_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestSessionHistoryDir(PathBuf);
+
+    impl TestSessionHistoryDir {
+        fn new() -> Self {
+            let id = SESSION_HISTORY_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "echo-admin-session-history-{}-{}",
+                std::process::id(),
+                id
+            ));
+            fs::create_dir_all(&path).expect("create session history test directory");
+            Self(path)
+        }
+
+        fn write(&self, file_name: &str, events: &[SessionEvent]) {
+            let payload = serde_json::to_string(events).expect("serialize session events");
+            fs::write(self.0.join(file_name), payload).expect("write session history fixture");
+        }
+    }
+
+    impl Drop for TestSessionHistoryDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn session_event(
+        timestamp: u64,
+        identity: &str,
+        event_type: &str,
+        duration_secs: Option<u64>,
+    ) -> SessionEvent {
+        SessionEvent {
+            event_type: event_type.to_string(),
+            identity: identity.to_string(),
+            name: identity.to_string(),
+            room_id: "main".to_string(),
+            timestamp,
+            duration_secs,
+        }
+    }
+
+    fn session_query(
+        range_name: Option<&str>,
+        limit: Option<usize>,
+        cursor: Option<String>,
+    ) -> AdminSessionsQuery {
+        AdminSessionsQuery {
+            range_name: range_name.map(str::to_string),
+            limit,
+            cursor,
+        }
+    }
+
+    fn assert_bad_session_query(result: Result<AdminSessionsResponse, StatusCode>) {
+        assert!(matches!(result, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    #[test]
+    fn admin_sessions_defaults_to_month_and_reports_full_availability() {
+        let dir = TestSessionHistoryDir::new();
+        let now = unix_timestamp_for_date(2026, 7, 31).unwrap() + 12 * 3_600;
+        let newest = session_event(now - 10, "newest", "join", None);
+        let month_old = session_event(now - 29 * 86_400, "month-old", "leave", Some(20));
+        let quarter_old = session_event(now - 31 * 86_400, "quarter-old", "join", None);
+        let prior_year = session_event(
+            unix_timestamp_for_date(2025, 1, 1).unwrap(),
+            "prior-year",
+            "leave",
+            Some(60),
+        );
+        dir.write(
+            "sessions-2026-07-31.json",
+            &[newest.clone(), month_old.clone()],
+        );
+        dir.write(
+            "sessions-2026-07-30.json",
+            &[newest.clone(), quarter_old.clone(), prior_year.clone()],
+        );
+        dir.write("sessions-2026-13-40.json", &[newest.clone()]);
+        dir.write("sessions-2026-07-31.json.bak", &[newest.clone()]);
+
+        let response = load_admin_sessions(&dir.0, session_query(None, None, None), now)
+            .expect("default month history");
+
+        assert_eq!(response.total_count, 2);
+        assert_eq!(response.events.len(), 2);
+        assert_eq!(response.events[0].identity, "newest");
+        assert_eq!(response.events[1].identity, "month-old");
+        assert_eq!(response.next_cursor, None);
+        assert_eq!(response.available_from, Some(prior_year.timestamp));
+        assert_eq!(response.available_to, Some(newest.timestamp));
+        assert_eq!(response.available_years, vec![2026, 2025]);
+    }
+
+    #[test]
+    fn admin_sessions_paginates_equal_timestamps_without_duplicates() {
+        let dir = TestSessionHistoryDir::new();
+        let timestamp = unix_timestamp_for_date(2026, 7, 31).unwrap();
+        dir.write(
+            "sessions-2026-07-31.json",
+            &[
+                session_event(timestamp, "charlie", "join", None),
+                session_event(timestamp, "alpha", "join", None),
+                session_event(timestamp, "bravo", "join", None),
+                session_event(timestamp - 1, "older", "join", None),
+            ],
+        );
+
+        let first = load_admin_sessions(
+            &dir.0,
+            session_query(Some("all"), Some(2), None),
+            timestamp + 1,
+        )
+        .expect("first history page");
+        assert_eq!(first.total_count, 4);
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.identity.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo"]
+        );
+        let cursor = first.next_cursor.expect("next cursor");
+
+        let second = load_admin_sessions(
+            &dir.0,
+            session_query(Some("all"), Some(2), Some(cursor)),
+            timestamp + 1,
+        )
+        .expect("second history page");
+        assert_eq!(second.total_count, 4);
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .map(|event| event.identity.as_str())
+                .collect::<Vec<_>>(),
+            vec!["charlie", "older"]
+        );
+        assert_eq!(second.next_cursor, None);
+    }
+
+    #[test]
+    fn admin_sessions_deduplicates_only_exact_events() {
+        let dir = TestSessionHistoryDir::new();
+        let timestamp = unix_timestamp_for_date(2026, 7, 31).unwrap();
+        let join = session_event(timestamp, "sam", "join", None);
+        let leave_without_duration = session_event(timestamp, "sam", "leave", None);
+        let leave_with_duration = session_event(timestamp, "sam", "leave", Some(30));
+        dir.write(
+            "sessions-2026-07-31.json",
+            &[
+                join.clone(),
+                join,
+                leave_without_duration,
+                leave_with_duration,
+            ],
+        );
+
+        let response =
+            load_admin_sessions(&dir.0, session_query(Some("all"), None, None), timestamp)
+                .expect("deduplicated history");
+        assert_eq!(response.total_count, 3);
+        assert_eq!(response.events.len(), 3);
+    }
+
+    #[test]
+    fn admin_sessions_calendar_year_uses_exact_utc_boundaries() {
+        let dir = TestSessionHistoryDir::new();
+        let start = unix_timestamp_for_date(2025, 1, 1).unwrap();
+        let end = unix_timestamp_for_date(2026, 1, 1).unwrap();
+        dir.write(
+            "sessions-2025-01-01.json",
+            &[
+                session_event(start - 1, "before", "join", None),
+                session_event(start, "start", "join", None),
+                session_event(end - 1, "end", "leave", Some(1)),
+                session_event(end, "after", "join", None),
+            ],
+        );
+
+        let response = load_admin_sessions(
+            &dir.0,
+            session_query(Some("year:2025"), None, None),
+            end + 1,
+        )
+        .expect("calendar year history");
+        assert_eq!(response.total_count, 2);
+        assert_eq!(response.events[0].identity, "end");
+        assert_eq!(response.events[1].identity, "start");
+    }
+
+    #[test]
+    fn admin_sessions_rejects_invalid_range_limit_and_cursor() {
+        let dir = TestSessionHistoryDir::new();
+        let timestamp = unix_timestamp_for_date(2026, 7, 31).unwrap();
+        let event = session_event(timestamp, "sam", "join", None);
+        dir.write("sessions-2026-07-31.json", std::slice::from_ref(&event));
+
+        for invalid_range in ["years", "year:", "year:26", "year:1969", "year:10000"] {
+            assert_bad_session_query(load_admin_sessions(
+                &dir.0,
+                session_query(Some(invalid_range), None, None),
+                timestamp,
+            ));
+        }
+        for invalid_limit in [0, ADMIN_SESSIONS_MAX_LIMIT + 1] {
+            assert_bad_session_query(load_admin_sessions(
+                &dir.0,
+                session_query(Some("all"), Some(invalid_limit), None),
+                timestamp,
+            ));
+        }
+        assert_bad_session_query(load_admin_sessions(
+            &dir.0,
+            session_query(Some("all"), None, Some("not-a-cursor".to_string())),
+            timestamp,
+        ));
+
+        let cursor = encode_session_cursor(&SessionHistoryCursor {
+            version: 1,
+            range: "week".to_string(),
+            event: SessionEventKey::from(&event),
+        });
+        assert_bad_session_query(load_admin_sessions(
+            &dir.0,
+            session_query(Some("month"), None, Some(cursor)),
+            timestamp,
+        ));
+
+        let stale_cursor = encode_session_cursor(&SessionHistoryCursor {
+            version: 1,
+            range: "all".to_string(),
+            event: SessionEventKey::from(&session_event(timestamp - 1, "missing", "join", None)),
+        });
+        assert_bad_session_query(load_admin_sessions(
+            &dir.0,
+            session_query(Some("all"), None, Some(stale_cursor)),
+            timestamp,
+        ));
+    }
+
+    #[test]
+    fn session_history_date_helpers_validate_leap_days() {
+        assert!(parse_session_history_file_name("sessions-2024-02-29.json").is_some());
+        assert!(parse_session_history_file_name("sessions-2025-02-29.json").is_none());
+        assert!(parse_session_history_file_name("sessions-2025-00-01.json").is_none());
+        assert!(parse_session_history_file_name("sessions-2025-01-00.json").is_none());
+        assert!(parse_session_history_file_name("sessions-2025-01-01.json.bak").is_none());
+        assert_eq!(
+            year_from_unix_timestamp(unix_timestamp_for_date(2026, 12, 31).unwrap()),
+            Some(2026)
+        );
+    }
 
     #[test]
     fn github_screenshot_embedding_accepts_only_generated_upload_names() {

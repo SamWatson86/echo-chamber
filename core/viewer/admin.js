@@ -185,6 +185,16 @@ if (bugReportModal) {
 
 var _adminDashTimer = null;
 var _adminDashOpen = false;
+var _admHistoryState = {
+  range: "month",
+  events: [],
+  nextCursor: null,
+  totalCount: null,
+  availableYears: [],
+  controller: null,
+  requestId: 0,
+  retryAppend: false,
+};
 
 function adminKickParticipant(identity) {
   if (!confirm("Kick " + identity + " from the room?")) return;
@@ -251,6 +261,11 @@ function toggleAdminDash() {
     }, 3000);
   } else {
     panel.classList.add("hidden");
+    if (_admHistoryState.controller) {
+      _admHistoryState.controller.abort();
+      _admHistoryState.controller = null;
+      _admHistoryState.requestId += 1;
+    }
     if (_adminDashTimer) {
       clearInterval(_adminDashTimer);
       _adminDashTimer = null;
@@ -298,6 +313,7 @@ function switchAdminTab(btn, tabId) {
   var tab = document.getElementById(tabId);
   if (tab) tab.classList.remove("hidden");
   btn.classList.add("active");
+  if (tabId === "admin-dash-history") fetchAdminHistory();
   if (tabId === "admin-dash-deploys") fetchAdminDeploys();
 }
 
@@ -364,36 +380,182 @@ async function fetchAdminDashboard() {
   } catch (e) {}
 }
 
-async function fetchAdminHistory() {
-  try {
-    var res = await fetch(apiUrl("/admin/api/sessions"), {
-      headers: { "Authorization": "Bearer " + adminToken }
-    });
-    if (!res.ok) return;
-    var data = await res.json();
-    var el = document.getElementById("admin-dash-history");
-    if (!el) return;
-    var events = data.events || [];
-    if (events.length === 0) {
-      el.innerHTML = '<div class="adm-empty">No session history</div>';
-      return;
-    }
-    var html = '<table class="adm-table"><thead><tr><th>Time</th><th>Event</th><th>User</th><th>Room</th><th>Duration</th></tr></thead><tbody>';
+function _admHistorySetError(message) {
+  var error = document.getElementById("admin-history-error");
+  var errorMessage = document.getElementById("admin-history-error-message");
+  if (errorMessage) errorMessage.textContent = message || "Session history could not be loaded.";
+  if (error) error.hidden = false;
+}
+
+function _admHistoryClearError() {
+  var error = document.getElementById("admin-history-error");
+  if (error) error.hidden = true;
+}
+
+function _admHistorySetLoading(loading, append) {
+  var results = document.getElementById("admin-history-results");
+  var loadMore = document.getElementById("admin-history-load-more");
+  var status = document.getElementById("admin-history-status");
+  if (results) results.setAttribute("aria-busy", loading ? "true" : "false");
+  if (loadMore) loadMore.disabled = loading;
+  if (loading && status) {
+    status.textContent = append
+      ? "Loading older events..."
+      : "Loading " + EchoAdminHistory.rangeLabel(_admHistoryState.range).toLowerCase() + "...";
+  }
+}
+
+function _admHistoryUpdateYears(values) {
+  var years = EchoAdminHistory.normalizeAvailableYears(values, _admHistoryState.range);
+  if (years.join(",") === _admHistoryState.availableYears.join(",")) return;
+  _admHistoryState.availableYears = years;
+
+  var group = document.getElementById("admin-history-years");
+  var select = document.getElementById("admin-history-range");
+  if (!group || !select) return;
+  var selected = _admHistoryState.range;
+  while (group.firstChild) group.removeChild(group.firstChild);
+  years.forEach(function(year) {
+    var option = document.createElement("option");
+    option.value = "year:" + year;
+    option.textContent = year === new Date().getFullYear() ? year + " (year to date)" : String(year);
+    group.appendChild(option);
+  });
+  select.value = selected;
+}
+
+function _admHistoryRenderEvents() {
+  var results = document.getElementById("admin-history-results");
+  var loadMore = document.getElementById("admin-history-load-more");
+  var status = document.getElementById("admin-history-status");
+  if (!results) return;
+
+  var events = _admHistoryState.events;
+  if (events.length === 0) {
+    results.innerHTML = '<div class="adm-empty">' +
+      escAdm(EchoAdminHistory.emptyMessage(_admHistoryState.range)) + '</div>';
+  } else {
+    var html = '<div class="adm-history-table-wrap"><table class="adm-table" aria-label="Session join and leave history"><thead><tr><th>Time</th><th>Event</th><th>User</th><th>Room</th><th>Duration</th></tr></thead><tbody>';
     var lastDateKey = "";
     events.forEach(function(ev) {
-      var d = new Date(ev.timestamp * 1000);
-      var dateKey = d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+      var dateKey = EchoAdminHistory.formatDateSeparator(ev.timestamp);
       if (dateKey !== lastDateKey) {
-        html += '<tr class="adm-date-sep"><td colspan="5">' + dateKey + '</td></tr>';
+        html += '<tr class="adm-date-sep"><td colspan="5">' + escAdm(dateKey) + '</td></tr>';
         lastDateKey = dateKey;
       }
       var isJoin = ev.event_type === "join";
-      html += '<tr><td>' + fmtTime(ev.timestamp) + '</td><td><span class="adm-badge ' + (isJoin ? 'adm-join' : 'adm-leave') + '">' + (isJoin ? 'JOIN' : 'LEAVE') + '</span></td><td>' + escAdm(ev.name || ev.identity) + '</td><td>' + escAdm(ev.room_id) + '</td><td>' + (ev.duration_secs != null ? fmtDur(ev.duration_secs) : '') + '</td></tr>';
+      var isLeave = ev.event_type === "leave";
+      var eventClass = isJoin ? "adm-join" : isLeave ? "adm-leave" : "adm-event";
+      var eventLabel = isJoin ? "JOIN" : isLeave ? "LEAVE" : "EVENT";
+      html += '<tr><td>' + escAdm(fmtTime(ev.timestamp)) + '</td><td><span class="adm-badge ' + eventClass + '">' + eventLabel + '</span></td><td>' + escAdm(ev.name || ev.identity || "Unknown") + '</td><td>' + escAdm(ev.room_id || "") + '</td><td>' + (ev.duration_secs != null ? escAdm(fmtDur(ev.duration_secs)) : '') + '</td></tr>';
     });
-    html += '</tbody></table>';
-    el.innerHTML = html;
-  } catch (e) {}
+    html += '</tbody></table></div>';
+    results.innerHTML = html;
+  }
+
+  if (status) {
+    status.textContent = EchoAdminHistory.formatStatus(
+      events.length,
+      _admHistoryState.totalCount,
+      _admHistoryState.range,
+    );
+  }
+  if (loadMore) {
+    loadMore.hidden = !_admHistoryState.nextCursor;
+    loadMore.disabled = false;
+  }
+  results.setAttribute("aria-busy", "false");
 }
+
+async function fetchAdminHistory(options) {
+  var append = !!(options && options.append);
+  var cursor = append ? _admHistoryState.nextCursor : null;
+  if (append && !cursor) return;
+
+  if (_admHistoryState.controller) _admHistoryState.controller.abort();
+  var requestId = _admHistoryState.requestId + 1;
+  _admHistoryState.requestId = requestId;
+  _admHistoryState.retryAppend = append;
+  _admHistoryState.controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+
+  var results = document.getElementById("admin-history-results");
+  var loadMore = document.getElementById("admin-history-load-more");
+  if (!append) {
+    _admHistoryState.events = [];
+    _admHistoryState.nextCursor = null;
+    _admHistoryState.totalCount = null;
+    if (results) results.innerHTML = '<div class="adm-empty">Loading...</div>';
+    if (loadMore) loadMore.hidden = true;
+  }
+  _admHistoryClearError();
+  _admHistorySetLoading(true, append);
+
+  try {
+    var requestOptions = {
+      headers: { "Authorization": "Bearer " + adminToken }
+    };
+    if (_admHistoryState.controller) requestOptions.signal = _admHistoryState.controller.signal;
+    var path = EchoAdminHistory.buildSessionsPath(_admHistoryState.range, cursor);
+    var res = await fetch(apiUrl(path), requestOptions);
+    if (!res.ok) throw new Error("History request failed (" + res.status + ")");
+    var data = await res.json();
+    if (requestId !== _admHistoryState.requestId) return;
+
+    _admHistoryState.events = EchoAdminHistory.mergeEvents(
+      append ? _admHistoryState.events : [],
+      data.events,
+    );
+    _admHistoryState.nextCursor = data.next_cursor == null || data.next_cursor === ""
+      ? null
+      : String(data.next_cursor);
+    var totalCount = Number(data.total_count);
+    _admHistoryState.totalCount = Number.isFinite(totalCount) && totalCount >= 0
+      ? Math.max(totalCount, _admHistoryState.events.length)
+      : null;
+    _admHistoryUpdateYears(data.available_years);
+    _admHistoryClearError();
+    _admHistoryRenderEvents();
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    if (requestId !== _admHistoryState.requestId) return;
+    _admHistorySetError(e && e.message ? e.message : "Session history could not be loaded.");
+    if (append && _admHistoryState.events.length > 0) {
+      _admHistoryRenderEvents();
+    } else {
+      if (results) results.innerHTML = '<div class="adm-empty">Session history is temporarily unavailable.</div>';
+      var status = document.getElementById("admin-history-status");
+      if (status) status.textContent = "History unavailable \u00b7 " + EchoAdminHistory.rangeLabel(_admHistoryState.range);
+    }
+  } finally {
+    if (requestId === _admHistoryState.requestId) {
+      _admHistoryState.controller = null;
+      _admHistorySetLoading(false, append);
+    }
+  }
+}
+
+(function initAdminHistoryControls() {
+  var range = document.getElementById("admin-history-range");
+  var retry = document.getElementById("admin-history-retry");
+  var loadMore = document.getElementById("admin-history-load-more");
+  if (range) {
+    _admHistoryState.range = EchoAdminHistory.normalizeRange(range.value);
+    range.addEventListener("change", function() {
+      _admHistoryState.range = EchoAdminHistory.normalizeRange(range.value);
+      fetchAdminHistory();
+    });
+  }
+  if (retry) {
+    retry.addEventListener("click", function() {
+      fetchAdminHistory({ append: _admHistoryState.retryAppend });
+    });
+  }
+  if (loadMore) {
+    loadMore.addEventListener("click", function() {
+      fetchAdminHistory({ append: true });
+    });
+  }
+})();
 
 var _admUserColors = [
   "#e8922f","#3b9dda","#49b86d","#c75dba","#d65757","#c9b83e","#6ec4c4","#8b7dd6",

@@ -154,6 +154,36 @@ pub fn resolve_deploy_dir() -> PathBuf {
     PathBuf::from("deploy")
 }
 
+pub(crate) const VIEWER_WATCHED_FILES: &[&str] = &[
+    "app.js",
+    "style.css",
+    "clubhouse-shell.css",
+    "themes.css",
+    "layout-policy.js",
+    "ui-shell.js",
+    "theme-runtime.js",
+    "theme-effects.js",
+    "theme.js",
+    "diagnostics-client.js",
+    "grid-layout.js",
+    "index.html",
+    "connect.js",
+    "room-status.js",
+    "participants.js",
+    "audio-routing.js",
+    "media-controls.js",
+    "admin-history.js",
+    "admin.js",
+    "chat.js",
+    "soundboard.js",
+    "state.js",
+    "settings.js",
+    "capture-picker.js",
+    "jam.js",
+    "jam-session-state.js",
+    "jam.css",
+];
+
 /// Stamp cache-busting version query strings into viewer/index.html on disk.
 /// Called once at server startup so ServeDir serves the already-stamped file.
 /// Idempotent — strips old ?v= params before re-stamping.
@@ -173,7 +203,7 @@ pub fn stamp_viewer_index(viewer_dir: &PathBuf, v: &str) {
                 "screen-share-adaptive.js", "screen-share-native.js",
                 "participants-grid.js", "grid-layout.js", "camera-lobby-layout.js", "participants-avatar.js", "participants-fullscreen.js",
                 "participants.js",
-                "audio-routing.js", "media-controls.js", "admin.js", "connect.js",
+                "audio-routing.js", "media-controls.js", "admin-history.js", "admin.js", "connect.js",
                 "app.js", "jam.js", "changelog.js",
                 "capture-picker.js", "capture-picker.css",
             ];
@@ -225,7 +255,7 @@ pub fn urlencoded(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::stamp_viewer_index;
+    use super::{stamp_viewer_index, VIEWER_WATCHED_FILES};
     use std::fs;
 
     #[test]
@@ -252,6 +282,7 @@ mod tests {
             <script src="display-status.js?v=old"></script>
             <script src="native-presenter.js?v=old"></script>
             <script src="admin-panel.js?v=old"></script>
+            <script src="admin-history.js?v=old"></script>
             "#,
         )
         .unwrap();
@@ -272,9 +303,16 @@ mod tests {
         assert!(stamped.contains("display-status.js?v=0.6.12.test"));
         assert!(stamped.contains("native-presenter.js?v=0.6.12.test"));
         assert!(stamped.contains("admin-panel.js?v=0.6.12.test"));
+        assert!(stamped.contains("admin-history.js?v=0.6.12.test"));
         assert!(!stamped.contains("?v=old"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn viewer_watcher_tracks_admin_history_assets() {
+        assert!(VIEWER_WATCHED_FILES.contains(&"admin-history.js"));
+        assert!(VIEWER_WATCHED_FILES.contains(&"admin.js"));
     }
 
     fn now_for_test() -> u128 {
