@@ -751,36 +751,9 @@ async fn main() {
         let vdir = viewer_dir.clone();
         let mut startup = SystemTime::now();
         tokio::spawn(async move {
-            let watched_files = [
-                "app.js",
-                "style.css",
-                "clubhouse-shell.css",
-                "themes.css",
-                "layout-policy.js",
-                "ui-shell.js",
-                "theme-runtime.js",
-                "theme-effects.js",
-                "theme.js",
-                "diagnostics-client.js",
-                "grid-layout.js",
-                "index.html",
-                "connect.js",
-                "room-status.js",
-                "participants.js",
-                "audio-routing.js",
-                "media-controls.js",
-                "chat.js",
-                "soundboard.js",
-                "state.js",
-                "settings.js",
-                "capture-picker.js",
-                "jam.js",
-                "jam-session-state.js",
-                "jam.css",
-            ];
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                let changed = watched_files.iter().any(|f| {
+                let changed = VIEWER_WATCHED_FILES.iter().any(|f| {
                     vdir.join(f)
                         .metadata()
                         .and_then(|m| m.modified())
