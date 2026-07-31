@@ -25,8 +25,13 @@ $logFile = Join-Path $logDir "deploy-watcher.log"
 $envFile = Join-Path $coreDir "control\.env"
 $viewerSourceDir = Join-Path $coreDir "viewer"
 $viewerRuntimeLib = Join-Path $deployDir "viewer-runtime-lib.ps1"
+$productionNetworkLib = Join-Path $deployDir "production-network-lib.ps1"
 
 . $viewerRuntimeLib
+if (!(Test-Path -LiteralPath $productionNetworkLib -PathType Leaf)) {
+    throw "Required production network guard library is missing: $productionNetworkLib"
+}
+. $productionNetworkLib
 
 if (!$NoMain -and !(Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
@@ -123,16 +128,26 @@ function Start-OldProcess {
     $pidFile = Join-Path $coreDir "control\core-control.pid"
     $outLog = Join-Path $logDir "core-control.out.log"
     $errLog = Join-Path $logDir "core-control.err.log"
+    $proc = $null
     try {
+        # A rollback is still a production activation. Never restore a process
+        # from a localhost-only or otherwise unsafe production environment.
+        Assert-WatcherProductionEnvironment | Out-Null
         Load-Env $envFile
         Write-Log "Restarting control plane..."
         $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
         if (!$proc) { throw "Start-Process returned no process" }
         [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
-        Write-Log "Control plane restarted (PID $($proc.Id))"
+        Write-Log "Control plane restarted (PID $($proc.Id)); verifying rollback safety..."
+        if (-not (Complete-WatcherRollbackActivation -Process $proc)) {
+            return $false
+        }
         return $true
     }
     catch {
+        if ($proc) {
+            Stop-TrackedControlProcess $proc | Out-Null
+        }
         Write-Log "Control plane restart failed: $_" "ERROR"
         return $false
     }
@@ -144,6 +159,200 @@ function Test-Health {
         if ($result -match '"ok"\s*:\s*true') { return $true }
     } catch {}
     return $false
+}
+
+function Assert-WatcherProductionEnvironment {
+    param(
+        [string]$EnvFilePath = $envFile,
+        # Test-only injection forwarded to the shared guard. Production omits
+        # this and reads the exact environment file it is about to activate.
+        [scriptblock]$ReadEnvironmentFile
+    )
+
+    $guardArgs = @{ EnvFilePath = $EnvFilePath }
+    if ($PSBoundParameters.ContainsKey("ReadEnvironmentFile")) {
+        $guardArgs.ReadEnvironmentFile = $ReadEnvironmentFile
+    }
+    $result = Assert-ProductionControlEnvironment @guardArgs
+    Write-Log "Production network configuration passed: CORE_BIND=$($result.Bind) CORE_PORT=$($result.Port)"
+    return $result
+}
+
+function Assert-WatcherProductionIngress {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedControlProcessId,
+        # Test-only providers are forwarded only when explicitly supplied.
+        [scriptblock]$ListenerProvider,
+        [scriptblock]$DefaultRouteLanIPv4Provider,
+        [scriptblock]$TcpProbeProvider
+    )
+
+    $guardArgs = @{ ExpectedControlProcessId = $ExpectedControlProcessId }
+    foreach ($providerName in @("ListenerProvider", "DefaultRouteLanIPv4Provider", "TcpProbeProvider")) {
+        if ($PSBoundParameters.ContainsKey($providerName)) {
+            $guardArgs[$providerName] = $PSBoundParameters[$providerName]
+        }
+    }
+    $result = Assert-ProductionControlIngress @guardArgs
+    Write-Log "Production ingress passed: PID=$($result.ControlProcessId) listener=$($result.ListenerAddress):$($result.Port) probe=$($result.ProbeAddress)"
+    return $result
+}
+
+function Wait-ControlHealth {
+    Start-Sleep -Seconds 3
+    for ($i = 0; $i -lt $healthTimeout; $i++) {
+        if (Test-Health) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Assert-WatcherProductionActivation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedControlProcessId,
+        [scriptblock]$HealthProbe = { Wait-ControlHealth },
+        [scriptblock]$ListenerProvider,
+        [scriptblock]$DefaultRouteLanIPv4Provider,
+        [scriptblock]$TcpProbeProvider
+    )
+
+    if (-not (& $HealthProbe)) {
+        throw "control plane failed its health check"
+    }
+
+    $guardArgs = @{ ExpectedControlProcessId = $ExpectedControlProcessId }
+    foreach ($providerName in @("ListenerProvider", "DefaultRouteLanIPv4Provider", "TcpProbeProvider")) {
+        if ($PSBoundParameters.ContainsKey($providerName)) {
+            $guardArgs[$providerName] = $PSBoundParameters[$providerName]
+        }
+    }
+    Assert-WatcherProductionIngress @guardArgs | Out-Null
+}
+
+function Assert-WatcherLiveProductionIngress {
+    param(
+        [string]$EnvFilePath = $envFile,
+        [scriptblock]$ReadEnvironmentFile,
+        [int]$ExpectedControlProcessId = 0,
+        [scriptblock]$HealthProbe = { Wait-ControlHealth },
+        [scriptblock]$ListenerProvider,
+        [scriptblock]$DefaultRouteLanIPv4Provider,
+        [scriptblock]$TcpProbeProvider
+    )
+
+    $environmentArgs = @{ EnvFilePath = $EnvFilePath }
+    if ($PSBoundParameters.ContainsKey("ReadEnvironmentFile")) {
+        $environmentArgs.ReadEnvironmentFile = $ReadEnvironmentFile
+    }
+    Assert-WatcherProductionEnvironment @environmentArgs | Out-Null
+
+    $controlProcessId = $ExpectedControlProcessId
+    if ($controlProcessId -le 0) {
+        $pidFile = Join-Path $coreDir "control\core-control.pid"
+        $controlProcessId = 0
+        if (-not [int]::TryParse(
+                [System.IO.File]::ReadAllText($pidFile).Trim(),
+                [ref]$controlProcessId
+            ) -or $controlProcessId -le 0) {
+            throw "tracked production control PID is invalid"
+        }
+        $process = Get-Process -Id $controlProcessId -ErrorAction Stop
+        if ($process.ProcessName -ne "echo-core-control") {
+            throw "tracked production PID $controlProcessId is not echo-core-control"
+        }
+    }
+
+    $activationArgs = @{
+        ExpectedControlProcessId = $controlProcessId
+        HealthProbe = $HealthProbe
+    }
+    foreach ($providerName in @("ListenerProvider", "DefaultRouteLanIPv4Provider", "TcpProbeProvider")) {
+        if ($PSBoundParameters.ContainsKey($providerName)) {
+            $activationArgs[$providerName] = $PSBoundParameters[$providerName]
+        }
+    }
+    Assert-WatcherProductionActivation @activationArgs
+    Write-Log "Live production ingress preflight passed for PID $controlProcessId"
+
+    return $controlProcessId
+}
+
+function Complete-WatcherRollbackActivation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Process,
+        [scriptblock]$HealthProbe = { Wait-ControlHealth },
+        [scriptblock]$ListenerProvider,
+        [scriptblock]$DefaultRouteLanIPv4Provider,
+        [scriptblock]$TcpProbeProvider,
+        [ValidateRange(1, 10)]
+        [int]$AncillaryProbeAttempts = 3,
+        [ValidateRange(0, 60000)]
+        [int]$AncillaryProbeDelayMilliseconds = 1000,
+        [scriptblock]$RetryDelayProvider = {
+            param([int]$Milliseconds)
+            if ($Milliseconds -gt 0) {
+                Start-Sleep -Milliseconds $Milliseconds
+            }
+        },
+        [scriptblock]$StopProcessProvider = {
+            param([object]$TrackedProcess)
+            Stop-TrackedControlProcess $TrackedProcess
+        }
+    )
+
+    try {
+        if (-not (& $HealthProbe)) {
+            throw "rollback control plane failed its health check"
+        }
+
+        $listenerArgs = @{ ExpectedControlProcessId = [int]$Process.Id }
+        if ($PSBoundParameters.ContainsKey("ListenerProvider")) {
+            $listenerArgs.ListenerProvider = $ListenerProvider
+        }
+        $listener = Assert-ProductionControlListener @listenerArgs
+        Write-Log "Rollback hard listener passed: PID=$($listener.ControlProcessId) listener=$($listener.ListenerAddress):$($listener.Port)"
+
+        $probeArgs = @{}
+        foreach ($providerName in @("DefaultRouteLanIPv4Provider", "TcpProbeProvider")) {
+            if ($PSBoundParameters.ContainsKey($providerName)) {
+                $probeArgs[$providerName] = $PSBoundParameters[$providerName]
+            }
+        }
+        $lastProbeError = $null
+        for ($attempt = 1; $attempt -le $AncillaryProbeAttempts; $attempt++) {
+            try {
+                $probe = Assert-ProductionControlLanProbe @probeArgs
+                Write-Log "Rollback LAN probe passed: $($probe.ProbeAddress):$($probe.Port)"
+                return $true
+            }
+            catch {
+                $lastProbeError = "$($_.Exception.Message)"
+                if ($attempt -lt $AncillaryProbeAttempts) {
+                    Write-Log "Rollback LAN probe attempt $attempt/$AncillaryProbeAttempts failed; retrying: $lastProbeError" "WARN"
+                    & $RetryDelayProvider $AncillaryProbeDelayMilliseconds | Out-Null
+                }
+            }
+        }
+
+        # The route table or a self-LAN probe can be transiently unavailable
+        # during recovery. Reassert the hard safety boundary before preserving
+        # the known-old process; never trade a degraded rollback for an outage.
+        if (-not (& $HealthProbe)) {
+            throw "rollback control plane lost health after ancillary ingress probe failure"
+        }
+        Assert-ProductionControlListener @listenerArgs | Out-Null
+        Write-Log "Rollback restored a healthy wildcard-bound control process, but LAN ingress remained unverified after $AncillaryProbeAttempts attempts; leaving the known-old process running. Last probe error: $lastProbeError" "WARN"
+        return $true
+    }
+    catch {
+        $failure = "$($_.Exception.Message)"
+        $stopped = [bool](& $StopProcessProvider $Process)
+        Write-Log "Rollback control activation failed hard safety checks: $failure (stopped=$stopped)" "ERROR"
+        return $false
+    }
 }
 
 function Run-Tests {
@@ -158,16 +367,32 @@ function Run-Tests {
     $testExitCode = $LASTEXITCODE
     Pop-Location
 
-    if ($testExitCode -eq 0) {
-        Write-Log "Tests PASSED"
-        return $true
-    } else {
+    if ($testExitCode -ne 0) {
         Write-Log "Tests FAILED (exit code $testExitCode)" "ERROR"
         # Log first 50 lines of output to avoid huge logs
         $lines = $testOutput -split "`n" | Select-Object -First 50
         foreach ($l in $lines) { Write-Log "  test: $l" "ERROR" }
         return $false
     }
+
+    # This is the Windows production deployment path, so run the PowerShell
+    # network/service regression gate here instead of routing it through the
+    # cross-platform npm suite (which also triggers unrelated viewer CI).
+    $productionNetworkTest = Join-Path $deployDir "test-production-network.ps1"
+    $networkTestOutput = & powershell.exe `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File $productionNetworkTest 2>&1 | Out-String
+    $networkTestExitCode = $LASTEXITCODE
+    if ($networkTestExitCode -ne 0) {
+        Write-Log "Production network tests FAILED (exit code $networkTestExitCode)" "ERROR"
+        $lines = $networkTestOutput -split "`n" | Select-Object -First 50
+        foreach ($l in $lines) { Write-Log "  network test: $l" "ERROR" }
+        return $false
+    }
+
+    Write-Log "Tests PASSED"
+    return $true
 }
 
 function Build-Control {
@@ -453,10 +678,14 @@ function Deploy-BlueGreen($viewerPublish) {
     $outLog = Join-Path $logDir "core-control.out.log"
     $errLog = Join-Path $logDir "core-control.err.log"
 
-    Load-Env $envFile
     Write-Log "Starting new control plane..."
     $proc = $null
     try {
+        # Re-read and validate the exact file at the last responsible moment.
+        # The watcher also checks it before polling, but this closes the window
+        # for an unsafe edit while a release is building.
+        Assert-WatcherProductionEnvironment | Out-Null
+        Load-Env $envFile
         $proc = Start-Process -FilePath $exe -WorkingDirectory $coreDir -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog
         if (!$proc) { throw "Start-Process returned no process" }
         [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)")
@@ -475,25 +704,19 @@ function Deploy-BlueGreen($viewerPublish) {
     }
 
     Write-Log "Waiting for health check..."
-    Start-Sleep -Seconds 3
-    $healthy = $false
-    for ($i = 0; $i -lt $healthTimeout; $i++) {
-        if (Test-Health) {
-            $healthy = $true
-            break
-        }
-        Start-Sleep -Seconds 1
-    }
-
-    if ($healthy) {
-        Write-Log "Health check PASSED - deploy successful"
+    try {
+        # Loopback health alone is insufficient: the production process must
+        # own the wildcard listener and answer on the host LAN IP.
+        Assert-WatcherProductionActivation -ExpectedControlProcessId $proc.Id
+        Write-Log "Health and production ingress checks PASSED - deploy successful"
         if (Test-Path -LiteralPath $bak) {
             Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
         }
         return New-DeployResult -Succeeded $true -RollbackAttempted $false -RollbackSucceeded $false -ErrorMessage $null
     }
-
-    $healthError = "New control plane failed its health check"
+    catch {
+        $healthError = "New control plane failed its production activation guard: $_"
+    }
     Write-Log "$healthError - rolling back" "ERROR"
     $newProcessStopped = Stop-TrackedControlProcess $proc
 
@@ -514,9 +737,19 @@ if (!$NoMain) {
     Write-Log "Max consecutive failures: $maxFailures"
     Write-Log "========================================="
 
-    # This gate MUST run before Get-RemoteSha or git pull. If control serves the
-    # checkout directly, pulling first would already publish a mismatched viewer
-    # before the watcher had a chance to reject the deployment.
+    # These gates MUST run before Get-RemoteSha or git pull. Validate the live
+    # process, not only its environment: a healthy loopback-only listener would
+    # otherwise survive preflight while remote users remain locked out.
+    try {
+        Assert-WatcherLiveProductionIngress | Out-Null
+    }
+    catch {
+        Write-Log "CIRCUIT BREAKER: live production ingress preflight failed" "ERROR"
+        Write-Log "$_" "ERROR"
+        Write-Log "No remote poll or git pull was attempted" "ERROR"
+        exit 1
+    }
+
     $startupViewerPreflight = Get-ViewerRuntimePreflight
     if (!$startupViewerPreflight.Succeeded) {
         Write-Log "CIRCUIT BREAKER: viewer runtime preflight failed" "ERROR"
@@ -537,6 +770,19 @@ if (!$NoMain) {
         $shortLocal = $localSha.Substring(0, 7)
         Write-Log "New commit detected: $shortRemote (was: $shortLocal)"
 
+        # The watcher can remain resident for days. Recheck the full live path
+        # before every release transaction so neither an environment edit nor
+        # a degraded listener/probe can reach git pull or production mutation.
+        try {
+            Assert-WatcherLiveProductionIngress | Out-Null
+        }
+        catch {
+            Write-Log "CIRCUIT BREAKER: live production ingress pre-mutation check failed" "ERROR"
+            Write-Log "$_" "ERROR"
+            Write-Log "No git pull or production mutation was attempted" "ERROR"
+            exit 1
+        }
+
         # Pull
         Write-Log "Pulling latest from origin/main..."
         $pullOutput = git -C $root pull origin main --ff-only 2>&1 | Out-String
@@ -556,6 +802,19 @@ if (!$NoMain) {
                 Write-DeployEvent $remoteSha "failed" $dur "Tests failed"
                 $consecutiveFailures++
             } else {
+                # Tests can take long enough for live state or the environment
+                # to change. Recheck at the last responsible moment, before
+                # copying artifacts or stopping any production process.
+                try {
+                    Assert-WatcherLiveProductionIngress | Out-Null
+                }
+                catch {
+                    Write-Log "CIRCUIT BREAKER: final live production ingress check failed" "ERROR"
+                    Write-Log "$_" "ERROR"
+                    Write-Log "No production artifact or process was mutated" "ERROR"
+                    exit 1
+                }
+
                 # Kill process BEFORE build so cargo can overwrite the .exe
                 Write-Log "Stopping control plane for rebuild..."
                 $exe = Join-Path $coreDir "target\debug\echo-core-control.exe"

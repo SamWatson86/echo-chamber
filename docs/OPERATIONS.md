@@ -19,6 +19,83 @@ Important gotcha from the v0.6.12 screen-share release: the service executable p
 
 The deploy watcher is separate. It watches/builds/deploys from the clean repo path, but it is not the boot owner for the core stack.
 
+### Production network reachability invariant
+
+Production must run with `CORE_BIND=0.0.0.0` and `CORE_PORT=9443`. Treat both
+values as release invariants, verify them in the active `control_env_file`, and
+confirm the listener is on `0.0.0.0:9443` after every promotion or rollback.
+The host config must be a top-level JSON object and `control_env_file` must be a
+case-sensitive JSON string containing a fully qualified Windows drive-rooted
+path; arrays, scalar roots, relative, drive-relative, root-relative, and UNC
+paths fail closed.
+`CORE_BIND=127.0.0.1` is valid only for an isolated candidate or local test. A
+candidate loopback bind must never be copied into the production environment.
+Do not promote a candidate environment wholesale; preserve and independently
+verify the production network values.
+
+The server's Windows `hosts` file overrides public DNS resolution. When it maps
+the public Echo hostname to loopback, a public-hostname `curl` run on the server
+is a local-only service check, not proof that LAN or internet clients can
+connect. Hairpin NAT is also not external-path proof. A production network
+change is complete only after all three independent checks pass:
+
+1. **Loopback (server):** verify `/health` and `/api/version` through
+   `https://127.0.0.1:9443` and confirm the port listener is bound to
+   `0.0.0.0:9443`, not `127.0.0.1:9443`.
+2. **LAN (another device):** connect to the server's LAN address on port 9443
+   from a different machine on the local network. A request made by the server
+   to its own LAN address does not satisfy this check.
+3. **External (off-LAN):** connect to the public Echo hostname from a genuine
+   internet path, such as a friend's connection or a phone with Wi-Fi disabled.
+   The server itself and another device using the same LAN do not satisfy this
+   check.
+
+The committed `echo-core-host-network-guard.ps1` wrapper is mandatory for every
+manual production service start or restart. It reads the canonical host JSON,
+resolves and validates its `control_env_file` before the service mutation, then
+uses bounded retries to require one running `EchoCoreHost`, exactly one direct
+`echo-core-control.exe` child, that child's `0.0.0.0:9443` listener, and a TCP
+probe through the server's default-route LAN address. Do not call
+`Start-Service EchoCoreHost` or `Restart-Service EchoCoreHost` directly.
+`Start` requires the service to be stopped first. `Restart` must replace the
+service or direct-control PID. A hard post-mutation failure stops the
+partial-live service; an ancillary LAN-route/probe failure leaves a healthy,
+loopback-responsive, wildcard-bound service running but still fails the release
+gate for explicit LAN/WAN verification. A no-op `Restart` also fails the release
+gate, but preserves the old process only after health, wildcard ownership, and
+LAN ingress have all passed. If the Windows service mutation itself throws, the
+wrapper preserves only the exact unchanged service/control PIDs after rechecking
+the canonical config, loopback health, and wildcard ownership; changed, partial,
+or unsafe post-error state is stopped.
+
+Run the read-only verification after a reboot and before a release or rollback:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Verify
+curl.exe -sk https://127.0.0.1:9443/health
+curl.exe -sk https://127.0.0.1:9443/api/version
+```
+
+For a controlled promotion that requires an outage, run `Preflight` immediately
+before the stop. After the reviewed artifact/config swap, use the wrapper to
+start and verify production as one operation:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Preflight
+Stop-Service EchoCoreHost
+# Perform the reviewed, backed-up release mutation while Echo is stopped.
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Start
+```
+
+For a routine restart, use `-Action Restart`; it validates before mutation and
+verifies the new service/control PIDs and ingress afterward. These server-side
+assertions prove the process is not localhost-only, but they do not replace the
+separate-device LAN check or a genuine off-LAN check. Obtain both before the
+release is declared live.
+
 ## Echo preflight
 
 Run this before a release claim, after a reboot, or before live troubleshooting:
@@ -29,15 +106,23 @@ git status -sb
 git branch --show-current
 git rev-parse --short HEAD
 git rev-parse --short origin/main
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\test-production-network.ps1
 
-curl.exe -sk https://echo.fellowshipoftheboatrace.party:9443/api/version
-curl.exe -sk https://echo.fellowshipoftheboatrace.party:9443/health
-
+$activeHost = Get-Content "C:\ProgramData\Echo Chamber\echo-core-host.json" -Raw |
+  ConvertFrom-Json
+curl.exe -sk https://127.0.0.1:9443/api/version
+curl.exe -sk https://127.0.0.1:9443/health
 Get-Service EchoCoreHost
-Get-Content "C:\ProgramData\Echo Chamber\logs\echo-core-host.log" -Tail 20
+Get-Content (Join-Path $activeHost.logs_dir "echo-core-host.log") -Tail 20
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Verify
 ```
 
-Expected production state after v0.6.12: `/api/version` reports `0.6.12`, `/health` is OK, and the host log shows `control started ... F:\EC-worktrees\main\core\target\release\echo-core-control.exe`.
+Expected production state: `/api/version` reports the reviewed release version
+and Git SHA, `/health` is OK, and the host log's control path exactly matches
+the immutable `control_exe` path in the active host JSON. Do not use a stale
+hard-coded version or checkout path as release evidence.
 
 ## Start / stop
 
@@ -178,14 +263,18 @@ Use the full-snapshot publisher during an approved control-service outage:
 ```powershell
 # From a clean, up-to-date main checkout, verify code first.
 npm run verify:quick
-powershell -NoProfile -ExecutionPolicy Bypass -File .\core\deploy\test-viewer-runtime-lib.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\test-production-network.ps1
 
 # Stop EchoCoreHost/control before the swap. Deploy the matching control binary
 # in the same outage, then publish every viewer asset as one verified snapshot.
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Preflight
 Stop-Service EchoCoreHost
 powershell -NoProfile -ExecutionPolicy Bypass -File .\core\deploy\publish-viewer-runtime.ps1 `
   -RuntimeDirectory "F:\EC-runtime\echo-viewer"
-Start-Service EchoCoreHost
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Start
 
 # The verifier normalizes only control's expected index.html cache stamps.
 powershell -NoProfile -ExecutionPolicy Bypass -File .\core\deploy\publish-viewer-runtime.ps1 `
@@ -307,8 +396,9 @@ For an approved recovery outage:
 
 1. Run the Echo preflight and record the active `control_env_file` and its
    `CORE_SESSION_LOG_DIR`.
-2. Stop `EchoCoreHost`; the utility deliberately never stops or starts the
-   service and must not race the control plane's read-modify-write logger.
+2. Run the service guard's `Preflight` action immediately before stopping
+   `EchoCoreHost`; the utility deliberately never stops or starts the service
+   and must not race the control plane's read-modify-write logger.
 3. Rerun the reviewed command with `-Apply` and, preferably, an explicit new
    `-BackupDirectory`. The tool snapshots and hashes every existing destination
    session file before any destination write, deduplicates exact events, routes
@@ -318,8 +408,10 @@ For an approved recovery outage:
    never mutates service configuration. Keep private web diagnostics at its own
    stable restricted root so its existing identity key is never replaced by a
    release candidate's key.
-5. Start `EchoCoreHost`, confirm the control log reports the stable session
-   directory, then verify `/api/version`, `/health`, and Dashboard History.
+5. Start `EchoCoreHost` through the service guard's `Start` action, confirm the
+   control log reports the stable session directory, then verify `/api/version`,
+   `/health`, Dashboard History, another-device LAN access, and genuine off-LAN
+   access.
 
 Candidate promotion can fork more than Dashboard History. Audit every mutable
 path in the candidate environment, including `CORE_SOUNDBOARD_DIR`,
@@ -339,8 +431,9 @@ and remove only that exact file. Never use a glob or recursive deletion for this
 step. Then hash-verify every backup named in `destination_files`, restore it to
 the destination (prefer a same-directory staged atomic replacement), and verify
 the restored SHA-256 values plus the absence of every `created_paths` entry.
-Restore the prior environment file if it changed, then start and verify the
-service. Source files are read-only and remain untouched throughout recovery.
+Restore the prior environment file if it changed, then use the service guard's
+`Start` action to start and verify the service. Source files are read-only and
+remain untouched throughout recovery.
 
 ## Quick incident flow
 

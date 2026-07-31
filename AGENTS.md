@@ -40,6 +40,14 @@ product development is centered in `core/`.
   fallback.
 - Before release, reboot validation, or live troubleshooting, run the Echo
   preflight in `docs/OPERATIONS.md`.
+- For every manual production `EchoCoreHost` start or restart, use
+  `core/deploy/echo-core-host-network-guard.ps1`; run its `Preflight` action
+  immediately before a controlled stop or promotion mutation, and its `Start`,
+  `Restart`, or `Verify` action afterward as appropriate. Never copy a candidate
+  loopback bind into production, and never treat the server's own hostname/LAN
+  probes as the required genuine off-LAN verification. Run
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  core\deploy\test-production-network.ps1` before the production mutation.
 - Do not assume the running server is from the repo you are editing. Verify
   `/api/version`, `/health`, `EchoCoreHost`, and
   `C:\ProgramData\Echo Chamber\echo-core-host.json`.
