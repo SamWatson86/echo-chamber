@@ -367,16 +367,32 @@ function Run-Tests {
     $testExitCode = $LASTEXITCODE
     Pop-Location
 
-    if ($testExitCode -eq 0) {
-        Write-Log "Tests PASSED"
-        return $true
-    } else {
+    if ($testExitCode -ne 0) {
         Write-Log "Tests FAILED (exit code $testExitCode)" "ERROR"
         # Log first 50 lines of output to avoid huge logs
         $lines = $testOutput -split "`n" | Select-Object -First 50
         foreach ($l in $lines) { Write-Log "  test: $l" "ERROR" }
         return $false
     }
+
+    # This is the Windows production deployment path, so run the PowerShell
+    # network/service regression gate here instead of routing it through the
+    # cross-platform npm suite (which also triggers unrelated viewer CI).
+    $productionNetworkTest = Join-Path $deployDir "test-production-network.ps1"
+    $networkTestOutput = & powershell.exe `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File $productionNetworkTest 2>&1 | Out-String
+    $networkTestExitCode = $LASTEXITCODE
+    if ($networkTestExitCode -ne 0) {
+        Write-Log "Production network tests FAILED (exit code $networkTestExitCode)" "ERROR"
+        $lines = $networkTestOutput -split "`n" | Select-Object -First 50
+        foreach ($l in $lines) { Write-Log "  network test: $l" "ERROR" }
+        return $false
+    }
+
+    Write-Log "Tests PASSED"
+    return $true
 }
 
 function Build-Control {

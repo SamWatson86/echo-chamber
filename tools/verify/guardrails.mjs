@@ -171,7 +171,6 @@ function checkProductionNetworkGuardrails() {
   const serviceGuard = exists(serviceGuardPath) ? read(serviceGuardPath) : '';
   const serviceGuardTest = exists(serviceGuardTestPath) ? read(serviceGuardTestPath) : '';
   const windowsNetworkGate = exists(windowsNetworkGatePath) ? read(windowsNetworkGatePath) : '';
-  const packageJson = JSON.parse(read('package.json'));
 
   assert(
     /Production network reachability invariant[\s\S]*`CORE_BIND=0\.0\.0\.0`[\s\S]*`CORE_PORT=9443`/i.test(operations),
@@ -255,12 +254,11 @@ function checkProductionNetworkGuardrails() {
     'The Windows production network gate must execute library, canonical service, and watcher integration tests.',
   );
   assert(
-    packageJson.scripts?.['verify:production-network:windows'] ===
-      'powershell.exe -NoProfile -ExecutionPolicy Bypass -File core/deploy/test-production-network.ps1',
-    'package.json must expose the Windows production network verification gate.',
+    /function Run-Tests[\s\S]*test-production-network\.ps1[\s\S]*Production network tests FAILED/i.test(deployWatcher),
+    'The Windows deploy watcher must execute the production network verification gate.',
   );
   assert(
-    /npm run verify:production-network:windows/i.test(operations),
+    /powershell\.exe -NoProfile -ExecutionPolicy Bypass -File[\s\S]*test-production-network\.ps1/i.test(operations),
     'docs/OPERATIONS.md must run the Windows production network verification gate during release preflight.',
   );
   assert(

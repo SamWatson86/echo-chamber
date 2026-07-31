@@ -106,7 +106,8 @@ git status -sb
 git branch --show-current
 git rev-parse --short HEAD
 git rev-parse --short origin/main
-npm run verify:production-network:windows
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\test-production-network.ps1
 
 $activeHost = Get-Content "C:\ProgramData\Echo Chamber\echo-core-host.json" -Raw |
   ConvertFrom-Json
@@ -262,7 +263,8 @@ Use the full-snapshot publisher during an approved control-service outage:
 ```powershell
 # From a clean, up-to-date main checkout, verify code first.
 npm run verify:quick
-npm run verify:production-network:windows
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\core\deploy\test-production-network.ps1
 
 # Stop EchoCoreHost/control before the swap. Deploy the matching control binary
 # in the same outage, then publish every viewer asset as one verified snapshot.

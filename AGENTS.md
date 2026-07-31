@@ -46,7 +46,8 @@ product development is centered in `core/`.
   `Restart`, or `Verify` action afterward as appropriate. Never copy a candidate
   loopback bind into production, and never treat the server's own hostname/LAN
   probes as the required genuine off-LAN verification. Run
-  `npm run verify:production-network:windows` before the production mutation.
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  core\deploy\test-production-network.ps1` before the production mutation.
 - Do not assume the running server is from the repo you are editing. Verify
   `/api/version`, `/health`, `EchoCoreHost`, and
   `C:\ProgramData\Echo Chamber\echo-core-host.json`.
