@@ -90,28 +90,10 @@ function Test-ProductionListenerAddress {
         [string]$Address
     )
 
-    $parsed = $null
-    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed)) {
-        return $false
-    }
-
-    if ($parsed.Equals([System.Net.IPAddress]::Any) -or
-        $parsed.Equals([System.Net.IPAddress]::IPv6Any)) {
-        return $true
-    }
-
-    if ([System.Net.IPAddress]::IsLoopback($parsed) -or $parsed.IsIPv6Multicast) {
-        return $false
-    }
-
-    if ($parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
-        $bytes = $parsed.GetAddressBytes()
-        if ($parsed.Equals([System.Net.IPAddress]::Broadcast) -or $bytes[0] -ge 224) {
-            return $false
-        }
-    }
-
-    return $true
+    # Production is configured for the IPv4 wildcard specifically. A concrete
+    # LAN address can disappear after an adapter or DHCP change, and IPv6Any
+    # does not prove that the required IPv4 ingress path exists.
+    return $Address -ceq "0.0.0.0"
 }
 
 function Test-ProductionLanIPv4Address {
@@ -196,7 +178,7 @@ function Test-ProductionTcpProbe {
     }
 }
 
-function Assert-ProductionControlIngress {
+function Assert-ProductionControlListener {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, [int]::MaxValue)]
@@ -206,15 +188,6 @@ function Assert-ProductionControlIngress {
             param([int]$Port)
             Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop |
                 Select-Object LocalAddress, LocalPort, OwningProcess
-        },
-
-        [scriptblock]$DefaultRouteLanIPv4Provider = {
-            Get-ProductionDefaultRouteLanIPv4
-        },
-
-        [scriptblock]$TcpProbeProvider = {
-            param([string]$Address, [int]$Port)
-            Test-ProductionTcpProbe -Address $Address -Port $Port
         }
     )
 
@@ -251,10 +224,30 @@ function Assert-ProductionControlIngress {
 
     if ($null -eq $ownedListener) {
         throw [System.InvalidOperationException]::new(
-            "Expected control PID $ExpectedControlProcessId does not own a wildcard or non-loopback TCP listener on port $requiredPort."
+            "Expected control PID $ExpectedControlProcessId does not own the IPv4 wildcard TCP listener 0.0.0.0 on port $requiredPort."
         )
     }
 
+    return [PSCustomObject]@{
+        ControlProcessId = $ExpectedControlProcessId
+        ListenerAddress = [string]$ownedListener.LocalAddress
+        Port = $requiredPort
+    }
+}
+
+function Assert-ProductionControlLanProbe {
+    param(
+        [scriptblock]$DefaultRouteLanIPv4Provider = {
+            Get-ProductionDefaultRouteLanIPv4
+        },
+
+        [scriptblock]$TcpProbeProvider = {
+            param([string]$Address, [int]$Port)
+            Test-ProductionTcpProbe -Address $Address -Port $Port
+        }
+    )
+
+    $requiredPort = 9443
     try {
         $probeAddresses = @(& $DefaultRouteLanIPv4Provider)
     } catch {
@@ -289,9 +282,44 @@ function Assert-ProductionControlIngress {
     }
 
     return [PSCustomObject]@{
-        ControlProcessId = $ExpectedControlProcessId
-        ListenerAddress = [string]$ownedListener.LocalAddress
         Port = $requiredPort
         ProbeAddress = $probeAddress
+    }
+}
+
+function Assert-ProductionControlIngress {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$ExpectedControlProcessId,
+
+        [scriptblock]$ListenerProvider = {
+            param([int]$Port)
+            Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop |
+                Select-Object LocalAddress, LocalPort, OwningProcess
+        },
+
+        [scriptblock]$DefaultRouteLanIPv4Provider = {
+            Get-ProductionDefaultRouteLanIPv4
+        },
+
+        [scriptblock]$TcpProbeProvider = {
+            param([string]$Address, [int]$Port)
+            Test-ProductionTcpProbe -Address $Address -Port $Port
+        }
+    )
+
+    $listener = Assert-ProductionControlListener `
+        -ExpectedControlProcessId $ExpectedControlProcessId `
+        -ListenerProvider $ListenerProvider
+    $probe = Assert-ProductionControlLanProbe `
+        -DefaultRouteLanIPv4Provider $DefaultRouteLanIPv4Provider `
+        -TcpProbeProvider $TcpProbeProvider
+
+    return [PSCustomObject]@{
+        ControlProcessId = $listener.ControlProcessId
+        ListenerAddress = $listener.ListenerAddress
+        Port = $listener.Port
+        ProbeAddress = $probe.ProbeAddress
     }
 }

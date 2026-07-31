@@ -17,6 +17,154 @@ $runtime = Join-Path $testRoot "runtime"
 New-Item -ItemType Directory -Path $source, $runtime | Out-Null
 
 try {
+    # Exercise the watcher's production-only adapters with isolated providers.
+    # This proves the standard deploy path forwards the exact environment file
+    # and expected process ID to the shared guard without inspecting live state.
+    $networkEnvFile = Join-Path $testRoot "production.env"
+    Set-Content -LiteralPath $networkEnvFile -Value @(
+        "CORE_BIND=0.0.0.0",
+        "CORE_PORT=9443"
+    )
+    $networkEnvironment = Assert-WatcherProductionEnvironment -EnvFilePath $networkEnvFile
+    Assert-True ($networkEnvironment.Bind -eq "0.0.0.0") "watcher forwards its production environment to the network guard"
+    Assert-True ($networkEnvironment.Port -eq 9443) "watcher production environment requires the public control port"
+
+    $networkIngress = Assert-WatcherProductionIngress `
+        -ExpectedControlProcessId 4242 `
+        -ListenerProvider {
+            param([int]$Port)
+            [pscustomobject]@{ LocalAddress = "0.0.0.0"; LocalPort = $Port; OwningProcess = 4242 }
+        } `
+        -DefaultRouteLanIPv4Provider { "192.168.50.10" } `
+        -TcpProbeProvider {
+            param([string]$Address, [int]$Port)
+            ($Address -eq "192.168.50.10" -and $Port -eq 9443)
+        }
+    Assert-True ($networkIngress.ControlProcessId -eq 4242) "watcher forwards the activated control PID to the ingress guard"
+    Assert-True ($networkIngress.ProbeAddress -eq "192.168.50.10") "watcher ingress guard probes a LAN address"
+
+    Assert-WatcherProductionActivation `
+        -ExpectedControlProcessId 4242 `
+        -HealthProbe { $true } `
+        -ListenerProvider {
+            param([int]$Port)
+            [pscustomobject]@{ LocalAddress = "0.0.0.0"; LocalPort = $Port; OwningProcess = 4242 }
+        } `
+        -DefaultRouteLanIPv4Provider { "192.168.50.10" } `
+        -TcpProbeProvider { $true }
+
+    $failedPostActivationRejected = $false
+    try {
+        Assert-WatcherProductionActivation `
+            -ExpectedControlProcessId 4242 `
+            -HealthProbe { $true } `
+            -ListenerProvider {
+                param([int]$Port)
+                [pscustomobject]@{ LocalAddress = "127.0.0.1"; LocalPort = $Port; OwningProcess = 4242 }
+            } `
+            -DefaultRouteLanIPv4Provider { "192.168.50.10" } `
+            -TcpProbeProvider { $true }
+    }
+    catch { $failedPostActivationRejected = $true }
+    Assert-True $failedPostActivationRejected "watcher rejects a healthy localhost-only post-activation listener"
+
+    $liveIngress = Assert-WatcherLiveProductionIngress `
+        -EnvFilePath $networkEnvFile `
+        -ExpectedControlProcessId 4242 `
+        -HealthProbe { $true } `
+        -ListenerProvider {
+            param([int]$Port)
+            [pscustomobject]@{ LocalAddress = "0.0.0.0"; LocalPort = $Port; OwningProcess = 4242 }
+        } `
+        -DefaultRouteLanIPv4Provider { "192.168.50.10" } `
+        -TcpProbeProvider { $true }
+    Assert-True ($liveIngress -eq 4242) "pre-mutation preflight validates environment, health, listener, and LAN ingress"
+
+    # A restored known-old process must survive a transient route/LAN probe
+    # failure once its environment, health, and wildcard listener are safe.
+    $script:rollbackStopCount = 0
+    $script:rollbackRouteCount = 0
+    $script:rollbackProbeCount = 0
+    $script:rollbackRetryDelayCount = 0
+    $degradedRollbackKeptRunning = Complete-WatcherRollbackActivation `
+        -Process ([pscustomobject]@{ Id = 4242 }) `
+        -HealthProbe { $true } `
+        -ListenerProvider {
+            param([int]$Port)
+            [pscustomobject]@{ LocalAddress = "0.0.0.0"; LocalPort = $Port; OwningProcess = 4242 }
+        } `
+        -DefaultRouteLanIPv4Provider {
+            $script:rollbackRouteCount++
+            if ($script:rollbackRouteCount -ne 2) { throw "route temporarily unavailable" }
+            "192.168.50.10"
+        } `
+        -TcpProbeProvider {
+            $script:rollbackProbeCount++
+            $false
+        } `
+        -AncillaryProbeAttempts 3 `
+        -AncillaryProbeDelayMilliseconds 1 `
+        -RetryDelayProvider {
+            param([int]$Milliseconds)
+            $script:rollbackRetryDelayCount++
+        } `
+        -StopProcessProvider {
+            param([object]$TrackedProcess)
+            $script:rollbackStopCount++
+            $true
+        }
+    Assert-True $degradedRollbackKeptRunning "ancillary LAN probe failure does not fail a hard-safe rollback"
+    Assert-True ($script:rollbackRouteCount -eq 3) "rollback default-route lookup retries are bounded"
+    Assert-True ($script:rollbackProbeCount -eq 1) "rollback also tolerates a LAN TCP failure within the bounded attempts"
+    Assert-True ($script:rollbackRetryDelayCount -eq 2) "rollback waits only between bounded ancillary attempts"
+    Assert-True ($script:rollbackStopCount -eq 0) "ancillary LAN probe failure does not kill the known-old process"
+
+    $script:rollbackStopCount = 0
+    $script:rollbackProbeCount = 0
+    $loopbackRollbackRejected = Complete-WatcherRollbackActivation `
+        -Process ([pscustomobject]@{ Id = 4242 }) `
+        -HealthProbe { $true } `
+        -ListenerProvider {
+            param([int]$Port)
+            [pscustomobject]@{ LocalAddress = "127.0.0.1"; LocalPort = $Port; OwningProcess = 4242 }
+        } `
+        -DefaultRouteLanIPv4Provider {
+            $script:rollbackProbeCount++
+            "192.168.50.10"
+        } `
+        -TcpProbeProvider { $true } `
+        -StopProcessProvider {
+            param([object]$TrackedProcess)
+            $script:rollbackStopCount++
+            $true
+        }
+    Assert-True (!$loopbackRollbackRejected) "a loopback-only rollback listener fails hard safety"
+    Assert-True ($script:rollbackStopCount -eq 1) "a loopback-only rollback process is stopped"
+    Assert-True ($script:rollbackProbeCount -eq 0) "hard listener safety fails before ancillary probes"
+
+    $deployDefinition = (Get-Command Deploy-BlueGreen).Definition
+    $rollbackStartDefinition = (Get-Command Start-OldProcess).Definition
+    Assert-True ($deployDefinition.Contains("Assert-WatcherProductionEnvironment")) "new deployment rechecks production config immediately before activation"
+    Assert-True ($deployDefinition.Contains("Assert-WatcherProductionActivation")) "new deployment verifies production ingress after activation"
+    Assert-True ($rollbackStartDefinition.Contains("Assert-WatcherProductionEnvironment")) "rollback restart validates production config before activation"
+    Assert-True ($rollbackStartDefinition.Contains("Complete-WatcherRollbackActivation")) "rollback delegates the keep-or-stop decision to the rollback safety guard"
+
+    $watcherScript = Get-Content -Raw -LiteralPath (Join-Path $scriptDir "deploy-watcher.ps1")
+    $liveIngressReferences = [regex]::Matches(
+        $watcherScript,
+        [regex]::Escape("Assert-WatcherLiveProductionIngress")
+    ).Count
+    Assert-True ($liveIngressReferences -ge 4) "watcher defines and invokes full live ingress at startup, before pull, and immediately before production mutation"
+
+    Set-Content -LiteralPath $networkEnvFile -Value @(
+        "CORE_BIND=127.0.0.1",
+        "CORE_PORT=9443"
+    )
+    $unsafeNetworkRejected = $false
+    try { Assert-WatcherProductionEnvironment -EnvFilePath $networkEnvFile | Out-Null }
+    catch { $unsafeNetworkRejected = $true }
+    Assert-True $unsafeNetworkRejected "watcher fails closed on a localhost-only production environment"
+
     $requiredFiles = @(
         "app.js", "state.js", "settings.js", "urls.js", "debug.js",
         "identity.js", "auth.js", "connect.js", "room-status.js",

@@ -112,6 +112,17 @@ $probeProvider = {
     return $Address -eq "192.168.50.20" -and $Port -eq 9443
 }
 
+$listener = Assert-ProductionControlListener `
+    -ExpectedControlProcessId $expectedPid `
+    -ListenerProvider $listenerProvider
+Assert-Equal $expectedPid $listener.ControlProcessId "the listener-only guard reports the expected PID"
+Assert-Equal "0.0.0.0" $listener.ListenerAddress "the listener-only guard requires the IPv4 wildcard"
+
+$lanProbe = Assert-ProductionControlLanProbe `
+    -DefaultRouteLanIPv4Provider $routeProvider `
+    -TcpProbeProvider $probeProvider
+Assert-Equal "192.168.50.20" $lanProbe.ProbeAddress "the ancillary LAN guard reports its probe address"
+
 $ingress = Assert-ProductionControlIngress `
     -ExpectedControlProcessId $expectedPid `
     -ListenerProvider $listenerProvider `
@@ -122,14 +133,21 @@ Assert-Equal "0.0.0.0" $ingress.ListenerAddress "the verified listener is report
 Assert-Equal 9443 $ingress.Port "the verified port is reported"
 Assert-Equal "192.168.50.20" $ingress.ProbeAddress "the probed LAN address is reported"
 
-$nonLoopbackIngress = Assert-ProductionControlIngress `
-    -ExpectedControlProcessId $expectedPid `
-    -ListenerProvider {
-        New-TestListener -Address "192.168.50.20" -Port 9443 -ProcessId 4242
-    } `
-    -DefaultRouteLanIPv4Provider $routeProvider `
-    -TcpProbeProvider { $true }
-Assert-Equal "192.168.50.20" $nonLoopbackIngress.ListenerAddress "a concrete non-loopback listener is accepted"
+Assert-ThrowsLike {
+    Assert-ProductionControlListener `
+        -ExpectedControlProcessId $expectedPid `
+        -ListenerProvider {
+            New-TestListener -Address "192.168.50.20" -Port 9443 -ProcessId 4242
+        }
+} "*does not own*port 9443*" "a concrete non-loopback listener is rejected because production requires the wildcard"
+
+Assert-ThrowsLike {
+    Assert-ProductionControlListener `
+        -ExpectedControlProcessId $expectedPid `
+        -ListenerProvider {
+            New-TestListener -Address "::" -Port 9443 -ProcessId 4242
+        }
+} "*does not own*port 9443*" "the IPv6 wildcard does not substitute for required IPv4 ingress"
 
 Assert-ThrowsLike {
     Assert-ProductionControlIngress `
