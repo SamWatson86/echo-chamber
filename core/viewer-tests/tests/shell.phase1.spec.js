@@ -1259,6 +1259,7 @@ test("360px mini People sheet contains its header, list, and participant cards",
   await page.setViewportSize({ width: 360, height: 640 });
   await openPhaseOneViewer(page, { participants: 4, cameras: 1, screenShares: 0 });
   await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "mini");
+  await expect(page.locator("#screen-grid")).toHaveAttribute("data-visible-tiles", "0");
 
   const geometry = await page.evaluate(() => {
     const rect = (element) => {
@@ -1270,6 +1271,8 @@ test("360px mini People sheet contains its header, list, and participant cards",
     const list = document.getElementById("user-list");
     const cards = Array.from(list.querySelectorAll(".user-card"));
     return {
+      utility: rect(document.getElementById("utility-host")),
+      workspace: rect(document.querySelector('.room-layout[data-ui-region="workspace"]')),
       sheet: rect(sheet),
       header: rect(header),
       list: rect(list),
@@ -1283,6 +1286,11 @@ test("360px mini People sheet contains its header, list, and participant cards",
 
   expect(geometry.sheetScrollWidth).toBeLessThanOrEqual(geometry.sheetClientWidth + 1);
   expect(geometry.listScrollWidth).toBeLessThanOrEqual(geometry.listClientWidth + 1);
+  for (const region of [geometry.utility, geometry.sheet]) {
+    for (const edge of ["top", "right", "bottom", "left"]) {
+      expect(Math.abs(region[edge] - geometry.workspace[edge])).toBeLessThanOrEqual(1);
+    }
+  }
   for (const region of [geometry.header, geometry.list, ...geometry.cards]) {
     expect(region.width).toBeGreaterThan(0);
     expect(region.left).toBeGreaterThanOrEqual(geometry.sheet.left - 1);
@@ -1290,6 +1298,159 @@ test("360px mini People sheet contains its header, list, and participant cards",
   }
   await expectNoDocumentOverflow(page);
 });
+
+for (const viewport of [
+  { width: 360, height: 640 },
+  { width: 390, height: 844 },
+  { width: 412, height: 915 },
+]) {
+  test(`${viewport.width}x${viewport.height} mini default People sheet exposes a dismissible live Stage`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openPhaseOneViewer(page, {
+      participants: 2,
+      cameras: 0,
+      screenShares: 1,
+      shareAspects: [16 / 9],
+    });
+    await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "mini");
+
+    const layout = page.locator('.room-layout[data-ui-region="workspace"]');
+    const stage = page.locator('.room-main[data-ui-region="primary-stage"]');
+    const utility = page.locator('.utility-host[data-ui-region="utility-host"]');
+    const grid = page.locator("#screen-grid");
+    const tile = grid.locator(":scope > .tile");
+    const video = tile.locator("video.screen-video-surface");
+    const fullscreen = tile.locator(".tile-fullscreen-btn");
+
+    await expect(layout).not.toHaveClass(/utility-collapsed/);
+    await expect(utility).toHaveAttribute("data-active-tool", "people");
+    await expect(grid).toHaveAttribute("data-visible-tiles", "1");
+    await expect(tile).toHaveAttribute("data-grid-visible", "");
+    await expect(video).toHaveCount(1);
+    await expect(fullscreen).toBeVisible();
+    await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(true);
+    await expect.poll(() => video.evaluate((element) => ({
+      hasCurrentData: element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
+      sourceTrackState: element.srcObject?.getVideoTracks()[0]?.readyState || null,
+    }))).toEqual({ hasCurrentData: true, sourceTrackState: "live" });
+
+    const geometry = await page.evaluate(() => {
+      function rect(element) {
+        const bounds = element.getBoundingClientRect();
+        return {
+          bottom: bounds.bottom,
+          height: bounds.height,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          width: bounds.width,
+        };
+      }
+
+      const workspace = document.querySelector('.room-layout[data-ui-region="workspace"]');
+      const primaryStage = document.querySelector('.room-main[data-ui-region="primary-stage"]');
+      const utilityHost = document.querySelector('.utility-host[data-ui-region="utility-host"]');
+      const scrim = document.getElementById("utility-scrim");
+      const screenTile = document.querySelector("#screen-grid > .tile[data-grid-visible]");
+      const screenVideo = screenTile.querySelector("video.screen-video-surface");
+      const fullscreenButton = screenTile.querySelector(".tile-fullscreen-btn");
+      const sourceTrack = screenVideo.srcObject.getVideoTracks()[0];
+      const workspaceRect = rect(workspace);
+      const stageRect = rect(primaryStage);
+      const utilityRect = rect(utilityHost);
+      const tileRect = rect(screenTile);
+      const videoRect = rect(screenVideo);
+      const exposedTop = Math.max(0, workspaceRect.top, stageRect.top, tileRect.top);
+      const exposedBottom = Math.min(innerHeight, workspaceRect.bottom, utilityRect.top, tileRect.bottom);
+      const exposedLeft = Math.max(0, workspaceRect.left, stageRect.left, tileRect.left);
+      const exposedRight = Math.min(innerWidth, workspaceRect.right, stageRect.right, tileRect.right);
+      const exposedTile = {
+        height: Math.max(0, exposedBottom - exposedTop),
+        width: Math.max(0, exposedRight - exposedLeft),
+      };
+      const hitPoint = {
+        x: exposedLeft + exposedTile.width / 2,
+        y: exposedTop + exposedTile.height / 2,
+      };
+      const hitTarget = document.elementFromPoint(hitPoint.x, hitPoint.y);
+
+      window.__miniStageUtilityNodes = { fullscreenButton, screenTile, screenVideo, sourceTrack };
+      return {
+        exposedTile,
+        hitPoint,
+        hitTargetIsScrim: hitTarget === scrim || scrim.contains(hitTarget),
+        tile: tileRect,
+        utilityHeightRatio: utilityRect.height / workspaceRect.height,
+        video: videoRect,
+        videoHeight: screenVideo.videoHeight,
+        videoWidth: screenVideo.videoWidth,
+      };
+    });
+
+    expect(geometry.utilityHeightRatio).toBeLessThanOrEqual(0.63);
+    expect(geometry.exposedTile.width).toBeGreaterThanOrEqual(44);
+    expect(geometry.exposedTile.height).toBeGreaterThanOrEqual(100);
+    expect(geometry.tile.width).toBeGreaterThan(1);
+    expect(geometry.tile.height).toBeGreaterThan(1);
+    expect(geometry.video.width).toBeGreaterThan(1);
+    expect(geometry.video.height).toBeGreaterThan(1);
+    expect(geometry.videoWidth).toBeGreaterThan(0);
+    expect(geometry.videoHeight).toBeGreaterThan(0);
+    expect(geometry.hitTargetIsScrim).toBe(true);
+
+    await page.mouse.click(geometry.hitPoint.x, geometry.hitPoint.y);
+    await expect(layout).toHaveClass(/utility-collapsed/);
+    await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => utility.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
+
+    const restored = await page.evaluate(() => {
+      const saved = window.__miniStageUtilityNodes;
+      const tileBounds = saved.screenTile.getBoundingClientRect();
+      const videoBounds = saved.screenVideo.getBoundingClientRect();
+      const fullscreenBounds = saved.fullscreenButton.getBoundingClientRect();
+      const tileHitTarget = document.elementFromPoint(
+        tileBounds.left + tileBounds.width / 2,
+        tileBounds.top + tileBounds.height / 2,
+      );
+      const fullscreenHitTarget = document.elementFromPoint(
+        fullscreenBounds.left + fullscreenBounds.width / 2,
+        fullscreenBounds.top + fullscreenBounds.height / 2,
+      );
+      return {
+        fullscreenHit: fullscreenHitTarget === saved.fullscreenButton
+          || saved.fullscreenButton.contains(fullscreenHitTarget),
+        hasCurrentData: saved.screenVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
+        sourceHeight: saved.screenVideo.videoHeight,
+        sourceTrack: saved.sourceTrack === saved.screenVideo.srcObject.getVideoTracks()[0],
+        sourceTrackState: saved.sourceTrack.readyState,
+        sourceWidth: saved.screenVideo.videoWidth,
+        stableFullscreen: saved.fullscreenButton === document.querySelector("#screen-grid > .tile .tile-fullscreen-btn"),
+        stableTile: saved.screenTile === document.querySelector("#screen-grid > .tile"),
+        stableVideo: saved.screenVideo === document.querySelector("#screen-grid > .tile video.screen-video-surface"),
+        tileHeight: tileBounds.height,
+        tileHit: saved.screenTile.contains(tileHitTarget),
+        tileWidth: tileBounds.width,
+        videoHeight: videoBounds.height,
+        videoWidth: videoBounds.width,
+      };
+    });
+    expect(restored.stableFullscreen).toBe(true);
+    expect(restored.stableTile).toBe(true);
+    expect(restored.stableVideo).toBe(true);
+    expect(restored.sourceTrack).toBe(true);
+    expect(restored.sourceTrackState).toBe("live");
+    expect(restored.hasCurrentData).toBe(true);
+    expect(restored.tileHit).toBe(true);
+    expect(restored.fullscreenHit).toBe(true);
+    expect(restored.tileWidth).toBeGreaterThanOrEqual(44);
+    expect(restored.tileHeight).toBeGreaterThanOrEqual(44);
+    expect(restored.videoWidth).toBeGreaterThan(1);
+    expect(restored.videoHeight).toBeGreaterThan(1);
+    expect(restored.sourceWidth).toBeGreaterThan(0);
+    expect(restored.sourceHeight).toBeGreaterThan(0);
+    await expectNoDocumentOverflow(page);
+  });
+}
 
 test("theater Chat retains the primary stage height", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
