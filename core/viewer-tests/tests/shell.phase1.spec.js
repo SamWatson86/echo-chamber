@@ -538,6 +538,13 @@ test("a retained hidden share enters solo presentation and restores the multi-sh
   await expect(firstTile).toHaveAttribute("data-grid-visible", "");
   await expect(secondTile).not.toHaveAttribute("data-grid-visible", "");
   await expect(grid.locator(":scope > .tile[data-grid-visible]")).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => {
+    const gridElement = document.getElementById("screen-grid");
+    const visibleTile = gridElement.querySelector(":scope > .tile[data-grid-visible]");
+    const gridRect = gridElement.getBoundingClientRect();
+    const visibleRect = visibleTile.getBoundingClientRect();
+    return (visibleRect.width * visibleRect.height) / (gridRect.width * gridRect.height);
+  }), { message: "the retained share should settle into solo Stage geometry" }).toBeGreaterThanOrEqual(0.95);
 
   const solo = await page.evaluate(() => {
     const gridElement = document.getElementById("screen-grid");

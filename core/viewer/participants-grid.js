@@ -35,6 +35,7 @@ function addScreenTile(label, element, trackSid) {
   }
   ensureVideoPlays(element._lkTrack, element);
   const tile = addTile(label, element);
+  tile.style.setProperty("--screen-source-aspect-ratio", (16 / 9).toFixed(6));
 
   // Poster overlay: hide uninitialized GPU garbage (green/black flash) until first real frame.
   // Uses a dark cover that fades out once the video has decoded data.
@@ -128,10 +129,16 @@ function addScreenTile(label, element, trackSid) {
       const vw = element.videoWidth, vh = element.videoHeight;
       if (vw && vh) {
         const ratio = vw / vh;
+        const publishedRatio = ratio.toFixed(6);
+        const aspectChanged = tile.style.getPropertyValue("--screen-source-aspect-ratio") !== publishedRatio;
         tile.classList.toggle("ultrawide", ratio > 2.0);
         tile.classList.toggle("superwide", ratio > 2.8);
         tile.classList.toggle("portrait", ratio < 1.0);
         tile.dataset.aspectRatio = ratio.toFixed(2);
+        tile.style.setProperty("--screen-source-aspect-ratio", publishedRatio);
+        if (aspectChanged && typeof window._echoRecalcGrid === "function") {
+          window._echoRecalcGrid();
+        }
       }
     };
     element.addEventListener("loadedmetadata", tagAspect);

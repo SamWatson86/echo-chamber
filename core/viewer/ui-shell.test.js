@@ -6,6 +6,7 @@ const {
   parseFlagValue,
   resolveShellVariant,
 } = require("./ui-shell.js");
+const layoutPolicy = require("./layout-policy.js");
 
 function createHarness(policyOverride) {
   const attributes = new Set();
@@ -176,4 +177,30 @@ test("runtime variant changes can persist without rebuilding the controller", ()
   controller.applyVariant("legacy", { persist: true });
   assert.equal(harness.storage.get("echo-ui-shell-v2"), "0");
   assert.equal(harness.listeners.get("resize").length, 1);
+});
+
+test("fullscreen state restoration resumes hysteresis from the prior layout mode", () => {
+  const harness = createHarness(layoutPolicy);
+  const controller = createShellController(harness);
+
+  harness.rootElement.clientWidth = 800;
+  harness.rootElement.clientHeight = 600;
+  controller.start("v2");
+  assert.equal(harness.rootElement.dataset.uiMode, "compact");
+
+  harness.rootElement.clientWidth = 900;
+  controller.measureNow();
+  assert.equal(harness.rootElement.dataset.uiMode, "compact");
+  const beforeFullscreen = controller.captureResponsiveState();
+  assert.deepEqual(beforeFullscreen, { mode: "compact", width: 900, height: 600 });
+
+  harness.rootElement.clientWidth = 1920;
+  harness.rootElement.clientHeight = 1080;
+  controller.measureNow();
+  assert.equal(harness.rootElement.dataset.uiMode, "theater");
+
+  harness.rootElement.clientWidth = 900;
+  harness.rootElement.clientHeight = 600;
+  controller.restoreResponsiveState(beforeFullscreen);
+  assert.equal(harness.rootElement.dataset.uiMode, "compact");
 });

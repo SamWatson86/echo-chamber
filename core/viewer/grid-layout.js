@@ -75,6 +75,26 @@
     return Math.max(0, Number(value) || 0).toFixed(3).replace(/\.?0+$/, "") + "px";
   }
 
+  function tileAspectRatio(tile, fallback) {
+    var video = tile && tile.querySelector("video.screen-video-surface");
+    var videoWidth = Number(video && video.videoWidth);
+    var videoHeight = Number(video && video.videoHeight);
+    if (Number.isFinite(videoWidth) && videoWidth > 0 &&
+        Number.isFinite(videoHeight) && videoHeight > 0) {
+      return videoWidth / videoHeight;
+    }
+
+    var published = Number.parseFloat(
+      tile && tile.style.getPropertyValue("--screen-source-aspect-ratio")
+    );
+    if (Number.isFinite(published) && published > 0) return published;
+
+    var tagged = Number.parseFloat(tile && tile.dataset.aspectRatio);
+    if (Number.isFinite(tagged) && tagged > 0) return tagged;
+    var fallbackAspect = Number(fallback);
+    return Number.isFinite(fallbackAspect) && fallbackAspect > 0 ? fallbackAspect : (16 / 9);
+  }
+
   function updateGridLayout() {
     var grid = document.getElementById("screen-grid");
     if (!grid) return;
@@ -112,6 +132,9 @@
       tileCount: tiles.length,
       gap: numericGap(grid, policy),
       aspectRatio: policy.DEFAULT_TILE_ASPECT_RATIO,
+      aspectRatios: tiles.map(function (tile) {
+        return tileAspectRatio(tile, policy.DEFAULT_TILE_ASPECT_RATIO);
+      }),
     });
     if (!layout || !layout.valid || layout.columns < 1 || layout.rows < 1 ||
         layout.tileWidth <= 0 || layout.tileHeight <= 0) {
@@ -119,19 +142,27 @@
       return;
     }
 
+    var sourceAware = Array.isArray(layout.tileLayouts) &&
+      layout.tileLayouts.length === tiles.length &&
+      Array.isArray(layout.columnWidths) &&
+      Array.isArray(layout.rowHeights);
     setStyleValue(
       grid,
       "gridTemplateColumns",
-      "repeat(" + layout.columns + ", " + pixelTrack(layout.tileWidth) + ")"
+      sourceAware
+        ? layout.columnWidths.map(pixelTrack).join(" ")
+        : "repeat(" + layout.columns + ", " + pixelTrack(layout.tileWidth) + ")"
     );
     setStyleValue(
       grid,
       "gridTemplateRows",
-      "repeat(" + layout.rows + ", " + pixelTrack(layout.tileHeight) + ")"
+      sourceAware
+        ? layout.rowHeights.map(pixelTrack).join(" ")
+        : "repeat(" + layout.rows + ", " + pixelTrack(layout.tileHeight) + ")"
     );
 
-    // The selected tracks are the canonical tile bounds. Filling those tracks
-    // prevents decoded WebRTC resolution changes from resizing the UI.
+    // The selected tracks are the canonical tile cells. Uniform sources fill
+    // those cells exactly; mixed sources use the policy's contained geometry.
     var visibleSet = new Set(tiles);
     _managedTiles.forEach(function (tile) {
       if (!visibleSet.has(tile)) {
@@ -140,9 +171,10 @@
         _managedTiles.delete(tile);
       }
     });
-    tiles.forEach(function (tile) {
-      setStyleValue(tile, "width", "100%");
-      setStyleValue(tile, "height", "100%");
+    tiles.forEach(function (tile, index) {
+      var tileLayout = sourceAware ? layout.tileLayouts[index] : null;
+      setStyleValue(tile, "width", tileLayout ? pixelTrack(tileLayout.width) : "100%");
+      setStyleValue(tile, "height", tileLayout ? pixelTrack(tileLayout.height) : "100%");
       _managedTiles.add(tile);
     });
   }
@@ -189,7 +221,7 @@
       });
       _mutationObserver.observe(grid, {
         attributes: true,
-        attributeFilter: ["class", "hidden", "style"],
+        attributeFilter: ["class", "data-aspect-ratio", "hidden", "style"],
         childList: true,
         subtree: true,
       });

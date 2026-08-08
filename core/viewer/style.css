@@ -977,6 +977,7 @@ video {
   transform: translateZ(0);
   backface-visibility: hidden;
   mix-blend-mode: normal;
+  border-radius: 0;
 }
 
 .screens-grid {
@@ -993,7 +994,7 @@ video {
   max-height: 100%;
   max-width: 100%;
   overflow: visible;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--screen-source-aspect-ratio, 16 / 9);
   justify-self: center;
   align-self: center;
   position: relative;
@@ -1039,6 +1040,12 @@ video {
   grid-column: 1 / -1;
   max-height: none;
   min-height: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  justify-self: stretch;
+  align-self: stretch;
   opacity: 1;
 }
 
@@ -2577,21 +2584,81 @@ video {
 }
 
 /* ─── Fullscreen Video ─── */
-.fullscreen-video-wrapper {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.fullscreen-video-wrapper:fullscreen {
+  box-sizing: border-box !important;
+  position: relative !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: grid !important;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr) !important;
+  gap: 0 !important;
+  place-items: stretch !important;
+  overflow: hidden !important;
+  aspect-ratio: auto !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: #000 !important;
+  box-shadow: none !important;
   cursor: pointer;
 }
-.fullscreen-video-wrapper video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain !important;
+
+.fullscreen-video-wrapper:fullscreen::after {
+  display: none !important;
 }
+
+.fullscreen-video-wrapper:fullscreen > video {
+  grid-area: 1 / 1 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  align-self: stretch !important;
+  justify-self: stretch !important;
+  object-fit: contain !important;
+  border-radius: 0 !important;
+  background: #000 !important;
+  z-index: 1;
+}
+
+.fullscreen-video-wrapper:fullscreen > h3 {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 12;
+  width: max-content;
+  max-width: calc(100% - 92px);
+  pointer-events: none;
+}
+
+.fullscreen-video-wrapper:fullscreen .tile-fullscreen-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 14;
+  width: 44px;
+  height: 44px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.fullscreen-video-wrapper:fullscreen .tile-fullscreen-btn:focus-visible {
+  outline: 3px solid #f8d58a;
+  outline-offset: 3px;
+}
+
+.fullscreen-video-wrapper:fullscreen .tile-volume-wrap,
+.fullscreen-video-wrapper:fullscreen .tile-overlay {
+  z-index: 12;
+}
+
 .fullscreen-hint {
   position: absolute;
   bottom: 40px;
@@ -2609,6 +2676,28 @@ video {
 }
 .fullscreen-hint.fade-out {
   opacity: 0;
+}
+
+.fullscreen-isolated-preview {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  z-index: 13;
+  max-width: calc(100% - 220px);
+  padding: 6px 10px;
+  overflow: hidden;
+  color: #fff3c7;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+  border: 1px solid rgba(248, 213, 138, 0.65);
+  border-radius: 999px;
+  background: rgba(75, 45, 8, 0.9);
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
 /* ── Bug Report ── */

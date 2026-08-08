@@ -198,6 +198,7 @@ test("test server keeps admin assets isolated while preserving the viewer root",
 });
 
 test("a blocked diagnostics script cannot serialize the owner secret into a request or URL", async ({
+  baseURL,
   page,
 }) => {
   const observedRequests = [];
@@ -215,7 +216,7 @@ test("a blocked diagnostics script cannot serialize the owner secret into a requ
 
   const finalUrl = new URL(page.url());
   expect(`${finalUrl.origin}${finalUrl.pathname}`).toBe(
-    "http://127.0.0.1:4175/admin/diagnostics/",
+    new URL("/admin/diagnostics/", baseURL).href,
   );
   expect([...finalUrl.searchParams]).toHaveLength(0);
   expect(finalUrl.hash).toBe("");
@@ -224,6 +225,7 @@ test("a blocked diagnostics script cannot serialize the owner secret into a requ
 });
 
 test("credentials stay memory-only, exact, omitted from cookies, and clear on lifecycle boundaries", async ({
+  baseURL,
   page,
 }) => {
   const loginBodies = [];
@@ -232,7 +234,7 @@ test("credentials stay memory-only, exact, omitted from cookies, and clear on li
   await page.context().addCookies([{
     name: "unrelated-cookie",
     value: "must-not-be-sent",
-    url: "http://127.0.0.1:4175",
+    url: new URL("/", baseURL).href,
   }]);
   await installApiMock(page, {
     login: async (route) => {

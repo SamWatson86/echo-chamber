@@ -553,7 +553,7 @@
 :root[data-ui-shell="v2"] .screens-grid .tile {
   padding: 0;
   gap: 0;
-  overflow: hidden;
+  overflow: visible;
   border-color: var(--club-border);
   border-radius: var(--club-radius-card);
   background: #05070a;
