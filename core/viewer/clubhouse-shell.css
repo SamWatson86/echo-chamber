@@ -1849,6 +1849,13 @@
   height: 100%;
 }
 
+:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-layout:has(
+  #screen-grid[data-visible-tiles]:not([data-visible-tiles="0"]) > .tile[data-grid-visible]
+) > .utility-host[data-active-tool="people"] {
+  top: auto;
+  height: min(300px, 62%);
+}
+
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-card {
   min-width: 0;
   padding: 11px;
