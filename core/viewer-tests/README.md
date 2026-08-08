@@ -35,6 +35,23 @@ npm test
 ```
 
 From the repository root, use `npm run verify:viewer:layout` after setup.
+Set `PORT` to an available loopback port when a fixed test port is unsuitable;
+the Playwright base URL and test server use the same value. Set
+`ECHO_VIEWER_TEST_OUTPUT_DIR` to keep reports and failure artifacts outside the
+worktree.
+
+For a clearly labeled, disconnected Stage/layout preview on Windows:
+
+```powershell
+$env:PORT = "0"
+$env:ECHO_LAYOUT_PREVIEW = "1"
+node .\scripts\serve-viewer.mjs
+```
+
+Open the loopback URL printed by the server. Query options can select
+`aspect=16-9|16-10|21-9|32-9|4-3|portrait`, `shares=1..6`,
+`participants=0..12`, and `cameras=0..participants`. The fixture uses
+deterministic canvas media and does not connect to LiveKit or production.
 
 For a clearly labeled, disconnected Jam workspace preview on Windows:
 

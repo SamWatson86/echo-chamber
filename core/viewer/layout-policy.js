@@ -36,6 +36,7 @@
     balance: 0.2,
     occupancy: 0.08,
   });
+  const ASPECT_RATIO_EPSILON = 1e-9;
 
   function finiteNonNegative(value, fallback) {
     const number = Number(value);
@@ -202,12 +203,41 @@
 
   function normalizeGridOptions(options) {
     const input = options || {};
+    const tileCount = Math.max(0, Math.floor(finiteNonNegative(input.tileCount, 0)));
+    const fallbackAspectRatio = finitePositive(input.aspectRatio, DEFAULT_TILE_ASPECT_RATIO);
+    let aspectRatios = null;
+
+    if (tileCount > 0 && Array.isArray(input.aspectRatios) && input.aspectRatios.length > 0) {
+      const normalized = Array.from({ length: tileCount }, function (_, index) {
+        return finitePositive(input.aspectRatios[index], fallbackAspectRatio);
+      });
+      const first = normalized[0];
+      const isUniform = normalized.every(function (aspectRatio) {
+        return Math.abs(aspectRatio - first) <= ASPECT_RATIO_EPSILON;
+      });
+
+      if (isUniform) {
+        // A uniform per-tile list is equivalent to the original single-aspect
+        // API. Collapse it so existing callers retain identical output.
+        return {
+          width: finiteNonNegative(input.width, 0),
+          height: finiteNonNegative(input.height, 0),
+          tileCount,
+          gap: finiteNonNegative(input.gap, DEFAULT_GRID_GAP),
+          aspectRatio: first,
+          aspectRatios: null,
+        };
+      }
+      aspectRatios = normalized;
+    }
+
     return {
       width: finiteNonNegative(input.width, 0),
       height: finiteNonNegative(input.height, 0),
-      tileCount: Math.max(0, Math.floor(finiteNonNegative(input.tileCount, 0))),
+      tileCount,
       gap: finiteNonNegative(input.gap, DEFAULT_GRID_GAP),
-      aspectRatio: finitePositive(input.aspectRatio, DEFAULT_TILE_ASPECT_RATIO),
+      aspectRatio: fallbackAspectRatio,
+      aspectRatios,
     };
   }
 
@@ -242,13 +272,69 @@
 
     const cellWidth = availableWidth / columns;
     const cellHeight = availableHeight / rows;
-    const fitted = fitAspectRatio(cellWidth, cellHeight, input.aspectRatio);
     const balance = Math.min(columns, rows) / Math.max(columns, rows);
     const occupancy = input.tileCount / (columns * rows);
     const quality =
       GRID_SCORE_WEIGHTS.area +
       GRID_SCORE_WEIGHTS.balance * balance +
       GRID_SCORE_WEIGHTS.occupancy * occupancy;
+
+    if (input.aspectRatios) {
+      const columnWidths = Array.from({ length: columns }, function () { return 0; });
+      const rowHeights = Array.from({ length: rows }, function () { return 0; });
+      let totalTileArea = 0;
+      const tileLayouts = input.aspectRatios.map(function (aspectRatio, index) {
+        const fitted = fitAspectRatio(cellWidth, cellHeight, aspectRatio);
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        columnWidths[column] = Math.max(columnWidths[column], fitted.width);
+        rowHeights[row] = Math.max(rowHeights[row], fitted.height);
+        totalTileArea += fitted.area;
+        return {
+          index,
+          column,
+          row,
+          aspectRatio,
+          width: fitted.width,
+          height: fitted.height,
+          area: fitted.area,
+        };
+      });
+      const tileArea = totalTileArea / input.tileCount;
+      const totalWidth = columnWidths.reduce(function (sum, width) { return sum + width; }, 0) +
+        input.gap * (columns - 1);
+      const totalHeight = rowHeights.reduce(function (sum, height) { return sum + height; }, 0) +
+        input.gap * (rows - 1);
+
+      return {
+        valid: true,
+        reason: null,
+        columns,
+        rows,
+        tileCount: input.tileCount,
+        gap: input.gap,
+        aspectRatio: input.aspectRatio,
+        aspectRatios: input.aspectRatios.slice(),
+        cellWidth,
+        cellHeight,
+        tileWidth: cellWidth,
+        tileHeight: cellHeight,
+        tileArea,
+        totalTileArea,
+        tileLayouts,
+        columnWidths,
+        rowHeights,
+        balance,
+        occupancy,
+        score: tileArea * quality,
+        totalWidth,
+        totalHeight,
+        unusedWidth: Math.max(0, input.width - totalWidth),
+        unusedHeight: Math.max(0, input.height - totalHeight),
+      };
+    }
+
+    const fitted = fitAspectRatio(cellWidth, cellHeight, input.aspectRatio);
     const score = fitted.area * quality;
     const totalWidth = fitted.width * columns + input.gap * (columns - 1);
     const totalHeight = fitted.height * rows + input.gap * (rows - 1);
@@ -280,14 +366,16 @@
     const input = normalizeGridOptions(options);
     const candidates = [];
     for (let columns = 1; columns <= input.tileCount; columns += 1) {
-      candidates.push(scoreGridCandidate({
+      const candidateOptions = {
         width: input.width,
         height: input.height,
         tileCount: input.tileCount,
         gap: input.gap,
         aspectRatio: input.aspectRatio,
         columns,
-      }));
+      };
+      if (input.aspectRatios) candidateOptions.aspectRatios = input.aspectRatios;
+      candidates.push(scoreGridCandidate(candidateOptions));
     }
     return candidates;
   }

@@ -17,11 +17,11 @@ test("screen video elements receive the protected surface class", () => {
   assert.match(gridJs, /element\.classList\.add\("screen-video-surface"\)/);
 });
 
-test("protected video surface rules avoid direct filters and clipping", () => {
+test("protected video surface rules avoid filters and rounded clipping", () => {
   const match = css.match(/\.screens-grid \.tile video\.screen-video-surface\s*\{([^}]*)\}/);
   assert.ok(match, "missing .screens-grid .tile video.screen-video-surface rule");
   assert.equal(/filter\s*:/.test(match[1]), false);
   assert.equal(/backdrop-filter\s*:/.test(match[1]), false);
-  assert.equal(/border-radius\s*:/.test(match[1]), false);
+  assert.match(match[1], /border-radius\s*:\s*0\s*;/);
   assert.equal(/box-shadow\s*:/.test(match[1]), false);
 });

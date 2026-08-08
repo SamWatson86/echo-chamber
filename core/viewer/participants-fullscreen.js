@@ -3,51 +3,143 @@
    video quality, screen/camera recovery
    ========================================================= */
 
-// Fullscreen video helper — click video to exit, overlay hint shown on enter
+var activeVideoFullscreenSession = null;
+
+function resolveVideoFullscreenHost(videoEl) {
+  if (!videoEl || !videoEl.isConnected) return null;
+  if (typeof videoEl.closest === "function") {
+    var stableHost = videoEl.closest(".tile, .user-avatar");
+    if (stableHost) return stableHost;
+  }
+  return videoEl.parentElement || null;
+}
+
+function captureFullscreenResponsiveState() {
+  var shell = typeof window !== "undefined" ? window.EchoUiShell : null;
+  return shell && typeof shell.captureResponsiveState === "function"
+    ? shell.captureResponsiveState()
+    : null;
+}
+
+function restoreFullscreenResponsiveState(snapshot) {
+  if (!snapshot || typeof window === "undefined") return;
+  var shell = window.EchoUiShell;
+  if (!shell || typeof shell.restoreResponsiveState !== "function") return;
+  var requestFrame = typeof window.requestAnimationFrame === "function"
+    ? window.requestAnimationFrame.bind(window)
+    : function(callback) { return window.setTimeout(callback, 0); };
+  requestFrame(function() {
+    requestFrame(function() {
+      shell.restoreResponsiveState(snapshot);
+    });
+  });
+}
+
+// Fullscreen the existing stable media host. Keeping the live video inside its
+// Stage tile lets subscription reconciliation, diagnostics, and the watchdog
+// continue to find the same node throughout the transition.
 function enterVideoFullscreen(videoEl) {
   if (document.fullscreenElement) {
-    document.exitFullscreen();
-    return;
+    return document.exitFullscreen();
   }
-  // Wrap in a container so we can overlay a hint
-  var wrapper = document.createElement("div");
-  wrapper.className = "fullscreen-video-wrapper";
+  if (activeVideoFullscreenSession) return activeVideoFullscreenSession.promise;
+
+  var host = resolveVideoFullscreenHost(videoEl);
+  if (!host || typeof host.requestFullscreen !== "function") {
+    return Promise.resolve(false);
+  }
+
   var hint = document.createElement("div");
   hint.className = "fullscreen-hint";
-  hint.textContent = "Click or press ESC to exit";
-  wrapper.appendChild(hint);
+  hint.textContent = "Click the video, use Exit fullscreen, or press ESC to exit";
+  host.appendChild(hint);
 
-  // Move video into wrapper temporarily
-  var parent = videoEl.parentNode;
-  var next = videoEl.nextSibling;
-  wrapper.appendChild(videoEl);
-  document.body.appendChild(wrapper);
+  var isolatedMarker = null;
+  if (document.documentElement.dataset.echoIsolatedPreview === "true") {
+    isolatedMarker = document.createElement("div");
+    isolatedMarker.className = "fullscreen-isolated-preview";
+    isolatedMarker.textContent = "Isolated preview · Not Live Echo";
+    host.appendChild(isolatedMarker);
+  }
 
-  // Fade out hint after 2s
-  setTimeout(function() { hint.classList.add("fade-out"); }, 2000);
+  var fullscreenControl = host.querySelector(".tile-fullscreen-btn");
+  var priorControlLabel = fullscreenControl && fullscreenControl.getAttribute("aria-label");
+  var priorControlTitle = fullscreenControl && fullscreenControl.title;
+  var responsiveSnapshot = captureFullscreenResponsiveState();
+  var entered = false;
+  var cleaned = false;
 
-  wrapper.requestFullscreen().then(function() {
-    // Click anywhere on wrapper exits fullscreen
-    wrapper.addEventListener("click", function() {
-      if (document.fullscreenElement) document.exitFullscreen();
-    });
-  }).catch(function() {
-    // Fullscreen denied — restore video
-    parent.insertBefore(videoEl, next);
-    wrapper.remove();
-  });
+  function setControlPresentation(isFullscreen) {
+    if (!fullscreenControl) return;
+    fullscreenControl.setAttribute(
+      "aria-label",
+      isFullscreen ? "Exit shared screen fullscreen" : (priorControlLabel || "Open shared screen fullscreen")
+    );
+    fullscreenControl.title = isFullscreen ? "Exit fullscreen" : (priorControlTitle || "Fullscreen");
+  }
 
-  // When exiting fullscreen, restore video to original location
-  var onFsChange = function() {
-    if (!document.fullscreenElement) {
-      document.removeEventListener("fullscreenchange", onFsChange);
-      if (wrapper.contains(videoEl)) {
-        parent.insertBefore(videoEl, next);
-      }
-      wrapper.remove();
+  function onHostClick(event) {
+    if (document.fullscreenElement !== host) return;
+    var interactive = event.target && typeof event.target.closest === "function"
+      ? event.target.closest("button, input, select, textarea, a[href]")
+      : null;
+    if (interactive) return;
+    event.preventDefault();
+    event.stopPropagation();
+    document.exitFullscreen();
+  }
+
+  function cleanup(restoreResponsiveState) {
+    if (cleaned) return;
+    cleaned = true;
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
+    host.removeEventListener("click", onHostClick, true);
+    host.classList.remove("fullscreen-video-wrapper");
+    hint.remove();
+    if (isolatedMarker) isolatedMarker.remove();
+    setControlPresentation(false);
+    activeVideoFullscreenSession = null;
+    if (restoreResponsiveState) restoreFullscreenResponsiveState(responsiveSnapshot);
+    if (fullscreenControl && fullscreenControl.isConnected) {
+      try { fullscreenControl.focus({ preventScroll: true }); } catch (_focusError) {}
     }
-  };
-  document.addEventListener("fullscreenchange", onFsChange);
+  }
+
+  function onFullscreenChange() {
+    if (document.fullscreenElement === host) {
+      entered = true;
+      setControlPresentation(true);
+      return;
+    }
+    if (entered && !document.fullscreenElement) cleanup(true);
+  }
+
+  host.classList.add("fullscreen-video-wrapper");
+  host.addEventListener("click", onHostClick, true);
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+  setTimeout(function() {
+    if (hint.isConnected) hint.classList.add("fade-out");
+  }, 2400);
+
+  var request = Promise.resolve().then(function() {
+    return host.requestFullscreen();
+  }).then(function() {
+    // Some embedded browser hosts can resolve the request while immediately
+    // declining the top-layer transition. Do not leave fullscreen-only classes
+    // and controls behind when no fullscreen element was established.
+    if (document.fullscreenElement !== host) {
+      cleanup(false);
+      return false;
+    }
+    entered = true;
+    setControlPresentation(true);
+    return true;
+  }).catch(function() {
+    cleanup(false);
+    return false;
+  });
+  activeVideoFullscreenSession = { host: host, promise: request };
+  return request;
 }
 
 // Image lightbox — click chat image to view full-size, click or ESC to close

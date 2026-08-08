@@ -178,8 +178,11 @@ The screen-grid allocator calculates media tile geometry inside the stage. It
 receives the stage's available rectangle; it must not duplicate shell
 breakpoints or control utility-panel behavior. A single visible share owns the
 full grid independently of the currently decoded media resolution. Two or more
-shares use the canonical grid policy, and every video preserves its source with
-`object-fit: contain`.
+shares use the canonical grid policy. That policy may use each decoded source's
+aspect ratio to choose tracks, but its input rectangle is always the Stage's CSS
+viewport geometry rather than physical display pixels. Every video preserves
+its complete source frame with `object-fit: contain`; letterboxing and
+pillarboxing are preferred to cropping or stretching.
 
 The Camera Lobby uses the same canonical grid policy against the lobby's own
 available rectangle. Resizing may change only grid tracks and tile geometry; it
@@ -403,13 +406,25 @@ The same media element must remain connected to the same track across a resize.
 CSS may change its containing geometry and `object-fit`. The media-grid owner may
 recalculate tile tracks after its container changes size.
 
+Browser fullscreen must target the existing stable media tile (or another
+existing stable media host). It must not reparent, clone, or replace the live
+video. The fullscreen host keeps an explicit, keyboard-reachable exit control,
+preserves source aspect ratio, and restores focus, focused-share state, and the
+pre-fullscreen responsive hysteresis history after exit. Resize and display
+changes while fullscreen may update the temporary presentation, but must not
+leave stale tracks or geometry after exit. The Windows desktop shell inherits
+this HTML fullscreen path through its WebView runtime; responsive code must not
+also invoke an independent native fullscreen toggle.
+
 If an intentional user action hides or stops watching media, that feature's
 existing state machine remains the owner. Responsive code must not impersonate
 that action.
 
 Acceptance tests for the shell must retain references to representative media
-nodes, cross every hysteresis boundary in both directions, and assert object
-identity, track identity, publication state, volume, and selected UI state.
+nodes, cross every hysteresis boundary in both directions, exercise repeated
+fullscreen enter/exit cycles, and assert object identity, track identity,
+publication state, volume, focused-share state, responsive mode restoration,
+and selected UI state.
 
 ## Accessibility and Input Contract
 

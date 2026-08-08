@@ -250,6 +250,37 @@ test("aspect fitting honors landscape and portrait constraints exactly", () => {
   approximatelyEqual(portrait.width, 300 * (9 / 16));
 });
 
+test("source aspect fitting stays contained across 1080p, 4K, and ultrawide boxes", () => {
+  const sourceAspects = [
+    ["16:9", 16 / 9],
+    ["16:10", 16 / 10],
+    ["21:9", 21 / 9],
+    ["32:9", 32 / 9],
+    ["4:3", 4 / 3],
+    ["portrait", 9 / 16],
+  ];
+  const containers = [
+    ["1080p", 1920, 1080],
+    ["4K", 3840, 2160],
+    ["ultrawide", 3440, 1440],
+    ["super-ultrawide", 5120, 1440],
+  ];
+
+  for (const [containerName, width, height] of containers) {
+    for (const [aspectName, aspectRatio] of sourceAspects) {
+      const fitted = fitAspectRatio(width, height, aspectRatio);
+      const label = `${containerName} ${width}x${height}, source ${aspectName}`;
+      assert.ok(fitted.width <= width + EPSILON, `${label} width`);
+      assert.ok(fitted.height <= height + EPSILON, `${label} height`);
+      approximatelyEqual(fitted.width / fitted.height, aspectRatio, 1e-9);
+      assert.ok(
+        Math.abs(fitted.width - width) <= EPSILON || Math.abs(fitted.height - height) <= EPSILON,
+        `${label} must consume one constraining axis`
+      );
+    }
+  }
+});
+
 test("aspect fitting returns safe zero geometry for unavailable space", () => {
   assert.deepEqual(fitAspectRatio(0, 100, 16 / 9), {
     width: 0,
@@ -313,6 +344,92 @@ test("optimal grids choose expected arrangements for representative shapes", () 
   assert.deepEqual({ columns: portraitThree.columns, rows: portraitThree.rows }, { columns: 1, rows: 3 });
 });
 
+test("uniform per-tile aspect ratios preserve the original grid contract exactly", () => {
+  const containers = [
+    { width: 1920, height: 1080 },
+    { width: 3840, height: 2160 },
+    { width: 3440, height: 1440 },
+    { width: 5120, height: 1440 },
+  ];
+  const aspects = [16 / 9, 16 / 10, 21 / 9, 32 / 9, 4 / 3, 9 / 16];
+
+  for (const container of containers) {
+    for (const aspectRatio of aspects) {
+      const options = { ...container, tileCount: 6, gap: 12, aspectRatio };
+      assert.deepEqual(
+        chooseOptimalGrid({ ...options, aspectRatios: Array(6).fill(aspectRatio) }),
+        chooseOptimalGrid(options),
+        `${container.width}x${container.height}, aspect=${aspectRatio}`
+      );
+    }
+  }
+});
+
+test("mixed source aspects select and expose source-aware tile geometry", () => {
+  const aspectRatios = [32 / 9, 9 / 16];
+  const options = {
+    width: 1920,
+    height: 1080,
+    tileCount: aspectRatios.length,
+    gap: 12,
+    aspectRatios,
+  };
+  const layout = chooseOptimalGrid(options);
+  const uniformFallback = chooseOptimalGrid({
+    width: options.width,
+    height: options.height,
+    tileCount: options.tileCount,
+    gap: options.gap,
+  });
+
+  assert.deepEqual({ columns: uniformFallback.columns, rows: uniformFallback.rows }, { columns: 2, rows: 1 });
+  assert.deepEqual({ columns: layout.columns, rows: layout.rows }, { columns: 1, rows: 2 });
+  assert.deepEqual(layout.aspectRatios, aspectRatios);
+  assert.equal(layout.tileLayouts.length, aspectRatios.length);
+  assert.equal(layout.columnWidths.length, layout.columns);
+  assert.equal(layout.rowHeights.length, layout.rows);
+  assert.ok(layout.totalWidth <= options.width + EPSILON);
+  assert.ok(layout.totalHeight <= options.height + EPSILON);
+
+  layout.tileLayouts.forEach((tile, index) => {
+    approximatelyEqual(tile.width / tile.height, aspectRatios[index], 1e-9);
+    assert.ok(tile.width <= layout.cellWidth + EPSILON);
+    assert.ok(tile.height <= layout.cellHeight + EPSILON);
+    assert.ok(tile.width <= layout.columnWidths[tile.column] + EPSILON);
+    assert.ok(tile.height <= layout.rowHeights[tile.row] + EPSILON);
+  });
+
+  const candidates = listGridCandidates(options);
+  assert.equal(layout.score, Math.max(...candidates.map((candidate) => candidate.score)));
+});
+
+test("mixed source grid selection is deterministic across representative display boxes", () => {
+  const aspectRatios = [16 / 9, 16 / 10, 21 / 9, 32 / 9, 4 / 3, 9 / 16];
+  const containers = [
+    { width: 1920, height: 1080 },
+    { width: 3840, height: 2160 },
+    { width: 3440, height: 1440 },
+    { width: 5120, height: 1440 },
+  ];
+
+  for (const container of containers) {
+    const input = {
+      ...container,
+      tileCount: aspectRatios.length,
+      gap: 12,
+      aspectRatios,
+    };
+    const first = chooseOptimalGrid(input);
+    assert.equal(first.valid, true);
+    assert.equal(first.tileLayouts.length, aspectRatios.length);
+    assert.ok(first.totalWidth <= container.width + EPSILON);
+    assert.ok(first.totalHeight <= container.height + EPSILON);
+    for (let index = 0; index < 25; index += 1) {
+      assert.deepEqual(chooseOptimalGrid(input), first);
+    }
+  }
+});
+
 test("empty optimal grid has a stable zero-sized result", () => {
   assert.deepEqual(chooseOptimalGrid({ width: 1000, height: 600, tileCount: 0 }), {
     valid: true,
@@ -330,9 +447,9 @@ test("empty optimal grid has a stable zero-sized result", () => {
 });
 
 test("grid geometry never exceeds its container across an exhaustive matrix", () => {
-  const widths = [240, 320, 480, 640, 900, 1280, 1920, 2560];
-  const heights = [180, 240, 360, 480, 600, 720, 1080, 1440];
-  const aspects = [4 / 3, 16 / 9, 21 / 9, 9 / 16];
+  const widths = [240, 320, 480, 640, 900, 1280, 1920, 2560, 3440, 3840, 5120];
+  const heights = [180, 240, 360, 480, 600, 720, 1080, 1440, 2160];
+  const aspects = [4 / 3, 16 / 10, 16 / 9, 21 / 9, 32 / 9, 9 / 16];
   const gaps = [0, 6, 12, 24];
 
   for (const width of widths) {

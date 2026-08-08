@@ -121,6 +121,31 @@
       };
     }
 
+    function isResponsiveMode(mode) {
+      if (policy && typeof policy.isMode === "function") return policy.isMode(mode);
+      return ["mini", "compact", "lounge", "theater"].includes(mode);
+    }
+
+    function captureResponsiveState() {
+      const viewport = readViewport();
+      const mode = isResponsiveMode(previousMode)
+        ? previousMode
+        : isResponsiveMode(rootElement.dataset.uiMode)
+          ? rootElement.dataset.uiMode
+          : null;
+      return Object.freeze({
+        mode,
+        width: viewport.width,
+        height: viewport.height,
+      });
+    }
+
+    function restoreResponsiveState(snapshot) {
+      if (rootElement.dataset.uiShell !== V2_VARIANT) return null;
+      previousMode = snapshot && isResponsiveMode(snapshot.mode) ? snapshot.mode : null;
+      return measureNow();
+    }
+
     function notifyPresentationChange(resolved) {
       const detail = {
         variant: rootElement.dataset.uiShell || LEGACY_VARIANT,
@@ -208,7 +233,9 @@
 
     return Object.freeze({
       applyVariant,
+      captureResponsiveState,
       measureNow,
+      restoreResponsiveState,
       scheduleMeasure,
       start,
       stop,
@@ -239,16 +266,26 @@
     return installedController ? installedController.applyVariant(value, options) : null;
   }
 
+  function captureResponsiveState() {
+    return installedController ? installedController.captureResponsiveState() : null;
+  }
+
+  function restoreResponsiveState(snapshot) {
+    return installedController ? installedController.restoreResponsiveState(snapshot) : null;
+  }
+
   return {
     FLAG_NAME,
     LEGACY_VARIANT,
     V2_VARIANT,
     applyVariant,
+    captureResponsiveState,
     createShellController,
     install,
     normalizeVariant,
     parseFlagValue,
     readQueryOverride,
+    restoreResponsiveState,
     resolveShellVariant,
   };
 });

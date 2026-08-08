@@ -8,10 +8,11 @@ const viewerRoot = path.resolve(scriptDirectory, "..", "..", "viewer");
 const adminRoot = path.resolve(scriptDirectory, "..", "..", "admin");
 const previewFixture = path.resolve(scriptDirectory, "..", "fixtures", "install-scenario.js");
 const port = Number.parseInt(process.env.PORT || "4175", 10);
+const isolatedLayoutPreview = process.env.ECHO_LAYOUT_PREVIEW === "1";
 const isolatedThemePreview = process.env.ECHO_THEME_PREVIEW === "1";
 const isolatedJamPreview = process.env.ECHO_JAM_PREVIEW === "1";
 const isolatedHistoryPreview = process.env.ECHO_HISTORY_PREVIEW === "1";
-const isolatedPreview = isolatedThemePreview || isolatedJamPreview || isolatedHistoryPreview;
+const isolatedPreview = isolatedLayoutPreview || isolatedThemePreview || isolatedJamPreview || isolatedHistoryPreview;
 const transparentPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -162,6 +163,51 @@ function send(response, statusCode, body, contentType) {
   response.end(body);
 }
 
+const layoutPreviewAspects = Object.freeze({
+  "16-9": 16 / 9,
+  "16-10": 16 / 10,
+  "21-9": 21 / 9,
+  "32-9": 32 / 9,
+  "4-3": 4 / 3,
+  portrait: 9 / 16,
+});
+
+function boundedPreviewCount(searchParams, name, fallback, minimum, maximum) {
+  const raw = searchParams.get(name);
+  if (raw === null || !/^\d{1,2}$/.test(raw)) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function layoutPreviewScenario(requestUrl) {
+  const aspectName = requestUrl.searchParams.get("aspect")
+    || requestUrl.searchParams.get("source-aspect")
+    || "16-9";
+  const aspect = Object.prototype.hasOwnProperty.call(layoutPreviewAspects, aspectName)
+    ? layoutPreviewAspects[aspectName]
+    : layoutPreviewAspects["16-9"];
+  const participants = boundedPreviewCount(requestUrl.searchParams, "participants", 5, 0, 12);
+  const screenShares = boundedPreviewCount(requestUrl.searchParams, "shares", 1, 1, 6);
+  const requestedCameras = boundedPreviewCount(
+    requestUrl.searchParams,
+    "cameras",
+    Math.min(3, participants),
+    0,
+    participants,
+  );
+  const localCamera = requestedCameras > 0;
+
+  return {
+    participants,
+    cameras: Math.max(0, requestedCameras - (localCamera ? 1 : 0)),
+    screenShares,
+    shareAspects: Array(screenShares).fill(aspect),
+    chatOpen: false,
+    localCamera,
+    screenOwners: Array(screenShares).fill(0),
+  };
+}
+
 function resolveStaticFile(requestUrl) {
   const url = new URL(requestUrl, `http://127.0.0.1:${port}`);
   const pathname = decodeURIComponent(url.pathname);
@@ -186,12 +232,15 @@ function resolveStaticFile(requestUrl) {
   return candidate;
 }
 
-function injectIsolatedPreview(html) {
-  const previewName = isolatedJamPreview
-    ? "Isolated Jam Preview"
-    : isolatedHistoryPreview
-      ? "Isolated Dashboard History Preview"
-      : "Isolated Theme Preview";
+function injectIsolatedPreview(html, rawRequestUrl) {
+  const requestUrl = new URL(rawRequestUrl, `http://127.0.0.1:${port}`);
+  const previewName = isolatedLayoutPreview
+    ? "Isolated Layout Preview"
+    : isolatedJamPreview
+      ? "Isolated Jam Preview"
+      : isolatedHistoryPreview
+        ? "Isolated Dashboard History Preview"
+        : "Isolated Theme Preview";
   const earlyBootstrap = `
     <script>
       (function () {
@@ -283,8 +332,13 @@ function injectIsolatedPreview(html) {
       <small>localhost fixture · no production connection</small>
     </div>
   `;
-  const openPreview = isolatedJamPreview
+  const openPreview = isolatedLayoutPreview
     ? `
+          if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(false);
+          if (typeof closeJamPanel === "function") closeJamPanel({ restoreFocus: false });
+      `
+    : isolatedJamPreview
+      ? `
           if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(false);
           if (typeof adminToken !== "undefined") adminToken = "isolated-jam-preview-admin";
           if (typeof currentAccessToken !== "undefined") currentAccessToken = "isolated-jam-preview-participant";
@@ -307,24 +361,27 @@ function injectIsolatedPreview(html) {
             switchAdminTab(historyTab, "admin-dash-history");
           }
       `
-      : `
+        : `
           if (typeof setThemeStudioOpen === "function") setThemeStudioOpen(true);
-      `;
+        `;
+  const scenarioOptions = isolatedLayoutPreview
+    ? layoutPreviewScenario(requestUrl)
+    : {
+        participants: 5,
+        cameras: 3,
+        screenShares: 1,
+        shareAspects: [16 / 9],
+        chatOpen: false,
+        localCamera: true,
+        screenOwners: [0],
+      };
   const scenario = `
     <script src="/__echo-preview-fixture.js"></script>
     <script>
       window.addEventListener("load", function () {
         var fixture = window.EchoLayoutTestScenario;
         if (!fixture) return;
-        fixture.install({
-          participants: 5,
-          cameras: 3,
-          screenShares: 1,
-          shareAspects: [16 / 9],
-          chatOpen: false,
-          localCamera: true,
-          screenOwners: [0]
-        }).then(function () {
+        fixture.install(${JSON.stringify(scenarioOptions)}).then(function () {
           document.documentElement.dataset.echoIsolatedPreviewReady = "true";
           ${openPreview}
         }).catch(function (error) {
@@ -458,7 +515,7 @@ const server = http.createServer(async (request, response) => {
       isolatedPreview &&
       filePath === path.join(viewerRoot, "index.html")
     ) {
-      body = injectIsolatedPreview(body.toString("utf8"));
+      body = injectIsolatedPreview(body.toString("utf8"), request.url || "/");
     }
     const contentType = contentTypes.get(path.extname(filePath).toLowerCase()) || "application/octet-stream";
     response.writeHead(200, {
@@ -474,15 +531,19 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  const previewLabel = isolatedJamPreview
-    ? " [ISOLATED JAM PREVIEW]"
-    : isolatedThemePreview
-      ? " [ISOLATED THEME PREVIEW]"
-      : isolatedHistoryPreview
-        ? " [ISOLATED HISTORY PREVIEW]"
-        : "";
+  const address = server.address();
+  const boundPort = address && typeof address === "object" ? address.port : port;
+  const previewLabel = isolatedLayoutPreview
+    ? " [ISOLATED LAYOUT PREVIEW]"
+    : isolatedJamPreview
+      ? " [ISOLATED JAM PREVIEW]"
+      : isolatedThemePreview
+        ? " [ISOLATED THEME PREVIEW]"
+        : isolatedHistoryPreview
+          ? " [ISOLATED HISTORY PREVIEW]"
+          : "";
   console.log(
-    `[viewer-tests] serving ${viewerRoot} and ${adminRoot} at http://127.0.0.1:${port}${previewLabel}`,
+    `[viewer-tests pid=${process.pid}] serving ${viewerRoot} and ${adminRoot} at http://127.0.0.1:${boundPort}${previewLabel}`,
   );
 });
 
