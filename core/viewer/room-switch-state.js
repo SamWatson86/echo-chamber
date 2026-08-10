@@ -137,8 +137,216 @@
     return accessToken;
   }
 
+  function resolvePostConnectMicrophoneBehavior(options) {
+    const opts = options || {};
+    const restoreMic = opts.reuseAdmin === true && opts.micWasEnabled === true;
+    return {
+      restoreMic,
+      preserveMutedMic: opts.reuseAdmin === true &&
+        opts.preserveMicIntent === true &&
+        !restoreMic,
+    };
+  }
+
+  function createAndroidFirefoxRoomDisconnectRecovery(options) {
+    const opts = options || {};
+    const retryDelaysMs = Array.isArray(opts.retryDelaysMs)
+      ? opts.retryDelaysMs.filter((delay) => Number.isFinite(delay) && delay >= 0)
+      : [500, 2000, 5000];
+    const schedule = typeof opts.schedule === "function" ? opts.schedule : setTimeout;
+    const cancelSchedule = typeof opts.cancelSchedule === "function" ? opts.cancelSchedule : clearTimeout;
+    const getCurrentRoom = typeof opts.getCurrentRoom === "function" ? opts.getCurrentRoom : () => null;
+    const isSwitching = typeof opts.isSwitching === "function" ? opts.isSwitching : () => false;
+    const isHidden = typeof opts.isHidden === "function" ? opts.isHidden : () => false;
+    const isOnline = typeof opts.isOnline === "function" ? opts.isOnline : () => true;
+    const enabled = typeof opts.isTargetBrowser === "function" &&
+      opts.isTargetBrowser(opts.navigatorObject || null, opts.isNativeShell === true) === true;
+
+    let nextGeneration = 0;
+    let activeRecovery = null;
+
+    function disconnectReasonName(reason, disconnectReasons) {
+      if (typeof reason === "string") return reason.toUpperCase();
+      if (typeof reason === "number" && disconnectReasons && typeof disconnectReasons[reason] === "string") {
+        return disconnectReasons[reason].toUpperCase();
+      }
+      return reason == null ? "UNKNOWN_REASON" : "UNRECOGNIZED_REASON";
+    }
+
+    function isTerminalDisconnectReason(reason, disconnectReasons) {
+      const name = disconnectReasonName(reason, disconnectReasons);
+      return name === "CLIENT_INITIATED" ||
+        name === "DUPLICATE_IDENTITY" ||
+        name === "SERVER_SHUTDOWN" ||
+        name === "PARTICIPANT_REMOVED" ||
+        name === "ROOM_DELETED" ||
+        name === "JOIN_FAILURE" ||
+        name === "ROOM_CLOSED" ||
+        name === "USER_UNAVAILABLE" ||
+        name === "USER_REJECTED" ||
+        name === "SIP_TRUNK_FAILURE";
+    }
+
+    function clearActiveRecovery(expectedRecovery) {
+      if (!activeRecovery || (expectedRecovery && activeRecovery !== expectedRecovery)) return false;
+      if (activeRecovery.timerId != null) {
+        cancelSchedule(activeRecovery.timerId);
+      }
+      activeRecovery = null;
+      return true;
+    }
+
+    function isCurrentRecovery(recovery) {
+      return enabled &&
+        !!recovery &&
+        activeRecovery === recovery &&
+        recovery.room === getCurrentRoom() &&
+        recovery.room?._echoExpectedDisconnect !== true &&
+        isSwitching() !== true;
+    }
+
+    function queueNextAttempt(recovery) {
+      if (!isCurrentRecovery(recovery)) {
+        clearActiveRecovery(recovery);
+        return false;
+      }
+      if (recovery.nextAttemptIndex >= retryDelaysMs.length) {
+        recovery.exhausted = true;
+        recovery.waiting = false;
+        if (typeof opts.onExhausted === "function") {
+          opts.onExhausted({ room: recovery.room, attempts: recovery.nextAttemptIndex });
+        }
+        return false;
+      }
+      if (isHidden() === true || isOnline() !== true) {
+        recovery.waiting = true;
+        return false;
+      }
+
+      recovery.waiting = false;
+      const generation = recovery.generation;
+      const delayMs = retryDelaysMs[recovery.nextAttemptIndex];
+      recovery.timerId = schedule(function () {
+        recovery.timerId = null;
+        return runAttempt(recovery, generation);
+      }, delayMs);
+      return true;
+    }
+
+    async function runAttempt(recovery, generation) {
+      if (!isCurrentRecovery(recovery) || recovery.generation !== generation) {
+        clearActiveRecovery(recovery);
+        return false;
+      }
+      if (isHidden() === true || isOnline() !== true) {
+        recovery.waiting = true;
+        return false;
+      }
+
+      const attemptIndex = recovery.nextAttemptIndex;
+      recovery.nextAttemptIndex += 1;
+      recovery.inFlight = true;
+      if (typeof opts.onAttempt === "function") {
+        opts.onAttempt({
+          room: recovery.room,
+          attempt: attemptIndex + 1,
+          maxAttempts: retryDelaysMs.length,
+        });
+      }
+
+      let failed = false;
+      try {
+        await recovery.reconnect();
+      } catch (error) {
+        failed = true;
+        if (typeof opts.onAttemptFailed === "function") {
+          opts.onAttemptFailed({ room: recovery.room, attempt: attemptIndex + 1, error });
+        }
+      }
+
+      if (activeRecovery !== recovery || recovery.generation !== generation) return false;
+      recovery.inFlight = false;
+      if (!failed && getCurrentRoom() !== recovery.room) {
+        clearActiveRecovery(recovery);
+        return true;
+      }
+      if (!isCurrentRecovery(recovery)) {
+        clearActiveRecovery(recovery);
+        return false;
+      }
+      return queueNextAttempt(recovery);
+    }
+
+    function handleDisconnected(event) {
+      const detail = event || {};
+      const candidateRoom = detail.room;
+      if (!enabled || !candidateRoom || candidateRoom !== getCurrentRoom()) return false;
+
+      if (candidateRoom._echoExpectedDisconnect === true ||
+          isSwitching() === true ||
+          isTerminalDisconnectReason(detail.reason, detail.disconnectReasons)) {
+        if (activeRecovery?.room === candidateRoom) clearActiveRecovery(activeRecovery);
+        return false;
+      }
+      if (typeof detail.reconnect !== "function") return false;
+
+      if (activeRecovery) {
+        if (activeRecovery.room === candidateRoom) return false;
+        clearActiveRecovery(activeRecovery);
+      }
+
+      const recovery = {
+        room: candidateRoom,
+        reconnect: detail.reconnect,
+        generation: ++nextGeneration,
+        nextAttemptIndex: 0,
+        timerId: null,
+        inFlight: false,
+        waiting: false,
+        exhausted: false,
+      };
+      activeRecovery = recovery;
+      queueNextAttempt(recovery);
+      return true;
+    }
+
+    function resume() {
+      const recovery = activeRecovery;
+      if (!recovery || recovery.exhausted || recovery.inFlight || recovery.timerId != null) return false;
+      return queueNextAttempt(recovery);
+    }
+
+    function cancel(candidateRoom) {
+      if (candidateRoom && activeRecovery?.room !== candidateRoom) return false;
+      return clearActiveRecovery(activeRecovery);
+    }
+
+    function snapshot() {
+      if (!activeRecovery) return { enabled, active: false };
+      return {
+        enabled,
+        active: true,
+        attemptCount: activeRecovery.nextAttemptIndex,
+        scheduled: activeRecovery.timerId != null,
+        inFlight: activeRecovery.inFlight,
+        waiting: activeRecovery.waiting,
+        exhausted: activeRecovery.exhausted,
+      };
+    }
+
+    return {
+      cancel,
+      handleDisconnected,
+      isEnabled: () => enabled,
+      resume,
+      snapshot,
+    };
+  }
+
   return {
     commitConnectedAccessToken,
+    createAndroidFirefoxRoomDisconnectRecovery,
     createRoomSwitchState,
+    resolvePostConnectMicrophoneBehavior,
   };
 });

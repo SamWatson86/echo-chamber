@@ -91,6 +91,43 @@ document.addEventListener(
 let switchingRoom = false;
 let connectSequence = 0;
 
+var androidFirefoxRoomDisconnectRecovery = null;
+var androidFirefoxRoomDisconnectRecoveryEnabled = typeof isAndroidFirefoxBrowser === "function" &&
+  isAndroidFirefoxBrowser(navigator, window.__ECHO_NATIVE__ === true);
+if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+    window.EchoRoomSwitchState?.createAndroidFirefoxRoomDisconnectRecovery) {
+  androidFirefoxRoomDisconnectRecovery =
+    window.EchoRoomSwitchState.createAndroidFirefoxRoomDisconnectRecovery({
+      navigatorObject: navigator,
+      isNativeShell: window.__ECHO_NATIVE__ === true,
+      isTargetBrowser: isAndroidFirefoxBrowser,
+      getCurrentRoom: function() { return room; },
+      isSwitching: function() { return switchingRoom || _isRoomSwitch; },
+      isHidden: function() { return document.hidden === true; },
+      isOnline: function() { return navigator.onLine !== false; },
+      schedule: setTimeout,
+      cancelSchedule: clearTimeout,
+      onAttempt: function(state) {
+        debugLog("[android-firefox-room-recovery] reconnect attempt " +
+          state.attempt + "/" + state.maxAttempts);
+      },
+      onAttemptFailed: function(state) {
+        debugLog("[android-firefox-room-recovery] reconnect attempt " +
+          state.attempt + " failed: " + (state.error?.message || state.error));
+      },
+      onExhausted: function(state) {
+        debugLog("[android-firefox-room-recovery] exhausted after " + state.attempts + " attempts");
+      },
+    });
+
+  document.addEventListener("visibilitychange", function() {
+    if (document.hidden !== true) androidFirefoxRoomDisconnectRecovery?.resume();
+  });
+  window.addEventListener("online", function() {
+    androidFirefoxRoomDisconnectRecovery?.resume();
+  });
+}
+
 function recordActiveRoomDiagnostic(candidateRoom, recorder) {
   if (!candidateRoom ||
       candidateRoom !== room ||
@@ -267,11 +304,33 @@ function reconcileLocalPublishIndicators(reason) {
   }
 }
 
-async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuseAdmin }) {
+async function connectToRoom({
+  controlUrl,
+  sfuUrl,
+  roomId,
+  identity,
+  name,
+  reuseAdmin,
+  preserveMicIntent,
+}) {
   // A newly connected LiveKit participant has no publications yet. Preserve
   // the user's pre-switch intent separately so authoritative reconciliation
   // can report the new room truth without cancelling mic restoration.
-  const restoreMicAfterConnect = !!(reuseAdmin && desiredMicEnabledForRoomSwitch());
+  const micWasEnabledBeforeConnect = desiredMicEnabledForRoomSwitch() === true;
+  const postConnectMicBehavior = window.EchoRoomSwitchState?.resolvePostConnectMicrophoneBehavior
+    ? window.EchoRoomSwitchState.resolvePostConnectMicrophoneBehavior({
+        reuseAdmin: reuseAdmin === true,
+        preserveMicIntent: preserveMicIntent === true,
+        micWasEnabled: micWasEnabledBeforeConnect,
+      })
+    : {
+        restoreMic: reuseAdmin === true && micWasEnabledBeforeConnect,
+        preserveMutedMic: reuseAdmin === true &&
+          preserveMicIntent === true &&
+          !micWasEnabledBeforeConnect,
+      };
+  const restoreMicAfterConnect = postConnectMicBehavior.restoreMic;
+  const preserveDisabledMicAfterConnect = postConnectMicBehavior.preserveMutedMic;
   if (!controlUrl || !sfuUrl) {
     setStatus("Enter control URL and SFU URL.", true);
     return;
@@ -585,6 +644,12 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   if (LK.RoomEvent?.ConnectionStateChanged) {
     newRoom.on(LK.RoomEvent.ConnectionStateChanged, (state) => {
       if (!state) return;
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          state === "disconnected" &&
+          newRoom !== room) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room disconnected state");
+        return;
+      }
       debugLog("[connection] state changed: " + state);
       if (state === "reconnecting") {
         _isReconnecting = true;
@@ -606,6 +671,14 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   }
   if (LK.RoomEvent?.Disconnected) {
     newRoom.on(LK.RoomEvent.Disconnected, (reason) => {
+      // Failed reconnect candidates also emit Disconnected. On Android Firefox,
+      // ignore those stale Room instances before they overwrite the active
+      // session status or stop its stats monitor. Other platforms retain the
+      // existing handler behavior.
+      if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room disconnect");
+        return;
+      }
       const detail = describeDisconnectReason(reason, LK);
       setStatus(`Disconnected: ${detail}`, true);
       if (!_isRoomSwitch) {
@@ -619,6 +692,25 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
       // a plain disconnect (network drop, server kick) needs an explicit stop.
       if (typeof stopInboundScreenStatsMonitor === "function") {
         stopInboundScreenStatsMonitor();
+      }
+      var recoveryAccepted = androidFirefoxRoomDisconnectRecovery?.handleDisconnected({
+        room: newRoom,
+        reason: reason,
+        disconnectReasons: LK.DisconnectReason,
+        reconnect: function() {
+          return connectToRoom({
+            controlUrl: controlUrl,
+            sfuUrl: sfuUrl,
+            roomId: roomId,
+            identity: identity,
+            name: name,
+            reuseAdmin: true,
+            preserveMicIntent: true,
+          });
+        },
+      });
+      if (recoveryAccepted) {
+        setStatus("Reconnecting Android Firefox session...", true);
       }
     });
   }
@@ -1416,6 +1508,13 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     toggleMicOn(true).catch((err) => {
       debugLog("[mic] room-switch re-enable failed: " + (err.message || err));
     });
+  } else if (preserveDisabledMicAfterConnect) {
+    // Android Firefox transport recovery must not turn on a mic the user had
+    // muted. Generic room switches and first-connect behavior stay unchanged.
+    micEnabled = false;
+    syncDesiredMicToActual(false);
+    renderPublishButtons();
+    debugLog("[android-firefox-room-recovery] preserved muted microphone");
   } else {
     // First connect: go through full permission flow
     ensureDevicePermissions().then(() => refreshDevices()).then(() => {
