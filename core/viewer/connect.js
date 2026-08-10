@@ -315,7 +315,9 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
   // Chrome BWE starts at ~300kbps and probes up. If the SFU answer caps bandwidth
   // (b=AS or b=TIAS), Chrome never probes higher. We munge BOTH local and remote
   // descriptions to set 8Mbps bandwidth and add x-google bitrate hints.
-  if (!window._sdpMungingInstalled) {
+  var _skipAndroidFirefoxRtcOverrides = typeof isAndroidFirefoxBrowser === "function" &&
+    isAndroidFirefoxBrowser(navigator, window.__ECHO_NATIVE__ === true);
+  if (!_skipAndroidFirefoxRtcOverrides && !window._sdpMungingInstalled) {
     window._sdpMungingInstalled = true;
 
     function _mungeSDPBandwidth(sdp) {
@@ -520,6 +522,8 @@ async function connectToRoom({ controlUrl, sfuUrl, roomId, identity, name, reuse
     };
 
     debugLog("SDP + transceiver + setParameters overrides installed (H264 High 5.1, simulcast 3-layer, 20Mbps aggregate)");
+  } else if (_skipAndroidFirefoxRtcOverrides) {
+    debugLog("[SDP] custom WebRTC overrides skipped for Android Firefox");
   }
 
   const LK = getLiveKitClient();

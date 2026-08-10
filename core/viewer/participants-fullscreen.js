@@ -4,6 +4,64 @@
    ========================================================= */
 
 var activeVideoFullscreenSession = null;
+var androidFirefoxScreenRecoveryBySid = new Map();
+
+function isCurrentScreenRecoveryGeneration(options) {
+  if (!options || !options.trackSid || !options.meta || !options.publication || !options.tile) return false;
+  if (!options.tile.isConnected) return false;
+  if (options.tile.dataset?.trackSid !== options.trackSid) return false;
+  if (options.meta.publication !== options.publication || options.meta.tile !== options.tile) return false;
+  if (options.getCurrentMeta(options.trackSid) !== options.meta) return false;
+  if (options.getCurrentTile(options.trackSid) !== options.tile) return false;
+  if (options.isHidden && options.isHidden(options.meta.identity)) return false;
+  return true;
+}
+
+function attemptAndroidFirefoxScreenSubscriptionReset(options) {
+  if (!options || options.enabled !== true) return false;
+  var meta = options.meta;
+  var publication = options.publication;
+  var trackSid = options.trackSid;
+  var tile = options.tile;
+  if (!isCurrentScreenRecoveryGeneration(options)) return false;
+  if (!options.recoveryStateBySid) return false;
+  var recoveryState = options.recoveryStateBySid.get(trackSid);
+  if (recoveryState?.subscriptionResetAttempted === true) return false;
+  if (publication.isSubscribed !== true || typeof publication.setSubscribed !== "function") return false;
+  var mediaTrack = publication.track?.mediaStreamTrack;
+  if (!mediaTrack || mediaTrack.readyState !== "live" || mediaTrack.muted !== true) return false;
+  if (!(options.frameAgeMs > 3000) || !(options.firstLineRecoveryAt > 0)) return false;
+
+  // Mark before touching the subscription. TrackUnsubscribed can arrive
+  // synchronously. SID-scoped state survives same-SID metadata replacement,
+  // so this recovery cannot turn into a reset loop.
+  options.recoveryStateBySid.set(trackSid, { subscriptionResetAttempted: true });
+  if (typeof options.markResubscribeIntent === "function") {
+    options.markResubscribeIntent(trackSid);
+  }
+  if (typeof options.log === "function") {
+    options.log("[android-firefox-recovery] resetting stalled screen subscription sid=" + trackSid);
+  }
+  var originalTrack = publication.track;
+  publication.setSubscribed(false);
+
+  options.schedule(function() {
+    var currentOptions = Object.assign({}, options, {
+      meta: meta,
+      publication: publication,
+      tile: tile,
+    });
+    if (!isCurrentScreenRecoveryGeneration(currentOptions)) return;
+    publication.setSubscribed(true);
+    if (typeof options.requestKeyFrame === "function") {
+      options.requestKeyFrame(publication, publication.track || originalTrack);
+    }
+    if (typeof options.log === "function") {
+      options.log("[android-firefox-recovery] restored screen subscription sid=" + trackSid);
+    }
+  }, options.resetDelayMs == null ? 500 : options.resetDelayMs);
+  return true;
+}
 
 function resolveVideoFullscreenHost(videoEl) {
   if (!videoEl || !videoEl.isConnected) return null;
@@ -197,6 +255,7 @@ function registerScreenTrack(trackSid, publication, tile, identity) {
 
 function unregisterScreenTrack(trackSid) {
   if (!trackSid) return;
+  androidFirefoxScreenRecoveryBySid.delete(trackSid);
   if (typeof stopNativePresenterForTrack === "function") {
     stopNativePresenterForTrack(trackSid).catch(function(e) {
       debugLog("[native-presenter] unregister stop failed: " + (e && e.message ? e.message : e));
@@ -244,6 +303,41 @@ function startScreenWatchdog() {
       // New tiles need time to receive first frames before recovery kicks in.
       var tileAge = now - (meta.createdAt || 0);
       if (tileAge < 8000) return;
+      const stalled = age > 3000;
+
+      // Firefox on Android can negotiate successfully, decode a handful of
+      // frames, then leave every remote MediaStreamTrack live-but-muted. Give
+      // the normal keyframe/reattach recovery one full watchdog pass first,
+      // then perform one exact-SID subscription reset. No other browser or the
+      // native desktop shell can enter this path.
+      var androidFirefoxRecoveryEnabled = typeof isAndroidFirefoxBrowser === "function" &&
+        isAndroidFirefoxBrowser(
+          typeof navigator === "object" ? navigator : null,
+          typeof window === "object" && window.__ECHO_NATIVE__ === true
+        );
+      var localScreenIdentity = room?.localParticipant?.identity || null;
+      var isRemoteScreen = !!meta.identity && meta.identity !== localScreenIdentity;
+      if (androidFirefoxRecoveryEnabled && isRemoteScreen && stalled &&
+          meta.lastFix > 0 && now - meta.lastFix >= 2500) {
+        var resetScheduled = attemptAndroidFirefoxScreenSubscriptionReset({
+          enabled: true,
+          trackSid: trackSid,
+          meta: meta,
+          publication: publication,
+          tile: tile,
+          frameAgeMs: age,
+          firstLineRecoveryAt: meta.lastFix,
+          recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
+          getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
+          getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
+          isHidden: function(identity) { return hiddenScreens.has(identity); },
+          markResubscribeIntent: markResubscribeIntent,
+          requestKeyFrame: requestVideoKeyFrame,
+          schedule: setTimeout,
+          log: debugLog,
+        });
+        if (resetScheduled) return;
+      }
       if (isBlack && blackFor > 3000 && track) {
         if (!meta.lastSwap || now - meta.lastSwap > 10000) {
           meta.lastSwap = now;
@@ -265,7 +359,6 @@ function startScreenWatchdog() {
       }
       // Give new tracks time to settle before trying aggressive recovery.
       if (!isBlack && sinceFirstFrame > 0 && sinceFirstFrame < 5000 && age < 5000) return;
-      const stalled = age > 3000;
       if (!stalled) return;
       const minFixInterval = meta.lastFix ? (isBlack ? 8000 : 15000) : (isBlack ? 4000 : 6000);
       if (now - (meta.lastFix || 0) < minFixInterval) return;
@@ -664,8 +757,10 @@ function attachVideoDiagnostics(track, element, overlay) {
 
 if (typeof module === "object" && module.exports) {
   module.exports = {
+    attemptAndroidFirefoxScreenSubscriptionReset,
     createVideoFrameRateTracker,
     getVideoPresentationSnapshot,
+    isCurrentScreenRecoveryGeneration,
   };
 }
 
