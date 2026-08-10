@@ -316,7 +316,7 @@ test("production wiring is target-gated and invokes only supported connectToRoom
   );
   assert.match(
     connectSource,
-    /RoomEvent\.Disconnected[\s\S]*?androidFirefoxRoomDisconnectRecovery\?\.handleDisconnected\(\{[\s\S]*?reconnect: function\(\) \{\s+return connectToRoom\(\{[\s\S]*?reuseAdmin: true,[\s\S]*?preserveMicIntent: true/
+    /function reconnectAndroidFirefoxRoom\([\s\S]*?return connectToRoom\(\{[\s\S]*?reuseAdmin: true,[\s\S]*?preserveMicIntent: true[\s\S]*?RoomEvent\.Disconnected[\s\S]*?handleDisconnected\(\{[\s\S]*?reconnect: reconnectAndroidFirefoxRoom/
   );
   assert.match(
     connectSource,
@@ -324,7 +324,7 @@ test("production wiring is target-gated and invokes only supported connectToRoom
   );
   assert.match(
     connectSource,
-    /if \(androidFirefoxRoomDisconnectRecoveryEnabled &&\s+state === "disconnected" &&\s+newRoom !== room\) \{[\s\S]*?return;/
+    /ConnectionStateChanged[\s\S]*?if \(androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room\) \{[\s\S]*?return;/
   );
   assert.match(
     connectSource,

@@ -148,11 +148,47 @@
     };
   }
 
+  async function disconnectAndroidFirefoxRecoverySource(sourceRoom) {
+    if (!sourceRoom || typeof sourceRoom.disconnect !== "function") {
+      throw new Error("Android Firefox recovery source Room is unavailable");
+    }
+
+    sourceRoom._echoRecoveryDisconnect = true;
+    sourceRoom._echoExpectedDisconnect = true;
+    if (sourceRoom._echoRecoveryDisconnectComplete === true) return false;
+
+    let disconnectPromise = sourceRoom._echoRecoveryDisconnectPromise;
+    if (!disconnectPromise) {
+      disconnectPromise = (async function() {
+        await sourceRoom.disconnect(true);
+        sourceRoom._echoRecoveryDisconnectComplete = true;
+        return true;
+      })();
+      sourceRoom._echoRecoveryDisconnectPromise = disconnectPromise;
+    }
+
+    try {
+      return await disconnectPromise;
+    } catch (error) {
+      // A failed sendLeave/engine close must not poison every bounded retry.
+      // Keep concurrent callers on one promise, then let the next attempt
+      // create a fresh teardown promise for the same source Room.
+      if (sourceRoom._echoRecoveryDisconnectPromise === disconnectPromise) {
+        sourceRoom._echoRecoveryDisconnectPromise = null;
+      }
+      throw error;
+    }
+  }
+
   function createAndroidFirefoxRoomDisconnectRecovery(options) {
     const opts = options || {};
     const retryDelaysMs = Array.isArray(opts.retryDelaysMs)
       ? opts.retryDelaysMs.filter((delay) => Number.isFinite(delay) && delay >= 0)
       : [500, 2000, 5000];
+    const stalledReconnectTimeoutMs = Number.isFinite(opts.stalledReconnectTimeoutMs) &&
+      opts.stalledReconnectTimeoutMs >= 0
+      ? opts.stalledReconnectTimeoutMs
+      : 15000;
     const schedule = typeof opts.schedule === "function" ? opts.schedule : setTimeout;
     const cancelSchedule = typeof opts.cancelSchedule === "function" ? opts.cancelSchedule : clearTimeout;
     const getCurrentRoom = typeof opts.getCurrentRoom === "function" ? opts.getCurrentRoom : () => null;
@@ -164,6 +200,7 @@
 
     let nextGeneration = 0;
     let activeRecovery = null;
+    let activeReconnectWatch = null;
 
     function disconnectReasonName(reason, disconnectReasons) {
       if (typeof reason === "string") return reason.toUpperCase();
@@ -196,13 +233,34 @@
       return true;
     }
 
-    function isCurrentRecovery(recovery) {
+    function clearReconnectWatch(expectedWatch) {
+      if (!activeReconnectWatch || (expectedWatch && activeReconnectWatch !== expectedWatch)) return false;
+      if (activeReconnectWatch.timerId != null) {
+        cancelSchedule(activeReconnectWatch.timerId);
+      }
+      activeReconnectWatch = null;
+      return true;
+    }
+
+    function isEligibleCurrentRoom(candidateRoom) {
       return enabled &&
-        !!recovery &&
-        activeRecovery === recovery &&
-        recovery.room === getCurrentRoom() &&
-        recovery.room?._echoExpectedDisconnect !== true &&
+        !!candidateRoom &&
+        candidateRoom === getCurrentRoom() &&
+        (candidateRoom._echoExpectedDisconnect !== true ||
+          candidateRoom._echoRecoveryDisconnect === true) &&
         isSwitching() !== true;
+    }
+
+    function isCurrentRecovery(recovery) {
+      return !!recovery &&
+        activeRecovery === recovery &&
+        isEligibleCurrentRoom(recovery.room);
+    }
+
+    function isCurrentReconnectWatch(watch) {
+      return !!watch &&
+        activeReconnectWatch === watch &&
+        isEligibleCurrentRoom(watch.room);
     }
 
     function queueNextAttempt(recovery) {
@@ -256,7 +314,10 @@
 
       let failed = false;
       try {
-        await recovery.reconnect();
+        await recovery.reconnect({
+          room: recovery.room,
+          micWasEnabled: recovery.micWasEnabled,
+        });
       } catch (error) {
         failed = true;
         if (typeof opts.onAttemptFailed === "function") {
@@ -277,27 +338,21 @@
       return queueNextAttempt(recovery);
     }
 
-    function handleDisconnected(event) {
-      const detail = event || {};
-      const candidateRoom = detail.room;
-      if (!enabled || !candidateRoom || candidateRoom !== getCurrentRoom()) return false;
-
-      if (candidateRoom._echoExpectedDisconnect === true ||
-          isSwitching() === true ||
-          isTerminalDisconnectReason(detail.reason, detail.disconnectReasons)) {
-        if (activeRecovery?.room === candidateRoom) clearActiveRecovery(activeRecovery);
-        return false;
-      }
-      if (typeof detail.reconnect !== "function") return false;
+    function beginRecovery(candidateRoom, reconnect, micWasEnabled) {
+      if (!isEligibleCurrentRoom(candidateRoom) || typeof reconnect !== "function") return false;
 
       if (activeRecovery) {
         if (activeRecovery.room === candidateRoom) return false;
         clearActiveRecovery(activeRecovery);
       }
+      if (activeReconnectWatch?.room === candidateRoom) {
+        clearReconnectWatch(activeReconnectWatch);
+      }
 
       const recovery = {
         room: candidateRoom,
-        reconnect: detail.reconnect,
+        reconnect,
+        micWasEnabled: typeof micWasEnabled === "boolean" ? micWasEnabled : null,
         generation: ++nextGeneration,
         nextAttemptIndex: 0,
         timerId: null,
@@ -310,19 +365,133 @@
       return true;
     }
 
+    function activateReconnectWatch(watch, generation) {
+      if (!isCurrentReconnectWatch(watch) || watch.generation !== generation) {
+        clearReconnectWatch(watch);
+        return false;
+      }
+      watch.stale = true;
+      if (isHidden() === true || isOnline() !== true) {
+        watch.waiting = true;
+        return false;
+      }
+
+      const candidateRoom = watch.room;
+      const reconnect = watch.reconnect;
+      const micWasEnabled = watch.micWasEnabled;
+      clearReconnectWatch(watch);
+      if (typeof opts.onStalledReconnect === "function") {
+        opts.onStalledReconnect({ room: candidateRoom, timeoutMs: stalledReconnectTimeoutMs });
+      }
+      return beginRecovery(candidateRoom, reconnect, micWasEnabled);
+    }
+
+    function handleReconnecting(event) {
+      const detail = event || {};
+      const candidateRoom = detail.room;
+      if (!isEligibleCurrentRoom(candidateRoom) || typeof detail.reconnect !== "function") {
+        if (activeReconnectWatch?.room === candidateRoom) {
+          clearReconnectWatch(activeReconnectWatch);
+        }
+        return false;
+      }
+      if (activeRecovery?.room === candidateRoom || activeReconnectWatch?.room === candidateRoom) {
+        return false;
+      }
+      if (activeReconnectWatch) clearReconnectWatch(activeReconnectWatch);
+
+      const watch = {
+        room: candidateRoom,
+        reconnect: detail.reconnect,
+        micWasEnabled: typeof detail.micWasEnabled === "boolean" ? detail.micWasEnabled : null,
+        generation: ++nextGeneration,
+        timerId: null,
+        stale: false,
+        waiting: false,
+      };
+      activeReconnectWatch = watch;
+      const generation = watch.generation;
+      watch.timerId = schedule(function () {
+        watch.timerId = null;
+        return activateReconnectWatch(watch, generation);
+      }, stalledReconnectTimeoutMs);
+      return true;
+    }
+
+    function handleConnected(event) {
+      const candidateRoom = event?.room;
+      if (!enabled || !candidateRoom || candidateRoom !== getCurrentRoom()) return false;
+
+      let cancelled = false;
+      if (activeReconnectWatch?.room === candidateRoom) {
+        cancelled = clearReconnectWatch(activeReconnectWatch) || cancelled;
+      }
+      if (activeRecovery?.room === candidateRoom) {
+        cancelled = clearActiveRecovery(activeRecovery) || cancelled;
+      }
+      return cancelled;
+    }
+
+    function handleDisconnected(event) {
+      const detail = event || {};
+      const candidateRoom = detail.room;
+      if (!enabled || !candidateRoom || candidateRoom !== getCurrentRoom()) return false;
+
+      // A stale-reconnect recovery deliberately disconnects its source Room
+      // before opening the same identity again. Its CLIENT_INITIATED event is
+      // teardown confirmation, not a request to cancel the serialized recovery.
+      if (candidateRoom._echoRecoveryDisconnect === true) return false;
+
+      if (candidateRoom._echoExpectedDisconnect === true ||
+          isSwitching() === true ||
+          isTerminalDisconnectReason(detail.reason, detail.disconnectReasons)) {
+        if (activeRecovery?.room === candidateRoom) clearActiveRecovery(activeRecovery);
+        if (activeReconnectWatch?.room === candidateRoom) clearReconnectWatch(activeReconnectWatch);
+        return false;
+      }
+      if (typeof detail.reconnect !== "function") return false;
+
+      if (activeRecovery) {
+        if (activeRecovery.room === candidateRoom) return false;
+        clearActiveRecovery(activeRecovery);
+      }
+      if (activeReconnectWatch?.room === candidateRoom) clearReconnectWatch(activeReconnectWatch);
+      return beginRecovery(candidateRoom, detail.reconnect, detail.micWasEnabled);
+    }
+
     function resume() {
+      const watch = activeReconnectWatch;
+      if (watch?.stale && watch.timerId == null) {
+        return activateReconnectWatch(watch, watch.generation);
+      }
       const recovery = activeRecovery;
       if (!recovery || recovery.exhausted || recovery.inFlight || recovery.timerId != null) return false;
       return queueNextAttempt(recovery);
     }
 
     function cancel(candidateRoom) {
-      if (candidateRoom && activeRecovery?.room !== candidateRoom) return false;
-      return clearActiveRecovery(activeRecovery);
+      let cancelled = false;
+      if (!candidateRoom || activeReconnectWatch?.room === candidateRoom) {
+        cancelled = clearReconnectWatch(activeReconnectWatch) || cancelled;
+      }
+      if (!candidateRoom || activeRecovery?.room === candidateRoom) {
+        cancelled = clearActiveRecovery(activeRecovery) || cancelled;
+      }
+      return cancelled;
     }
 
     function snapshot() {
-      if (!activeRecovery) return { enabled, active: false };
+      if (!activeRecovery) {
+        if (!activeReconnectWatch) return { enabled, active: false };
+        return {
+          enabled,
+          active: false,
+          watching: true,
+          scheduled: activeReconnectWatch.timerId != null,
+          waiting: activeReconnectWatch.waiting,
+          stale: activeReconnectWatch.stale,
+        };
+      }
       return {
         enabled,
         active: true,
@@ -336,7 +505,9 @@
 
     return {
       cancel,
+      handleConnected,
       handleDisconnected,
+      handleReconnecting,
       isEnabled: () => enabled,
       resume,
       snapshot,
@@ -347,6 +518,7 @@
     commitConnectedAccessToken,
     createAndroidFirefoxRoomDisconnectRecovery,
     createRoomSwitchState,
+    disconnectAndroidFirefoxRecoverySource,
     resolvePostConnectMicrophoneBehavior,
   };
 });
