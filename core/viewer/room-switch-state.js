@@ -148,20 +148,60 @@
     };
   }
 
-  async function disconnectAndroidFirefoxRecoverySource(sourceRoom) {
+  async function disconnectAndroidFirefoxRecoverySource(sourceRoom, options) {
     if (!sourceRoom || typeof sourceRoom.disconnect !== "function") {
       throw new Error("Android Firefox recovery source Room is unavailable");
     }
 
+    const opts = options || {};
+    const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs >= 0
+      ? opts.timeoutMs
+      : 1500;
+    const schedule = typeof opts.schedule === "function" ? opts.schedule : setTimeout;
+    const cancelSchedule = typeof opts.cancelSchedule === "function" ? opts.cancelSchedule : clearTimeout;
+
     sourceRoom._echoRecoveryDisconnect = true;
     sourceRoom._echoExpectedDisconnect = true;
-    if (sourceRoom._echoRecoveryDisconnectComplete === true) return false;
+    if (sourceRoom._echoRecoveryDisconnectComplete === true ||
+        sourceRoom._echoRecoveryDisconnectReleased === true) {
+      return false;
+    }
 
     let disconnectPromise = sourceRoom._echoRecoveryDisconnectPromise;
     if (!disconnectPromise) {
       disconnectPromise = (async function() {
-        await sourceRoom.disconnect(true);
-        sourceRoom._echoRecoveryDisconnectComplete = true;
+        let timeoutId = null;
+        const disconnectOutcome = (async function() {
+          await sourceRoom.disconnect(true);
+          sourceRoom._echoRecoveryDisconnectComplete = true;
+          return { completed: true };
+        })()
+          .then(undefined, function(error) {
+            // Convert a late rejection into data so a teardown that rejects
+            // after the deadline cannot become an unhandled Promise.
+            return { completed: false, rejected: true, error: error };
+          });
+        const deadline = new Promise(function(resolve) {
+          timeoutId = schedule(function() {
+            resolve({ completed: false, timedOut: true });
+          }, timeoutMs);
+        });
+
+        let outcome;
+        try {
+          outcome = await Promise.race([disconnectOutcome, deadline]);
+        } finally {
+          if (timeoutId != null) cancelSchedule(timeoutId);
+        }
+        if (outcome?.rejected === true) throw outcome.error;
+        if (outcome?.timedOut) {
+          // LiveKit can send CLIENT_REQUEST_LEAVE and then remain pending while
+          // closing a wedged Android Firefox engine. Release the serialized
+          // handoff after a short deadline; the old Room stays marked so its
+          // late events cannot mutate the replacement session.
+          sourceRoom._echoRecoveryDisconnectReleased = true;
+          sourceRoom._echoRecoveryDisconnectTimedOut = true;
+        }
         return true;
       })();
       sourceRoom._echoRecoveryDisconnectPromise = disconnectPromise;
