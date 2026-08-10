@@ -118,6 +118,11 @@ if (androidFirefoxRoomDisconnectRecoveryEnabled &&
       onExhausted: function(state) {
         debugLog("[android-firefox-room-recovery] exhausted after " + state.attempts + " attempts");
       },
+      onStalledReconnect: function(state) {
+        debugLog("[android-firefox-room-recovery] SDK reconnect still stalled after " +
+          state.timeoutMs + "ms; starting fresh Room recovery");
+        setStatus("Refreshing stalled Android Firefox session...", true);
+      },
     });
 
   document.addEventListener("visibilitychange", function() {
@@ -174,6 +179,10 @@ async function switchRoom(roomId) {
     currentRoomName = roomId;
   }
 
+  if (androidFirefoxRoomDisconnectRecoveryEnabled) {
+    androidFirefoxRoomDisconnectRecovery?.cancel(room);
+    connectSequence += 1;
+  }
   switchingRoom = true;
   _isRoomSwitch = true;
   // Freeze local publish intent until the new room is connected. This keeps a
@@ -312,11 +321,19 @@ async function connectToRoom({
   name,
   reuseAdmin,
   preserveMicIntent,
+  androidFirefoxRecoverySourceRoom,
+  androidFirefoxPreservedMicEnabled,
 }) {
+  const controlledAndroidFirefoxReplacement = androidFirefoxRoomDisconnectRecoveryEnabled &&
+    !!androidFirefoxRecoverySourceRoom &&
+    androidFirefoxRecoverySourceRoom === room;
   // A newly connected LiveKit participant has no publications yet. Preserve
   // the user's pre-switch intent separately so authoritative reconciliation
   // can report the new room truth without cancelling mic restoration.
-  const micWasEnabledBeforeConnect = desiredMicEnabledForRoomSwitch() === true;
+  const micWasEnabledBeforeConnect = controlledAndroidFirefoxReplacement &&
+    typeof androidFirefoxPreservedMicEnabled === "boolean"
+    ? androidFirefoxPreservedMicEnabled
+    : desiredMicEnabledForRoomSwitch() === true;
   const postConnectMicBehavior = window.EchoRoomSwitchState?.resolvePostConnectMicrophoneBehavior
     ? window.EchoRoomSwitchState.resolvePostConnectMicrophoneBehavior({
         reuseAdmin: reuseAdmin === true,
@@ -331,6 +348,24 @@ async function connectToRoom({
       };
   const restoreMicAfterConnect = postConnectMicBehavior.restoreMic;
   const preserveDisabledMicAfterConnect = postConnectMicBehavior.preserveMutedMic;
+  var controlledReplacementSequence = null;
+  if (controlledAndroidFirefoxReplacement) {
+    // Stop LiveKit's stale same-identity resume loop before opening a fresh
+    // Room. The marker suppresses teardown events from mutating current UI or
+    // cancelling the serialized recovery controller.
+    controlledReplacementSequence = ++connectSequence;
+    var disconnectRecoverySource = window.EchoRoomSwitchState?.disconnectAndroidFirefoxRecoverySource;
+    if (typeof disconnectRecoverySource !== "function") {
+      throw new Error("Android Firefox recovery teardown helper is unavailable");
+    }
+    await disconnectRecoverySource(androidFirefoxRecoverySourceRoom);
+    if (controlledReplacementSequence !== connectSequence ||
+        androidFirefoxRecoverySourceRoom !== room ||
+        switchingRoom ||
+        _isRoomSwitch) {
+      return;
+    }
+  }
   if (!controlUrl || !sfuUrl) {
     setStatus("Enter control URL and SFU URL.", true);
     return;
@@ -353,7 +388,9 @@ async function connectToRoom({
   } catch {}
 
   setStatus("Requesting token...");
-  const seq = ++connectSequence;
+  const seq = controlledReplacementSequence == null
+    ? ++connectSequence
+    : controlledReplacementSequence;
   if (!reuseAdmin) {
     // First connect: ensure room exists (not needed for subsequent switches of fixed rooms)
     await ensureRoomExists(controlUrl, adminToken, roomId);
@@ -641,20 +678,86 @@ async function connectToRoom({
       newRoom.startAudio().catch(() => {});
     }
   } catch {}
+  var androidFirefoxRecoveryMicWasEnabled = null;
+  function captureAndroidFirefoxRecoveryMicIntent() {
+    if (typeof androidFirefoxRecoveryMicWasEnabled !== "boolean") {
+      androidFirefoxRecoveryMicWasEnabled = desiredMicEnabledForRoomSwitch() === true;
+    }
+    return androidFirefoxRecoveryMicWasEnabled;
+  }
+  function resetAndroidFirefoxRecoveryMicIntent() {
+    androidFirefoxRecoveryMicWasEnabled = null;
+  }
+  function reconnectAndroidFirefoxRoom(recoveryState) {
+    var preservedMicEnabled = typeof recoveryState?.micWasEnabled === "boolean"
+      ? recoveryState.micWasEnabled
+      : captureAndroidFirefoxRecoveryMicIntent();
+    return connectToRoom({
+      controlUrl: controlUrl,
+      sfuUrl: sfuUrl,
+      roomId: roomId,
+      identity: identity,
+      name: name,
+      reuseAdmin: true,
+      preserveMicIntent: true,
+      androidFirefoxRecoverySourceRoom: newRoom,
+      androidFirefoxPreservedMicEnabled: preservedMicEnabled,
+    });
+  }
+  function watchAndroidFirefoxRoomReconnect() {
+    if (!androidFirefoxRoomDisconnectRecoveryEnabled) return;
+    var accepted = androidFirefoxRoomDisconnectRecovery?.handleReconnecting({
+      room: newRoom,
+      reconnect: reconnectAndroidFirefoxRoom,
+      micWasEnabled: captureAndroidFirefoxRecoveryMicIntent(),
+    });
+    if (accepted) {
+      debugLog("[android-firefox-room-recovery] watching SDK reconnect for a stall");
+    }
+  }
+  function scheduleReconnectFlagSafetyReset() {
+    setTimeout(() => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
+        return;
+      }
+      if (_isReconnecting) {
+        _isReconnecting = false;
+        debugLog("[reconnect] safety timeout — resetting reconnecting flag");
+      }
+    }, 10000);
+  }
+  function ignoreAndroidFirefoxStaleRoomEvent(eventName) {
+    if (!androidFirefoxRoomDisconnectRecoveryEnabled ||
+        (newRoom === room && newRoom._echoRecoveryDisconnect !== true)) {
+      return false;
+    }
+    debugLog("[android-firefox-room-recovery] ignored stale/controlled Room " + eventName);
+    return true;
+  }
   if (LK.RoomEvent?.ConnectionStateChanged) {
     newRoom.on(LK.RoomEvent.ConnectionStateChanged, (state) => {
       if (!state) return;
+      if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room " + state + " state");
+        return;
+      }
       if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          state === "disconnected" &&
-          newRoom !== room) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room disconnected state");
+          newRoom._echoRecoveryDisconnect === true) {
+        debugLog("[android-firefox-room-recovery] ignored controlled old Room " + state + " state");
         return;
       }
       debugLog("[connection] state changed: " + state);
       if (state === "reconnecting") {
         _isReconnecting = true;
+        if (androidFirefoxRoomDisconnectRecoveryEnabled) watchAndroidFirefoxRoomReconnect();
+      } else if (androidFirefoxRoomDisconnectRecoveryEnabled && state === "signalReconnecting") {
+        _isReconnecting = true;
+        watchAndroidFirefoxRoomReconnect();
       } else if (state === "connected") {
         _isReconnecting = false;
+        androidFirefoxRoomDisconnectRecovery?.handleConnected({ room: newRoom });
+        resetAndroidFirefoxRecoveryMicIntent();
       }
       if (state === "disconnected") {
         _isReconnecting = false;
@@ -671,6 +774,14 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.Disconnected) {
     newRoom.on(LK.RoomEvent.Disconnected, (reason) => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          newRoom._echoRecoveryDisconnect === true) {
+        if (typeof stopInboundScreenStatsMonitor === "function") {
+          stopInboundScreenStatsMonitor();
+        }
+        debugLog("[android-firefox-room-recovery] ignored controlled source Room disconnect");
+        return;
+      }
       // Failed reconnect candidates also emit Disconnected. On Android Firefox,
       // ignore those stale Room instances before they overwrite the active
       // session status or stop its stats monitor. Other platforms retain the
@@ -697,17 +808,8 @@ async function connectToRoom({
         room: newRoom,
         reason: reason,
         disconnectReasons: LK.DisconnectReason,
-        reconnect: function() {
-          return connectToRoom({
-            controlUrl: controlUrl,
-            sfuUrl: sfuUrl,
-            roomId: roomId,
-            identity: identity,
-            name: name,
-            reuseAdmin: true,
-            preserveMicIntent: true,
-          });
-        },
+        reconnect: reconnectAndroidFirefoxRoom,
+        micWasEnabled: captureAndroidFirefoxRecoveryMicIntent(),
       });
       if (recoveryAccepted) {
         setStatus("Reconnecting Android Firefox session...", true);
@@ -716,17 +818,30 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.SignalReconnecting) {
     newRoom.on(LK.RoomEvent.SignalReconnecting, () => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room signal reconnecting");
+        return;
+      }
       _isReconnecting = true;
+      watchAndroidFirefoxRoomReconnect();
       setStatus("Signal reconnecting...", true);
       recordActiveRoomDiagnostic(newRoom, () => logEvent("signal-reconnecting", ""));
       debugLog("[reconnect] signal reconnecting — suppressing chimes and delaying cleanup");
       // Safety: auto-reset after 10s if reconnection stalls
-      setTimeout(() => { if (_isReconnecting) { _isReconnecting = false; debugLog("[reconnect] safety timeout — resetting reconnecting flag"); } }, 10000);
+      scheduleReconnectFlagSafetyReset();
     });
   }
   if (LK.RoomEvent?.SignalReconnected) {
     newRoom.on(LK.RoomEvent.SignalReconnected, () => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room signal reconnected");
+        return;
+      }
       _isReconnecting = false;
+      androidFirefoxRoomDisconnectRecovery?.handleConnected({ room: newRoom });
+      resetAndroidFirefoxRecoveryMicIntent();
       setStatus("Signal reconnected");
       recordActiveRoomDiagnostic(newRoom, () => logEvent("signal-reconnected", ""));
       debugLog("[reconnect] signal reconnected — cancelling pending disconnects");
@@ -754,16 +869,29 @@ async function connectToRoom({
   // Room-level reconnecting/reconnected (covers media reconnection too)
   if (LK.RoomEvent?.Reconnecting) {
     newRoom.on(LK.RoomEvent.Reconnecting, () => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room reconnecting event");
+        return;
+      }
       _isReconnecting = true;
+      watchAndroidFirefoxRoomReconnect();
       setStatus("Reconnecting...", true);
       recordActiveRoomDiagnostic(newRoom, () => logEvent("reconnecting", ""));
       debugLog("[reconnect] room reconnecting — suppressing chimes and delaying cleanup");
-      setTimeout(() => { if (_isReconnecting) { _isReconnecting = false; debugLog("[reconnect] safety timeout — resetting reconnecting flag"); } }, 10000);
+      scheduleReconnectFlagSafetyReset();
     });
   }
   if (LK.RoomEvent?.Reconnected) {
     newRoom.on(LK.RoomEvent.Reconnected, () => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room reconnected event");
+        return;
+      }
       _isReconnecting = false;
+      androidFirefoxRoomDisconnectRecovery?.handleConnected({ room: newRoom });
+      resetAndroidFirefoxRecoveryMicIntent();
       setStatus("Reconnected");
       recordActiveRoomDiagnostic(newRoom, () => logEvent("reconnected", ""));
       debugLog("[reconnect] room reconnected — cancelling pending disconnects");
@@ -789,6 +917,15 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.ConnectionError) {
     newRoom.on(LK.RoomEvent.ConnectionError, (err) => {
+      if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
+        debugLog("[android-firefox-room-recovery] ignored stale Room connection error");
+        return;
+      }
+      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
+          newRoom._echoRecoveryDisconnect === true) {
+        debugLog("[android-firefox-room-recovery] ignored controlled source Room connection error");
+        return;
+      }
       const detail = err?.message || String(err || "unknown");
       recordActiveRoomDiagnostic(newRoom, () => {
         window.EchoWebDiagnosticsRuntime?.recordConnectionState?.("error", err?.name);
@@ -799,6 +936,7 @@ async function connectToRoom({
   const localIdentity = identity;
   ensureParticipantCard({ identity: localIdentity, name }, true);
   newRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+    if (ignoreAndroidFirefoxStaleRoomEvent("track subscribed")) return;
     // DEBUG: log ALL track subscriptions
     console.log('[TRACK-SUB] ' + (participant?.identity || '?') + ' kind=' + track.kind + ' source=' + (publication?.source || track?.source));
     // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
@@ -846,6 +984,7 @@ async function connectToRoom({
   });
   if (LK.RoomEvent?.TrackSubscriptionFailed) {
     newRoom.on(LK.RoomEvent.TrackSubscriptionFailed, (publication, participant, err) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("track subscription failed")) return;
       const detail = err?.message || String(err || "track subscription failed");
       setStatus(`Track subscription failed: ${detail}`, true);
       debugLog(`track subscription failed ${participant?.identity || "unknown"} ${detail}`);
@@ -868,6 +1007,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.TrackPublished) {
     newRoom.on(LK.RoomEvent.TrackPublished, (publication, participant) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("track published")) return;
       // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
       patchScreenCompanionSource(publication, publication?.track, participant);
       var pubSource = getTrackSource(publication, publication?.track);
@@ -926,6 +1066,7 @@ async function connectToRoom({
     });
   }
   newRoom.on(LK.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+    if (ignoreAndroidFirefoxStaleRoomEvent("track unsubscribed")) return;
     handleTrackUnsubscribed(track, publication, participant);
   });
   // Remote TrackUnpublished — fires AFTER the publication is removed from the
@@ -934,6 +1075,7 @@ async function connectToRoom({
   // This handler catches screen share tiles and camera cards that got stuck.
   if (LK.RoomEvent?.TrackUnpublished) {
     newRoom.on(LK.RoomEvent.TrackUnpublished, (publication, participant) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("track unpublished")) return;
       if (!publication || !participant) return;
       // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
       patchScreenCompanionSource(publication, publication?.track, participant);
@@ -1015,6 +1157,7 @@ async function connectToRoom({
     });
   }
   newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
+    if (ignoreAndroidFirefoxStaleRoomEvent("participant connected")) return;
     console.log('[PARTICIPANT] connected: ' + participant.identity);
     if (participant.identity.endsWith('$screen')) {
       debugLog('[screen-merge] $screen companion joined: ' + participant.identity);
@@ -1102,6 +1245,7 @@ async function connectToRoom({
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
     newRoom.on(LK.RoomEvent.ParticipantNameChanged, (participant) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("participant name changed")) return;
       const cardRef = participantCards.get(participant.identity);
       if (!cardRef) return;
       const label = participant.name || "Guest";
@@ -1113,6 +1257,7 @@ async function connectToRoom({
     });
   }
   newRoom.on(LK.RoomEvent.ParticipantDisconnected, (participant) => {
+    if (ignoreAndroidFirefoxStaleRoomEvent("participant disconnected")) return;
     const key = participant.identity;
     debugLog(`participant disconnected ${participant.identity} (reconnecting=${_isReconnecting})`);
 
@@ -1208,6 +1353,7 @@ async function connectToRoom({
   });
   if (LK.RoomEvent?.TrackMuted) {
     newRoom.on(LK.RoomEvent.TrackMuted, (publication, participant) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("track muted")) return;
       if (!participant) return;
       const source = publication?.source;
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
@@ -1230,6 +1376,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.TrackUnmuted) {
     newRoom.on(LK.RoomEvent.TrackUnmuted, (publication, participant) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("track unmuted")) return;
       if (!participant) return;
       const source = publication?.source;
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
@@ -1254,6 +1401,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.ActiveSpeakers) {
     newRoom.on(LK.RoomEvent.ActiveSpeakers, (speakers) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("active speakers")) return;
       activeSpeakerIds = new Set(speakers.map((p) => p.identity));
       lastActiveSpeakerEvent = performance.now();
       updateActiveSpeakerUi();
@@ -1261,6 +1409,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.DataReceived) {
     newRoom.on(LK.RoomEvent.DataReceived, (payload, participant) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("data received")) return;
       try {
         const text = new TextDecoder().decode(payload);
         const msg = JSON.parse(text);
@@ -1355,6 +1504,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.LocalTrackPublished) {
     newRoom.on(LK.RoomEvent.LocalTrackPublished, (publication) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("local track published")) return;
       const local = room.localParticipant;
       if (!local || !publication) return;
       updatePublisherMicrophoneState(publication, local, true);
@@ -1391,6 +1541,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.LocalTrackUnpublished) {
     newRoom.on(LK.RoomEvent.LocalTrackUnpublished, (publication) => {
+      if (ignoreAndroidFirefoxStaleRoomEvent("local track unpublished")) return;
       const localParticipant = room?.localParticipant;
       if (localParticipant) updatePublisherMicrophoneState(publication, localParticipant, false);
       const source = publication.source;
@@ -1460,7 +1611,7 @@ async function connectToRoom({
   // New room is connected — NOW disconnect old room and swap
   if (hadOldRoom && oldRoom) {
     oldRoom._echoExpectedDisconnect = true;
-    oldRoom.disconnect();
+    if (oldRoom._echoRecoveryDisconnect !== true) oldRoom.disconnect();
     clearMedia();
     clearSoundboardState();
     hiddenScreens.clear();
@@ -1866,6 +2017,7 @@ async function connect() {
 
 async function disconnect() {
   if (!room) return;
+  androidFirefoxRoomDisconnectRecovery?.cancel(room);
   // Invalidate any in-flight connect/switch attempts (#67)
   connectSequence++;
   sendLeaveNotification();
