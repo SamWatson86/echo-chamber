@@ -4,6 +4,16 @@
 
 // Mobile device detection — variable declared in state.js, assigned here
 var _isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+
+// Firefox on Android needs LiveKit's unmodified SDP negotiation. Keep this
+// predicate narrow so every desktop/native client and other mobile browser
+// retains the existing custom WebRTC overrides.
+function isAndroidFirefoxBrowser(navigatorObject, isNativeShell) {
+  if (isNativeShell) return false;
+  var ua = String(navigatorObject && navigatorObject.userAgent || "");
+  return /Android/i.test(ua) && /Firefox\/\d/i.test(ua);
+}
+
 var _isMacOSDevice = (function() {
   try {
     var uaPlatform = navigator.userAgentData && navigator.userAgentData.platform;

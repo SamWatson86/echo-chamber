@@ -181,6 +181,7 @@ function clearMedia() {
   screenTileBySid.clear();
   screenTileByIdentity.clear();
   screenTrackMeta.clear();
+  androidFirefoxScreenRecoveryBySid.clear();
   screenRecoveryAttempts.clear();
   screenResubscribeIntent.clear();
   stopInboundScreenStatsMonitor();
