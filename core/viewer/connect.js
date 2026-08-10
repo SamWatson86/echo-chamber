@@ -359,6 +359,9 @@ async function connectToRoom({
       throw new Error("Android Firefox recovery teardown helper is unavailable");
     }
     await disconnectRecoverySource(androidFirefoxRecoverySourceRoom);
+    if (androidFirefoxRecoverySourceRoom._echoRecoveryDisconnectTimedOut === true) {
+      debugLog("[android-firefox-room-recovery] source Room teardown exceeded 1500ms; continuing fresh handoff");
+    }
     if (controlledReplacementSequence !== connectSequence ||
         androidFirefoxRecoverySourceRoom !== room ||
         switchingRoom ||
@@ -776,7 +779,7 @@ async function connectToRoom({
     newRoom.on(LK.RoomEvent.Disconnected, (reason) => {
       if (androidFirefoxRoomDisconnectRecoveryEnabled &&
           newRoom._echoRecoveryDisconnect === true) {
-        if (typeof stopInboundScreenStatsMonitor === "function") {
+        if (newRoom === room && typeof stopInboundScreenStatsMonitor === "function") {
           stopInboundScreenStatsMonitor();
         }
         debugLog("[android-firefox-room-recovery] ignored controlled source Room disconnect");

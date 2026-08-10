@@ -308,6 +308,151 @@ test("failed source teardown is retried and successful teardown stays single-fli
   assert.equal(disconnectCalls, 2, "completed teardown must never run again");
 });
 
+test("falsy source teardown rejection clears the cached attempt and permits a successful retry", async () => {
+  let disconnectCalls = 0;
+  const sourceRoom = {
+    disconnect() {
+      disconnectCalls += 1;
+      if (disconnectCalls === 1) return Promise.reject(undefined);
+      return Promise.resolve();
+    },
+  };
+
+  let rejected = false;
+  try {
+    await disconnectAndroidFirefoxRecoverySource(sourceRoom);
+  } catch (error) {
+    rejected = true;
+    assert.equal(error, undefined);
+  }
+  assert.equal(rejected, true);
+  assert.equal(sourceRoom._echoRecoveryDisconnectPromise, null);
+  assert.equal(sourceRoom._echoRecoveryDisconnectComplete, undefined);
+
+  assert.equal(await disconnectAndroidFirefoxRecoverySource(sourceRoom), true);
+  assert.equal(disconnectCalls, 2);
+  assert.equal(sourceRoom._echoRecoveryDisconnectComplete, true);
+});
+
+test("never-settling source teardown releases once at its deadline and remains single-flight", async () => {
+  const timers = [];
+  let disconnectCalls = 0;
+  const sourceRoom = {
+    disconnect(stopTracks) {
+      disconnectCalls += 1;
+      assert.equal(stopTracks, true);
+      return new Promise(() => {});
+    },
+  };
+  const options = {
+    timeoutMs: 1500,
+    schedule(callback, delay) {
+      const timer = { callback, delay, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    cancelSchedule(timer) { timer.cancelled = true; },
+  };
+
+  const first = disconnectAndroidFirefoxRecoverySource(sourceRoom, options);
+  const concurrent = disconnectAndroidFirefoxRecoverySource(sourceRoom, options);
+  await Promise.resolve();
+
+  assert.equal(disconnectCalls, 1, "concurrent callers must share the wedged teardown");
+  assert.equal(timers.length, 1, "the shared teardown must own one deadline");
+  assert.equal(timers[0].delay, 1500);
+  timers[0].callback();
+
+  assert.deepEqual(await Promise.all([first, concurrent]), [true, true]);
+  assert.equal(sourceRoom._echoRecoveryDisconnectReleased, true);
+  assert.equal(sourceRoom._echoRecoveryDisconnectTimedOut, true);
+  assert.equal(sourceRoom._echoRecoveryDisconnectComplete, undefined);
+  assert.equal(await disconnectAndroidFirefoxRecoverySource(sourceRoom, options), false);
+  assert.equal(disconnectCalls, 1, "released teardown must not start again");
+});
+
+test("controller cannot overlap fresh connects while a wedged teardown waits for its deadline", async () => {
+  const teardownTimers = [];
+  let disconnectCalls = 0;
+  let replacementStarts = 0;
+  const teardownOptions = {
+    timeoutMs: 1500,
+    schedule(callback, delay) {
+      const timer = { callback, delay, cancelled: false };
+      teardownTimers.push(timer);
+      return timer;
+    },
+    cancelSchedule(timer) { timer.cancelled = true; },
+  };
+  const harness = createHarness({
+    reconnect({ currentRoom, setCurrentRoom }) {
+      replacementStarts += 1;
+      currentRoom.disconnect = function(stopTracks) {
+        disconnectCalls += 1;
+        assert.equal(stopTracks, true);
+        return new Promise(() => {});
+      };
+      return disconnectAndroidFirefoxRecoverySource(currentRoom, teardownOptions)
+        .then(function() {
+          setCurrentRoom({ sid: "replacement-room" });
+        });
+    },
+  });
+
+  assert.equal(harness.arm(true), true);
+  await harness.fire(harness.liveTimers()[0]);
+  const attempt = harness.fire(harness.liveTimers()[0]);
+  await Promise.resolve();
+
+  assert.equal(replacementStarts, 1);
+  assert.equal(disconnectCalls, 1);
+  assert.equal(harness.arm(false), false, "duplicate reconnect events must not start another fresh connect");
+  assert.equal(harness.controller.snapshot().inFlight, true);
+  assert.equal(teardownTimers.length, 1);
+  assert.equal(teardownTimers[0].delay, 1500);
+
+  teardownTimers[0].callback();
+  await attempt;
+  assert.equal(replacementStarts, 1);
+  assert.equal(disconnectCalls, 1);
+  assert.equal(harness.getCurrentRoom().sid, "replacement-room");
+  assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false });
+});
+
+test("late source teardown completion cannot restart or overwrite a released handoff", async () => {
+  const timers = [];
+  let disconnectCalls = 0;
+  let finishDisconnect;
+  const sourceRoom = {
+    disconnect() {
+      disconnectCalls += 1;
+      return new Promise((resolve) => { finishDisconnect = resolve; });
+    },
+  };
+  const options = {
+    timeoutMs: 1500,
+    schedule(callback) {
+      const timer = { callback, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    cancelSchedule(timer) { timer.cancelled = true; },
+  };
+
+  const teardown = disconnectAndroidFirefoxRecoverySource(sourceRoom, options);
+  await Promise.resolve();
+  timers[0].callback();
+  assert.equal(await teardown, true);
+  assert.equal(sourceRoom._echoRecoveryDisconnectReleased, true);
+
+  finishDisconnect();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(sourceRoom._echoRecoveryDisconnectComplete, true);
+  assert.equal(await disconnectAndroidFirefoxRecoverySource(sourceRoom, options), false);
+  assert.equal(disconnectCalls, 1);
+});
+
 test("real platform gate gives every non-target client zero stalled-reconnect actions", () => {
   const cases = [
     ["Windows Chrome", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153.0 Safari/537.36", false],
@@ -348,6 +493,8 @@ test("mic preservation policy remains recovery-only and production wiring tears 
   assert.match(connectSource, /handleReconnecting\(\{[\s\S]*?micWasEnabled: captureAndroidFirefoxRecoveryMicIntent\(\)/);
   assert.match(connectSource, /disconnectAndroidFirefoxRecoverySource[\s\S]*?await disconnectRecoverySource\(androidFirefoxRecoverySourceRoom\)/);
   assert.match(connectSource, /await disconnectRecoverySource\(androidFirefoxRecoverySourceRoom\)[\s\S]*?await newRoom\.connect/);
+  assert.match(connectSource, /_echoRecoveryDisconnectTimedOut === true[\s\S]*?continuing fresh handoff/);
+  assert.match(connectSource, /newRoom\._echoRecoveryDisconnect === true\)[\s\S]*?if \(newRoom === room && typeof stopInboundScreenStatsMonitor/);
   assert.match(connectSource, /reuseAdmin: true,[\s\S]*?preserveMicIntent: true,[\s\S]*?androidFirefoxRecoverySourceRoom: newRoom/);
   assert.match(connectSource, /ignoreAndroidFirefoxStaleRoomEvent\("local track unpublished"\)/);
   assert.match(connectSource, /androidFirefoxRoomDisconnectRecovery\?\.cancel\(room\);[\s\S]*?connectSequence \+= 1;[\s\S]*?room\._echoExpectedDisconnect = true/);
