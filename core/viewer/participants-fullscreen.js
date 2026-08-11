@@ -17,6 +17,140 @@ function isCurrentScreenRecoveryGeneration(options) {
   return true;
 }
 
+function isAndroidFirefoxPresentationRecoveryGeneration(options) {
+  if (!isCurrentScreenRecoveryGeneration(options)) return false;
+  if (typeof options.isRoomConnected === "function") {
+    try {
+      if (options.isRoomConnected() !== true) return false;
+    } catch (_error) {
+      return false;
+    }
+  } else if (options.roomConnected !== true) {
+    return false;
+  }
+  var publication = options.publication;
+  var mediaTrack = publication?.track?.mediaStreamTrack;
+  if (publication?.isSubscribed !== true || !mediaTrack || mediaTrack.readyState !== "live") return false;
+  if (mediaTrack.muted === true) return false;
+  var video = options.video || options.tile?.querySelector?.("video");
+  if (!video || video !== options.tile?.querySelector?.("video")) return false;
+  if (video._lkTrack !== publication.track || video.paused === true) return false;
+  if (typeof options.isDocumentVisible === "function") {
+    try {
+      if (options.isDocumentVisible() !== true) return false;
+    } catch (_error) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getAndroidFirefoxPresentationRecoveryAction(options) {
+  if (!options || options.enabled !== true || !options.recoveryStateBySid || !options.trackSid) {
+    return "none";
+  }
+  var nowMs = Number(options.nowMs);
+  if (!Number.isFinite(nowMs)) return "none";
+  var state = options.recoveryStateBySid.get(options.trackSid) || {};
+  var presentedFrameTs = Number(options.presentedFrameTs) || 0;
+  if (options.current === false) return "none";
+
+  if (presentedFrameTs > (Number(state.lastPresentedFrameTs) || 0)) {
+    var recoveredAfterAction = Number(state.presentationActionFrameTs) > 0 &&
+      presentedFrameTs > Number(state.presentationActionFrameTs);
+    state.lastPresentedFrameTs = presentedFrameTs;
+    state.presentationStalledTicks = 0;
+    state.presentationLastStallTickAt = 0;
+    if (recoveredAfterAction) {
+      var previousProgressTickAt = Number(state.presentationRearmLastProgressTickAt) || 0;
+      state.presentationRearmProgressTicks = previousProgressTickAt > 0 &&
+        nowMs - previousProgressTickAt <= 15000
+        ? (Number(state.presentationRearmProgressTicks) || 0) + 1
+        : 1;
+      state.presentationRearmLastProgressTickAt = nowMs;
+      if (state.presentationRearmProgressTicks >= 2) {
+        delete state.presentationSinkResetAttempted;
+        delete state.presentationSinkResetAt;
+        delete state.presentationActionFrameTs;
+        delete state.presentationSubscriptionResetAttempted;
+        delete state.presentationSubscriptionResetAt;
+        delete state.presentationSubscriptionResetSkipped;
+        delete state.presentationRearmProgressTicks;
+        delete state.presentationRearmLastProgressTickAt;
+        if (state.subscriptionResetKind === "presentation") {
+          delete state.subscriptionResetAttempted;
+          delete state.subscriptionResetAt;
+          delete state.subscriptionResetKind;
+        }
+      }
+    } else {
+      delete state.presentationRearmProgressTicks;
+      delete state.presentationRearmLastProgressTickAt;
+    }
+    options.recoveryStateBySid.set(options.trackSid, state);
+    return "progress";
+  }
+
+  // A single intermittent frame is not recovery. It must be followed by frame
+  // progress on the next watchdog observation before the SID can rearm.
+  if (state.presentationRearmProgressTicks) {
+    delete state.presentationRearmProgressTicks;
+    delete state.presentationRearmLastProgressTickAt;
+  }
+
+  var lastPresentedFrameTs = Number(state.lastPresentedFrameTs) || presentedFrameTs;
+  if (!(lastPresentedFrameTs > 0) || nowMs - lastPresentedFrameTs < 8000) return "none";
+  state.presentationLastStallTickAt = nowMs;
+  state.presentationStalledTicks = (Number(state.presentationStalledTicks) || 0) + 1;
+  options.recoveryStateBySid.set(options.trackSid, state);
+  if (state.presentationStalledTicks < 2) return "none";
+  if (state.presentationSinkResetAttempted !== true) return "sink";
+  if (nowMs - (Number(state.presentationSinkResetAt) || 0) < 6000) return "none";
+  if (state.presentationSubscriptionResetAttempted !== true &&
+      state.subscriptionResetAttempted === true &&
+      state.subscriptionResetKind !== "presentation") {
+    state.presentationSubscriptionResetAttempted = true;
+    state.presentationSubscriptionResetAt = Number(state.presentationSinkResetAt) || nowMs;
+    state.presentationSubscriptionResetSkipped = true;
+    options.recoveryStateBySid.set(options.trackSid, state);
+  }
+  if (state.presentationSubscriptionResetAttempted !== true) return "subscription";
+  if (nowMs - (Number(state.presentationSubscriptionResetAt) || 0) < 6000) return "none";
+  return "relay";
+}
+
+function isAndroidFirefoxPresentationRelayAction(action) {
+  return action === "relay";
+}
+
+function markAndroidFirefoxPresentationRecoveryAction(options, action) {
+  if (!options?.recoveryStateBySid || !options.trackSid) return false;
+  var state = options.recoveryStateBySid.get(options.trackSid) || {};
+  var nowMs = Number(options.nowMs);
+  if (!Number.isFinite(nowMs)) return false;
+  if (action === "sink") {
+    state.presentationSinkResetAttempted = true;
+    state.presentationSinkResetAt = nowMs;
+    state.presentationActionFrameTs = Number(state.lastPresentedFrameTs) ||
+      Number(options.presentedFrameTs) || 0;
+    if (state.subscriptionResetAttempted === true &&
+        state.subscriptionResetKind !== "presentation") {
+      state.presentationSubscriptionResetAttempted = true;
+      state.presentationSubscriptionResetAt = nowMs;
+      state.presentationSubscriptionResetSkipped = true;
+    }
+  } else if (action === "subscription") {
+    state.presentationSubscriptionResetAttempted = true;
+    state.presentationSubscriptionResetAt = nowMs;
+    state.presentationActionFrameTs = Number(state.lastPresentedFrameTs) ||
+      Number(options.presentedFrameTs) || 0;
+  } else {
+    return false;
+  }
+  options.recoveryStateBySid.set(options.trackSid, state);
+  return true;
+}
+
 function attemptAndroidFirefoxScreenSubscriptionReset(options) {
   if (!options || options.enabled !== true) return false;
   var meta = options.meta;
@@ -29,7 +163,8 @@ function attemptAndroidFirefoxScreenSubscriptionReset(options) {
   if (recoveryState?.subscriptionResetAttempted === true) return false;
   if (publication.isSubscribed !== true || typeof publication.setSubscribed !== "function") return false;
   var mediaTrack = publication.track?.mediaStreamTrack;
-  if (!mediaTrack || mediaTrack.readyState !== "live" || mediaTrack.muted !== true) return false;
+  if (!mediaTrack || mediaTrack.readyState !== "live") return false;
+  if (mediaTrack.muted !== true && options.allowUnmutedPresentationStall !== true) return false;
   if (!(options.frameAgeMs > 3000) || !(options.firstLineRecoveryAt > 0)) return false;
 
   // Mark before touching the subscription. TrackUnsubscribed can arrive
@@ -40,10 +175,14 @@ function attemptAndroidFirefoxScreenSubscriptionReset(options) {
     : (typeof performance === "object" && typeof performance.now === "function"
         ? performance.now()
         : Date.now());
-  options.recoveryStateBySid.set(trackSid, {
+  var nextRecoveryState = Object.assign({}, recoveryState || {}, {
     subscriptionResetAttempted: true,
     subscriptionResetAt: resetAtMs,
   });
+  if (options.allowUnmutedPresentationStall === true) {
+    nextRecoveryState.subscriptionResetKind = "presentation";
+  }
+  options.recoveryStateBySid.set(trackSid, nextRecoveryState);
   if (typeof options.markResubscribeIntent === "function") {
     options.markResubscribeIntent(trackSid);
   }
@@ -96,7 +235,17 @@ function isAndroidFirefoxConnectedMediaStallCurrent(options) {
   if (!(frameAgeMs > 3000)) return false;
 
   var mediaTrack = options.publication.track?.mediaStreamTrack;
-  return !!mediaTrack && mediaTrack.readyState === "live" && mediaTrack.muted === true;
+  if (!mediaTrack || mediaTrack.readyState !== "live") return false;
+  if (mediaTrack.muted === true) return true;
+  if (options.allowUnmutedPresentationStall !== true ||
+      typeof options.isPresentationCurrent !== "function") {
+    return false;
+  }
+  try {
+    return options.isPresentationCurrent() === true;
+  } catch (_error) {
+    return false;
+  }
 }
 
 function attemptAndroidFirefoxConnectedMediaRelayRecovery(options) {
@@ -391,7 +540,89 @@ function startScreenWatchdog() {
       const publication = meta.publication;
       const track = publication?.track;
 
-      if (hasFrames && !isBlack && age < 4500) return;
+      var androidFirefoxRecoveryEnabled = typeof isAndroidFirefoxBrowser === "function" &&
+        isAndroidFirefoxBrowser(
+          typeof navigator === "object" ? navigator : null,
+          typeof window === "object" && window.__ECHO_NATIVE__ === true
+        );
+      var localScreenIdentity = room?.localParticipant?.identity || null;
+      var isRemoteScreen = !!meta.identity && meta.identity !== localScreenIdentity;
+      var presentationState = androidFirefoxScreenRecoveryBySid.get(trackSid) || {};
+      var basicPresentationCurrent = androidFirefoxRecoveryEnabled && isRemoteScreen &&
+        isAndroidFirefoxPresentationRecoveryGeneration({
+          trackSid: trackSid,
+          meta: meta,
+          publication: publication,
+          tile: tile,
+          video: video,
+          roomConnected: String(room?.state || "").toLowerCase() === "connected",
+          getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
+          getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
+          isHidden: function(identity) { return hiddenScreens.has(identity); },
+          isDocumentVisible: function() {
+            return typeof document !== "object" || document.visibilityState !== "hidden";
+          },
+        });
+      var initialPresentationReady = video.paused !== true && video.readyState >= 2 &&
+        video.videoWidth > 0 && video.videoHeight > 0 && video._lastPresentedFrameTs > 0;
+      var presentationCurrent = basicPresentationCurrent &&
+        (initialPresentationReady || presentationState.presentationSinkResetAttempted === true);
+      var presentationAction = getAndroidFirefoxPresentationRecoveryAction({
+        enabled: androidFirefoxRecoveryEnabled && isRemoteScreen,
+        current: presentationCurrent,
+        trackSid: trackSid,
+        nowMs: now,
+        presentedFrameTs: video._lastPresentedFrameTs || 0,
+        recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
+      });
+
+      if (presentationAction === "sink") {
+        if (replaceAndroidFirefoxPresentationVideoElement(tile, track, publication)) {
+          markAndroidFirefoxPresentationRecoveryAction({
+            trackSid: trackSid,
+            nowMs: now,
+            presentedFrameTs: video._lastPresentedFrameTs || 0,
+            recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
+          }, "sink");
+          debugLog("[android-firefox-recovery] replacing stalled presentation sink sid=" + trackSid);
+          requestVideoKeyFrame(publication, track);
+          return;
+        }
+      }
+
+      if (presentationAction === "subscription") {
+        var presentationResetScheduled = attemptAndroidFirefoxScreenSubscriptionReset({
+          enabled: true,
+          allowUnmutedPresentationStall: true,
+          trackSid: trackSid,
+          meta: meta,
+          publication: publication,
+          tile: tile,
+          frameAgeMs: now - (Number(presentationState.lastPresentedFrameTs) || 0),
+          firstLineRecoveryAt: meta.lastFix || Number(presentationState.presentationSinkResetAt) || now,
+          nowMs: now,
+          recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
+          getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
+          getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
+          isHidden: function(identity) { return hiddenScreens.has(identity); },
+          markResubscribeIntent: markResubscribeIntent,
+          requestKeyFrame: requestVideoKeyFrame,
+          schedule: setTimeout,
+          log: debugLog,
+        });
+        if (presentationResetScheduled) {
+          markAndroidFirefoxPresentationRecoveryAction({
+            trackSid: trackSid,
+            nowMs: now,
+            presentedFrameTs: video._lastPresentedFrameTs || 0,
+            recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
+          }, "subscription");
+          return;
+        }
+      }
+
+      var presentationRelayReady = isAndroidFirefoxPresentationRelayAction(presentationAction);
+      if (hasFrames && !isBlack && age < 4500 && !presentationRelayReady) return;
       // Grace period: don't run recovery on tiles less than 8 seconds old.
       // New tiles need time to receive first frames before recovery kicks in.
       var tileAge = now - (meta.createdAt || 0);
@@ -403,15 +634,10 @@ function startScreenWatchdog() {
       // the normal keyframe/reattach recovery one full watchdog pass first,
       // then perform one exact-SID subscription reset. No other browser or the
       // native desktop shell can enter this path.
-      var androidFirefoxRecoveryEnabled = typeof isAndroidFirefoxBrowser === "function" &&
-        isAndroidFirefoxBrowser(
-          typeof navigator === "object" ? navigator : null,
-          typeof window === "object" && window.__ECHO_NATIVE__ === true
-        );
-      var localScreenIdentity = room?.localParticipant?.identity || null;
-      var isRemoteScreen = !!meta.identity && meta.identity !== localScreenIdentity;
-      if (androidFirefoxRecoveryEnabled && isRemoteScreen && stalled &&
-          meta.lastFix > 0 && now - meta.lastFix >= 2500) {
+      if (androidFirefoxRecoveryEnabled && isRemoteScreen &&
+          (stalled || presentationRelayReady) &&
+          (presentationRelayReady ||
+            (meta.lastFix > 0 && now - meta.lastFix >= 2500))) {
         var resetScheduled = attemptAndroidFirefoxScreenSubscriptionReset({
           enabled: true,
           trackSid: trackSid,
@@ -433,8 +659,10 @@ function startScreenWatchdog() {
         if (resetScheduled) return;
 
         var connectedMediaRecoveryRoom = room;
+        var allowUnmutedPresentationStall = presentationRelayReady;
         var relayRecoveryAccepted = attemptAndroidFirefoxConnectedMediaRelayRecovery({
           enabled: true,
+          allowUnmutedPresentationStall: allowUnmutedPresentationStall,
           roomConnected: String(connectedMediaRecoveryRoom?.state || "").toLowerCase() === "connected",
           isRoomConnected: function() {
             return room === connectedMediaRecoveryRoom &&
@@ -444,7 +672,9 @@ function startScreenWatchdog() {
           meta: meta,
           publication: publication,
           tile: tile,
-          frameAgeMs: age,
+          frameAgeMs: allowUnmutedPresentationStall
+            ? now - (Number(presentationState.lastPresentedFrameTs) || 0)
+            : age,
           getFrameAgeMs: function() {
             var currentMeta = screenTrackMeta.get(trackSid);
             var currentTile = screenTileBySid.get(trackSid);
@@ -452,6 +682,15 @@ function startScreenWatchdog() {
             if (!currentMeta || !currentTile || !currentVideo ||
                 currentVideo._lkTrack !== currentMeta.publication?.track) {
               return null;
+            }
+            if (allowUnmutedPresentationStall) {
+              var currentState = androidFirefoxScreenRecoveryBySid.get(trackSid) || {};
+              var currentPresentedFrameTs = Number(currentVideo._lastPresentedFrameTs) || 0;
+              var lastKnownPresentedFrameTs = Math.max(
+                currentPresentedFrameTs,
+                Number(currentState.lastPresentedFrameTs) || 0
+              );
+              return performance.now() - lastKnownPresentedFrameTs;
             }
             return performance.now() - (currentVideo._lastFrameTs || 0);
           },
@@ -462,6 +701,32 @@ function startScreenWatchdog() {
           getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
           getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
           isHidden: function(identity) { return hiddenScreens.has(identity); },
+          isPresentationCurrent: function() {
+            if (!allowUnmutedPresentationStall) return false;
+            var currentMeta = screenTrackMeta.get(trackSid);
+            var currentTile = screenTileBySid.get(trackSid);
+            var currentVideo = currentTile?.querySelector("video");
+            var currentState = androidFirefoxScreenRecoveryBySid.get(trackSid) || {};
+            if (currentState.presentationSinkResetAttempted !== true ||
+                currentState.presentationSubscriptionResetAttempted !== true) {
+              return false;
+            }
+            return room === connectedMediaRecoveryRoom &&
+              isAndroidFirefoxPresentationRecoveryGeneration({
+                trackSid: trackSid,
+                meta: currentMeta,
+                publication: currentMeta?.publication,
+                tile: currentTile,
+                video: currentVideo,
+                roomConnected: String(connectedMediaRecoveryRoom?.state || "").toLowerCase() === "connected",
+                getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
+                getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
+                isHidden: function(identity) { return hiddenScreens.has(identity); },
+                isDocumentVisible: function() {
+                  return typeof document !== "object" || document.visibilityState !== "hidden";
+                },
+              });
+          },
           recover: function(detail) {
             if (typeof requestAndroidFirefoxConnectedMediaRelayRecovery !== "function") return false;
             return requestAndroidFirefoxConnectedMediaRelayRecovery(detail);
@@ -592,6 +857,46 @@ function replaceScreenVideoElement(tile, track, publication) {
   }
   ensureVideoPlays(track, newEl);
   ensureVideoSubscribed(publication, newEl);
+}
+
+function replaceAndroidFirefoxPresentationVideoElement(tile, track, publication) {
+  if (!tile || !track) return false;
+  var oldVideo = tile.querySelector("video");
+  if (!oldVideo) return false;
+  var overlay = tile.querySelector(".tile-overlay");
+  var nextVideo = createAttachedVideoElement(track);
+  if (!nextVideo || nextVideo === oldVideo) return false;
+  configureVideoElement(nextVideo, true);
+  nextVideo.classList.add("screen-video-surface");
+  nextVideo.style.setProperty("object-fit", "contain", "important");
+  nextVideo.style.width = "100%";
+  nextVideo.style.height = "100%";
+  nextVideo.style.background = "transparent";
+
+  // Build and configure the replacement first. Only after a usable sink exists
+  // do we stop diagnostics and detach/null the old element, so a failed element
+  // creation can never destroy the sole working attachment.
+  if (overlay) cleanupVideoDiagnostics(overlay);
+  oldVideo._playGeneration = (oldVideo._playGeneration || 0) + 1;
+  oldVideo._ensurePlayId = (oldVideo._ensurePlayId || 0) + 1;
+  if (oldVideo._monitorTimer) {
+    clearInterval(oldVideo._monitorTimer);
+    oldVideo._monitorTimer = null;
+  }
+  try {
+    if (typeof track.detach === "function") track.detach(oldVideo);
+  } catch (_error) {}
+  try {
+    oldVideo._objectFitGuard?.disconnect?.();
+  } catch (_error) {}
+  try {
+    oldVideo.srcObject = null;
+  } catch (_error) {}
+  try { window._pausedVideos?.delete?.(oldVideo); } catch (_error) {}
+  oldVideo.replaceWith(nextVideo);
+  if (overlay) attachVideoDiagnostics(track, nextVideo, overlay);
+  ensureVideoPlays(track, nextVideo);
+  return tile.querySelector("video") === nextVideo && nextVideo._lkTrack === track;
 }
 
 function kickStartScreenVideo(publication, track, element) {
@@ -793,8 +1098,11 @@ function attachVideoDiagnostics(track, element, overlay) {
   const mediaTrack = track?.mediaStreamTrack;
   const frameRate = createVideoFrameRateTracker(() => performance.now());
   element._lastFrameTs = performance.now();
+  element._lastPresentedFrameTs = Number(element._lastPresentedFrameTs) || 0;
   element._firstFrameTs = element._firstFrameTs || 0;
   let lastMediaTime = element.currentTime || 0;
+  const hasVideoFrameCallback = typeof element.requestVideoFrameCallback === "function";
+  let lastPlaybackQualityFrames = null;
   let blackStreak = 0;
   const canvas = document.createElement("canvas");
   canvas.width = 16;
@@ -838,6 +1146,18 @@ function attachVideoDiagnostics(track, element, overlay) {
         element._firstFrameTs = now;
       }
     }
+    if (!hasVideoFrameCallback && typeof element.getVideoPlaybackQuality === "function") {
+      try {
+        const totalFrames = Number(element.getVideoPlaybackQuality()?.totalVideoFrames);
+        if (Number.isFinite(totalFrames)) {
+          if (lastPlaybackQualityFrames !== null && totalFrames > lastPlaybackQualityFrames) {
+            element._lastPresentedFrameTs = now;
+            if (!element._firstFrameTs) element._firstFrameTs = now;
+          }
+          lastPlaybackQualityFrames = totalFrames;
+        }
+      } catch (_error) {}
+    }
     const fps = frameRate.sample(now);
     const w = element.videoWidth || 0;
     const h = element.videoHeight || 0;
@@ -853,22 +1173,28 @@ function attachVideoDiagnostics(track, element, overlay) {
       black: isBlack,
       firstFrameTs: element._firstFrameTs || 0,
       lastFrameTs: element._lastFrameTs || 0,
+      lastPresentedFrameTs: element._lastPresentedFrameTs || 0,
       presentedFrames: frameRate.presentedFrames(),
       updatedAt: Date.now(),
     };
     overlay.textContent = `${w}x${h} | fps ${fps.toFixed(1)} | ${muted} | rs ${ready}${isBlack ? " | black" : ""}`;
   };
 
-  if (typeof element.requestVideoFrameCallback === "function") {
+  if (hasVideoFrameCallback) {
     const onFrame = (_now, metadata) => {
+      if (overlay._echoDiagnosticVideo !== element || !element.isConnected) return;
       frameRate.noteFrame(metadata);
       element._lastFrameTs = performance.now();
+      element._lastPresentedFrameTs = element._lastFrameTs;
       if (!element._firstFrameTs) {
         element._firstFrameTs = element._lastFrameTs;
       }
-      element.requestVideoFrameCallback(onFrame);
+      element._echoVideoFrameCallbackId = element.requestVideoFrameCallback(onFrame);
     };
-    element.requestVideoFrameCallback(onFrame);
+    overlay._echoDiagnosticVideo = element;
+    element._echoVideoFrameCallbackId = element.requestVideoFrameCallback(onFrame);
+  } else {
+    overlay._echoDiagnosticVideo = element;
   }
 
   const timer = setInterval(updateOverlay, 1000);
@@ -892,9 +1218,13 @@ if (typeof module === "object" && module.exports) {
     attemptAndroidFirefoxScreenSubscriptionReset,
     attemptAndroidFirefoxConnectedMediaRelayRecovery,
     createVideoFrameRateTracker,
+    getAndroidFirefoxPresentationRecoveryAction,
     getVideoPresentationSnapshot,
     isAndroidFirefoxConnectedMediaStallCurrent,
+    isAndroidFirefoxPresentationRecoveryGeneration,
+    isAndroidFirefoxPresentationRelayAction,
     isCurrentScreenRecoveryGeneration,
+    markAndroidFirefoxPresentationRecoveryAction,
   };
 }
 
@@ -902,6 +1232,13 @@ function cleanupVideoDiagnostics(overlay) {
   if (!overlay) return;
   const timer = Number(overlay.dataset.timer || 0);
   if (timer) clearInterval(timer);
+  var element = overlay._echoDiagnosticVideo;
+  if (element && element._echoVideoFrameCallbackId != null &&
+      typeof element.cancelVideoFrameCallback === "function") {
+    try { element.cancelVideoFrameCallback(element._echoVideoFrameCallbackId); } catch (_error) {}
+  }
+  if (element) element._echoVideoFrameCallbackId = null;
+  overlay._echoDiagnosticVideo = null;
 }
 
 // ── Camera recovery ──

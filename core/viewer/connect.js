@@ -727,8 +727,12 @@ async function connectToRoom({
       androidFirefoxForceRelay: recoveryState?.forceRelay === true,
     });
   }
+  function reconnectAndroidFirefoxRoomOverRelay(recoveryState) {
+    return reconnectAndroidFirefoxRoom(Object.assign({}, recoveryState || {}, { forceRelay: true }));
+  }
   if (androidFirefoxRoomDisconnectRecoveryEnabled) {
-    newRoom._echoAndroidFirefoxRelayForced = forceAndroidFirefoxRelay;
+    newRoom._echoAndroidFirefoxRelayAttempted = forceAndroidFirefoxRelay;
+    newRoom._echoAndroidFirefoxRelayForced = false;
     newRoom._echoAndroidFirefoxConnectedMediaRelayRecovery = function(detail) {
       if (newRoom !== room || String(newRoom.state || "").toLowerCase() !== "connected") {
         return false;
@@ -736,12 +740,12 @@ async function connectToRoom({
       return androidFirefoxRoomDisconnectRecovery?.handleConnectedMediaStall({
         room: newRoom,
         trackSid: detail?.trackSid || null,
-        alreadyUsingRelay: newRoom._echoAndroidFirefoxRelayForced === true,
+        alreadyUsingRelay: newRoom._echoAndroidFirefoxRelayAttempted === true,
         isStillStalled: detail?.isStillStalled,
         onValidated: detail?.onValidated,
         micWasEnabled: desiredMicEnabledForRoomSwitch() === true,
         reconnect: function(recoveryState) {
-          return reconnectAndroidFirefoxRoom(Object.assign({}, recoveryState, { forceRelay: true }));
+          return reconnectAndroidFirefoxRoom(Object.assign({}, recoveryState || {}, { forceRelay: true }));
         },
       }) === true;
     };
@@ -750,7 +754,7 @@ async function connectToRoom({
     if (!androidFirefoxRoomDisconnectRecoveryEnabled) return;
     var accepted = androidFirefoxRoomDisconnectRecovery?.handleReconnecting({
       room: newRoom,
-      reconnect: reconnectAndroidFirefoxRoom,
+      reconnect: reconnectAndroidFirefoxRoomOverRelay,
       micWasEnabled: captureAndroidFirefoxRecoveryMicIntent(),
     });
     if (accepted) {
@@ -850,7 +854,7 @@ async function connectToRoom({
         room: newRoom,
         reason: reason,
         disconnectReasons: LK.DisconnectReason,
-        reconnect: reconnectAndroidFirefoxRoom,
+        reconnect: reconnectAndroidFirefoxRoomOverRelay,
         micWasEnabled: captureAndroidFirefoxRecoveryMicIntent(),
       });
       if (recoveryAccepted) {
@@ -1643,12 +1647,63 @@ async function connectToRoom({
   var rtcConfig = { iceServers: iceServers };
   if (forceAndroidFirefoxRelay) {
     rtcConfig.iceTransportPolicy = "relay";
-    debugLog("[android-firefox-room-recovery] forcing TURN relay for connected-media recovery");
+    debugLog("[android-firefox-room-recovery] forcing TURN relay for automated recovery");
   }
   await newRoom.connect(sfuUrl, accessToken, {
     autoSubscribe: true,
     rtcConfig: rtcConfig,
   });
+  if (androidFirefoxRoomDisconnectRecoveryEnabled && forceAndroidFirefoxRelay) {
+    var verifyRelayCandidate = window.EchoRoomSwitchState?.verifyAndroidFirefoxRelayCandidateRoom;
+    var relayVerification = typeof verifyRelayCandidate === "function"
+      ? verifyRelayCandidate(newRoom)
+      : { publisherPolicy: null, subscriberPolicy: null, verified: false };
+    newRoom._echoAndroidFirefoxRelayForced = relayVerification.verified === true;
+    debugLog("[android-firefox-room-recovery] relay configuration publisher=" +
+      (relayVerification.publisherPolicy || "unknown") + " subscriber=" +
+      (relayVerification.subscriberPolicy || "unknown") +
+      " verified=" + newRoom._echoAndroidFirefoxRelayForced);
+    if (!newRoom._echoAndroidFirefoxRelayForced) {
+      // Reject inside the controller-owned reconnect attempt. A proven public
+      // disconnect keeps the normal bounded retry path; an unproven candidate
+      // release is tagged terminal so another same-identity Room cannot start.
+      var disconnectRejectedRelayCandidate =
+        window.EchoRoomSwitchState?.disconnectAndroidFirefoxRejectedRelayCandidate;
+      if (typeof disconnectRejectedRelayCandidate !== "function") {
+        var createCandidateReleaseError =
+          window.EchoRoomSwitchState?.createAndroidFirefoxCandidateReleaseError;
+        if (typeof createCandidateReleaseError === "function") {
+          throw createCandidateReleaseError(
+            "Android Firefox rejected-candidate teardown helper is unavailable"
+          );
+        }
+        // Fail closed if connect.js and room-switch-state.js ever load from
+        // different cache generations. The current controller recognizes this
+        // exact tag and must not open another same-identity candidate.
+        var unavailableCleanupError = new Error(
+          "Android Firefox rejected-candidate teardown helper is unavailable"
+        );
+        unavailableCleanupError.name = "AndroidFirefoxCandidateReleaseError";
+        unavailableCleanupError.code =
+          "ANDROID_FIREFOX_REJECTED_CANDIDATE_RELEASE_UNPROVEN";
+        unavailableCleanupError.terminal = true;
+        unavailableCleanupError.retryable = false;
+        throw unavailableCleanupError;
+      }
+      try {
+        await disconnectRejectedRelayCandidate(newRoom, { timeoutMs: 1500 });
+      } catch (cleanupError) {
+        debugLog("[android-firefox-room-recovery] rejected relay candidate teardown failed: " +
+          (cleanupError?.message || cleanupError));
+        throw cleanupError;
+      }
+      var relayVerificationError = new Error(
+        "Android Firefox recovery candidate did not verify relay transport"
+      );
+      relayVerificationError.name = "AndroidFirefoxRelayVerificationError";
+      throw relayVerificationError;
+    }
+  }
   if (seq !== connectSequence) {
     newRoom._echoExpectedDisconnect = true;
     newRoom.disconnect();
@@ -1670,6 +1725,9 @@ async function connectToRoom({
   // heartbeat, Jam, chat, and native-presenter requests remain authenticated.
   window.EchoWebDiagnosticsRuntime?.credentialBoundary?.(hadOldRoom || !!currentAccessToken);
   newRoom._echoDiagnosticsCommitted = true;
+  if (typeof startInboundScreenStatsMonitor === "function") {
+    startInboundScreenStatsMonitor(newRoom);
+  }
   window.EchoWebDiagnosticsRuntime?.recordConnectionState?.("connected", null);
   currentAccessToken = window.EchoRoomSwitchState &&
     typeof window.EchoRoomSwitchState.commitConnectedAccessToken === "function"

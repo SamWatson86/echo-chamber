@@ -5,7 +5,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 const {
   createAndroidFirefoxRoomDisconnectRecovery,
+  disconnectAndroidFirefoxRejectedRelayCandidate,
   disconnectAndroidFirefoxRecoverySource,
+  isAndroidFirefoxCandidateReleaseError,
   resolvePostConnectMicrophoneBehavior,
 } = require("./room-switch-state.js");
 
@@ -403,6 +405,66 @@ test("never-settling source teardown releases once at its deadline and remains s
   assert.equal(sourceRoom._echoRecoveryDisconnectComplete, undefined);
   assert.equal(await disconnectAndroidFirefoxRecoverySource(sourceRoom, options), false);
   assert.equal(disconnectCalls, 1, "released teardown must not start again");
+});
+
+test("timed-out rejected relay candidate teardown is terminal even if disconnect completes late", async () => {
+  const timers = [];
+  let disconnectCalls = 0;
+  let finishLateDisconnect;
+  let nextRetryStarts = 0;
+  const candidateRoom = {
+    disconnect(stopTracks) {
+      disconnectCalls += 1;
+      assert.equal(stopTracks, true);
+      return new Promise((resolve) => { finishLateDisconnect = resolve; });
+    },
+  };
+  const options = {
+    timeoutMs: 1500,
+    schedule(callback, delay) {
+      const timer = { callback, delay, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    cancelSchedule(timer) { timer.cancelled = true; },
+  };
+
+  const cleanup = disconnectAndroidFirefoxRejectedRelayCandidate(candidateRoom, options);
+  const duplicateCleanup = disconnectAndroidFirefoxRejectedRelayCandidate(candidateRoom, options);
+  const nextRetry = cleanup.then(
+    function() { nextRetryStarts += 1; },
+    function() { return false; }
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(candidateRoom._echoAndroidFirefoxStaleCandidate, true);
+  assert.equal(candidateRoom._echoExpectedDisconnect, true);
+  assert.equal(candidateRoom._echoRecoveryDisconnect, true);
+  assert.equal(disconnectCalls, 1, "candidate cleanup must be single-flight");
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 1500);
+  assert.equal(nextRetryStarts, 0, "the controller cannot start retry two during candidate teardown");
+
+  timers[0].callback();
+  const results = await Promise.allSettled([cleanup, duplicateCleanup]);
+  assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"]);
+  for (const result of results) {
+    assert.equal(isAndroidFirefoxCandidateReleaseError(result.reason), true);
+    assert.equal(result.reason.retryable, false);
+    assert.match(result.reason.message, /timed out/);
+  }
+  await nextRetry;
+  assert.equal(nextRetryStarts, 0);
+  assert.equal(candidateRoom._echoRecoveryDisconnectReleased, true);
+  assert.equal(candidateRoom._echoRecoveryDisconnectTimedOut, true);
+
+  finishLateDisconnect();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(nextRetryStarts, 0, "late candidate teardown completion is inert");
+  assert.equal(disconnectCalls, 1);
+  assert.equal(await disconnectAndroidFirefoxRejectedRelayCandidate(candidateRoom, options), false);
 });
 
 test("controller cannot overlap fresh connects while a wedged teardown waits for its deadline", async () => {
@@ -829,6 +891,8 @@ test("mic preservation policy remains recovery-only and production wiring tears 
   assert.match(connectSource, /_echoRecoveryDisconnectTimedOut === true[\s\S]*?continuing fresh handoff/);
   assert.match(connectSource, /newRoom\._echoRecoveryDisconnect === true\)[\s\S]*?if \(newRoom === room && typeof stopInboundScreenStatsMonitor/);
   assert.match(connectSource, /reuseAdmin: true,[\s\S]*?preserveMicIntent: true,[\s\S]*?androidFirefoxRecoverySourceRoom: newRoom/);
+  assert.match(connectSource,
+    /await disconnectRejectedRelayCandidate\(newRoom, \{ timeoutMs: 1500 \}\)[\s\S]*?throw relayVerificationError/);
   assert.match(connectSource, /forceAndroidFirefoxRelay = controlledAndroidFirefoxReplacement &&\s+androidFirefoxForceRelay === true/);
   assert.match(connectSource, /_echoAndroidFirefoxConnectedMediaRelayRecovery = function[\s\S]*?handleConnectedMediaStall\(\{[\s\S]*?alreadyUsingRelay:[\s\S]*?forceRelay: true/);
   assert.match(connectSource, /handleConnectedMediaStall\(\{[\s\S]*?isStillStalled: detail\?\.isStillStalled,[\s\S]*?onValidated: detail\?\.onValidated/);

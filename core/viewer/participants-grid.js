@@ -4,6 +4,99 @@
 
 // ── Screen tile management ──
 
+function shouldSuppressAndroidFirefoxScreenPresentationInteractions(nav, isNative) {
+  return typeof isAndroidFirefoxBrowser === "function" &&
+    isAndroidFirefoxBrowser(nav || null, isNative === true);
+}
+
+function shouldContainAndroidFirefoxUtilityScrimClick(options) {
+  if (!options || typeof options.isTargetBrowser !== "function") return false;
+  try {
+    if (options.isTargetBrowser(
+      options.navigatorObject || null,
+      options.isNativeShell === true
+    ) !== true) {
+      return false;
+    }
+  } catch (_error) {
+    return false;
+  }
+  if (typeof options.intersectsVisibleRemoteScreen !== "function") return false;
+  try {
+    return options.intersectsVisibleRemoteScreen() === true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function containAndroidFirefoxUtilityScrimClick(options) {
+  if (!shouldContainAndroidFirefoxUtilityScrimClick(options)) return false;
+  options.event?.preventDefault?.();
+  options.event?.stopPropagation?.();
+  return true;
+}
+
+function containAndroidFirefoxScreenTileClick(event, shouldContain) {
+  if (shouldContain !== true) return false;
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  return true;
+}
+
+function isPointInsideVisibleRemoteScreenPresentation(options) {
+  var opts = options || {};
+  var clientX = Number(opts.clientX);
+  var clientY = Number(opts.clientY);
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+  var metaBySid = opts.metaBySid ||
+    (typeof screenTrackMeta !== "undefined" ? screenTrackMeta : null);
+  var tileBySid = opts.tileBySid ||
+    (typeof screenTileBySid !== "undefined" ? screenTileBySid : null);
+  var hiddenIdentities = opts.hiddenIdentities ||
+    (typeof hiddenScreens !== "undefined" ? hiddenScreens : null);
+  var documentObject = opts.documentObject ||
+    (typeof document === "object" ? document : null);
+  var localIdentity = opts.localIdentity ||
+    (typeof room !== "undefined" ? room?.localParticipant?.identity : null);
+  var styleReader = opts.getComputedStyle ||
+    (typeof window === "object" && typeof window.getComputedStyle === "function"
+      ? window.getComputedStyle.bind(window)
+      : null);
+  if (!metaBySid || typeof metaBySid.forEach !== "function" ||
+      !tileBySid || typeof tileBySid.get !== "function") {
+    return false;
+  }
+  if (!localIdentity || documentObject?.visibilityState === "hidden") return false;
+
+  var found = false;
+  metaBySid.forEach(function(meta, trackSid) {
+    if (found || !meta || !meta.publication || !meta.publication.track) return;
+    if (!meta.identity || meta.identity === localIdentity) return;
+    if (meta.publication.isSubscribed === false) return;
+    var mediaTrack = meta.publication.track.mediaStreamTrack;
+    if (!mediaTrack || mediaTrack.readyState !== "live") return;
+    if (meta.identity && hiddenIdentities?.has?.(meta.identity)) return;
+    var tile = tileBySid.get(trackSid);
+    if (!tile || tile !== meta.tile || tile.isConnected !== true || tile.hidden === true) return;
+    if (tile.style?.display === "none" || tile.style?.visibility === "hidden") return;
+    if (styleReader) {
+      try {
+        var style = styleReader(tile);
+        if (style?.display === "none" || style?.visibility === "hidden") return;
+      } catch (_error) {}
+    }
+    if (typeof tile.getClientRects === "function" && tile.getClientRects().length === 0) return;
+    var video = tile.querySelector?.("video");
+    if (!video || video.isConnected !== true || video._lkTrack !== meta.publication.track) return;
+    if (typeof tile.getBoundingClientRect !== "function") return;
+    var rect = tile.getBoundingClientRect();
+    if (!rect || !(rect.width > 0) || !(rect.height > 0)) return;
+    found = clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom;
+  });
+  return found;
+}
+
 function addTile(label, element) {
   const tile = document.createElement("div");
   tile.className = "tile";
@@ -53,7 +146,16 @@ function addScreenTile(label, element, trackSid) {
     if (poster.parentNode) removePoster();
   }, 5000);
 
-  tile.addEventListener("click", () => {
+  var suppressAndroidFirefoxPresentationInteractions =
+    shouldSuppressAndroidFirefoxScreenPresentationInteractions(
+      typeof navigator === "object" ? navigator : null,
+      typeof window === "object" && window.__ECHO_NATIVE__ === true
+    );
+  tile.addEventListener("click", (event) => {
+    if (containAndroidFirefoxScreenTileClick(
+      event,
+      suppressAndroidFirefoxPresentationInteractions
+    )) return;
     if (screenGridEl.classList.contains("is-focused") && tile.classList.contains("is-focused")) {
       screenGridEl.classList.remove("is-focused");
       tile.classList.remove("is-focused");
@@ -73,8 +175,17 @@ function addScreenTile(label, element, trackSid) {
   fsBtn.title = "Fullscreen";
   fsBtn.setAttribute("aria-label", "Open shared screen fullscreen");
   fsBtn.innerHTML = "&#x26F6;"; // ⛶ fullscreen icon
+  if (suppressAndroidFirefoxPresentationInteractions) {
+    fsBtn.hidden = true;
+    fsBtn.disabled = true;
+    fsBtn.classList.add("hidden");
+  }
   fsBtn.addEventListener("click", function(e) {
     e.stopPropagation(); // don't trigger tile focus toggle
+    if (suppressAndroidFirefoxPresentationInteractions) {
+      e.preventDefault();
+      return;
+    }
     var video = tile.querySelector("video");
     if (video) enterVideoFullscreen(video);
   });
@@ -213,4 +324,14 @@ function hideRefreshButton() {
   if (refreshVideosButton) {
     refreshVideosButton.classList.add('hidden');
   }
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    containAndroidFirefoxScreenTileClick,
+    containAndroidFirefoxUtilityScrimClick,
+    isPointInsideVisibleRemoteScreenPresentation,
+    shouldContainAndroidFirefoxUtilityScrimClick,
+    shouldSuppressAndroidFirefoxScreenPresentationInteractions,
+  };
 }
