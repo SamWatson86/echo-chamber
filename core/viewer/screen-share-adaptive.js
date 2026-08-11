@@ -11,6 +11,98 @@ function getScreenPresentationStatsForIdentity(identity) {
   return video?._echoPresentationStats || null;
 }
 
+var _androidFirefoxStatsFlights = typeof WeakMap === "function" ? new WeakMap() : null;
+var _inboundScreenStatsPollGeneration = 0;
+var _inboundScreenStatsBoundRoom = null;
+
+function resolveInboundScreenStatsMonitorBinding(options) {
+  var opts = options || {};
+  var requestedRoom = opts.requestedRoom || opts.currentRoom || null;
+  if (!requestedRoom || requestedRoom !== opts.currentRoom ||
+      requestedRoom._echoDiagnosticsCommitted !== true) {
+    return "refuse";
+  }
+  if (opts.active === true && opts.boundRoom === requestedRoom) return "keep";
+  if (opts.active === true) return "restart";
+  return "start";
+}
+
+function isInboundScreenStatsPollCurrent(snapshot, currentRoom, currentGeneration, active) {
+  return !!snapshot && active === true && snapshot.room === currentRoom &&
+    snapshot.generation === currentGeneration;
+}
+
+function getAndroidFirefoxStatsSingleFlight(target, timeoutMs, flights, schedule, cancelSchedule) {
+  if (!target || typeof target.getStats !== "function") return Promise.resolve(null);
+  var flightMap = flights || _androidFirefoxStatsFlights;
+  if (!flightMap) return Promise.resolve(null);
+  var existing = flightMap.get(target);
+  if (existing?.timedOut === true) return Promise.resolve(null);
+  if (!existing) {
+    var raw = Promise.resolve().then(function() { return target.getStats(); });
+    var settled = raw.then(
+      function(value) { return { ok: true, value: value }; },
+      function(error) { return { ok: false, error: error }; }
+    );
+    existing = { promise: settled, timedOut: false };
+    flightMap.set(target, existing);
+    settled.then(function() {
+      if (flightMap.get(target) === existing) flightMap.delete(target);
+    });
+  }
+  var entry = existing;
+  var delay = typeof schedule === "function" ? schedule : setTimeout;
+  var cancel = typeof cancelSchedule === "function" ? cancelSchedule : clearTimeout;
+  var waitMs = Number.isFinite(timeoutMs) && timeoutMs >= 0 ? timeoutMs : 1000;
+  return new Promise(function(resolve) {
+    var done = false;
+    var timer = delay(function() {
+      if (done) return;
+      done = true;
+      entry.timedOut = true;
+      resolve(null);
+    }, waitMs);
+    entry.promise.then(function(outcome) {
+      if (done) return;
+      done = true;
+      cancel(timer);
+      resolve(outcome.ok ? outcome.value : null);
+    });
+  });
+}
+
+function resolveSelectedIceCandidatePair(stats) {
+  if (!stats || typeof stats.forEach !== "function") return null;
+  var reports = [];
+  var byId = new Map();
+  stats.forEach(function(report) {
+    reports.push(report);
+    if (report?.id) byId.set(report.id, report);
+  });
+  var pair = null;
+  var transport = reports.find(function(report) {
+    return report?.type === "transport" && !!report.selectedCandidatePairId;
+  });
+  if (transport) pair = byId.get(transport.selectedCandidatePairId) || null;
+  if (!pair) {
+    pair = reports.find(function(report) {
+      return report?.type === "candidate-pair" && report.selected === true;
+    }) || null;
+  }
+  if (!pair) {
+    pair = reports.find(function(report) {
+      return report?.type === "candidate-pair" && report.nominated === true &&
+        report.state === "succeeded";
+    }) || null;
+  }
+  if (!pair) return null;
+  return {
+    pair: pair,
+    local: byId.get(pair.localCandidateId) || null,
+    remote: byId.get(pair.remoteCandidateId) || null,
+  };
+}
+
 function buildNativePresenterUnavailableReport(reason) {
   return {
     state: "fallback",
@@ -74,41 +166,70 @@ function exposeNativePresenterReportGlobals(root) {
   root.resolveNativePresenterStatusForReport = resolveNativePresenterStatusForReport;
 }
 
-function startInboundScreenStatsMonitor() {
-  if (_inboundScreenStatsInterval) return;
+function startInboundScreenStatsMonitor(requestedRoom) {
+  var monitorRoom = requestedRoom || room || null;
+  var bindingAction = resolveInboundScreenStatsMonitorBinding({
+    requestedRoom: monitorRoom,
+    currentRoom: typeof room !== "undefined" ? room : null,
+    boundRoom: _inboundScreenStatsBoundRoom,
+    active: _inboundScreenStatsInterval != null,
+  });
+  if (bindingAction === "refuse") return false;
+  if (bindingAction === "keep") return true;
+  if (bindingAction === "restart") stopInboundScreenStatsMonitor();
+  _inboundScreenStatsBoundRoom = monitorRoom;
+  var monitorSnapshot = {
+    room: monitorRoom,
+    generation: ++_inboundScreenStatsPollGeneration,
+  };
+  function isCurrentPoll() {
+    return isInboundScreenStatsPollCurrent(
+      monitorSnapshot,
+      room,
+      _inboundScreenStatsPollGeneration,
+      _inboundScreenStatsInterval != null && _inboundScreenStatsBoundRoom === monitorSnapshot.room
+    );
+  }
   _inboundScreenStatsInterval = setInterval(async () => {
     try {
-      if (!room || !room.remoteParticipants) return;
+      if (!isCurrentPoll() || !monitorSnapshot.room?.remoteParticipants) return;
+      var monitorRoom = monitorSnapshot.room;
       const LK = getLiveKitClient();
+      var boundedAndroidFirefoxStats = typeof isAndroidFirefoxBrowser === "function" &&
+        isAndroidFirefoxBrowser(
+          typeof navigator === "object" ? navigator : null,
+          typeof window === "object" && window.__ECHO_NATIVE__ === true
+        );
+      var subscriberStatsUnavailable = false;
       // Extract ICE candidate-pair info once per poll cycle (from subscriber PeerConnection)
       var _iceType = "";
       var _iceLocalType = null, _iceRemoteType = null;
       try {
-        const subPc = room.engine?.pcManager?.subscriber?.pc;
+        const subPc = monitorRoom.engine?.pcManager?.subscriber?.pc;
         if (subPc) {
-          const pcStats = await subPc.getStats();
-          const iceCandidates = new Map();
-          pcStats.forEach(function(r) {
-            if (r.type === "local-candidate" || r.type === "remote-candidate") iceCandidates.set(r.id, r);
-          });
-          pcStats.forEach(function(r) {
-            if (r.type === "candidate-pair" && r.state === "succeeded") {
-              const lc = iceCandidates.get(r.localCandidateId);
-              const rc = iceCandidates.get(r.remoteCandidateId);
-              var lType = lc?.candidateType || "?";
-              var rType = rc?.candidateType || "?";
-              var rtt = r.currentRoundTripTime ? Math.round(r.currentRoundTripTime * 1000) : "?";
+          const pcStats = boundedAndroidFirefoxStats
+            ? await getAndroidFirefoxStatsSingleFlight(subPc, 1000)
+            : await subPc.getStats();
+          if (!isCurrentPoll()) return;
+          if (!pcStats) {
+            subscriberStatsUnavailable = boundedAndroidFirefoxStats;
+          } else {
+            var selectedPair = resolveSelectedIceCandidatePair(pcStats);
+            if (selectedPair) {
+              var lType = selectedPair.local?.candidateType || "?";
+              var rType = selectedPair.remote?.candidateType || "?";
+              var rtt = selectedPair.pair.currentRoundTripTime
+                ? Math.round(selectedPair.pair.currentRoundTripTime * 1000)
+                : "?";
               _iceType = `ice=${lType}->${rType} rtt=${rtt}ms`;
               _iceLocalType = lType !== "?" ? lType : null;
               _iceRemoteType = rType !== "?" ? rType : null;
-              // rtt collected in _iceType debug string above; not POSTed yet —
-              // remove the dead intermediate variable. Add back end-to-end if
-              // we want it on the dashboard later.
             }
-          });
+          }
         }
       } catch (e) { /* ignore ICE stats errors */ }
-      room.remoteParticipants.forEach(async (participant) => {
+      monitorRoom.remoteParticipants.forEach(async (participant) => {
+        if (!isCurrentPoll()) return;
         const effectiveIdentity = isScreenIdentity(participant.identity)
           ? getParentIdentity(participant.identity)
           : participant.identity;
@@ -124,12 +245,17 @@ function startInboundScreenStatsMonitor() {
           // Get receiver stats from the track's mediaStreamTrack
           const mst = pub.track.mediaStreamTrack;
           if (!mst) continue;
-          const pc = room.engine?.pcManager?.subscriber?.pc;
+          const pc = monitorRoom.engine?.pcManager?.subscriber?.pc;
           if (!pc) continue;
           const receivers = pc.getReceivers();
           const receiver = receivers.find(r => r.track === mst);
           if (!receiver) continue;
-          const stats = await receiver.getStats();
+          if (boundedAndroidFirefoxStats && subscriberStatsUnavailable) continue;
+          const stats = boundedAndroidFirefoxStats
+            ? await getAndroidFirefoxStatsSingleFlight(receiver, 1000)
+            : await receiver.getStats();
+          if (!isCurrentPoll()) return;
+          if (!stats) continue;
           var isCamera = pub.source === LK?.Track?.Source?.Camera;
           var sourceLabel = isCamera ? "camera" : "screen";
           stats.forEach((report) => {
@@ -231,7 +357,7 @@ function startInboundScreenStatsMonitor() {
               // Instead of switching simulcast layers (which causes 1080p->360p jumps),
               // we tell the PUBLISHER to reduce their encoder bitrate. Resolution stays
               // 1080p@60fps; only compression level changes. Uses data channel messages.
-              if (!isCamera && participant && room?.localParticipant) {
+              if (!isCamera && participant && monitorRoom?.localParticipant) {
                 var pubIdent = participant.identity;
                 var ctrl = _pubBitrateControl.get(pubIdent);
                 if (!ctrl) {
@@ -384,10 +510,10 @@ function startInboundScreenStatsMonitor() {
                     reason: isSevereCongestion ? "severe" : isCongestion ? "congestion" :
                             ctrl.probePhase === "probing" ? "probe" : "hold",
                     lossRate: Math.round(lossRate * 1000) / 1000,
-                    senderIdentity: room.localParticipant.identity
+                    senderIdentity: monitorRoom.localParticipant.identity
                   };
                   try {
-                    room.localParticipant.publishData(
+                    monitorRoom.localParticipant.publishData(
                       new TextEncoder().encode(JSON.stringify(capMsg)),
                       { reliable: true, destinationIdentities: [pubIdent] }
                     );
@@ -413,10 +539,10 @@ function startInboundScreenStatsMonitor() {
                     targetBitrateMed: BITRATE_DEFAULT_MED,
                     targetBitrateLow: BITRATE_DEFAULT_LOW,
                     reason: "restore", lossRate: 0,
-                    senderIdentity: room.localParticipant.identity
+                    senderIdentity: monitorRoom.localParticipant.identity
                   };
                   try {
-                    room.localParticipant.publishData(
+                    monitorRoom.localParticipant.publishData(
                       new TextEncoder().encode(JSON.stringify(restoreMsg)),
                       { reliable: true, destinationIdentities: [pubIdent] }
                     );
@@ -628,7 +754,8 @@ function startInboundScreenStatsMonitor() {
     // viewer). Server merges into client_stats map keyed by JWT subject.
     // Critical for diagnosing per-receiver mysteries — added 2026-04-08.
     try {
-      if (room && currentAccessToken) {
+      if (isCurrentPoll() && monitorSnapshot.room && currentAccessToken) {
+        var reportRoom = monitorSnapshot.room;
         var inboundArr2 = [];
         _inboundDropTracker.forEach(function(dt, key) {
           if (!dt._lastReport) return;
@@ -667,6 +794,7 @@ function startInboundScreenStatsMonitor() {
             captureHealth = await tauriInvoke("get_capture_health");
           }
         } catch (e) { /* IPC unavailable, e.g. browser viewer */ }
+        if (!isCurrentPoll()) return;
         var displayStatus = typeof getEchoDisplayStatusSnapshot === "function"
           ? getEchoDisplayStatusSnapshot()
           : null;
@@ -674,6 +802,7 @@ function startInboundScreenStatsMonitor() {
           ? getCaptureSourceReportSnapshot()
           : null;
         var nativePresenter = await resolveNativePresenterStatusForReport();
+        if (!isCurrentPoll()) return;
 
         // Fire the POST whenever we have ANYTHING to report — either receive-side
         // inbound stats (other publishers exist) OR local capture health (we are
@@ -688,8 +817,8 @@ function startInboundScreenStatsMonitor() {
               Authorization: "Bearer " + currentAccessToken,
             },
             body: JSON.stringify({
-              identity: room?.localParticipant?.identity || "",
-              name: room?.localParticipant?.name || "",
+              identity: reportRoom?.localParticipant?.identity || "",
+              name: reportRoom?.localParticipant?.name || "",
               room: currentRoomName || "",
               inbound: inboundArr2,
               capture_health: captureHealth,
@@ -702,6 +831,7 @@ function startInboundScreenStatsMonitor() {
       }
     } catch (e) {}
   }, 3000);
+  return true;
 }
 
 exposeNativePresenterReportGlobals(typeof globalThis === "object" ? globalThis : null);
@@ -710,12 +840,18 @@ if (typeof module === "object" && module.exports) {
   module.exports = {
     buildNativePresenterUnavailableReport,
     exposeNativePresenterReportGlobals,
+    getAndroidFirefoxStatsSingleFlight,
     getNativePresenterStatusForReport,
+    isInboundScreenStatsPollCurrent,
+    resolveInboundScreenStatsMonitorBinding,
+    resolveSelectedIceCandidatePair,
     resolveNativePresenterStatusForReport,
   };
 }
 
 function stopInboundScreenStatsMonitor() {
+  _inboundScreenStatsPollGeneration += 1;
+  _inboundScreenStatsBoundRoom = null;
   if (_inboundScreenStatsInterval) {
     clearInterval(_inboundScreenStatsInterval);
     _inboundScreenStatsInterval = null;

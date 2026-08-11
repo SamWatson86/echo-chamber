@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
   attemptAndroidFirefoxConnectedMediaRelayRecovery,
   attemptAndroidFirefoxScreenSubscriptionReset,
+  isAndroidFirefoxConnectedMediaStallCurrent,
 } = require("./participants-fullscreen.js");
 
 function createGeneration() {
@@ -320,6 +321,25 @@ test("relay handoff carries a dynamic exact-generation stall predicate", () => {
   options.isHidden = () => false;
   fixture.metaBySid.delete("TR_old");
   assert.equal(isStillStalled(), false, "metadata generation changed");
+});
+
+test("unmuted relay escalation requires the exact validated presentation episode", () => {
+  const fixture = createGeneration();
+  fixture.publication.track.mediaStreamTrack.muted = false;
+  const options = {
+    ...fixture.options,
+    roomConnected: true,
+    frameAgeMs: 9000,
+    allowUnmutedPresentationStall: true,
+    isPresentationCurrent: () => true,
+  };
+
+  assert.equal(isAndroidFirefoxConnectedMediaStallCurrent(options), true);
+  options.isPresentationCurrent = () => false;
+  assert.equal(isAndroidFirefoxConnectedMediaStallCurrent(options), false);
+  delete options.isPresentationCurrent;
+  assert.equal(isAndroidFirefoxConnectedMediaStallCurrent(options), false,
+    "an unmuted track cannot reuse the older muted-track predicate");
 });
 
 test("same-SID subscribed replacement inherits the bounded relay escalation state", () => {
