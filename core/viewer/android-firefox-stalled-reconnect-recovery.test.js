@@ -37,12 +37,15 @@ function createHarness(options = {}) {
   const timers = [];
   const reconnectStates = [];
   const stalled = [];
+  const connectedMediaStalls = [];
   let nextTimerId = 1;
   let currentRoom = options.room || { sid: "source-room" };
   let hidden = options.hidden === true;
   let online = options.online !== false;
   let switching = options.switching === true;
+  let mediaStalled = options.mediaStalled !== false;
   let reconnectCalls = 0;
+  let validatedMediaStalls = 0;
 
   const controller = createAndroidFirefoxRoomDisconnectRecovery({
     navigatorObject: { userAgent: options.userAgent || androidFirefoxUa },
@@ -64,6 +67,12 @@ function createHarness(options = {}) {
       if (timer) timer.cancelled = true;
     },
     onStalledReconnect(state) { stalled.push(state); },
+    onConnectedMediaStall(state) {
+      connectedMediaStalls.push(state);
+      if (typeof options.onConnectedMediaStall === "function") {
+        options.onConnectedMediaStall({ controller, state });
+      }
+    },
   });
 
   function reconnect(recoveryState) {
@@ -99,6 +108,27 @@ function createHarness(options = {}) {
     });
   }
 
+  function connectedMediaStall(options = {}) {
+    return controller.handleConnectedMediaStall({
+      room: currentRoom,
+      trackSid: options.trackSid || "TR_screen",
+      alreadyUsingRelay: options.alreadyUsingRelay === true,
+      isStillStalled: typeof options.isStillStalled === "function"
+        ? options.isStillStalled
+        : () => mediaStalled,
+      onValidated: typeof options.onValidated === "function"
+        ? options.onValidated
+        : () => {
+            validatedMediaStalls += 1;
+            return true;
+          },
+      micWasEnabled: options.micWasEnabled === true,
+      reconnect(recoveryState) {
+        return reconnect({ ...recoveryState, forceRelay: true });
+      },
+    });
+  }
+
   async function fire(timer, includeCancelled = false) {
     assert.ok(timer, "expected a timer");
     if (!includeCancelled) assert.equal(timer.cancelled, false, "timer must still be live");
@@ -114,15 +144,19 @@ function createHarness(options = {}) {
 
   return {
     arm,
+    connectedMediaStall,
+    connectedMediaStalls,
     controller,
     disconnect,
     fire,
     getCurrentRoom: () => currentRoom,
     getReconnectCalls: () => reconnectCalls,
+    getValidatedMediaStalls: () => validatedMediaStalls,
     liveTimers,
     reconnectStates,
     setCurrentRoom,
     setHidden(value) { hidden = value; },
+    setMediaStalled(value) { mediaStalled = value; },
     setOnline(value) { online = value; },
     setSwitching(value) { switching = value; },
     stalled,
@@ -453,6 +487,304 @@ test("late source teardown completion cannot restart or overwrite a released han
   assert.equal(disconnectCalls, 1);
 });
 
+test("connected media stall starts one relay fallback and preserves microphone intent", async () => {
+  const harness = createHarness();
+  const sourceRoom = harness.getCurrentRoom();
+
+  assert.equal(harness.connectedMediaStall({ trackSid: "TR_stalled", micWasEnabled: true }), true);
+  assert.equal(harness.connectedMediaStall({ trackSid: "TR_stalled", micWasEnabled: false }), false,
+    "duplicate watchdog ticks must coalesce on the same source Room");
+  assert.equal(harness.controller.handleConnected({ room: sourceRoom }), false,
+    "redundant connected events cannot substitute for media recovery");
+  assert.deepEqual(harness.liveTimers().map((timer) => timer.delay), [500]);
+  assert.deepEqual(harness.connectedMediaStalls, [],
+    "diagnostics must wait for the just-in-time media validation");
+
+  await harness.fire(harness.liveTimers()[0]);
+  assert.equal(harness.getValidatedMediaStalls(), 1);
+  assert.deepEqual(harness.connectedMediaStalls, [{ room: sourceRoom, trackSid: "TR_stalled" }]);
+  assert.equal(harness.getReconnectCalls(), 1);
+  assert.deepEqual(harness.reconnectStates, [{
+    room: sourceRoom,
+    micWasEnabled: true,
+    forceRelay: true,
+  }]);
+  assert.notEqual(harness.getCurrentRoom(), sourceRoom);
+  assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false });
+});
+
+test("an existing signaling watch rejects a later connected-media recovery claim", async () => {
+  const harness = createHarness();
+  const sourceRoom = harness.getCurrentRoom();
+  assert.equal(harness.arm(true), true);
+  const signalingTimer = harness.liveTimers()[0];
+
+  assert.equal(harness.connectedMediaStall({ micWasEnabled: false }), false);
+  assert.equal(signalingTimer.cancelled, false);
+  assert.deepEqual(harness.liveTimers().map((timer) => timer.delay), [15000]);
+  assert.deepEqual(harness.connectedMediaStalls, []);
+
+  await harness.fire(signalingTimer);
+  await harness.fire(harness.liveTimers()[0]);
+  assert.deepEqual(harness.reconnectStates, [{
+    room: sourceRoom,
+    micWasEnabled: true,
+  }], "the first signaling event retains recovery ownership and mic intent");
+});
+
+test("cancelled media validation leaves the same SID eligible for one real relay handoff", async () => {
+  const harness = createHarness();
+  const sourceRoom = harness.getCurrentRoom();
+
+  assert.equal(harness.connectedMediaStall({ trackSid: "TR_same", micWasEnabled: false }), true);
+  const timer = harness.liveTimers()[0];
+  harness.setMediaStalled(false);
+  await harness.fire(timer);
+
+  assert.equal(harness.getReconnectCalls(), 0);
+  assert.equal(harness.getValidatedMediaStalls(), 0,
+    "a recovered stream must not consume its relay fallback");
+  assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false });
+
+  harness.setMediaStalled(true);
+  assert.equal(harness.connectedMediaStall({ trackSid: "TR_same", micWasEnabled: true }), true,
+    "the same SID may schedule again with the user's fresh mic intent");
+  await harness.fire(harness.liveTimers()[0]);
+  assert.equal(harness.getValidatedMediaStalls(), 1);
+  assert.equal(harness.getReconnectCalls(), 1,
+    "only the validated stall may start the relay Room");
+  assert.deepEqual(harness.reconnectStates, [{
+    room: sourceRoom,
+    micWasEnabled: true,
+    forceRelay: true,
+  }], "a cancelled attempt cannot cache the old muted intent for the same-SID rearm");
+});
+
+test("Room and signal reconnect ordering supersedes an uncommitted media timer", async () => {
+  const eventOrders = [
+    ["Reconnecting", "SignalReconnecting"],
+    ["SignalReconnecting", "Reconnecting"],
+  ];
+
+  for (const [firstEvent, duplicateEvent] of eventOrders) {
+    const harness = createHarness();
+    const sourceRoom = harness.getCurrentRoom();
+    assert.equal(harness.connectedMediaStall({ micWasEnabled: true }), true, firstEvent);
+    const mediaTimer = harness.liveTimers()[0];
+
+    assert.equal(harness.arm(false), true, firstEvent + " must take ownership");
+    assert.equal(mediaTimer.cancelled, true, firstEvent + " must cancel the media timer");
+    assert.equal(harness.arm(false), false, duplicateEvent + " must coalesce");
+    assert.deepEqual(harness.liveTimers().map((timer) => timer.delay), [15000], firstEvent);
+
+    await harness.fire(mediaTimer, true);
+    assert.equal(harness.getValidatedMediaStalls(), 0, firstEvent);
+    assert.equal(harness.getReconnectCalls(), 0, firstEvent);
+
+    await harness.fire(harness.liveTimers()[0]);
+    assert.deepEqual(harness.liveTimers().map((timer) => timer.delay), [500], firstEvent);
+    await harness.fire(harness.liveTimers()[0]);
+    assert.deepEqual(harness.reconnectStates, [{
+      room: sourceRoom,
+      micWasEnabled: true,
+    }], firstEvent + " must preserve the media recovery's first mic intent");
+    assert.equal(harness.getReconnectCalls(), 1, firstEvent);
+  }
+});
+
+test("connected return cancels the reconnect watch that superseded a media timer", async () => {
+  const harness = createHarness();
+  const sourceRoom = harness.getCurrentRoom();
+  assert.equal(harness.connectedMediaStall({ micWasEnabled: true }), true);
+  const mediaTimer = harness.liveTimers()[0];
+  assert.equal(harness.arm(false), true);
+  const reconnectTimer = harness.liveTimers()[0];
+
+  assert.equal(harness.controller.handleConnected({ room: sourceRoom }), true);
+  assert.equal(mediaTimer.cancelled, true);
+  assert.equal(reconnectTimer.cancelled, true);
+  await harness.fire(mediaTimer, true);
+  await harness.fire(reconnectTimer, true);
+
+  assert.equal(harness.getValidatedMediaStalls(), 0);
+  assert.equal(harness.getReconnectCalls(), 0);
+  assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false });
+});
+
+test("direct nonterminal disconnect supersedes an uncommitted media timer", async () => {
+  const harness = createHarness();
+  const sourceRoom = harness.getCurrentRoom();
+  assert.equal(harness.connectedMediaStall({ micWasEnabled: true }), true);
+  const mediaTimer = harness.liveTimers()[0];
+
+  assert.equal(harness.disconnect(14, false), true);
+  assert.equal(mediaTimer.cancelled, true);
+  assert.deepEqual(harness.liveTimers().map((timer) => timer.delay), [500]);
+  await harness.fire(mediaTimer, true);
+  assert.equal(harness.getValidatedMediaStalls(), 0);
+  assert.equal(harness.getReconnectCalls(), 0);
+
+  await harness.fire(harness.liveTimers()[0]);
+  assert.deepEqual(harness.reconnectStates, [{
+    room: sourceRoom,
+    micWasEnabled: true,
+  }], "direct disconnect must retain the media recovery's first mic intent");
+  assert.equal(harness.getReconnectCalls(), 1);
+});
+
+test("signaling and direct disconnect cannot supersede committed or in-flight media recovery", async () => {
+  let committedSignalAccepted = null;
+  let committedDisconnectAccepted = null;
+  const committed = createHarness({
+    onConnectedMediaStall({ controller, state }) {
+      committedSignalAccepted = controller.handleReconnecting({
+        room: state.room,
+        reconnect: async () => {},
+        micWasEnabled: false,
+      });
+      committedDisconnectAccepted = controller.handleDisconnected({
+        room: state.room,
+        reason: 14,
+        disconnectReasons,
+        reconnect: async () => {},
+        micWasEnabled: false,
+      });
+    },
+  });
+  assert.equal(committed.connectedMediaStall({ micWasEnabled: true }), true);
+  await committed.fire(committed.liveTimers()[0]);
+  assert.equal(committedSignalAccepted, false,
+    "eligibility commit must make the serialized relay handoff authoritative");
+  assert.equal(committedDisconnectAccepted, false,
+    "a direct disconnect cannot replace an eligibility-committed handoff");
+  assert.equal(committed.getReconnectCalls(), 1);
+
+  let releaseAttempt = null;
+  const inFlight = createHarness({
+    reconnect({ setCurrentRoom }) {
+      return new Promise((resolve) => {
+        releaseAttempt = () => {
+          setCurrentRoom({ sid: "replacement-room" });
+          resolve();
+        };
+      });
+    },
+  });
+  assert.equal(inFlight.connectedMediaStall({ micWasEnabled: true }), true);
+  const attempt = inFlight.fire(inFlight.liveTimers()[0]);
+  await Promise.resolve();
+  assert.equal(inFlight.controller.snapshot().inFlight, true);
+  assert.equal(inFlight.arm(false), false,
+    "an in-flight relay handoff cannot be replaced by a second recovery owner");
+  assert.equal(inFlight.disconnect(14, false), false,
+    "direct disconnect cannot replace an in-flight relay handoff");
+  assert.deepEqual(inFlight.liveTimers(), []);
+  releaseAttempt();
+  await attempt;
+  assert.equal(inFlight.getReconnectCalls(), 1);
+  assert.deepEqual(inFlight.controller.snapshot(), { enabled: true, active: false });
+});
+
+test("expected and terminal disconnect still cancel pending media recovery without replacement", async () => {
+  const cases = [
+    ["expected leave", (harness) => { harness.getCurrentRoom()._echoExpectedDisconnect = true; }, 1],
+    ["terminal disconnect", () => {}, 3],
+  ];
+
+  for (const [label, prepare, reason] of cases) {
+    const harness = createHarness();
+    assert.equal(harness.connectedMediaStall({ micWasEnabled: true }), true, label);
+    const mediaTimer = harness.liveTimers()[0];
+    prepare(harness);
+    assert.equal(harness.disconnect(reason, false), false, label);
+    assert.equal(mediaTimer.cancelled, true, label);
+    assert.deepEqual(harness.liveTimers(), [], label);
+    await harness.fire(mediaTimer, true);
+    assert.equal(harness.getValidatedMediaStalls(), 0, label);
+    assert.equal(harness.getReconnectCalls(), 0, label);
+    assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false }, label);
+  }
+});
+
+test("hidden or offline deferral revalidates recovered media before resuming", async () => {
+  for (const condition of ["hidden", "offline"]) {
+    const harness = createHarness();
+    assert.equal(harness.connectedMediaStall(), true, condition);
+    const timer = harness.liveTimers()[0];
+    if (condition === "hidden") harness.setHidden(true);
+    else harness.setOnline(false);
+    await harness.fire(timer);
+    assert.equal(harness.getReconnectCalls(), 0, condition);
+    assert.equal(harness.getValidatedMediaStalls(), 0, condition);
+    assert.equal(harness.controller.snapshot().waiting, true, condition);
+
+    harness.setMediaStalled(false);
+    if (condition === "hidden") harness.setHidden(false);
+    else harness.setOnline(true);
+    assert.equal(harness.controller.resume(), true, condition);
+    await harness.fire(harness.liveTimers()[0]);
+    assert.equal(harness.getReconnectCalls(), 0, condition);
+    assert.equal(harness.getValidatedMediaStalls(), 0, condition);
+    assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false }, condition);
+  }
+});
+
+test("switch, leave, and stale Room invalidate a scheduled connected-media handoff", async () => {
+  const cases = [
+    ["switch", (harness) => harness.setSwitching(true)],
+    ["leave", (harness) => { harness.getCurrentRoom()._echoExpectedDisconnect = true; }],
+    ["stale Room", (harness) => harness.setCurrentRoom({ sid: "other-room" })],
+  ];
+
+  for (const [label, invalidate] of cases) {
+    const harness = createHarness();
+    assert.equal(harness.connectedMediaStall(), true, label);
+    const timer = harness.liveTimers()[0];
+    invalidate(harness);
+    await harness.fire(timer);
+    assert.equal(harness.getReconnectCalls(), 0, label);
+    assert.equal(harness.getValidatedMediaStalls(), 0, label);
+    assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false }, label);
+  }
+});
+
+test("relay-forced Room cannot trigger another connected-media fallback", () => {
+  const harness = createHarness();
+
+  assert.equal(harness.connectedMediaStall({ alreadyUsingRelay: true }), false);
+  assert.deepEqual(harness.liveTimers(), []);
+  assert.deepEqual(harness.connectedMediaStalls, []);
+  assert.equal(harness.getReconnectCalls(), 0);
+});
+
+test("connected-media fallback honors switch, visibility, and network guards", () => {
+  const switching = createHarness({ switching: true });
+  assert.equal(switching.connectedMediaStall(), false);
+  assert.deepEqual(switching.liveTimers(), []);
+
+  const hidden = createHarness({ hidden: true });
+  assert.equal(hidden.connectedMediaStall(), true);
+  assert.deepEqual(hidden.controller.snapshot(), {
+    enabled: true,
+    active: true,
+    attemptCount: 0,
+    scheduled: false,
+    inFlight: false,
+    waiting: true,
+    exhausted: false,
+  });
+  hidden.setHidden(false);
+  assert.equal(hidden.controller.resume(), true);
+  assert.deepEqual(hidden.liveTimers().map((timer) => timer.delay), [500]);
+
+  const offline = createHarness({ online: false });
+  assert.equal(offline.connectedMediaStall(), true);
+  assert.deepEqual(offline.liveTimers(), []);
+  offline.setOnline(true);
+  assert.equal(offline.controller.resume(), true);
+  assert.deepEqual(offline.liveTimers().map((timer) => timer.delay), [500]);
+});
+
 test("real platform gate gives every non-target client zero stalled-reconnect actions", () => {
   const cases = [
     ["Windows Chrome", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153.0 Safari/537.36", false],
@@ -467,6 +799,7 @@ test("real platform gate gives every non-target client zero stalled-reconnect ac
     const harness = createHarness({ userAgent, isNativeShell });
     assert.equal(harness.controller.isEnabled(), false, name);
     assert.equal(harness.arm(), false, name);
+    assert.equal(harness.connectedMediaStall(), false, name);
     assert.equal(harness.controller.resume(), false, name);
     assert.equal(harness.liveTimers().length, 0, name);
     assert.equal(harness.getReconnectCalls(), 0, name);
@@ -496,6 +829,12 @@ test("mic preservation policy remains recovery-only and production wiring tears 
   assert.match(connectSource, /_echoRecoveryDisconnectTimedOut === true[\s\S]*?continuing fresh handoff/);
   assert.match(connectSource, /newRoom\._echoRecoveryDisconnect === true\)[\s\S]*?if \(newRoom === room && typeof stopInboundScreenStatsMonitor/);
   assert.match(connectSource, /reuseAdmin: true,[\s\S]*?preserveMicIntent: true,[\s\S]*?androidFirefoxRecoverySourceRoom: newRoom/);
+  assert.match(connectSource, /forceAndroidFirefoxRelay = controlledAndroidFirefoxReplacement &&\s+androidFirefoxForceRelay === true/);
+  assert.match(connectSource, /_echoAndroidFirefoxConnectedMediaRelayRecovery = function[\s\S]*?handleConnectedMediaStall\(\{[\s\S]*?alreadyUsingRelay:[\s\S]*?forceRelay: true/);
+  assert.match(connectSource, /handleConnectedMediaStall\(\{[\s\S]*?isStillStalled: detail\?\.isStillStalled,[\s\S]*?onValidated: detail\?\.onValidated/);
+  assert.match(connectSource, /handleConnectedMediaStall\(\{[\s\S]*?micWasEnabled: desiredMicEnabledForRoomSwitch\(\) === true/);
+  assert.match(connectSource, /if \(forceAndroidFirefoxRelay\) \{\s+rtcConfig\.iceTransportPolicy = "relay"/);
+  assert.match(connectSource, /androidFirefoxForceRelay: recoveryState\?\.forceRelay === true/);
   assert.match(connectSource, /ignoreAndroidFirefoxStaleRoomEvent\("local track unpublished"\)/);
   assert.match(connectSource, /androidFirefoxRoomDisconnectRecovery\?\.cancel\(room\);[\s\S]*?connectSequence \+= 1;[\s\S]*?room\._echoExpectedDisconnect = true/);
 });

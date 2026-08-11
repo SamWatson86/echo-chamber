@@ -340,6 +340,36 @@
         recovery.waiting = true;
         return false;
       }
+      if (recovery.eligibilityValidated !== true && typeof recovery.isStillEligible === "function") {
+        let stillEligible = false;
+        try {
+          stillEligible = recovery.isStillEligible({ room: recovery.room }) === true;
+        } catch (_error) {
+          stillEligible = false;
+        }
+        if (!stillEligible) {
+          clearActiveRecovery(recovery);
+          return false;
+        }
+        let validationCommitted = false;
+        try {
+          validationCommitted = recovery.onEligibilityValidated({ room: recovery.room }) === true;
+        } catch (_error) {
+          validationCommitted = false;
+        }
+        if (!validationCommitted) {
+          clearActiveRecovery(recovery);
+          return false;
+        }
+        recovery.eligibilityValidated = true;
+        if (recovery.kind === "connected-media" &&
+            typeof opts.onConnectedMediaStall === "function") {
+          opts.onConnectedMediaStall({
+            room: recovery.room,
+            trackSid: recovery.trackSid || null,
+          });
+        }
+      }
 
       const attemptIndex = recovery.nextAttemptIndex;
       recovery.nextAttemptIndex += 1;
@@ -378,8 +408,9 @@
       return queueNextAttempt(recovery);
     }
 
-    function beginRecovery(candidateRoom, reconnect, micWasEnabled) {
+    function beginRecovery(candidateRoom, reconnect, micWasEnabled, recoveryOptions) {
       if (!isEligibleCurrentRoom(candidateRoom) || typeof reconnect !== "function") return false;
+      const recoveryOpts = recoveryOptions || {};
 
       if (activeRecovery) {
         if (activeRecovery.room === candidateRoom) return false;
@@ -399,6 +430,15 @@
         inFlight: false,
         waiting: false,
         exhausted: false,
+        isStillEligible: typeof recoveryOpts.isStillEligible === "function"
+          ? recoveryOpts.isStillEligible
+          : null,
+        onEligibilityValidated: typeof recoveryOpts.onEligibilityValidated === "function"
+          ? recoveryOpts.onEligibilityValidated
+          : null,
+        kind: recoveryOpts.kind || null,
+        trackSid: recoveryOpts.trackSid || null,
+        eligibilityValidated: false,
       };
       activeRecovery = recovery;
       queueNextAttempt(recovery);
@@ -435,7 +475,24 @@
         }
         return false;
       }
-      if (activeRecovery?.room === candidateRoom || activeReconnectWatch?.room === candidateRoom) {
+      let micWasEnabled = typeof detail.micWasEnabled === "boolean" ? detail.micWasEnabled : null;
+      if (activeRecovery?.room === candidateRoom) {
+        const pendingRecovery = activeRecovery;
+        const maySupersedeConnectedMedia = pendingRecovery.kind === "connected-media" &&
+          pendingRecovery.eligibilityValidated !== true &&
+          pendingRecovery.inFlight !== true;
+        if (!maySupersedeConnectedMedia) return false;
+
+        // Signaling loss is now the authoritative failure. Cancel the still-
+        // uncommitted media timer and let the normal reconnect watchdog own the
+        // Room, while retaining the microphone intent captured by the first
+        // recovery signal.
+        if (typeof pendingRecovery.micWasEnabled === "boolean") {
+          micWasEnabled = pendingRecovery.micWasEnabled;
+        }
+        clearActiveRecovery(pendingRecovery);
+      }
+      if (activeReconnectWatch?.room === candidateRoom) {
         return false;
       }
       if (activeReconnectWatch) clearReconnectWatch(activeReconnectWatch);
@@ -443,7 +500,7 @@
       const watch = {
         room: candidateRoom,
         reconnect: detail.reconnect,
-        micWasEnabled: typeof detail.micWasEnabled === "boolean" ? detail.micWasEnabled : null,
+        micWasEnabled,
         generation: ++nextGeneration,
         timerId: null,
         stale: false,
@@ -466,10 +523,44 @@
       if (activeReconnectWatch?.room === candidateRoom) {
         cancelled = clearReconnectWatch(activeReconnectWatch) || cancelled;
       }
-      if (activeRecovery?.room === candidateRoom) {
+      // A connected-state event proves an SDK reconnect recovered, but it does
+      // not prove that an already-connected Room resumed media. Let the latter
+      // reach its exact just-in-time media predicate instead of cancelling it
+      // on a redundant connection event.
+      if (activeRecovery?.room === candidateRoom &&
+          typeof activeRecovery.isStillEligible !== "function") {
         cancelled = clearActiveRecovery(activeRecovery) || cancelled;
       }
       return cancelled;
+    }
+
+    function handleConnectedMediaStall(event) {
+      const detail = event || {};
+      const candidateRoom = detail.room;
+      if (!isEligibleCurrentRoom(candidateRoom) || typeof detail.reconnect !== "function") {
+        return false;
+      }
+      // A relay-forced replacement is the final bounded fallback for this Room
+      // generation. If it also stalls, leave the session stable for diagnosis
+      // instead of cycling Rooms indefinitely.
+      if (detail.alreadyUsingRelay === true) return false;
+      if (typeof detail.isStillStalled !== "function") return false;
+      if (typeof detail.onValidated !== "function") return false;
+      if (activeRecovery?.room === candidateRoom) return false;
+      if (activeReconnectWatch?.room === candidateRoom) return false;
+
+      const accepted = beginRecovery(
+        candidateRoom,
+        detail.reconnect,
+        detail.micWasEnabled,
+        {
+          isStillEligible: detail.isStillStalled,
+          onEligibilityValidated: detail.onValidated,
+          kind: "connected-media",
+          trackSid: detail.trackSid || null,
+        }
+      );
+      return accepted;
     }
 
     function handleDisconnected(event) {
@@ -491,12 +582,24 @@
       }
       if (typeof detail.reconnect !== "function") return false;
 
+      let micWasEnabled = typeof detail.micWasEnabled === "boolean" ? detail.micWasEnabled : null;
       if (activeRecovery) {
-        if (activeRecovery.room === candidateRoom) return false;
-        clearActiveRecovery(activeRecovery);
+        if (activeRecovery.room === candidateRoom) {
+          const pendingRecovery = activeRecovery;
+          const maySupersedeConnectedMedia = pendingRecovery.kind === "connected-media" &&
+            pendingRecovery.eligibilityValidated !== true &&
+            pendingRecovery.inFlight !== true;
+          if (!maySupersedeConnectedMedia) return false;
+          if (typeof pendingRecovery.micWasEnabled === "boolean") {
+            micWasEnabled = pendingRecovery.micWasEnabled;
+          }
+          clearActiveRecovery(pendingRecovery);
+        } else {
+          clearActiveRecovery(activeRecovery);
+        }
       }
       if (activeReconnectWatch?.room === candidateRoom) clearReconnectWatch(activeReconnectWatch);
-      return beginRecovery(candidateRoom, detail.reconnect, detail.micWasEnabled);
+      return beginRecovery(candidateRoom, detail.reconnect, micWasEnabled);
     }
 
     function resume() {
@@ -546,6 +649,7 @@
     return {
       cancel,
       handleConnected,
+      handleConnectedMediaStall,
       handleDisconnected,
       handleReconnecting,
       isEnabled: () => enabled,

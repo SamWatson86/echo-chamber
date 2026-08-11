@@ -35,7 +35,15 @@ function attemptAndroidFirefoxScreenSubscriptionReset(options) {
   // Mark before touching the subscription. TrackUnsubscribed can arrive
   // synchronously. SID-scoped state survives same-SID metadata replacement,
   // so this recovery cannot turn into a reset loop.
-  options.recoveryStateBySid.set(trackSid, { subscriptionResetAttempted: true });
+  var resetAtMs = Number.isFinite(options.nowMs)
+    ? options.nowMs
+    : (typeof performance === "object" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now());
+  options.recoveryStateBySid.set(trackSid, {
+    subscriptionResetAttempted: true,
+    subscriptionResetAt: resetAtMs,
+  });
   if (typeof options.markResubscribeIntent === "function") {
     options.markResubscribeIntent(trackSid);
   }
@@ -60,6 +68,91 @@ function attemptAndroidFirefoxScreenSubscriptionReset(options) {
       options.log("[android-firefox-recovery] restored screen subscription sid=" + trackSid);
     }
   }, options.resetDelayMs == null ? 500 : options.resetDelayMs);
+  return true;
+}
+
+function isAndroidFirefoxConnectedMediaStallCurrent(options) {
+  if (!options || options.enabled !== true) return false;
+  var roomConnected = options.roomConnected === true;
+  if (typeof options.isRoomConnected === "function") {
+    try {
+      roomConnected = options.isRoomConnected() === true;
+    } catch (_error) {
+      roomConnected = false;
+    }
+  }
+  if (!roomConnected) return false;
+  if (!isCurrentScreenRecoveryGeneration(options)) return false;
+  if (options.publication.isSubscribed !== true) return false;
+
+  var frameAgeMs = options.frameAgeMs;
+  if (typeof options.getFrameAgeMs === "function") {
+    try {
+      frameAgeMs = options.getFrameAgeMs();
+    } catch (_error) {
+      return false;
+    }
+  }
+  if (!(frameAgeMs > 3000)) return false;
+
+  var mediaTrack = options.publication.track?.mediaStreamTrack;
+  return !!mediaTrack && mediaTrack.readyState === "live" && mediaTrack.muted === true;
+}
+
+function attemptAndroidFirefoxConnectedMediaRelayRecovery(options) {
+  if (!isAndroidFirefoxConnectedMediaStallCurrent(options)) return false;
+  if (!options.recoveryStateBySid || typeof options.recover !== "function") return false;
+
+  var recoveryState = options.recoveryStateBySid.get(options.trackSid);
+  if (!recoveryState || recoveryState.subscriptionResetAttempted !== true ||
+      recoveryState.relayRecoveryAttempted === true) {
+    return false;
+  }
+  var resetAtMs = recoveryState.subscriptionResetAt;
+  var nowMs = Number.isFinite(options.nowMs)
+    ? options.nowMs
+    : (typeof performance === "object" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now());
+  var graceMs = Number.isFinite(options.resetGraceMs) && options.resetGraceMs >= 0
+    ? options.resetGraceMs
+    : 6000;
+  if (!Number.isFinite(resetAtMs) || nowMs - resetAtMs < graceMs) return false;
+
+  var accepted = options.recover({
+    trackSid: options.trackSid,
+    identity: options.meta.identity || "",
+    isStillStalled: function() {
+      return isAndroidFirefoxConnectedMediaStallCurrent(options);
+    },
+    onValidated: function() {
+      if (!isAndroidFirefoxConnectedMediaStallCurrent(options)) return false;
+      var currentRecoveryState = options.recoveryStateBySid.get(options.trackSid);
+      if (!currentRecoveryState || currentRecoveryState.subscriptionResetAttempted !== true ||
+          currentRecoveryState.relayRecoveryAttempted === true) {
+        return false;
+      }
+      var validatedAtMs;
+      if (typeof options.getNowMs === "function") {
+        try {
+          validatedAtMs = options.getNowMs();
+        } catch (_error) {
+          return false;
+        }
+      }
+      if (!Number.isFinite(validatedAtMs)) validatedAtMs = nowMs;
+      options.recoveryStateBySid.set(options.trackSid, Object.assign({}, currentRecoveryState, {
+        relayRecoveryAttempted: true,
+        relayRecoveryAt: validatedAtMs,
+      }));
+      if (typeof options.log === "function") {
+        options.log("[android-firefox-recovery] escalating connected media stall to relay Room sid=" +
+          options.trackSid);
+      }
+      return true;
+    },
+  }) === true;
+  if (!accepted) return false;
   return true;
 }
 
@@ -327,6 +420,7 @@ function startScreenWatchdog() {
           tile: tile,
           frameAgeMs: age,
           firstLineRecoveryAt: meta.lastFix,
+          nowMs: now,
           recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
           getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
           getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
@@ -337,6 +431,44 @@ function startScreenWatchdog() {
           log: debugLog,
         });
         if (resetScheduled) return;
+
+        var connectedMediaRecoveryRoom = room;
+        var relayRecoveryAccepted = attemptAndroidFirefoxConnectedMediaRelayRecovery({
+          enabled: true,
+          roomConnected: String(connectedMediaRecoveryRoom?.state || "").toLowerCase() === "connected",
+          isRoomConnected: function() {
+            return room === connectedMediaRecoveryRoom &&
+              String(connectedMediaRecoveryRoom?.state || "").toLowerCase() === "connected";
+          },
+          trackSid: trackSid,
+          meta: meta,
+          publication: publication,
+          tile: tile,
+          frameAgeMs: age,
+          getFrameAgeMs: function() {
+            var currentMeta = screenTrackMeta.get(trackSid);
+            var currentTile = screenTileBySid.get(trackSid);
+            var currentVideo = currentTile?.querySelector("video");
+            if (!currentMeta || !currentTile || !currentVideo ||
+                currentVideo._lkTrack !== currentMeta.publication?.track) {
+              return null;
+            }
+            return performance.now() - (currentVideo._lastFrameTs || 0);
+          },
+          nowMs: now,
+          getNowMs: function() { return performance.now(); },
+          resetGraceMs: 6000,
+          recoveryStateBySid: androidFirefoxScreenRecoveryBySid,
+          getCurrentMeta: function(sid) { return screenTrackMeta.get(sid); },
+          getCurrentTile: function(sid) { return screenTileBySid.get(sid); },
+          isHidden: function(identity) { return hiddenScreens.has(identity); },
+          recover: function(detail) {
+            if (typeof requestAndroidFirefoxConnectedMediaRelayRecovery !== "function") return false;
+            return requestAndroidFirefoxConnectedMediaRelayRecovery(detail);
+          },
+          log: debugLog,
+        });
+        if (relayRecoveryAccepted) return;
       }
       if (isBlack && blackFor > 3000 && track) {
         if (!meta.lastSwap || now - meta.lastSwap > 10000) {
@@ -758,8 +890,10 @@ function attachVideoDiagnostics(track, element, overlay) {
 if (typeof module === "object" && module.exports) {
   module.exports = {
     attemptAndroidFirefoxScreenSubscriptionReset,
+    attemptAndroidFirefoxConnectedMediaRelayRecovery,
     createVideoFrameRateTracker,
     getVideoPresentationSnapshot,
+    isAndroidFirefoxConnectedMediaStallCurrent,
     isCurrentScreenRecoveryGeneration,
   };
 }

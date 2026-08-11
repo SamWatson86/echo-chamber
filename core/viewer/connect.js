@@ -123,6 +123,15 @@ if (androidFirefoxRoomDisconnectRecoveryEnabled &&
           state.timeoutMs + "ms; starting fresh Room recovery");
         setStatus("Refreshing stalled Android Firefox session...", true);
       },
+      onConnectedMediaStall: function(state) {
+        debugLog("[android-firefox-room-recovery] connected media remained stalled; " +
+          "forcing relay Room sid=" + (state.trackSid || "unknown"));
+        if (typeof reportWatchDebug === "function") {
+          reportWatchDebug("android-firefox connected-media-stall action=relay-room sid=" +
+            (state.trackSid || "unknown"));
+        }
+        setStatus("Refreshing Android Firefox media over relay...", true);
+      },
     });
 
   document.addEventListener("visibilitychange", function() {
@@ -131,6 +140,13 @@ if (androidFirefoxRoomDisconnectRecoveryEnabled &&
   window.addEventListener("online", function() {
     androidFirefoxRoomDisconnectRecovery?.resume();
   });
+}
+
+function requestAndroidFirefoxConnectedMediaRelayRecovery(detail) {
+  if (!androidFirefoxRoomDisconnectRecoveryEnabled || !room) return false;
+  var recover = room._echoAndroidFirefoxConnectedMediaRelayRecovery;
+  if (typeof recover !== "function") return false;
+  return recover(detail || {}) === true;
 }
 
 function recordActiveRoomDiagnostic(candidateRoom, recorder) {
@@ -323,10 +339,13 @@ async function connectToRoom({
   preserveMicIntent,
   androidFirefoxRecoverySourceRoom,
   androidFirefoxPreservedMicEnabled,
+  androidFirefoxForceRelay,
 }) {
   const controlledAndroidFirefoxReplacement = androidFirefoxRoomDisconnectRecoveryEnabled &&
     !!androidFirefoxRecoverySourceRoom &&
     androidFirefoxRecoverySourceRoom === room;
+  const forceAndroidFirefoxRelay = controlledAndroidFirefoxReplacement &&
+    androidFirefoxForceRelay === true;
   // A newly connected LiveKit participant has no publications yet. Preserve
   // the user's pre-switch intent separately so authoritative reconciliation
   // can report the new room truth without cancelling mic restoration.
@@ -705,7 +724,27 @@ async function connectToRoom({
       preserveMicIntent: true,
       androidFirefoxRecoverySourceRoom: newRoom,
       androidFirefoxPreservedMicEnabled: preservedMicEnabled,
+      androidFirefoxForceRelay: recoveryState?.forceRelay === true,
     });
+  }
+  if (androidFirefoxRoomDisconnectRecoveryEnabled) {
+    newRoom._echoAndroidFirefoxRelayForced = forceAndroidFirefoxRelay;
+    newRoom._echoAndroidFirefoxConnectedMediaRelayRecovery = function(detail) {
+      if (newRoom !== room || String(newRoom.state || "").toLowerCase() !== "connected") {
+        return false;
+      }
+      return androidFirefoxRoomDisconnectRecovery?.handleConnectedMediaStall({
+        room: newRoom,
+        trackSid: detail?.trackSid || null,
+        alreadyUsingRelay: newRoom._echoAndroidFirefoxRelayForced === true,
+        isStillStalled: detail?.isStillStalled,
+        onValidated: detail?.onValidated,
+        micWasEnabled: desiredMicEnabledForRoomSwitch() === true,
+        reconnect: function(recoveryState) {
+          return reconnectAndroidFirefoxRoom(Object.assign({}, recoveryState, { forceRelay: true }));
+        },
+      }) === true;
+    };
   }
   function watchAndroidFirefoxRoomReconnect() {
     if (!androidFirefoxRoomDisconnectRecoveryEnabled) return;
@@ -1601,9 +1640,14 @@ async function connectToRoom({
     debugLog("[ice] failed to fetch ICE config, using STUN-only fallback");
   }
 
+  var rtcConfig = { iceServers: iceServers };
+  if (forceAndroidFirefoxRelay) {
+    rtcConfig.iceTransportPolicy = "relay";
+    debugLog("[android-firefox-room-recovery] forcing TURN relay for connected-media recovery");
+  }
   await newRoom.connect(sfuUrl, accessToken, {
     autoSubscribe: true,
-    rtcConfig: { iceServers: iceServers },
+    rtcConfig: rtcConfig,
   });
   if (seq !== connectSequence) {
     newRoom._echoExpectedDisconnect = true;
