@@ -148,27 +148,6 @@
     };
   }
 
-  const ANDROID_FIREFOX_CANDIDATE_RELEASE_ERROR_CODE =
-    "ANDROID_FIREFOX_REJECTED_CANDIDATE_RELEASE_UNPROVEN";
-
-  function createAndroidFirefoxCandidateReleaseError(message, cause) {
-    const error = new Error(message);
-    error.name = "AndroidFirefoxCandidateReleaseError";
-    error.code = ANDROID_FIREFOX_CANDIDATE_RELEASE_ERROR_CODE;
-    error.terminal = true;
-    error.retryable = false;
-    if (cause !== undefined) error.cause = cause;
-    return error;
-  }
-
-  function isAndroidFirefoxCandidateReleaseError(error) {
-    return !!error &&
-      error.name === "AndroidFirefoxCandidateReleaseError" &&
-      error.code === ANDROID_FIREFOX_CANDIDATE_RELEASE_ERROR_CODE &&
-      error.terminal === true &&
-      error.retryable === false;
-  }
-
   async function disconnectAndroidFirefoxRecoverySource(sourceRoom, options) {
     if (!sourceRoom || typeof sourceRoom.disconnect !== "function") {
       throw new Error("Android Firefox recovery source Room is unavailable");
@@ -239,52 +218,6 @@
       }
       throw error;
     }
-  }
-
-  function verifyAndroidFirefoxRelayCandidateRoom(candidateRoom) {
-    let publisherPolicy = null;
-    let subscriberPolicy = null;
-    try {
-      publisherPolicy = candidateRoom?.engine?.pcManager?.publisher?.pc
-        ?.getConfiguration?.()?.iceTransportPolicy || null;
-    } catch (_error) {}
-    try {
-      subscriberPolicy = candidateRoom?.engine?.pcManager?.subscriber?.pc
-        ?.getConfiguration?.()?.iceTransportPolicy || null;
-    } catch (_error) {}
-    return {
-      publisherPolicy,
-      subscriberPolicy,
-      verified: publisherPolicy === "relay" && subscriberPolicy === "relay",
-    };
-  }
-
-  async function disconnectAndroidFirefoxRejectedRelayCandidate(candidateRoom, options) {
-    if (!candidateRoom) {
-      throw createAndroidFirefoxCandidateReleaseError(
-        "Android Firefox rejected relay candidate Room is unavailable"
-      );
-    }
-    candidateRoom._echoAndroidFirefoxStaleCandidate = true;
-    candidateRoom._echoExpectedDisconnect = true;
-    let released;
-    try {
-      released = await disconnectAndroidFirefoxRecoverySource(candidateRoom, options);
-    } catch (cause) {
-      throw createAndroidFirefoxCandidateReleaseError(
-        "Android Firefox rejected relay candidate disconnect failed",
-        cause
-      );
-    }
-    if (candidateRoom._echoRecoveryDisconnectComplete !== true) {
-      const timedOut = candidateRoom._echoRecoveryDisconnectTimedOut === true;
-      throw createAndroidFirefoxCandidateReleaseError(
-        timedOut
-          ? "Android Firefox rejected relay candidate disconnect timed out"
-          : "Android Firefox rejected relay candidate disconnect completion is unproven"
-      );
-    }
-    return released;
   }
 
   function createAndroidFirefoxRoomDisconnectRecovery(options) {
@@ -450,7 +383,6 @@
       }
 
       let failed = false;
-      let failureError = null;
       try {
         await recovery.reconnect({
           room: recovery.room,
@@ -458,7 +390,6 @@
         });
       } catch (error) {
         failed = true;
-        failureError = error;
         if (typeof opts.onAttemptFailed === "function") {
           opts.onAttemptFailed({ room: recovery.room, attempt: attemptIndex + 1, error });
         }
@@ -472,24 +403,6 @@
       }
       if (!isCurrentRecovery(recovery)) {
         clearActiveRecovery(recovery);
-        return false;
-      }
-      if (isAndroidFirefoxCandidateReleaseError(failureError)) {
-        // A fresh Room must never start while the prior rejected candidate may
-        // still own the same identity. Public Room.disconnect(true) is the
-        // only supported proof of release, so stop this recovery generation
-        // instead of creating overlapping candidates after a rejection or
-        // deadline-only release.
-        recovery.exhausted = true;
-        recovery.waiting = false;
-        if (typeof opts.onExhausted === "function") {
-          opts.onExhausted({
-            room: recovery.room,
-            attempts: recovery.nextAttemptIndex,
-            error: failureError,
-            terminal: true,
-          });
-        }
         return false;
       }
       return queueNextAttempt(recovery);
@@ -747,13 +660,9 @@
 
   return {
     commitConnectedAccessToken,
-    createAndroidFirefoxCandidateReleaseError,
     createAndroidFirefoxRoomDisconnectRecovery,
     createRoomSwitchState,
-    disconnectAndroidFirefoxRejectedRelayCandidate,
     disconnectAndroidFirefoxRecoverySource,
-    isAndroidFirefoxCandidateReleaseError,
     resolvePostConnectMicrophoneBehavior,
-    verifyAndroidFirefoxRelayCandidateRoom,
   };
 });

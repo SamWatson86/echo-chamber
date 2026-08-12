@@ -4,12 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const {
-  createAndroidFirefoxCandidateReleaseError,
   createAndroidFirefoxRoomDisconnectRecovery,
-  disconnectAndroidFirefoxRejectedRelayCandidate,
-  isAndroidFirefoxCandidateReleaseError,
   resolvePostConnectMicrophoneBehavior,
-  verifyAndroidFirefoxRelayCandidateRoom,
 } = require("./room-switch-state.js");
 
 const rnnoiseSource = fs.readFileSync(path.join(__dirname, "rnnoise.js"), "utf8");
@@ -50,7 +46,6 @@ const isAndroidFirefoxBrowser = loadRealBrowserPredicate();
 function createHarness(options = {}) {
   const timers = [];
   const attempts = [];
-  const attemptFailures = [];
   let nextTimerId = 1;
   let currentRoom = options.room || { sid: "old-room" };
   let hidden = options.hidden === true;
@@ -77,7 +72,6 @@ function createHarness(options = {}) {
       if (timer) timer.cancelled = true;
     },
     onAttempt(state) { attempts.push(state.attempt); },
-    onAttemptFailed(state) { attemptFailures.push(state); },
   });
 
   async function fireNextTimer() {
@@ -109,7 +103,6 @@ function createHarness(options = {}) {
 
   return {
     attempts,
-    attemptFailures,
     controller,
     disconnect,
     fireNextTimer,
@@ -207,192 +200,6 @@ test("brief duplicate-identity race retries with bounded deterministic backoff",
   assert.equal(harness.getReconnectCalls(), 3);
   assert.deepEqual(harness.attempts, [1, 2, 3]);
   assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false });
-});
-
-test("a completed rejected-candidate cleanup permits retry two and the next verified candidate succeeds", async () => {
-  const harness = createHarness({ userAgent: androidFirefoxUa });
-  const verificationResults = [];
-  const rejectedCandidates = [];
-  const reconnect = async ({ reconnectCalls, setCurrentRoom }) => {
-    const policy = reconnectCalls === 1 ? "all" : "relay";
-    const candidate = {
-      sid: "candidate-" + reconnectCalls,
-      _echoAndroidFirefoxRelayAttempted: true,
-      disconnectCalls: 0,
-      disconnect(stopTracks) {
-        candidate.disconnectCalls += 1;
-        assert.equal(stopTracks, true);
-        return Promise.resolve();
-      },
-      engine: {
-        pcManager: {
-          publisher: { pc: { getConfiguration: () => ({ iceTransportPolicy: policy }) } },
-          subscriber: { pc: { getConfiguration: () => ({ iceTransportPolicy: "relay" }) } },
-        },
-      },
-    };
-    const verification = verifyAndroidFirefoxRelayCandidateRoom(candidate);
-    verificationResults.push(verification.verified);
-    if (!verification.verified) {
-      rejectedCandidates.push(candidate);
-      assert.equal(
-        await disconnectAndroidFirefoxRejectedRelayCandidate(candidate),
-        true
-      );
-      const error = new Error("relay candidate verification failed");
-      error.name = "AndroidFirefoxRelayVerificationError";
-      throw error;
-    }
-    candidate._echoAndroidFirefoxRelayForced = true;
-    setCurrentRoom(candidate);
-  };
-
-  assert.equal(harness.disconnect(14, reconnect), true);
-  await harness.fireNextTimer();
-  assert.deepEqual(verificationResults, [false]);
-  assert.deepEqual(harness.attempts, [1]);
-  assert.deepEqual(harness.liveTimers().map((timer) => timer.delay), [2000]);
-  assert.equal(harness.getCurrentRoom().sid, "old-room");
-  assert.equal(rejectedCandidates[0]._echoRecoveryDisconnectComplete, true);
-  assert.equal(rejectedCandidates[0].disconnectCalls, 1);
-
-  await harness.fireNextTimer();
-  assert.deepEqual(verificationResults, [false, true]);
-  assert.deepEqual(harness.attempts, [1, 2]);
-  assert.equal(harness.getCurrentRoom()._echoAndroidFirefoxRelayAttempted, true);
-  assert.equal(harness.getCurrentRoom()._echoAndroidFirefoxRelayForced, true);
-  assert.deepEqual(harness.controller.snapshot(), { enabled: true, active: false });
-});
-
-test("rejected-candidate disconnect rejection is terminal and never starts fresh connect two", async () => {
-  let candidateDisconnectCalls = 0;
-  const harness = createHarness({ userAgent: androidFirefoxUa });
-  const reconnect = async () => {
-    const candidate = {
-      disconnect(stopTracks) {
-        candidateDisconnectCalls += 1;
-        assert.equal(stopTracks, true);
-        return Promise.reject(new Error("candidate sendLeave failed"));
-      },
-    };
-    await disconnectAndroidFirefoxRejectedRelayCandidate(candidate);
-  };
-
-  assert.equal(harness.disconnect(14, reconnect), true);
-  await harness.fireNextTimer();
-
-  assert.equal(harness.getReconnectCalls(), 1);
-  assert.equal(candidateDisconnectCalls, 1);
-  assert.deepEqual(harness.attempts, [1]);
-  assert.equal(harness.liveTimers().length, 0);
-  assert.equal(harness.attemptFailures.length, 1);
-  assert.equal(isAndroidFirefoxCandidateReleaseError(harness.attemptFailures[0].error), true);
-  assert.equal(harness.attemptFailures[0].error.retryable, false);
-  assert.deepEqual(harness.controller.snapshot(), {
-    enabled: true,
-    active: true,
-    attemptCount: 1,
-    scheduled: false,
-    inFlight: false,
-    waiting: false,
-    exhausted: true,
-  });
-  assert.equal(harness.disconnect(14, reconnect), false, "duplicate event cannot reopen recovery");
-  assert.equal(harness.controller.resume(), false);
-  assert.equal(harness.getReconnectCalls(), 1);
-});
-
-test("missing rejected-candidate cleanup helper fails closed without starting retry two", async () => {
-  const harness = createHarness({ userAgent: androidFirefoxUa });
-  const reconnect = () => {
-    throw createAndroidFirefoxCandidateReleaseError(
-      "Android Firefox rejected-candidate teardown helper is unavailable"
-    );
-  };
-
-  assert.equal(harness.disconnect(14, reconnect), true);
-  await harness.fireNextTimer();
-
-  assert.equal(harness.getReconnectCalls(), 1);
-  assert.deepEqual(harness.attempts, [1]);
-  assert.equal(harness.liveTimers().length, 0);
-  assert.equal(harness.attemptFailures.length, 1);
-  assert.equal(isAndroidFirefoxCandidateReleaseError(harness.attemptFailures[0].error), true);
-  assert.equal(harness.attemptFailures[0].error.retryable, false);
-  assert.equal(harness.controller.snapshot().exhausted, true);
-  assert.equal(harness.disconnect(14, reconnect), false);
-  assert.equal(harness.controller.resume(), false);
-  assert.equal(harness.getReconnectCalls(), 1);
-});
-
-test("unproven rejected-candidate timeout is terminal and cannot overlap a fresh connect", async () => {
-  const cleanupTimers = [];
-  let candidateDisconnectCalls = 0;
-  const cleanupOptions = {
-    timeoutMs: 1500,
-    schedule(callback, delay) {
-      const timer = { callback, delay, cancelled: false };
-      cleanupTimers.push(timer);
-      return timer;
-    },
-    cancelSchedule(timer) { timer.cancelled = true; },
-  };
-  const harness = createHarness({ userAgent: androidFirefoxUa });
-  const reconnect = async () => {
-    const candidate = {
-      disconnect(stopTracks) {
-        candidateDisconnectCalls += 1;
-        assert.equal(stopTracks, true);
-        return new Promise(() => {});
-      },
-    };
-    await disconnectAndroidFirefoxRejectedRelayCandidate(candidate, cleanupOptions);
-  };
-
-  assert.equal(harness.disconnect(14, reconnect), true);
-  const firstAttempt = harness.fireNextTimer();
-  await Promise.resolve();
-  await Promise.resolve();
-
-  assert.equal(harness.getReconnectCalls(), 1);
-  assert.equal(candidateDisconnectCalls, 1);
-  assert.equal(cleanupTimers.length, 1);
-  assert.equal(cleanupTimers[0].delay, 1500);
-  assert.equal(harness.liveTimers().length, 0);
-  assert.equal(harness.controller.snapshot().inFlight, true);
-  assert.equal(harness.disconnect(14, reconnect), false, "in-flight cleanup must coalesce events");
-
-  cleanupTimers[0].callback();
-  await firstAttempt;
-
-  assert.equal(harness.getReconnectCalls(), 1);
-  assert.equal(candidateDisconnectCalls, 1);
-  assert.equal(harness.liveTimers().length, 0);
-  assert.equal(harness.attemptFailures.length, 1);
-  assert.equal(isAndroidFirefoxCandidateReleaseError(harness.attemptFailures[0].error), true);
-  assert.match(harness.attemptFailures[0].error.message, /timed out/);
-  assert.equal(harness.controller.snapshot().exhausted, true);
-  assert.equal(harness.controller.resume(), false);
-});
-
-test("relay verification requires both publisher and subscriber peer connections", () => {
-  const candidate = {
-    engine: {
-      pcManager: {
-        publisher: { pc: { getConfiguration: () => ({ iceTransportPolicy: "relay" }) } },
-        subscriber: { pc: { getConfiguration: () => ({ iceTransportPolicy: "all" }) } },
-      },
-    },
-  };
-  assert.deepEqual(verifyAndroidFirefoxRelayCandidateRoom(candidate), {
-    publisherPolicy: "relay",
-    subscriberPolicy: "all",
-    verified: false,
-  });
-  candidate.engine.pcManager.subscriber.pc.getConfiguration = () => ({ iceTransportPolicy: "relay" });
-  assert.equal(verifyAndroidFirefoxRelayCandidateRoom(candidate).verified, true);
-  delete candidate.engine.pcManager.subscriber;
-  assert.equal(verifyAndroidFirefoxRelayCandidateRoom(candidate).verified, false);
 });
 
 test("failed recovery exhausts its bounded retry budget and cannot be restarted by duplicate events", async () => {
@@ -522,13 +329,5 @@ test("production wiring is target-gated and invokes only supported connectToRoom
   assert.match(
     connectSource,
     /if \(restoreMicAfterConnect\)[\s\S]*?else if \(preserveDisabledMicAfterConnect\)[\s\S]*?syncDesiredMicToActual\(false\)[\s\S]*?else \{/
-  );
-  assert.match(
-    connectSource,
-    /await disconnectRejectedRelayCandidate\(newRoom, \{ timeoutMs: 1500 \}\)[\s\S]*?catch \(cleanupError\)[\s\S]*?throw cleanupError[\s\S]*?AndroidFirefoxRelayVerificationError[\s\S]*?throw relayVerificationError/
-  );
-  assert.match(
-    connectSource,
-    /typeof disconnectRejectedRelayCandidate !== "function"[\s\S]*?createAndroidFirefoxCandidateReleaseError[\s\S]*?throw createCandidateReleaseError/
   );
 });

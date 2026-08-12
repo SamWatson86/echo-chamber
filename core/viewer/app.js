@@ -490,24 +490,7 @@ if (shellUtilityButton && shellLayout) {
 }
 
 if (shellUtilityScrim) {
-  shellUtilityScrim.addEventListener("click", function(event) {
-    var containScrimClick = typeof containAndroidFirefoxUtilityScrimClick === "function" &&
-      containAndroidFirefoxUtilityScrimClick({
-        event: event,
-        navigatorObject: typeof navigator === "object" ? navigator : null,
-        isNativeShell: typeof window === "object" && window.__ECHO_NATIVE__ === true,
-        isTargetBrowser: typeof isAndroidFirefoxBrowser === "function"
-          ? isAndroidFirefoxBrowser
-          : null,
-        intersectsVisibleRemoteScreen: function() {
-          return typeof isPointInsideVisibleRemoteScreenPresentation === "function" &&
-            isPointInsideVisibleRemoteScreenPresentation({
-              clientX: event.clientX,
-              clientY: event.clientY,
-            });
-        },
-      });
-    if (containScrimClick) return;
+  shellUtilityScrim.addEventListener("click", function() {
     setClubhouseUtilityCollapsed(true, { restoreFocus: true });
   });
 }
