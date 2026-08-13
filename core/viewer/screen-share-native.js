@@ -119,9 +119,29 @@ function getCaptureSourceReportSnapshot() {
   return window._echoCaptureSourceReport || null;
 }
 
+function _isBattlefield6NativeGameSource(source) {
+  if (!source || source.sourceType !== 'game') return false;
+
+  // Prefer the executable identity whenever the picker provides one. An
+  // explicit non-BF6 executable must not be overridden by a coincidental
+  // window title.
+  var executable = source.exeName || source.exe_name || null;
+  if (typeof executable === 'string' && executable.trim()) {
+    var executableName = executable.trim().split(/[\\\\/]/).pop();
+    return /^(?:bf6|battlefield6)\.exe$/i.test(executableName);
+  }
+
+  // Older desktop clients expose only the source title. Keep this exact so a
+  // browser, launcher, guide, or similarly named game cannot change routes.
+  var title = typeof source.title === 'string'
+    ? source.title.trim().replace(/\s+/g, ' ')
+    : '';
+  return /^(?:bf6|battlefield(?:[\u2122\u00ae])? 6(?:[\u2122\u00ae])?)$/i.test(title);
+}
+
 function nativeAudioCaptureRequestForSource(source) {
   if (!source) return null;
-  if (source.sourceType === 'monitor') {
+  if (source.sourceType === 'monitor' || _isBattlefield6NativeGameSource(source)) {
     return { mode: 'system-exclude-echo', pid: 0, toast: 'System audio streaming (Echo voice excluded)' };
   }
   if ((source.sourceType === 'game' || source.sourceType === 'window') &&
