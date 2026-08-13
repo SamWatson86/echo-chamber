@@ -1,11 +1,11 @@
 {
     "platforms":  {
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMEl2aTRWMElxNmU2S1lZVG9mNXA2MGYyT2x6aGtYaDVTVjU3TU9GQWQ5M1dDRXZkbVdVTmxJdUJuSlJBa29Kd1piK2VlVGFpVkwrMjgyK1VFVGg3ckFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MzI1Mjk1CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4zM194NjQtc2V0dXAuZXhlCkpTQlM5ZlhWVEtDNEFUL0k3ZnM4T1Z0L2Qxc3dralZLcVRxd0hkUU1LYjJCQkpNL2c1TmNGWjAvRFdaNG95RVg0cmh4OHlhMkNaV1pINDlQVXR1ZkFnPT0K",
-                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.33/Echo.Chamber_0.6.33_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQ3ByNFJuZlpjMExaVkdpRFBnZmtMUE1tRWNvMkVTVU11dUt1TFplYWlCUkdTL3ZiY3ZoV3ViSlJvZTBqMEhmbmhCYUtlUzhMYzlHSGJsTHVuNFJPdFFVbEhuSS85QkFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NjQwOTM5CWZpbGU6RWNobyBDaGFtYmVyXzAuNi4zNV94NjQtc2V0dXAuZXhlCmwyWWxydmtJM0JpUWdLQ3M0blpZZi9Rc2NTNnEvVFNFWkt5NHNmYkplMTVsRjg1OGNqSi9VYitWLzNXaHIvNGRqZVRUOFMwaHBYTkN2cnk4Zk9oaEN3PT0K",
+                                             "url":  "https://github.com/SamWatson86/echo-chamber/releases/download/v0.6.35/Echo.Chamber_0.6.35_x64-setup.exe"
                                          }
                   },
-    "pub_date":  "2026-07-17T21:54:55Z",
-    "version":  "0.6.33",
-    "notes":  "Echo Chamber v0.6.33"
+    "pub_date":  "2026-08-13T17:08:59Z",
+    "version":  "0.6.35",
+    "notes":  "Echo Chamber v0.6.35"
 }
