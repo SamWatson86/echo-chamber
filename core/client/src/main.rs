@@ -7,6 +7,8 @@ mod audio_capture;
 mod audio_capture_stub;
 #[cfg(target_os = "windows")]
 mod jam_source;
+#[cfg(target_os = "windows")]
+mod spotify_connect_repair;
 #[cfg(not(target_os = "windows"))]
 use audio_capture_stub as audio_capture;
 

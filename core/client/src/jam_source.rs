@@ -8,6 +8,9 @@ use crate::audio_capture::{
     find_spotify_root_pid, start_owned_process_capture, validate_spotify_root_pid,
     OwnedProcessCapture, ProcessCaptureEvent,
 };
+use crate::spotify_connect_repair::{
+    repair_spotify_connect, SpotifyConnectRepairAction, SpotifyConnectRepairOutcome,
+};
 use crate::spotify_output_route::{
     SpotifyOutputRouteLease, SpotifyOutputRouter, StartupRecoveryOutcome,
     DEFAULT_SPOTIFY_ROUTE_TARGET,
@@ -21,7 +24,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, USER_AGENT};
@@ -35,6 +38,11 @@ use windows::Win32::Storage::Packaging::Appx::{GetApplicationUserModelId, GetPac
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 const PROTOCOL_VERSION: u8 = 3;
+const SPOTIFY_CONNECT_REPAIR_CAPABILITY: &str = "spotify_connect_repair_v1";
+// A restart may already be in its restorative phase (2s graceful + 3s force
+// wait). Give that blocking worker enough time to relaunch Spotify before a
+// connection teardown or app shutdown proceeds.
+const SPOTIFY_CONNECT_REPAIR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,7 +52,8 @@ const ROUTE_JOURNAL_FILE_NAME: &str = "jam-source-route-journal.json";
 const AMBIGUOUS_DISCONNECT_ROUTE_RELEASE_GRACE: Duration = Duration::from_secs(36);
 const TAKEOVER_DISABLE_FALLBACK: Duration = Duration::from_secs(3);
 const SHUTDOWN_STOP_ACK_TIMEOUT: Duration = Duration::from_secs(16);
-const SPOTIFY_STORE_PACKAGE_PREFIX: &str = "SpotifyAB.SpotifyMusic_";
+const SPOTIFY_CONNECT_RESTART_COOLDOWN: Duration = Duration::from_secs(60);
+const SPOTIFY_STORE_PACKAGE_FAMILY: &str = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0";
 const SPOTIFY_STORE_APP_SUFFIX: &str = "!Spotify";
 const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
 const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
@@ -132,6 +141,8 @@ struct JamSourceLocalControlInner {
     preferences_tx: watch::Sender<JamSourceLocalPreferences>,
     takeover_active: AtomicBool,
     agent_running: AtomicBool,
+    spotify_connect_repair_active: AtomicBool,
+    last_spotify_connect_restart_at: Mutex<Option<Instant>>,
     preference_error: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
 }
@@ -182,6 +193,8 @@ impl JamSourceLocalControl {
                 preferences_tx,
                 takeover_active: AtomicBool::new(false),
                 agent_running: AtomicBool::new(false),
+                spotify_connect_repair_active: AtomicBool::new(false),
+                last_spotify_connect_restart_at: Mutex::new(None),
                 preference_error: Mutex::new(preference_error),
                 last_error: Mutex::new(None),
             }),
@@ -309,6 +322,63 @@ impl JamSourceLocalControl {
             .last_error
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
+    }
+
+    fn begin_spotify_connect_repair(
+        &self,
+        action: SpotifyConnectRepairAction,
+    ) -> Result<SpotifyConnectRepairGuard, String> {
+        self.inner
+            .spotify_connect_repair_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                "A Spotify Connect repair is already running on this source PC".to_string()
+            })?;
+        if action == SpotifyConnectRepairAction::Restart {
+            let mut last_restart = self
+                .inner
+                .last_spotify_connect_restart_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last_restart
+                .map(|started| started.elapsed() < SPOTIFY_CONNECT_RESTART_COOLDOWN)
+                .unwrap_or(false)
+            {
+                self.inner
+                    .spotify_connect_repair_active
+                    .store(false, Ordering::Release);
+                return Err(format!(
+                    "Spotify Connect restart is cooling down for {} seconds",
+                    SPOTIFY_CONNECT_RESTART_COOLDOWN.as_secs()
+                ));
+            }
+            *last_restart = Some(Instant::now());
+        }
+        Ok(SpotifyConnectRepairGuard {
+            control: self.clone(),
+        })
+    }
+
+    fn finish_spotify_connect_repair(&self) {
+        self.inner
+            .spotify_connect_repair_active
+            .store(false, Ordering::Release);
+    }
+
+    fn spotify_connect_repair_active(&self) -> bool {
+        self.inner
+            .spotify_connect_repair_active
+            .load(Ordering::Acquire)
+    }
+}
+
+struct SpotifyConnectRepairGuard {
+    control: JamSourceLocalControl,
+}
+
+impl Drop for SpotifyConnectRepairGuard {
+    fn drop(&mut self) {
+        self.control.finish_spotify_connect_repair();
     }
 }
 
@@ -541,9 +611,24 @@ impl Drop for JamSourceAgent {
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ServerCommand {
-    Start { generation: u64 },
-    Stop { generation: u64 },
-    Restart { generation: u64 },
+    Start {
+        generation: u64,
+    },
+    Stop {
+        generation: u64,
+    },
+    Restart {
+        generation: u64,
+    },
+    #[serde(rename = "spotify_connect_repair")]
+    SpotifyConnectRepair {
+        request_id: u64,
+        action: SpotifyConnectRepairAction,
+    },
+    #[serde(rename = "spotify_connect_repair_cancel")]
+    SpotifyConnectRepairCancel {
+        request_id: u64,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -553,6 +638,7 @@ enum SourceMessage<'a> {
         enabled: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<&'a str>,
+        capabilities: &'static [&'static str],
     },
     Format {
         generation: u64,
@@ -573,6 +659,15 @@ enum SourceMessage<'a> {
     Restarting {
         generation: u64,
     },
+    #[serde(rename = "spotify_connect_repair")]
+    SpotifyConnectRepair {
+        request_id: u64,
+        success: bool,
+        outcome: &'a str,
+        was_running_before: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+    },
 }
 
 struct ActiveCapture {
@@ -585,6 +680,32 @@ struct ActiveTakeover {
     generation: u64,
     route: SpotifyOutputRouteLease,
     capture: Option<ActiveCapture>,
+}
+
+struct SpotifyConnectRepairTask {
+    request_id: u64,
+    cancelled: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<
+        Result<crate::spotify_connect_repair::SpotifyConnectRepairReport, String>,
+    >,
+}
+
+async fn next_spotify_connect_repair(
+    repair: &mut Option<SpotifyConnectRepairTask>,
+) -> Option<(
+    u64,
+    Result<crate::spotify_connect_repair::SpotifyConnectRepairReport, String>,
+)> {
+    let pending = match repair.as_mut() {
+        Some(pending) => pending,
+        None => return std::future::pending().await,
+    };
+    let request_id = pending.request_id;
+    let result = (&mut pending.task)
+        .await
+        .map_err(|error| format!("Spotify Connect repair worker failed: {error}"))
+        .and_then(|result| result);
+    Some((request_id, result))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -785,6 +906,7 @@ async fn run_connection(
         &SourceMessage::Availability {
             enabled: source_enabled,
             error: availability_error.as_deref(),
+            capabilities: &[SPOTIFY_CONNECT_REPAIR_CAPABILITY],
         },
     )
     .await?;
@@ -795,6 +917,7 @@ async fn run_connection(
     shutdown_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut active: Option<ActiveTakeover> = None;
+    let mut spotify_connect_repair: Option<SpotifyConnectRepairTask> = None;
     let mut generation_fence = GenerationFence::default();
     let mut disable_fallback_deadline = None;
     let mut shutdown_stop_deadline = None;
@@ -822,6 +945,17 @@ async fn run_connection(
 
                         match command {
                             ServerCommand::Start { generation } => {
+                                if control.spotify_connect_repair_active() || spotify_connect_repair.is_some() {
+                                    let error = "Jam start is blocked while Spotify Connect repair is active";
+                                    send_source_message(
+                                        &mut writer,
+                                        &SourceMessage::Error {
+                                            generation,
+                                            message: error,
+                                        },
+                                    ).await?;
+                                    continue;
+                                }
                                 if !source_enabled || !preferences_rx.borrow().takeover_enabled {
                                     let error = availability_error
                                         .as_deref()
@@ -958,6 +1092,69 @@ async fn run_connection(
                                     }
                                 }
                             }
+                            ServerCommand::SpotifyConnectRepair { request_id, action } => {
+                                let consent_enabled = preferences_rx.borrow().takeover_enabled;
+                                let route_journal_exists = control.route_journal_path().exists();
+                                let rejection = if !source_enabled || !consent_enabled {
+                                    Some("Spotify Connect repair is disabled on the Jam source PC")
+                                } else if active.is_some() || shutdown_stop_deadline.is_some() || shutdown.load(Ordering::SeqCst) {
+                                    Some("Spotify Connect repair is unavailable while a Jam source generation or shutdown is active")
+                                } else if route_journal_exists {
+                                    Some("Spotify Connect repair is blocked while an Echo Spotify route journal exists")
+                                } else if spotify_connect_repair.is_some() {
+                                    Some("A Spotify Connect repair is already running on the source PC")
+                                } else {
+                                    None
+                                };
+                                if let Some(error) = rejection {
+                                    send_source_message(
+                                        &mut writer,
+                                        &SourceMessage::SpotifyConnectRepair {
+                                            request_id,
+                                            success: false,
+                                            outcome: "busy",
+                                            was_running_before: false,
+                                            error: Some(error),
+                                        },
+                                    ).await?;
+                                    continue;
+                                }
+                                let repair_guard = match control.begin_spotify_connect_repair(action) {
+                                    Ok(guard) => guard,
+                                    Err(error) => {
+                                        send_source_message(
+                                            &mut writer,
+                                            &SourceMessage::SpotifyConnectRepair {
+                                                request_id,
+                                                success: false,
+                                                outcome: "busy",
+                                                was_running_before: false,
+                                                error: Some(&error),
+                                            },
+                                        ).await?;
+                                        continue;
+                                    }
+                                };
+                                let cancelled = Arc::new(AtomicBool::new(false));
+                                let task_cancelled = cancelled.clone();
+                                let task = tokio::task::spawn_blocking(move || {
+                                    let _repair_guard = repair_guard;
+                                    repair_spotify_connect(action, &task_cancelled)
+                                });
+                                spotify_connect_repair = Some(SpotifyConnectRepairTask {
+                                    request_id,
+                                    cancelled,
+                                    task,
+                                });
+                            }
+                            ServerCommand::SpotifyConnectRepairCancel { request_id } => {
+                                if let Some(repair) = spotify_connect_repair
+                                    .as_ref()
+                                    .filter(|repair| repair.request_id == request_id)
+                                {
+                                    repair.cancelled.store(true, Ordering::Release);
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
@@ -968,11 +1165,76 @@ async fn run_connection(
                     Some(Err(error)) => return Err(error.into()),
                 }
             }
+            repair_result = next_spotify_connect_repair(&mut spotify_connect_repair) => {
+                let Some((request_id, result)) = repair_result else {
+                    continue;
+                };
+                spotify_connect_repair = None;
+                match result {
+                    Ok(report) => {
+                        let (next_enabled, next_error) = evaluate_local_availability(
+                            router,
+                            config,
+                            preferences_rx.borrow().takeover_enabled,
+                            control.preference_error(),
+                        );
+                        source_enabled = next_enabled;
+                        availability_error = next_error;
+                        control.set_last_error(availability_error.clone());
+                        send_source_message(
+                            &mut writer,
+                            &SourceMessage::Availability {
+                                enabled: source_enabled,
+                                error: availability_error.as_deref(),
+                                capabilities: &[SPOTIFY_CONNECT_REPAIR_CAPABILITY],
+                            },
+                        ).await?;
+                        let outcome = match report.outcome {
+                            SpotifyConnectRepairOutcome::Activated => "activated",
+                            SpotifyConnectRepairOutcome::Restarted => "restarted",
+                            SpotifyConnectRepairOutcome::NotRunning => "not_running",
+                        };
+                        log_jam_source(&format!(
+                            "[jam-source] Spotify Connect repair completed: {}",
+                            outcome
+                        ));
+                        send_source_message(
+                            &mut writer,
+                            &SourceMessage::SpotifyConnectRepair {
+                                request_id,
+                                success: true,
+                                outcome,
+                                was_running_before: report.was_running_before,
+                                error: None,
+                            },
+                        ).await?;
+                    }
+                    Err(error) => {
+                        control.set_last_error(Some(error.clone()));
+                        log_jam_source("[jam-source] Spotify Connect repair failed");
+                        send_source_message(
+                            &mut writer,
+                            &SourceMessage::SpotifyConnectRepair {
+                                request_id,
+                                success: false,
+                                outcome: "failed",
+                                was_running_before: false,
+                                error: Some(&error),
+                            },
+                        ).await?;
+                    }
+                }
+            }
             changed = preferences_rx.changed() => {
                 if changed.is_err() {
                     break;
                 }
                 let takeover_enabled = preferences_rx.borrow().takeover_enabled;
+                if !takeover_enabled {
+                    if let Some(repair) = spotify_connect_repair.as_ref() {
+                        repair.cancelled.store(true, Ordering::Release);
+                    }
+                }
                 if takeover_enabled {
                     disable_fallback_deadline = None;
                 }
@@ -998,6 +1260,7 @@ async fn run_connection(
                         &SourceMessage::Availability {
                             enabled: source_enabled,
                             error: availability_error.as_deref(),
+                            capabilities: &[SPOTIFY_CONNECT_REPAIR_CAPABILITY],
                         },
                     ).await?;
                 }
@@ -1110,6 +1373,7 @@ async fn run_connection(
                             &SourceMessage::Availability {
                                 enabled: source_enabled,
                                 error: availability_error.as_deref(),
+                                capabilities: &[SPOTIFY_CONNECT_REPAIR_CAPABILITY],
                             },
                         ).await?;
                     }
@@ -1123,6 +1387,9 @@ async fn run_connection(
             }
             _ = shutdown_poll.tick() => {
                 if shutdown.load(Ordering::SeqCst) && shutdown_stop_deadline.is_none() {
+                    if let Some(repair) = spotify_connect_repair.as_ref() {
+                        repair.cancelled.store(true, Ordering::Release);
+                    }
                     source_enabled = false;
                     availability_error = None;
                     disable_fallback_deadline = None;
@@ -1131,6 +1398,7 @@ async fn run_connection(
                         &SourceMessage::Availability {
                             enabled: false,
                             error: None,
+                            capabilities: &[SPOTIFY_CONNECT_REPAIR_CAPABILITY],
                         },
                     ).await?;
                     if let Some(generation) = active.as_ref().map(|takeover| takeover.generation) {
@@ -1177,6 +1445,17 @@ async fn run_connection(
         Ok(())
     }
     .await;
+
+    if let Some(repair) = spotify_connect_repair.take() {
+        repair.cancelled.store(true, Ordering::Release);
+        let mut task = repair.task;
+        if tokio::time::timeout(SPOTIFY_CONNECT_REPAIR_CLEANUP_TIMEOUT, &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        }
+    }
 
     // Close the socket before the release grace so the control plane observes
     // disconnect and has its full pause timeout before Spotify can be audible.
@@ -1328,22 +1607,31 @@ fn validate_store_spotify_root_pid(pid: u32) -> Result<(), String> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
         .map(OwnedIdentityProcess)
         .map_err(|error| format!("Cannot inspect Spotify PID {}: {}", pid, error))?;
+    store_spotify_process_identity(pid, process.0).map(|_| ())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreSpotifyProcessIdentity {
+    pub(crate) package_family: String,
+    pub(crate) application_user_model_id: String,
+}
+
+pub(crate) fn store_spotify_process_identity(
+    pid: u32,
+    process: HANDLE,
+) -> Result<StoreSpotifyProcessIdentity, String> {
     let package_family = read_process_app_model_string(
-        |length, buffer| unsafe { GetPackageFamilyName(process.0, length, buffer) },
+        |length, buffer| unsafe { GetPackageFamilyName(process, length, buffer) },
         "GetPackageFamilyName",
     )?;
-    if !package_family
-        .get(..SPOTIFY_STORE_PACKAGE_PREFIX.len())
-        .map(|prefix| prefix.eq_ignore_ascii_case(SPOTIFY_STORE_PACKAGE_PREFIX))
-        .unwrap_or(false)
-    {
+    if !package_family.eq_ignore_ascii_case(SPOTIFY_STORE_PACKAGE_FAMILY) {
         return Err(format!(
             "Spotify PID {} is not the Microsoft Store Spotify app",
             pid
         ));
     }
     let application_user_model_id = read_process_app_model_string(
-        |length, buffer| unsafe { GetApplicationUserModelId(process.0, length, buffer) },
+        |length, buffer| unsafe { GetApplicationUserModelId(process, length, buffer) },
         "GetApplicationUserModelId",
     )?;
     let expected_aumid = format!("{}{}", package_family, SPOTIFY_STORE_APP_SUFFIX);
@@ -1353,7 +1641,10 @@ fn validate_store_spotify_root_pid(pid: u32) -> Result<(), String> {
             pid
         ));
     }
-    Ok(())
+    Ok(StoreSpotifyProcessIdentity {
+        package_family,
+        application_user_model_id,
+    })
 }
 
 fn read_process_app_model_string(
@@ -1758,6 +2049,49 @@ mod tests {
             parse_server_command(r#"{"type":"restart","generation":42}"#).unwrap(),
             ServerCommand::Restart { generation: 42 }
         );
+        assert_eq!(
+            parse_server_command(
+                r#"{"type":"spotify_connect_repair","request_id":7,"action":"activate"}"#
+            )
+            .unwrap(),
+            ServerCommand::SpotifyConnectRepair {
+                request_id: 7,
+                action: SpotifyConnectRepairAction::Activate,
+            }
+        );
+        assert_eq!(
+            parse_server_command(r#"{"type":"spotify_connect_repair_cancel","request_id":7}"#)
+                .unwrap(),
+            ServerCommand::SpotifyConnectRepairCancel { request_id: 7 }
+        );
+    }
+
+    #[test]
+    fn spotify_connect_restart_is_single_flight_and_cooled_down() {
+        let path = temporary_settings_path("spotify-connect-repair-state");
+        let control = JamSourceLocalControl::load(Some(&source_config()), path);
+
+        let guard = control
+            .begin_spotify_connect_repair(SpotifyConnectRepairAction::Restart)
+            .unwrap();
+        assert!(control.spotify_connect_repair_active());
+        let concurrent = control.begin_spotify_connect_repair(SpotifyConnectRepairAction::Activate);
+        assert!(concurrent
+            .err()
+            .expect("concurrent repair must fail")
+            .contains("already running"));
+        drop(guard);
+        assert!(!control.spotify_connect_repair_active());
+
+        let cooled_down = control.begin_spotify_connect_repair(SpotifyConnectRepairAction::Restart);
+        assert!(cooled_down
+            .err()
+            .expect("restart cooldown must fail")
+            .contains("cooling down"));
+        let activation = control
+            .begin_spotify_connect_repair(SpotifyConnectRepairAction::Activate)
+            .unwrap();
+        drop(activation);
     }
 
     #[test]

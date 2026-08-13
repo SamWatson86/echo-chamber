@@ -169,6 +169,7 @@
       sourceStatus !== "negotiating" && !sourceUnavailable &&
       (input.source_ready === true || ["ready", "live", "silent", "stalled"].includes(sourceStatus));
     const active = input.active === true;
+    const starting = input.starting === true;
     const spotifyConnected = input.spotify_connected === true;
     const spotifyIsPlaying = input.spotify_is_playing === true;
     const playbackStopSupported = input.playback_stop_supported === true;
@@ -230,6 +231,7 @@
       compatible,
       compatibilityMessage,
       active,
+      starting,
       spotifyConnected,
       spotifyIsPlaying,
       playbackStopSupported,
@@ -245,7 +247,7 @@
       sourceError,
       sourceLastFrameMs: numberOrNull(input.source_last_frame_ms),
       sourcePeak: numberOrNull(input.source_peak),
-      canStart: compatible && !active && spotifyConnected && sourceReady,
+      canStart: compatible && !active && !starting && spotifyConnected && sourceReady,
       // New listeners fail closed on stalled PCM. Queue/skip intentionally stay
       // available against the current source so they can recover Spotify playback.
       canJoin: compatible && active && sourceReady,

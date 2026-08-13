@@ -88,11 +88,33 @@ diagnostic only: recovery accepts the current Spotify process only when it is
 in Echo's current Windows session and its Store package family and app ID still
 match the journal.
 
+## Spotify Connect self-recovery
+
+Start Jam performs one bounded preflight; there is no background watchdog. If
+the configured Spotify Connect device is missing while the Echo Jam source is
+armed and healthy, the control plane asks the provisioned Windows source client
+to re-activate the already-running Microsoft Store Spotify identity and polls
+Spotify for registration. If that exact Store app remains unregistered, Echo
+may restart it once and poll again. The complete recovery shares the existing
+15-second Jam-start deadline; there is no second independent timeout.
+
+Echo never restarts its desktop client, the control service, or unrelated
+processes during this repair. It refuses to interrupt an active Spotify media
+session, validates the exact Store package family/app ID/current Windows
+session, fences cancellation and connection replacement, and allows only one
+restart attempt per minute. A closed or unarmed Spotify app still requires the
+normal user action to open Spotify and enable Jam sharing. Errors explicitly
+distinguish a missing **Spotify Connect device** from an offline **Echo Jam
+source**.
+
 ## Release boundary
 
-Protocol v3 is a coordinated desktop-and-server change. Deploy the control
-plane and its complete server-served viewer snapshot, and install the matching
-Echo Desktop binary on the configured Spotify source PC. Ordinary listener PCs
-do not receive Jam-source credentials and do not need the source binary; they
-receive the updated viewer from the server. Do not run a protocol-v3 server
-against an older source client or publish only part of the viewer bundle.
+The `spotify_connect_repair_v1` capability is an optional protocol-v3
+capability. Install the source desktop binary first; the old server ignores the
+extra Availability field. Then deploy the control plane and its complete
+server-served viewer snapshot. If the server lands first, an older source stays
+protocol-compatible but a Start that needs repair fails closed with an update
+message. Ordinary listener PCs do not receive Jam-source credentials and do not
+need the source binary; they receive the updated viewer from the server. Always
+publish the viewer as one
+complete snapshot.
