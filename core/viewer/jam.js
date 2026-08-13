@@ -31,6 +31,7 @@ var _jamIsSourceHost = null;
 var _jamSourceLocalControl = null;
 var _jamSourceLocalControlPromise = null;
 var _jamSourceLocalControlPending = false;
+var _jamStartPending = false;
 var _jamSourceLocalControlLegacy = false;
 var _jamSourceLocalControlsBound = false;
 var _jamSourceLocalPollTimer = null;
@@ -460,6 +461,7 @@ function jamActionAllowed(action) {
   }
   if (action === "configure") return contract.canConfigure !== false;
   if (action === "start") {
+    if (_jamStartPending) return false;
     if (!contract.canStart) {
       showJamError(contract.spotifyConnected ? contract.sourceMessage : "Connect Spotify before starting a Jam");
       return false;
@@ -514,7 +516,7 @@ function applyJamContractToControls() {
   if (connectBtn) connectBtn.disabled = !contract.compatible;
   if (libraryRefreshBtn) libraryRefreshBtn.disabled = _jamImportPending || !contract.compatible;
   if (startBtn) {
-    startBtn.disabled = !contract.canStart;
+    startBtn.disabled = _jamStartPending || !contract.canStart;
     startBtn.title = contract.canStart
       ? "Start Jam"
       : !contract.compatible
@@ -917,8 +919,11 @@ async function connectSpotify() {
 // ──────────────────────────────────────────
 
 async function startJam() {
+  if (_jamStartPending) return;
   try {
     if (!jamActionAllowed("start")) return;
+    _jamStartPending = true;
+    applyJamContractToControls();
     await detectJamSourceHost();
     var identity = room && room.localParticipant ? room.localParticipant.identity : "";
     debugLog("[jam] startJam requested");
@@ -965,6 +970,9 @@ async function startJam() {
   } catch (e) {
     showJamError("Start jam error: " + e.message);
     debugLog("[jam] startJam error: " + e);
+  } finally {
+    _jamStartPending = false;
+    applyJamContractToControls();
   }
 }
 
@@ -3165,7 +3173,7 @@ function renderJamPanel() {
   var skipBtn = document.getElementById("jam-skip-btn");
   if (startBtn) {
     startBtn.style.display = _jamState.active ? "none" : "";
-    startBtn.disabled = !contract.canStart;
+    startBtn.disabled = _jamStartPending || !contract.canStart;
   }
   if (stopBtn) {
     stopBtn.style.display = _jamState.active && contract.playbackStopSupported ? "" : "none";

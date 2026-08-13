@@ -159,6 +159,21 @@ test("ready, live, and silent sources are capture-ready for a new Jam", () => {
   }).sourceMessage, "Host source audio is live");
 });
 
+test("Start Jam is disabled while the server is already starting one", () => {
+  const contract = evaluateJamContract({
+    jam_protocol_version: 3,
+    source_enabled: true,
+    source_availability_known: true,
+    spotify_connected: true,
+    active: false,
+    starting: true,
+    source_status: "ready",
+  });
+
+  assert.equal(contract.starting, true);
+  assert.equal(contract.canStart, false);
+});
+
 test("Start Jam fails closed until source availability is known and enabled", () => {
   const base = {
     jam_protocol_version: 3,

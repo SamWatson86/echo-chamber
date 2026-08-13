@@ -169,6 +169,27 @@ should report protocol 3, `source_availability_known: true`,
 Once the Jam is active, source status should be `ready` while Spotify is paused
 or warming up and `live` while audible playback is flowing.
 
+Start Jam also performs bounded Spotify Connect recovery. When the configured
+Connect device is absent but the Echo Jam source is armed and healthy, Echo
+re-activates the already-running Microsoft Store Spotify identity and polls for
+registration. If the exact Store app remains stale, idle, and unregistered, the
+source client may restart it once and poll again. The entire repair shares the
+15-second Jam-start deadline. There is no permanent watchdog, and this path
+never restarts Echo or a shared service. A healthy device takes no recovery
+action. A closed Spotify app still requires the operator to open it and arm Jam
+sharing. Operational errors must say
+**Spotify Connect device** when Spotify registration is missing; **Echo Jam
+source is offline** is reserved for a failed source WebSocket/heartbeat.
+
+Install the Windows source desktop binary before the server/viewer rollout. The
+old server ignores the optional capability; a new server detects an older
+source and fails repair with an update-required message. Verify authenticated
+`/api/jam/state` reports `spotify_connect_repair_supported: true`. Recovery is
+single-flight, refuses active local Spotify playback, and has a one-minute
+source-side restart cooldown that survives source WebSocket reconnects. If it
+still fails, confirm the Store Spotify app is open and signed into the same
+Premium account before restarting anything manually.
+
 Echo exposes one global shared Jam at a time. Any authenticated Echo user can
 start it, join it, search, add songs, skip, and use **Stop Music** from Echo's Jam panel. Those users
 do not need Spotify accounts and should add their songs through Echo, not through
@@ -309,6 +330,10 @@ sides are updated, an authenticated `/api/jam/state` response must report
 `live` while audible playback is expected before declaring the full Jam audio
 path operational. `silent` is a short playback/capture warmup state; `stalled`
 means Echo expected audible playback but did not receive it.
+
+The Spotify Connect self-recovery capability is also release impact **both**:
+deploy the control executable/viewer snapshot and update the configured Windows
+source desktop. Ordinary listener desktop binaries are unaffected.
 
 ## Default local URLs
 

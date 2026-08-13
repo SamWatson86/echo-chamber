@@ -30,6 +30,9 @@ use tracing::{info, warn};
 const SPOTIFY_RELEASE_PAUSE_TIMEOUT: Duration = Duration::from_secs(15);
 const SPOTIFY_START_BIND_TIMEOUT: Duration = Duration::from_secs(15);
 const SPOTIFY_RECOVERY_OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
+const SPOTIFY_CONNECT_REGISTRATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SPOTIFY_CONNECT_REGISTRATION_POLL_ATTEMPTS: usize = 4;
+const SPOTIFY_CONNECT_REPAIR_DEADLINE: Duration = Duration::from_secs(15);
 const SOURCE_START_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 const SPOTIFY_COMMITTED_QUEUE_FRONTIER: usize = 2;
 const MAX_QUEUE_REMOVAL_ENTRIES: usize = 1_000;
@@ -1124,26 +1127,39 @@ async fn refresh_spotify_token(state: &AppState, old: &SpotifyToken) -> Option<S
 struct SpotifyDevice {
     id: String,
     name: String,
+    is_restricted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SpotifyDeviceResolveError {
+    Unavailable(String),
+    Other(StatusCode, String),
+}
+
+impl SpotifyDeviceResolveError {
+    fn into_response(self) -> (StatusCode, String) {
+        match self {
+            Self::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
+            Self::Other(status, message) => (status, message),
+        }
+    }
 }
 
 fn select_spotify_device(
     candidates: Vec<SpotifyDevice>,
     configured_id: Option<&str>,
     configured_name: Option<&str>,
-) -> Result<SpotifyDevice, (StatusCode, String)> {
+) -> Result<SpotifyDevice, SpotifyDeviceResolveError> {
     if let Some(configured_id) = configured_id {
-        return candidates
-            .into_iter()
-            .find(|device| device.id == configured_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!(
-                        "Configured Spotify device ID '{}' is offline, restricted, or no longer valid",
-                        configured_id
-                    ),
-                )
-            });
+        if let Some(device) = candidates.iter().find(|device| device.id == configured_id) {
+            return ensure_spotify_device_usable(device.clone());
+        }
+        if configured_name.is_none() {
+            return Err(SpotifyDeviceResolveError::Unavailable(format!(
+                "Spotify Connect device ID '{}' is unavailable",
+                configured_id
+            )));
+        }
     }
 
     let configured_name = configured_name.unwrap_or_default();
@@ -1151,13 +1167,13 @@ fn select_spotify_device(
         .into_iter()
         .filter(|device| device.name.eq_ignore_ascii_case(configured_name));
     let first = matches.next().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Configured Spotify device '{}' is offline", configured_name),
-        )
+        SpotifyDeviceResolveError::Unavailable(format!(
+            "Spotify Connect device '{}' is unavailable",
+            configured_name
+        ))
     })?;
     if matches.next().is_some() {
-        return Err((
+        return Err(SpotifyDeviceResolveError::Other(
             StatusCode::CONFLICT,
             format!(
                 "More than one Spotify device is named '{}'; configure SPOTIFY_DEVICE_ID",
@@ -1165,14 +1181,49 @@ fn select_spotify_device(
             ),
         ));
     }
-    Ok(first)
+    ensure_spotify_device_usable(first)
+}
+
+fn ensure_spotify_device_usable(
+    device: SpotifyDevice,
+) -> Result<SpotifyDevice, SpotifyDeviceResolveError> {
+    if device.is_restricted {
+        return Err(SpotifyDeviceResolveError::Other(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "Spotify Connect device '{}' is present but restricted; Echo did not restart Spotify",
+                device.name
+            ),
+        ));
+    }
+    Ok(device)
 }
 
 async fn resolve_spotify_device(state: &AppState) -> Result<SpotifyDevice, (StatusCode, String)> {
+    let deadline = tokio::time::Instant::now() + SPOTIFY_CONNECT_REPAIR_DEADLINE;
+    resolve_spotify_device_with_repair(
+        || async {
+            let source = state.jam_source.snapshot().await;
+            jam_source_start_preflight(&source)
+                .map_err(|(status, message)| SpotifyDeviceResolveError::Other(status, message))?;
+            resolve_spotify_device_once(state).await
+        },
+        |action| state.jam_source.repair_spotify_connect(action, deadline),
+        SPOTIFY_CONNECT_REGISTRATION_POLL_ATTEMPTS,
+        SPOTIFY_CONNECT_REGISTRATION_POLL_INTERVAL,
+        Some(deadline),
+    )
+    .await
+    .map_err(SpotifyDeviceResolveError::into_response)
+}
+
+async fn resolve_spotify_device_once(
+    state: &AppState,
+) -> Result<SpotifyDevice, SpotifyDeviceResolveError> {
     if state.config.spotify_device_id.is_none() && state.config.spotify_device_name.is_none() {
-        return Err((
+        return Err(SpotifyDeviceResolveError::Other(
             StatusCode::SERVICE_UNAVAILABLE,
-            "Spotify source device is not configured (set SPOTIFY_DEVICE_ID or SPOTIFY_DEVICE_NAME)"
+            "Spotify Connect device is not configured (set SPOTIFY_DEVICE_ID or SPOTIFY_DEVICE_NAME)"
                 .to_string(),
         ));
     }
@@ -1182,41 +1233,196 @@ async fn resolve_spotify_device(state: &AppState) -> Result<SpotifyDevice, (Stat
         "https://api.spotify.com/v1/me/player/devices",
         None,
     )
-    .await?;
+    .await
+    .map_err(|(status, message)| SpotifyDeviceResolveError::Other(status, message))?;
     if !response.status().is_success() {
-        return Err(spotify_response_error(response, "List Spotify devices").await);
+        let (status, message) = spotify_response_error(response, "List Spotify devices").await;
+        return Err(SpotifyDeviceResolveError::Other(status, message));
     }
     let data: serde_json::Value = response.json().await.map_err(|error| {
-        (
+        SpotifyDeviceResolveError::Other(
             StatusCode::BAD_GATEWAY,
             format!("Spotify devices response was invalid: {}", error),
         )
     })?;
-    let candidates = data["devices"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|device| {
-            let id = device["id"].as_str()?.trim();
-            let name = device["name"].as_str()?.trim();
-            if id.is_empty()
-                || name.is_empty()
-                || device["is_restricted"].as_bool().unwrap_or(false)
-            {
-                return None;
-            }
-            Some(SpotifyDevice {
-                id: id.to_string(),
-                name: name.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
+    let candidates = parse_spotify_devices(&data)?;
 
     select_spotify_device(
         candidates,
         state.config.spotify_device_id.as_deref(),
         state.config.spotify_device_name.as_deref(),
     )
+}
+
+fn parse_spotify_devices(
+    data: &serde_json::Value,
+) -> Result<Vec<SpotifyDevice>, SpotifyDeviceResolveError> {
+    let devices = data
+        .get("devices")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SpotifyDeviceResolveError::Other(
+                StatusCode::BAD_GATEWAY,
+                "Spotify devices response was invalid: 'devices' was not an array".to_string(),
+            )
+        })?;
+    let mut candidates = Vec::with_capacity(devices.len());
+    for device in devices {
+        let Some(id_value) = device.get("id") else {
+            return Err(SpotifyDeviceResolveError::Other(
+                StatusCode::BAD_GATEWAY,
+                "Spotify devices response contained an invalid device entry".to_string(),
+            ));
+        };
+        // Spotify documents DeviceObject.id as nullable. Such entries cannot
+        // be targeted and must not poison an otherwise valid configured match.
+        if id_value.is_null() {
+            continue;
+        }
+        let id = id_value.as_str().ok_or_else(|| {
+            SpotifyDeviceResolveError::Other(
+                StatusCode::BAD_GATEWAY,
+                "Spotify devices response contained a non-string device ID".to_string(),
+            )
+        })?;
+        let name = device
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                SpotifyDeviceResolveError::Other(
+                    StatusCode::BAD_GATEWAY,
+                    "Spotify devices response contained an invalid device name".to_string(),
+                )
+            })?;
+        let is_restricted = device
+            .get("is_restricted")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                SpotifyDeviceResolveError::Other(
+                    StatusCode::BAD_GATEWAY,
+                    "Spotify devices response contained an invalid restriction state".to_string(),
+                )
+            })?;
+        let id = id.trim();
+        let name = name.trim();
+        if id.is_empty() || name.is_empty() {
+            return Err(SpotifyDeviceResolveError::Other(
+                StatusCode::BAD_GATEWAY,
+                "Spotify devices response contained an empty device ID or name".to_string(),
+            ));
+        }
+        candidates.push(SpotifyDevice {
+            id: id.to_string(),
+            name: name.to_string(),
+            is_restricted,
+        });
+    }
+
+    Ok(candidates)
+}
+
+async fn resolve_spotify_device_with_repair<Resolve, ResolveFuture, Repair, RepairFuture>(
+    mut resolve: Resolve,
+    mut repair: Repair,
+    poll_attempts: usize,
+    poll_interval: Duration,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<SpotifyDevice, SpotifyDeviceResolveError>
+where
+    Resolve: FnMut() -> ResolveFuture,
+    ResolveFuture: Future<Output = Result<SpotifyDevice, SpotifyDeviceResolveError>>,
+    Repair: FnMut(crate::jam_source::SpotifyConnectRepairAction) -> RepairFuture,
+    RepairFuture: Future<Output = Result<crate::jam_source::SpotifyConnectRepairResult, String>>,
+{
+    let unavailable = match await_spotify_deadline(deadline, resolve()).await? {
+        Ok(device) => return Ok(device),
+        Err(SpotifyDeviceResolveError::Unavailable(message)) => message,
+        Err(error) => return Err(error),
+    };
+
+    let activated = repair(crate::jam_source::SpotifyConnectRepairAction::Activate)
+        .await
+        .map_err(|error| {
+            SpotifyDeviceResolveError::Other(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{unavailable}. Echo could not activate Spotify on the source PC: {error}"),
+            )
+        })?;
+    if let Some(device) =
+        poll_spotify_connect_registration(&mut resolve, poll_attempts, poll_interval, deadline)
+            .await?
+    {
+        return Ok(device);
+    }
+
+    if activated.was_running_before {
+        repair(crate::jam_source::SpotifyConnectRepairAction::Restart)
+            .await
+            .map_err(|error| {
+                SpotifyDeviceResolveError::Other(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "{unavailable}. Echo could not restart Spotify on the source PC: {error}"
+                    ),
+                )
+            })?;
+        if let Some(device) =
+            poll_spotify_connect_registration(&mut resolve, poll_attempts, poll_interval, deadline)
+                .await?
+        {
+            return Ok(device);
+        }
+    }
+
+    Err(SpotifyDeviceResolveError::Unavailable(format!(
+        "{unavailable} after Echo tried to re-register Spotify on the source PC"
+    )))
+}
+
+async fn poll_spotify_connect_registration<Resolve, ResolveFuture>(
+    resolve: &mut Resolve,
+    attempts: usize,
+    interval: Duration,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Option<SpotifyDevice>, SpotifyDeviceResolveError>
+where
+    Resolve: FnMut() -> ResolveFuture,
+    ResolveFuture: Future<Output = Result<SpotifyDevice, SpotifyDeviceResolveError>>,
+{
+    for attempt in 0..attempts {
+        match await_spotify_deadline(deadline, resolve()).await? {
+            Ok(device) => return Ok(Some(device)),
+            Err(SpotifyDeviceResolveError::Unavailable(_)) => {}
+            Err(error) => return Err(error),
+        }
+        if attempt + 1 < attempts && !interval.is_zero() {
+            await_spotify_deadline(deadline, tokio::time::sleep(interval)).await?;
+        }
+    }
+    Ok(None)
+}
+
+async fn await_spotify_deadline<T, F>(
+    deadline: Option<tokio::time::Instant>,
+    future: F,
+) -> Result<T, SpotifyDeviceResolveError>
+where
+    F: Future<Output = T>,
+{
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future)
+            .await
+            .map_err(|_| {
+                SpotifyDeviceResolveError::Other(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "Spotify Connect device recovery exceeded the {} second start deadline",
+                        SPOTIFY_CONNECT_REPAIR_DEADLINE.as_secs()
+                    ),
+                )
+            }),
+        None => Ok(future.await),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1377,6 +1583,7 @@ fn bound_spotify_device(jam: &JamState, generation: u64) -> Option<SpotifyDevice
     Some(SpotifyDevice {
         id: jam.spotify_device_id.clone()?,
         name: jam.spotify_device_name.clone().unwrap_or_default(),
+        is_restricted: false,
     })
 }
 
@@ -3274,6 +3481,7 @@ pub(crate) async fn jam_state(
         "source_last_frame_ms": source.last_frame_ms,
         "source_peak": source.peak,
         "source_ready": source.ready,
+        "spotify_connect_repair_supported": source.spotify_connect_repair_supported,
     })))
 }
 
@@ -5876,6 +6084,7 @@ mod tests {
         SpotifyDevice {
             id: id.to_string(),
             name: name.to_string(),
+            is_restricted: false,
         }
     }
 
@@ -5899,6 +6108,7 @@ mod tests {
             channels: None,
             last_frame_ms: None,
             peak: 0.0,
+            spotify_connect_repair_supported: false,
         }
     }
 
@@ -6183,6 +6393,17 @@ mod tests {
     }
 
     #[test]
+    fn rotated_spotify_device_id_uses_one_exact_name_match() {
+        let selected = select_spotify_device(
+            vec![spotify_device("new-id", "Echo PC")],
+            Some("stale-id"),
+            Some("Echo PC"),
+        )
+        .expect("unique configured name should repair a rotated device ID");
+        assert_eq!(selected.id, "new-id");
+    }
+
+    #[test]
     fn duplicate_exact_spotify_device_names_are_rejected() {
         let error = select_spotify_device(
             vec![
@@ -6193,7 +6414,232 @@ mod tests {
             Some("ECHO PC"),
         )
         .unwrap_err();
-        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.into_response().0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn configured_restricted_spotify_device_never_triggers_repair() {
+        let mut restricted = spotify_device("id-a", "Echo PC");
+        restricted.is_restricted = true;
+        let error =
+            select_spotify_device(vec![restricted], Some("id-a"), Some("Echo PC")).unwrap_err();
+        assert!(matches!(&error, SpotifyDeviceResolveError::Other(_, _)));
+        assert!(error.into_response().1.contains("restricted"));
+    }
+
+    #[test]
+    fn malformed_spotify_devices_schema_is_not_missing_device() {
+        for data in [
+            serde_json::json!({}),
+            serde_json::json!({"devices": {}}),
+            serde_json::json!({"devices": [{"id":"id-a","name":"Echo PC","is_restricted":"no"}]}),
+        ] {
+            let error = parse_spotify_devices(&data).unwrap_err();
+            assert_eq!(error.into_response().0, StatusCode::BAD_GATEWAY);
+        }
+    }
+
+    #[test]
+    fn documented_null_spotify_device_id_does_not_hide_valid_target() {
+        let devices = parse_spotify_devices(&serde_json::json!({
+            "devices": [
+                {"id": null, "name": "Untargetable", "is_restricted": false},
+                {"id": "id-a", "name": "Echo PC", "is_restricted": false}
+            ]
+        }))
+        .expect("nullable non-targetable neighbor is skipped");
+        let selected = select_spotify_device(devices, Some("id-a"), Some("Echo PC"))
+            .expect("valid configured target remains selectable");
+        assert_eq!(selected.id, "id-a");
+    }
+
+    fn spotify_connect_unavailable() -> SpotifyDeviceResolveError {
+        SpotifyDeviceResolveError::Unavailable(
+            "Spotify Connect device 'Echo PC' is unavailable".to_string(),
+        )
+    }
+
+    fn repair_result(was_running_before: bool) -> crate::jam_source::SpotifyConnectRepairResult {
+        crate::jam_source::SpotifyConnectRepairResult {
+            outcome: "ok".to_string(),
+            was_running_before,
+        }
+    }
+
+    #[tokio::test]
+    async fn healthy_spotify_connect_device_takes_no_repair_action() {
+        let actions = std::cell::RefCell::new(Vec::new());
+        let result = resolve_spotify_device_with_repair(
+            || std::future::ready(Ok(spotify_device("device-a", "Echo PC"))),
+            |action| {
+                actions.borrow_mut().push(action);
+                std::future::ready(Ok(repair_result(true)))
+            },
+            2,
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.id, "device-a");
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delayed_spotify_registration_recovers_without_restart() {
+        let resolutions = std::cell::RefCell::new(std::collections::VecDeque::from([
+            Err(spotify_connect_unavailable()),
+            Err(spotify_connect_unavailable()),
+            Ok(spotify_device("device-a", "Echo PC")),
+        ]));
+        let actions = std::cell::RefCell::new(Vec::new());
+        let result = resolve_spotify_device_with_repair(
+            || std::future::ready(resolutions.borrow_mut().pop_front().unwrap()),
+            |action| {
+                actions.borrow_mut().push(action);
+                std::future::ready(Ok(repair_result(true)))
+            },
+            3,
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.id, "device-a");
+        assert_eq!(
+            *actions.borrow(),
+            vec![crate::jam_source::SpotifyConnectRepairAction::Activate]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_running_spotify_restarts_only_after_activation_poll_expires() {
+        let resolutions = std::cell::RefCell::new(std::collections::VecDeque::from([
+            Err(spotify_connect_unavailable()),
+            Err(spotify_connect_unavailable()),
+            Err(spotify_connect_unavailable()),
+            Ok(spotify_device("device-a", "Echo PC")),
+        ]));
+        let actions = std::cell::RefCell::new(Vec::new());
+        let result = resolve_spotify_device_with_repair(
+            || std::future::ready(resolutions.borrow_mut().pop_front().unwrap()),
+            |action| {
+                actions.borrow_mut().push(action);
+                std::future::ready(Ok(repair_result(true)))
+            },
+            2,
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.id, "device-a");
+        assert_eq!(
+            *actions.borrow(),
+            vec![
+                crate::jam_source::SpotifyConnectRepairAction::Activate,
+                crate::jam_source::SpotifyConnectRepairAction::Restart,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn freshly_activated_spotify_is_never_restarted_in_the_same_start() {
+        let actions = std::cell::RefCell::new(Vec::new());
+        let error = resolve_spotify_device_with_repair(
+            || std::future::ready(Err(spotify_connect_unavailable())),
+            |action| {
+                actions.borrow_mut().push(action);
+                std::future::ready(Ok(repair_result(false)))
+            },
+            1,
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(&error, SpotifyDeviceResolveError::Unavailable(_)));
+        assert_eq!(
+            *actions.borrow(),
+            vec![crate::jam_source::SpotifyConnectRepairAction::Activate]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_missing_spotify_errors_never_request_local_repair() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let actions = std::cell::RefCell::new(Vec::new());
+            let error = resolve_spotify_device_with_repair(
+                || {
+                    std::future::ready(Err(SpotifyDeviceResolveError::Other(
+                        status,
+                        "upstream failure".to_string(),
+                    )))
+                },
+                |action| {
+                    actions.borrow_mut().push(action);
+                    std::future::ready(Ok(repair_result(true)))
+                },
+                1,
+                Duration::ZERO,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.into_response().0, status);
+            assert!(actions.borrow().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_spotify_install_has_connect_specific_failure_wording() {
+        let error = resolve_spotify_device_with_repair(
+            || std::future::ready(Err(spotify_connect_unavailable())),
+            |_| {
+                std::future::ready(Err(
+                    "Spotify may not be installed or its app registration is damaged".to_string(),
+                ))
+            },
+            1,
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.1.contains("Spotify Connect device"));
+        assert!(error.1.contains("may not be installed"));
+        assert!(!error.1.contains("Echo Jam source is offline"));
+    }
+
+    #[tokio::test]
+    async fn exhausted_repair_never_reports_the_echo_source_offline() {
+        let error = resolve_spotify_device_with_repair(
+            || std::future::ready(Err(spotify_connect_unavailable())),
+            |_| std::future::ready(Ok(repair_result(false))),
+            1,
+            Duration::ZERO,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .into_response();
+
+        assert!(error.1.contains("Spotify Connect device"));
+        assert!(error.1.contains("tried to re-register Spotify"));
+        assert!(!error.1.to_ascii_lowercase().contains("source is offline"));
     }
 
     #[test]

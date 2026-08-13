@@ -337,6 +337,23 @@ pub fn find_spotify_root_pid() -> std::result::Result<u32, String> {
     })
 }
 
+/// Return every Spotify.exe PID in Echo's interactive Windows session.
+///
+/// This deliberately excludes Spotify processes in other signed-in sessions so
+/// Jam recovery can restart only the source PC user's Spotify instance.
+pub(crate) fn find_spotify_process_ids() -> std::result::Result<Vec<u32>, String> {
+    let current_pid = unsafe { GetCurrentProcessId() };
+    let current_session = process_session_id(current_pid)
+        .ok_or_else(|| "Cannot determine Echo's Windows session".to_string())?;
+    let mut pids = find_processes_by_name("Spotify.exe")
+        .into_iter()
+        .filter_map(|(pid, _)| (process_session_id(pid) == Some(current_session)).then_some(pid))
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids)
+}
+
 /// Verify that an existing Jam capture is still bound to the Spotify root
 /// selected for Echo's current Windows session. Spotify can exit without
 /// WASAPI reporting a terminal capture event, so the Jam source polls this

@@ -28,6 +28,11 @@ windows-core = "0.58"
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
+    "ApplicationModel",
+    "Foundation",
+    "Foundation_Collections",
+    "Management_Deployment",
+    "Media_Control",
     "implement",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",

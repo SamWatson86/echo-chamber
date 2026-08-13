@@ -22,6 +22,7 @@ const MAX_AUDIO_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const SOURCE_ACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const SOURCE_FRAME_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const CAPTURE_RESTART_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(15);
+const SPOTIFY_CONNECT_REPAIR_CAPABILITY: &str = "spotify_connect_repair_v1";
 
 #[derive(Clone, Debug)]
 pub(crate) enum SourceEvent {
@@ -59,6 +60,35 @@ pub(crate) enum SourceEvent {
         channels: u32,
         samples: Vec<f32>,
     },
+    SpotifyConnectRepair {
+        connection_id: u64,
+        request_id: u64,
+        success: bool,
+        outcome: String,
+        was_running_before: bool,
+        error: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SpotifyConnectRepairAction {
+    Activate,
+    Restart,
+}
+
+impl SpotifyConnectRepairAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::Restart => "restart",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SpotifyConnectRepairResult {
+    pub(crate) outcome: String,
+    pub(crate) was_running_before: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -76,6 +106,7 @@ pub(crate) struct JamSourceSnapshot {
     pub(crate) channels: Option<u32>,
     pub(crate) last_frame_ms: Option<u64>,
     pub(crate) peak: f32,
+    pub(crate) spotify_connect_repair_supported: bool,
 }
 
 struct ConnectedSource {
@@ -83,10 +114,39 @@ struct ConnectedSource {
     command_tx: mpsc::UnboundedSender<Message>,
 }
 
+struct PendingRepairCancelGuard {
+    command_tx: mpsc::UnboundedSender<Message>,
+    request_id: u64,
+    armed: bool,
+}
+
+impl PendingRepairCancelGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingRepairCancelGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.command_tx.send(Message::Text(
+            serde_json::json!({
+                "type": "spotify_connect_repair_cancel",
+                "request_id": self.request_id,
+            })
+            .to_string(),
+        ));
+    }
+}
+
 struct SourceInner {
     connection: Option<ConnectedSource>,
     availability_known: bool,
     enabled: bool,
+    spotify_connect_repair_supported: bool,
+    pending_repair: Option<(u64, u64)>,
     desired_generation: Option<u64>,
     ready_generation: Option<u64>,
     format_generation: Option<u64>,
@@ -110,6 +170,8 @@ impl Default for SourceInner {
             connection: None,
             availability_known: false,
             enabled: false,
+            spotify_connect_repair_supported: false,
+            pending_repair: None,
             desired_generation: None,
             ready_generation: None,
             format_generation: None,
@@ -135,6 +197,7 @@ pub(crate) struct JamSourceRegistry {
     inner: Arc<Mutex<SourceInner>>,
     events: broadcast::Sender<SourceEvent>,
     next_connection_id: Arc<AtomicU64>,
+    next_repair_request_id: Arc<AtomicU64>,
 }
 
 impl JamSourceRegistry {
@@ -149,6 +212,7 @@ impl JamSourceRegistry {
             inner: Arc::new(Mutex::new(inner)),
             events,
             next_connection_id: Arc::new(AtomicU64::new(1)),
+            next_repair_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -183,6 +247,9 @@ impl JamSourceRegistry {
         }
         if !inner.enabled {
             return Err("Jam source is disabled on the source PC".to_string());
+        }
+        if inner.pending_repair.is_some() {
+            return Err("Spotify Connect repair is still finishing on the source PC".to_string());
         }
         command_tx
             .send(Message::Text(message))
@@ -288,6 +355,119 @@ impl JamSourceRegistry {
         true
     }
 
+    /// Run one bounded, capability-negotiated repair on the source PC. Callers
+    /// serialize this through `jam_lifecycle`; the request ID additionally
+    /// fences delayed replies from earlier attempts or replaced connections.
+    pub(crate) async fn repair_spotify_connect(
+        &self,
+        action: SpotifyConnectRepairAction,
+        deadline: tokio::time::Instant,
+    ) -> Result<SpotifyConnectRepairResult, String> {
+        if deadline <= tokio::time::Instant::now() {
+            return Err("Spotify Connect repair start deadline expired".to_string());
+        }
+        let request_id = self.next_repair_request_id.fetch_add(1, Ordering::Relaxed);
+        let (connection_id, mut events, mut cancel_guard) = {
+            let mut inner = tokio::time::timeout_at(deadline, self.inner.lock())
+                .await
+                .map_err(|_| "Spotify Connect repair start deadline expired".to_string())?;
+            if inner
+                .last_activity_at
+                .map(|at| at.elapsed() > SOURCE_ACTIVITY_TIMEOUT)
+                .unwrap_or(true)
+            {
+                return Err("Echo Jam source heartbeat is stale".to_string());
+            }
+            if !inner.spotify_connect_repair_supported {
+                return Err(
+                    "The Echo Jam source desktop app does not support Spotify Connect repair; update it before retrying"
+                        .to_string(),
+                );
+            }
+            if inner.pending_repair.is_some() {
+                return Err("A Spotify Connect repair is already running".to_string());
+            }
+            let connection = inner
+                .connection
+                .as_ref()
+                .ok_or_else(|| "Echo Jam source is offline".to_string())?;
+            let connection_id = connection.connection_id;
+            let command_tx = connection.command_tx.clone();
+            // Subscribe while holding the same registry lock used by
+            // register/unregister. Their lifecycle events are published before
+            // that lock is released, so this receiver cannot consume a stale
+            // replacement event for the connection captured below.
+            let events = self.subscribe();
+            inner.pending_repair = Some((connection_id, request_id));
+            if command_tx
+                .send(Message::Text(
+                    serde_json::json!({
+                        "type": "spotify_connect_repair",
+                        "request_id": request_id,
+                        "action": action.as_str(),
+                    })
+                    .to_string(),
+                ))
+                .is_err()
+            {
+                inner.pending_repair = None;
+                return Err(
+                    "Echo Jam source disconnected during Spotify Connect repair".to_string()
+                );
+            }
+            let cancel_guard = PendingRepairCancelGuard {
+                command_tx,
+                request_id,
+                armed: true,
+            };
+            (connection_id, events, cancel_guard)
+        };
+
+        let reply = tokio::time::timeout_at(deadline, async {
+            loop {
+                match events.recv().await {
+                    Ok(SourceEvent::SpotifyConnectRepair {
+                        connection_id: reply_connection_id,
+                        request_id: reply_id,
+                        success,
+                        outcome,
+                        was_running_before,
+                        error,
+                    }) if reply_connection_id == connection_id && reply_id == request_id => {
+                        return if success {
+                            Ok(SpotifyConnectRepairResult {
+                                outcome,
+                                was_running_before,
+                            })
+                        } else {
+                            Err(error.unwrap_or_else(|| {
+                                "Spotify Connect repair failed on the source PC".to_string()
+                            }))
+                        };
+                    }
+                    Ok(SourceEvent::ConnectionReplaced { .. })
+                    | Ok(SourceEvent::Disconnected { .. }) => {
+                        return Err("Echo Jam source disconnected during Spotify Connect repair"
+                            .to_string());
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err("Echo Jam source repair channel closed".to_string())
+                    }
+                }
+            }
+        })
+        .await;
+        match reply {
+            Ok(reply) => {
+                cancel_guard.disarm();
+                reply
+            }
+            Err(_) => Err("Spotify Connect repair timed out on the source PC".to_string()),
+        }
+    }
+
     pub(crate) async fn snapshot(&self) -> JamSourceSnapshot {
         let inner = self.inner.lock().await;
         let activity_stale = inner.connection.is_some()
@@ -354,12 +534,13 @@ impl JamSourceRegistry {
             channels: inner.channels,
             last_frame_ms,
             peak: inner.peak,
+            spotify_connect_repair_supported: inner.spotify_connect_repair_supported,
         }
     }
 
     async fn register(&self, command_tx: mpsc::UnboundedSender<Message>) -> u64 {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let (old, replaced_generation) = {
+        {
             let mut inner = self.inner.lock().await;
             let old = inner.connection.replace(ConnectedSource {
                 connection_id,
@@ -371,6 +552,8 @@ impl JamSourceRegistry {
             }
             inner.availability_known = false;
             inner.enabled = false;
+            inner.spotify_connect_repair_supported = false;
+            inner.pending_repair = None;
             inner.status = if self.configured {
                 "negotiating".to_string()
             } else {
@@ -389,57 +572,54 @@ impl JamSourceRegistry {
             inner.restart_pending_generation = None;
             inner.last_restart = None;
             inner.peak = 0.0;
-            (old, replaced_generation)
-        };
-        let event = if let Some(old) = old {
-            let _ = old.command_tx.send(Message::Close(None));
-            SourceEvent::ConnectionReplaced {
-                generation: replaced_generation,
-            }
-        } else {
-            SourceEvent::Connected
-        };
-        let _ = self.events.send(event);
+            let event = if let Some(old) = old {
+                let _ = old.command_tx.send(Message::Close(None));
+                SourceEvent::ConnectionReplaced {
+                    generation: replaced_generation,
+                }
+            } else {
+                SourceEvent::Connected
+            };
+            // Publish before releasing the registry lock. A repair subscribes
+            // and captures its connection under this same lock, so it cannot
+            // mistake this event for a later connection's lifecycle.
+            let _ = self.events.send(event);
+        }
         connection_id
     }
 
     async fn unregister(&self, connection_id: u64) {
-        let (removed, generation) = {
-            let mut inner = self.inner.lock().await;
-            if inner
-                .connection
-                .as_ref()
-                .map(|connection| connection.connection_id)
-                == Some(connection_id)
-            {
-                let generation = inner.desired_generation;
-                inner.connection = None;
-                inner.desired_generation = None;
-                inner.availability_known = false;
-                inner.enabled = false;
-                inner.ready_generation = None;
-                inner.format_generation = None;
-                inner.sample_rate = None;
-                inner.channels = None;
-                inner.pid = None;
-                inner.ready_at = None;
-                inner.last_activity_at = None;
-                inner.last_frame_at = None;
-                inner.last_audible_at = None;
-                inner.restart_pending_generation = None;
-                inner.last_restart = None;
-                inner.peak = 0.0;
-                inner.status = if self.configured {
-                    "offline".to_string()
-                } else {
-                    "unconfigured".to_string()
-                };
-                (true, generation)
+        let mut inner = self.inner.lock().await;
+        if inner
+            .connection
+            .as_ref()
+            .map(|connection| connection.connection_id)
+            == Some(connection_id)
+        {
+            let generation = inner.desired_generation;
+            inner.connection = None;
+            inner.desired_generation = None;
+            inner.availability_known = false;
+            inner.enabled = false;
+            inner.spotify_connect_repair_supported = false;
+            inner.pending_repair = None;
+            inner.ready_generation = None;
+            inner.format_generation = None;
+            inner.sample_rate = None;
+            inner.channels = None;
+            inner.pid = None;
+            inner.ready_at = None;
+            inner.last_activity_at = None;
+            inner.last_frame_at = None;
+            inner.last_audible_at = None;
+            inner.restart_pending_generation = None;
+            inner.last_restart = None;
+            inner.peak = 0.0;
+            inner.status = if self.configured {
+                "offline".to_string()
             } else {
-                (false, None)
-            }
-        };
-        if removed {
+                "unconfigured".to_string()
+            };
             let _ = self.events.send(SourceEvent::Disconnected { generation });
         }
     }
@@ -498,6 +678,8 @@ enum SourceTextMessage {
     Availability {
         enabled: bool,
         error: Option<String>,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     Format {
         generation: u64,
@@ -517,6 +699,14 @@ enum SourceTextMessage {
     },
     Restarting {
         generation: u64,
+    },
+    #[serde(rename = "spotify_connect_repair")]
+    SpotifyConnectRepair {
+        request_id: u64,
+        success: bool,
+        outcome: String,
+        was_running_before: bool,
+        error: Option<String>,
     },
 }
 
@@ -601,10 +791,17 @@ async fn handle_text(registry: &JamSourceRegistry, connection_id: u64, text: &st
         return;
     }
     match message {
-        SourceTextMessage::Availability { enabled, error } => {
+        SourceTextMessage::Availability {
+            enabled,
+            error,
+            capabilities,
+        } => {
             inner.last_activity_at = Some(Instant::now());
             inner.availability_known = true;
             inner.enabled = enabled;
+            inner.spotify_connect_repair_supported = capabilities
+                .iter()
+                .any(|capability| capability == SPOTIFY_CONNECT_REPAIR_CAPABILITY);
             let error = error
                 .map(|message| message.chars().take(500).collect::<String>())
                 .filter(|message| !message.trim().is_empty());
@@ -754,6 +951,31 @@ async fn handle_text(registry: &JamSourceRegistry, connection_id: u64, text: &st
             inner.peak = 0.0;
             let _ = registry.events.send(SourceEvent::Restarting { generation });
         }
+        SourceTextMessage::SpotifyConnectRepair {
+            request_id,
+            success,
+            outcome,
+            was_running_before,
+            error,
+        } => {
+            if inner.pending_repair != Some((connection_id, request_id)) {
+                return;
+            }
+            inner.pending_repair = None;
+            inner.last_activity_at = Some(Instant::now());
+            let outcome = outcome.chars().take(100).collect::<String>();
+            let error = error
+                .map(|message| message.chars().take(500).collect::<String>())
+                .filter(|message| !message.trim().is_empty());
+            let _ = registry.events.send(SourceEvent::SpotifyConnectRepair {
+                connection_id,
+                request_id,
+                success,
+                outcome,
+                was_running_before,
+                error,
+            });
+        }
     }
 }
 
@@ -842,11 +1064,250 @@ mod tests {
         .await;
     }
 
+    async fn arm_with_spotify_connect_repair(registry: &JamSourceRegistry, connection_id: u64) {
+        handle_text(
+            registry,
+            connection_id,
+            r#"{"type":"availability","enabled":true,"capabilities":["spotify_connect_repair_v1"]}"#,
+        )
+        .await;
+    }
+
     #[test]
     fn source_token_comparison_requires_exact_match() {
         assert!(constant_time_eq(b"source-secret", b"source-secret"));
         assert!(!constant_time_eq(b"source-secret", b"source-secreu"));
         assert!(!constant_time_eq(b"short", b"longer"));
+    }
+
+    #[tokio::test]
+    async fn spotify_connect_repair_is_capability_gated() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm(&registry, connection_id).await;
+
+        assert!(!registry.snapshot().await.spotify_connect_repair_supported);
+        let error = registry
+            .repair_spotify_connect(
+                SpotifyConnectRepairAction::Activate,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not support Spotify Connect repair"));
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn spotify_connect_repair_is_single_flight_and_connection_fenced() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm_with_spotify_connect_repair(&registry, connection_id).await;
+        assert!(registry.snapshot().await.spotify_connect_repair_supported);
+
+        let first_registry = registry.clone();
+        let first = tokio::spawn(async move {
+            first_registry
+                .repair_spotify_connect(
+                    SpotifyConnectRepairAction::Activate,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+        });
+        let Message::Text(command) = command_rx.recv().await.expect("repair command") else {
+            panic!("expected repair text command");
+        };
+        let command: serde_json::Value = serde_json::from_str(&command).unwrap();
+        let request_id = command["request_id"].as_u64().unwrap();
+        assert_eq!(command["action"], "activate");
+
+        let duplicate = registry
+            .repair_spotify_connect(
+                SpotifyConnectRepairAction::Restart,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(duplicate, "A Spotify Connect repair is already running");
+
+        handle_text(
+            &registry,
+            connection_id,
+            &serde_json::json!({
+                "type": "spotify_connect_repair",
+                "request_id": request_id,
+                "success": true,
+                "outcome": "activated",
+                "was_running_before": true,
+            })
+            .to_string(),
+        )
+        .await;
+        let result = first.await.unwrap().unwrap();
+        assert_eq!(result.outcome, "activated");
+        assert!(result.was_running_before);
+        assert!(registry.inner.lock().await.pending_repair.is_none());
+    }
+
+    #[tokio::test]
+    async fn replacing_source_connection_cancels_and_clears_pending_repair() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm_with_spotify_connect_repair(&registry, connection_id).await;
+
+        let repair_registry = registry.clone();
+        let repair = tokio::spawn(async move {
+            repair_registry
+                .repair_spotify_connect(
+                    SpotifyConnectRepairAction::Activate,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .await
+        });
+        command_rx.recv().await.expect("repair command");
+        let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
+        registry.register(replacement_tx).await;
+
+        let error = repair.await.unwrap().unwrap_err();
+        assert!(error.contains("disconnected during Spotify Connect repair"));
+        let inner = registry.inner.lock().await;
+        assert!(inner.pending_repair.is_none());
+        assert!(!inner.spotify_connect_repair_supported);
+    }
+
+    #[tokio::test]
+    async fn repair_deadline_cancels_exact_worker_and_blocks_start_until_reply() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm_with_spotify_connect_repair(&registry, connection_id).await;
+
+        let repair_registry = registry.clone();
+        let repair = tokio::spawn(async move {
+            repair_registry
+                .repair_spotify_connect(
+                    SpotifyConnectRepairAction::Restart,
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(25),
+                )
+                .await
+        });
+        let Message::Text(command) = command_rx.recv().await.expect("repair command") else {
+            panic!("expected repair command");
+        };
+        let command: serde_json::Value = serde_json::from_str(&command).unwrap();
+        let request_id = command["request_id"].as_u64().unwrap();
+
+        let error = repair.await.unwrap().unwrap_err();
+        assert!(error.contains("timed out"));
+        let Message::Text(cancel) = command_rx.recv().await.expect("cancel command") else {
+            panic!("expected cancel command");
+        };
+        let cancel: serde_json::Value = serde_json::from_str(&cancel).unwrap();
+        assert_eq!(cancel["type"], "spotify_connect_repair_cancel");
+        assert_eq!(cancel["request_id"], request_id);
+        assert_eq!(
+            registry.start(9).await.unwrap_err(),
+            "Spotify Connect repair is still finishing on the source PC"
+        );
+
+        handle_text(
+            &registry,
+            connection_id,
+            &serde_json::json!({
+                "type": "spotify_connect_repair",
+                "request_id": request_id,
+                "success": false,
+                "outcome": "cancelled",
+                "was_running_before": true,
+                "error": "cancelled",
+            })
+            .to_string(),
+        )
+        .await;
+        assert!(registry.inner.lock().await.pending_repair.is_none());
+        registry
+            .start(9)
+            .await
+            .expect("start after cancellation reply");
+    }
+
+    #[tokio::test]
+    async fn dropped_repair_future_cancels_exact_worker_without_releasing_start_fence() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm_with_spotify_connect_repair(&registry, connection_id).await;
+
+        let repair_registry = registry.clone();
+        let repair = tokio::spawn(async move {
+            repair_registry
+                .repair_spotify_connect(
+                    SpotifyConnectRepairAction::Restart,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                )
+                .await
+        });
+        let Message::Text(command) = command_rx.recv().await.expect("repair command") else {
+            panic!("expected repair command");
+        };
+        let command: serde_json::Value = serde_json::from_str(&command).unwrap();
+        let request_id = command["request_id"].as_u64().unwrap();
+
+        repair.abort();
+        assert!(repair.await.unwrap_err().is_cancelled());
+        let Message::Text(cancel) = command_rx.recv().await.expect("drop cancel command") else {
+            panic!("expected cancel command");
+        };
+        let cancel: serde_json::Value = serde_json::from_str(&cancel).unwrap();
+        assert_eq!(cancel["request_id"], request_id);
+        assert_eq!(
+            registry.start(10).await.unwrap_err(),
+            "Spotify Connect repair is still finishing on the source PC"
+        );
+
+        handle_text(
+            &registry,
+            connection_id,
+            &serde_json::json!({
+                "type": "spotify_connect_repair",
+                "request_id": request_id,
+                "success": false,
+                "outcome": "cancelled",
+                "was_running_before": true,
+                "error": "cancelled",
+            })
+            .to_string(),
+        )
+        .await;
+        registry
+            .start(10)
+            .await
+            .expect("reply releases start fence");
+    }
+
+    #[tokio::test]
+    async fn repair_never_sends_after_deadline_while_registry_lock_is_contended() {
+        let registry = JamSourceRegistry::new(true);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let connection_id = registry.register(command_tx).await;
+        arm_with_spotify_connect_repair(&registry, connection_id).await;
+
+        let held = registry.inner.lock().await;
+        let error = registry
+            .repair_spotify_connect(
+                SpotifyConnectRepairAction::Activate,
+                tokio::time::Instant::now() + std::time::Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+        drop(held);
+
+        assert!(error.contains("deadline expired"));
+        assert!(command_rx.try_recv().is_err());
+        assert!(registry.inner.lock().await.pending_repair.is_none());
     }
 
     #[tokio::test]
