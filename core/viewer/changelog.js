@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.35",
+    title: "Safer Mobile Screens & Jam Recovery",
+    notes: [
+      "Android Firefox can recover a stalled shared-screen presentation without changing the desktop stage or ultrawide layout.",
+      "The Spotify source can repair a stale Connect registration for the already-running Store app without requiring a manual source re-registration.",
+      "Jam recovery stays single-flight and refuses to interrupt active Spotify playback or run on upstream and authentication failures."
+    ]
+  },
+  {
     version: "v0.6.34",
     title: "Shared Jam Library & History",
     notes: [

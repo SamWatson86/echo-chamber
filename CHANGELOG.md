@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.35
+
+- Mobile: Android Firefox presentation recovery now loads only on that exact browser target and can recover a stalled screen sink without changing shared desktop stage, ultrawide, fullscreen, or Jam behavior.
+- Jam: A provisioned Windows Spotify source can safely repair a stale Spotify Connect registration for the already-running Microsoft Store app, including a rotated device ID matched by the uniquely configured device name.
+- Safety: Spotify repair is capability-negotiated, connection-fenced, deadline-bounded, blocked during playback or active capture, and never runs for authentication, rate-limit, upstream, restricted-device, or malformed-response failures.
+- Reliability: Jam Start remains single-flight while source repair is pending, and old desktop source clients fail closed with an actionable update requirement.
+- Release: Desktop and control package versions are aligned at 0.6.35.
+
 ## 0.6.34
 
 - Jam Library: Search Spotify tracks and playlists, save them as shared Echo Favorites, and filter or sort the library by the people who contributed each item.
