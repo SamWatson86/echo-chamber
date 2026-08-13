@@ -416,6 +416,87 @@ test("monitor audio capture requests system audio with Echo playback excluded", 
   );
 });
 
+test("Battlefield 6 executable variants request system audio with Echo excluded", () => {
+  const { context } = loadScreenShareNative();
+  const sources = [
+    { sourceType: "game", pid: 601, title: "Loading", exe_name: "BF6.exe" },
+    { sourceType: "game", pid: 602, title: "Loading", exeName: "C:\\Games\\Battlefield6.EXE" },
+  ];
+
+  for (const source of sources) {
+    const request = context.nativeAudioCaptureRequestForSource(source);
+    assert.equal(request.mode, "system-exclude-echo");
+    assert.equal(request.pid, 0);
+  }
+});
+
+test("Battlefield 6 exact title variants are used only when executable identity is absent", () => {
+  const { context } = loadScreenShareNative();
+  for (const title of ["BF6", "Battlefield 6", "Battlefield\u2122 6", " Battlefield  6 "]) {
+    const request = context.nativeAudioCaptureRequestForSource({
+      sourceType: "game",
+      pid: 603,
+      title,
+    });
+    assert.equal(request.mode, "system-exclude-echo", title);
+  }
+});
+
+test("Battlefield 6 matching rejects false positives and preserves other source routes", () => {
+  const { context } = loadScreenShareNative();
+  const falsePositives = [
+    { sourceType: "window", pid: 701, title: "Battlefield 6" },
+    { sourceType: "game", pid: 702, title: "Battlefield 6 Beta" },
+    { sourceType: "game", pid: 703, title: "My BF6 stream" },
+    { sourceType: "game", pid: 704, title: "BF6", exe_name: "chrome.exe" },
+    { sourceType: "game", pid: 705, title: "Battlefield 6", exeName: "bf2042.exe" },
+    { sourceType: "game", pid: 706, title: "Battlefield 6", exe_name: "notbf6.exe" },
+  ];
+
+  for (const source of falsePositives) {
+    const request = context.nativeAudioCaptureRequestForSource(source);
+    assert.equal(request.mode, "process", JSON.stringify(source));
+    assert.equal(request.pid, source.pid);
+  }
+
+  assert.equal(
+    JSON.stringify(context.nativeAudioCaptureRequestForSource({
+      sourceType: "game",
+      pid: 801,
+      title: "Crimson Desert",
+      exe_name: "CrimsonDesert.exe",
+    })),
+    JSON.stringify({ mode: "process", pid: 801, toast: "Game audio streaming" })
+  );
+  assert.equal(
+    JSON.stringify(context.nativeAudioCaptureRequestForSource({
+      sourceType: "window",
+      pid: 802,
+      title: "PowerPoint",
+    })),
+    JSON.stringify({ mode: "process", pid: 802, toast: "Window audio streaming" })
+  );
+});
+
+test("Battlefield 6 audio routing does not mutate capture geometry", () => {
+  const { context } = loadScreenShareNative();
+  const source = {
+    sourceType: "game",
+    id: 4242,
+    pid: 5678,
+    title: "BF6",
+    width: 3440,
+    height: 1440,
+    fullscreenLike: true,
+    monitorId: "DISPLAY1",
+  };
+  const before = JSON.stringify(source);
+
+  context.nativeAudioCaptureRequestForSource(source);
+
+  assert.equal(JSON.stringify(source), before);
+});
+
 test("native audio capture uses the Echo-excluding system command for monitor audio", async () => {
   const { context, calls } = loadScreenShareNative();
 
@@ -465,6 +546,36 @@ test("native audio capture uses the Echo-excluding system command for monitor au
     calls.some((call) => call.command === "start_system_audio_capture"),
     false
   );
+});
+
+test("Battlefield 6 audio request invokes only the Echo-excluding system command", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const audioInvocations = [];
+  context.showCapturePicker = async () => ({
+    sourceType: "game",
+    id: 4242,
+    pid: 5678,
+    title: "Battlefield 6",
+    captureMode: "auto",
+  });
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_os_build_number") return 26100;
+    return null;
+  };
+  context.startNativeAudioCapture = async (pid, options) => {
+    audioInvocations.push({ pid, options });
+  };
+  context._startQualityWarnListener = () => {};
+
+  await context.startScreenShareManual();
+  await Promise.resolve();
+
+  assert.equal(audioInvocations.length, 1);
+  assert.equal(audioInvocations[0].pid, 0);
+  assert.equal(audioInvocations[0].options.system, false);
+  assert.equal(audioInvocations[0].options.systemExcludeEcho, true);
+  assert.equal(calls.some((call) => call.command === "start_screen_share"), true);
 });
 
 test("native stop clears local screen tile and removes the screen companion", async () => {
