@@ -115,6 +115,14 @@ test("loader is idempotent after its automatic exact-target request", () => {
   assert.equal(result.requests.length, 1, "a duplicate loader evaluation finds the existing tag");
 });
 
+test("loader independently cache-busts the corrected presentation module", () => {
+  const result = loadLoader({ userAgent: androidFirefox });
+  assert.deepEqual(result.requests, [
+    "android-firefox-presentation-recovery.js?v=0.6.35.1786648741",
+  ]);
+  assert.equal(result.api.RECOVERY_SCRIPT, result.requests[0]);
+});
+
 test("the shared runtime isolation allowlist contains only the loader seam", () => {
   const index = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
   assert.equal((index.match(/android-firefox-presentation-recovery-loader\.js/g) || []).length, 1);

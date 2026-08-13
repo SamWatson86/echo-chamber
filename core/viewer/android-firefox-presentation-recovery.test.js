@@ -9,6 +9,7 @@ const androidFirefox =
 
 function createHarness() {
   const calls = [];
+  const logs = [];
   const timeouts = [];
   const intervals = [];
   const videos = [];
@@ -69,6 +70,7 @@ function createHarness() {
       setTimeout(callback, delay) { timeouts.push({ callback, delay }); return timeouts.length; },
     },
     configureVideoElement() { calls.push(["configure"]); },
+    debugLog(message) { logs.push(message); },
     ensureVideoPlays() { calls.push(["play"]); },
     ensureVideoSubscribed() { calls.push(["ensureSubscribed"]); },
     markResubscribeIntent(sid) { calls.push(["intent", sid]); },
@@ -80,7 +82,16 @@ function createHarness() {
     fs.readFileSync(path.join(__dirname, "android-firefox-presentation-recovery.js"), "utf8"),
     context,
   );
-  return { api: context.module.exports, calls, context, intervals, meta, publication, room, tile, timeouts, videos };
+  return { api: context.module.exports, calls, context, intervals, logs, meta, publication, room, tile, timeouts, videos };
+}
+
+function usePlaybackQualityFallback(video, totalFrames) {
+  video._echoPresentationStats.presentedFrames = null;
+  video._playbackQualityFrames = totalFrames;
+  video.getVideoPlaybackQuality = function() {
+    return { totalVideoFrames: this._playbackQualityFrames };
+  };
+  return video;
 }
 
 test("a never-presented live track cannot enter the presentation recovery ladder", () => {
@@ -91,6 +102,75 @@ test("a never-presented live track cannot enter the presentation recovery ladder
   assert.equal(harness.api.inspect(20000), 0);
   assert.deepEqual(harness.calls, []);
   assert.equal(harness.timeouts.length, 0);
+});
+
+test("playback-quality fallback proves progress and enters the same bounded stall ladder", () => {
+  const harness = createHarness();
+  const video = usePlaybackQualityFallback(harness.tile.currentVideo, 20);
+  harness.api.stateBySid.clear();
+
+  assert.equal(harness.api.inspect(1000), 0, "the first played frame proves presentation");
+  assert.equal(harness.api.stateBySid.get("TR_screen").sawPresentedFrame, true);
+  video._playbackQualityFrames = 24;
+  assert.equal(harness.api.inspect(4000), 0, "an increasing total records progress");
+  assert.equal(harness.api.inspect(11999), 0, "an unchanged total remains inside the stall grace");
+  assert.equal(harness.api.inspect(12001), 1, "an unchanged total beyond eight seconds reattaches");
+
+  assert.equal(harness.calls.filter((entry) => entry[0] === "reattach").length, 1);
+  assert.equal(harness.api.diagnostics.fallbackActivations, 1);
+  assert.equal(harness.api.diagnostics.fallbackProgressSamples, 2);
+  assert.match(harness.logs.join("\n"), /using playback-quality frame fallback sid=TR_screen/);
+  assert.match(harness.logs.join("\n"), /reattaching stalled presentation sink sid=TR_screen/);
+});
+
+test("playback-quality counter reset rebases without inventing a presented frame", () => {
+  const harness = createHarness();
+  const video = usePlaybackQualityFallback(harness.tile.currentVideo, 40);
+  harness.api.stateBySid.clear();
+
+  harness.api.inspect(1000);
+  video._playbackQualityFrames = 0;
+  assert.equal(harness.api.inspect(4000), 0, "a reset to zero only establishes a new baseline");
+  assert.equal(harness.api.stateBySid.get("TR_screen").lastProgressAt, 4000);
+  video._playbackQualityFrames = 1;
+  assert.equal(harness.api.inspect(7000), 0, "the first post-reset frame is genuine progress");
+  assert.equal(harness.api.inspect(14999), 0);
+  assert.equal(harness.api.inspect(15001), 1, "a later unchanged counter still detects a stall");
+});
+
+test("missing or throwing playback-quality APIs fail closed when presented frames are unavailable", () => {
+  for (const configure of [
+    (video) => { video._echoPresentationStats.presentedFrames = null; },
+    (video) => {
+      video._echoPresentationStats.presentedFrames = null;
+      video.getVideoPlaybackQuality = () => { throw new Error("unsupported"); };
+    },
+    (video) => {
+      video._echoPresentationStats.presentedFrames = Number.NaN;
+      video.getVideoPlaybackQuality = () => ({ totalVideoFrames: null });
+    },
+  ]) {
+    const harness = createHarness();
+    configure(harness.tile.currentVideo);
+    harness.api.stateBySid.clear();
+    assert.equal(harness.api.inspect(1000), 0);
+    assert.equal(harness.api.inspect(20000), 0);
+    assert.equal(harness.api.stateBySid.get("TR_screen").sawPresentedFrame, undefined);
+    assert.deepEqual(harness.calls, []);
+  }
+});
+
+test("finite presented-frame diagnostics always win over playback-quality fallback", () => {
+  const harness = createHarness();
+  let fallbackReads = 0;
+  harness.tile.currentVideo.getVideoPlaybackQuality = () => {
+    fallbackReads += 1;
+    return { totalVideoFrames: 999 };
+  };
+  harness.api.stateBySid.clear();
+  assert.equal(harness.api.inspect(1000), 0);
+  assert.equal(fallbackReads, 0);
+  assert.equal(harness.api.stateBySid.get("TR_screen").presentationCounterSource, "presented-frames");
 });
 
 test("a proven presentation stall reattaches only its stable sink, then performs one exact-SID resubscribe", () => {
@@ -198,6 +278,42 @@ test("same SID in a new publication and video generation cannot inherit presenta
   harness.api.inspect(40000);
   assert.deepEqual(harness.calls.filter((entry) => entry[0] === "replacementSubscribed"), []);
   assert.equal(harness.api.stateBySid.get("TR_screen").sawPresentedFrame, undefined);
+});
+
+test("same SID playback-quality replacement generation cannot inherit presentation proof", () => {
+  const harness = createHarness();
+  usePlaybackQualityFallback(harness.tile.currentVideo, 12);
+  harness.api.stateBySid.clear();
+  harness.api.inspect(1000);
+  assert.equal(harness.api.stateBySid.get("TR_screen").sawPresentedFrame, true);
+
+  const replacementVideo = usePlaybackQualityFallback({
+    ...harness.tile.currentVideo,
+    _echoPresentationStats: { presentedFrames: null },
+  }, 0);
+  const replacementTrack = {
+    mediaStreamTrack: { readyState: "live", muted: false },
+    attach() {},
+    detach() {},
+  };
+  replacementVideo._lkTrack = replacementTrack;
+  const replacementPublication = {
+    isSubscribed: true,
+    track: replacementTrack,
+    setSubscribed(value) { this.isSubscribed = value; harness.calls.push(["replacementSubscribed", value]); },
+  };
+  const replacementMeta = {
+    identity: "remote",
+    publication: replacementPublication,
+    tile: harness.tile,
+  };
+  harness.tile.currentVideo = replacementVideo;
+  harness.context.screenTrackMeta.set("TR_screen", replacementMeta);
+
+  assert.equal(harness.api.inspect(20000), 0);
+  assert.equal(harness.api.inspect(40000), 0);
+  assert.equal(harness.api.stateBySid.get("TR_screen").sawPresentedFrame, undefined);
+  assert.deepEqual(harness.calls.filter((entry) => entry[0] === "replacementSubscribed"), []);
 });
 
 test("state for a removed SID is swept on the next inspection", () => {

@@ -7,6 +7,44 @@
   var SUBSCRIPTION_DELAY_MS = 500;
   var REARM_PROGRESS_FRAMES = 2;
   var stateBySid = new Map();
+  var diagnostics = {
+    fallbackActivations: 0,
+    fallbackProgressSamples: 0,
+    fallbackSamples: 0,
+    sinkAttempts: 0,
+    subscriptionAttempts: 0,
+    unavailableSamples: 0,
+  };
+
+  function logRecovery(message) {
+    if (typeof debugLog !== "function") return;
+    try { debugLog("[android-firefox-presentation-recovery] " + message); }
+    catch (_error) {}
+  }
+
+  function finiteFrameCounter(value) {
+    if (value === null || value === undefined) return null;
+    var number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
+  function readPresentedFrameSample(video) {
+    var stats = video && video._echoPresentationStats;
+    var presentedFrames = finiteFrameCounter(stats && stats.presentedFrames);
+    if (presentedFrames !== null) {
+      return { frames: presentedFrames, source: "presented-frames" };
+    }
+    if (!video || typeof video.getVideoPlaybackQuality !== "function") return null;
+    try {
+      var quality = video.getVideoPlaybackQuality();
+      var totalVideoFrames = finiteFrameCounter(quality && quality.totalVideoFrames);
+      return totalVideoFrames === null
+        ? null
+        : { frames: totalVideoFrames, source: "playback-quality" };
+    } catch (_error) {
+      return null;
+    }
+  }
 
   function currentTarget(rootObject) {
     var win = rootObject || root;
@@ -104,7 +142,7 @@
       state.track === current.track && state.video === current.video;
   }
 
-  function createGenerationState(generation, current) {
+  function createGenerationState(generation, current, trackSid) {
     return {
       lastProgressAt: 0,
       meta: generation.meta,
@@ -113,18 +151,43 @@
       room: generation.room,
       tile: generation.tile,
       track: current.track,
+      trackSid: trackSid,
       video: current.video,
     };
   }
 
   function observePresentedFrame(video, now, state) {
-    var stats = video && video._echoPresentationStats;
-    var frames = Number(stats && stats.presentedFrames);
-    if (!Number.isFinite(frames)) return false;
+    var sample = readPresentedFrameSample(video);
+    if (!sample) {
+      diagnostics.unavailableSamples += 1;
+      return false;
+    }
+    var frames = sample.frames;
+    if (sample.source === "playback-quality") diagnostics.fallbackSamples += 1;
+    if (state.presentationCounterSource !== sample.source) {
+      state.presentationCounterSource = sample.source;
+      state.lastPresentedFrames = frames;
+      if (sample.source === "playback-quality") {
+        diagnostics.fallbackActivations += 1;
+        logRecovery("using playback-quality frame fallback sid=" + (state.trackSid || "unknown"));
+      }
+      if (state.sawPresentedFrame === true) {
+        // The two counters are not comparable. Rebase and give the new source
+        // one polling interval instead of misclassifying the source change as
+        // an immediate stall.
+        state.lastProgressAt = now;
+        return true;
+      }
+      if (frames < 1) return false;
+      if (sample.source === "playback-quality") diagnostics.fallbackProgressSamples += 1;
+      recordPresentationProgress(state, now);
+      return true;
+    }
     if (state.video && state.video !== video) {
       state.video = video;
       state.lastPresentedFrames = frames;
       if (frames < 1) return false;
+      if (sample.source === "playback-quality") diagnostics.fallbackProgressSamples += 1;
       recordPresentationProgress(state, now);
       return true;
     }
@@ -138,11 +201,18 @@
     if (frames === state.lastPresentedFrames) return false;
     if (frames < state.lastPresentedFrames) {
       state.lastPresentedFrames = frames;
-      if (frames < 1) return false;
+      if (frames < 1) {
+        // Firefox may reset VideoPlaybackQuality when its decoder/sink is
+        // rebound. Zero is not proof of a frame, but it is a new baseline.
+        if (state.sawPresentedFrame === true) state.lastProgressAt = now;
+        return true;
+      }
+      if (sample.source === "playback-quality") diagnostics.fallbackProgressSamples += 1;
       recordPresentationProgress(state, now);
       return true;
     }
     state.lastPresentedFrames = frames;
+    if (sample.source === "playback-quality") diagnostics.fallbackProgressSamples += 1;
     recordPresentationProgress(state, now);
     return true;
   }
@@ -167,7 +237,7 @@
         return;
       }
       if (!state) {
-        state = createGenerationState(generation, current);
+        state = createGenerationState(generation, current, trackSid);
       }
       stateBySid.set(trackSid, state);
       var presentationReady = current.video.paused !== true && current.video.readyState >= 2 &&
@@ -180,6 +250,8 @@
       if (!(state.lastProgressAt > 0) || now - state.lastProgressAt < STALL_MS) return;
       state.progressTicks = 0;
       if (!state.sinkAttempted) {
+        diagnostics.sinkAttempts += 1;
+        logRecovery("reattaching stalled presentation sink sid=" + trackSid);
         var reattached = reattachSink(trackSid, generation);
         // Consume the first-line attempt even when the browser rejects it so a
         // failed same-node reattach cannot block the one bounded SID reset.
@@ -191,6 +263,8 @@
       if (!state.subscriptionAttempted && !state.subscriptionEverAttempted &&
           now - state.sinkAttemptedAt >= SINK_GRACE_MS) {
         if (resetSubscription(trackSid, generation)) {
+          diagnostics.subscriptionAttempts += 1;
+          logRecovery("resetting stalled presentation subscription sid=" + trackSid);
           state.subscriptionAttempted = true;
           state.subscriptionEverAttempted = true;
           state.subscriptionAttemptedAt = now;
@@ -219,7 +293,8 @@
 
   var api = { currentGeneration: currentGeneration, currentTarget: currentTarget,
     createGenerationState: createGenerationState, exactGeneration: exactGeneration, inspect: inspect,
-    observePresentedFrame: observePresentedFrame, reattachSink: reattachSink,
+    diagnostics: diagnostics, observePresentedFrame: observePresentedFrame,
+    readPresentedFrameSample: readPresentedFrameSample, reattachSink: reattachSink,
     resetSubscription: resetSubscription, start: start, stateBySid: stateBySid,
     stateOwnsGeneration: stateOwnsGeneration };
   root.EchoAndroidFirefoxPresentationRecovery = api;
