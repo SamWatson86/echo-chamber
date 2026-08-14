@@ -189,6 +189,17 @@ function restoreFullscreenResponsiveState(snapshot) {
 // Fullscreen the existing stable media host. Keeping the live video inside its
 // Stage tile lets subscription reconciliation, diagnostics, and the watchdog
 // continue to find the same node throughout the transition.
+function getVideoFullscreenMediaName(host, priorControlLabel) {
+  return host?.dataset?.mediaKind === "camera" || /camera/i.test(priorControlLabel || "")
+    ? "camera"
+    : "shared screen";
+}
+
+function getVideoFullscreenControlLabel(host, priorControlLabel, isFullscreen) {
+  if (!isFullscreen) return priorControlLabel || "Open shared screen fullscreen";
+  return "Exit " + getVideoFullscreenMediaName(host, priorControlLabel) + " fullscreen";
+}
+
 function enterVideoFullscreen(videoEl) {
   if (document.fullscreenElement) {
     return document.exitFullscreen();
@@ -224,7 +235,7 @@ function enterVideoFullscreen(videoEl) {
     if (!fullscreenControl) return;
     fullscreenControl.setAttribute(
       "aria-label",
-      isFullscreen ? "Exit shared screen fullscreen" : (priorControlLabel || "Open shared screen fullscreen")
+      getVideoFullscreenControlLabel(host, priorControlLabel, isFullscreen)
     );
     fullscreenControl.title = isFullscreen ? "Exit fullscreen" : (priorControlTitle || "Fullscreen");
   }
@@ -323,9 +334,23 @@ function openImageLightbox(src) {
 
 // ── Screen track registration & watchdog ──
 
-function registerScreenTrack(trackSid, publication, tile, identity) {
+function stampScreenTileGeneration(tile, publication, identity, participant, track, expectedRoom) {
+  if (!tile) return;
+  var screenRoom = expectedRoom || room;
+  var screenParticipant = participant || getCameraStageParticipant(identity, screenRoom);
+  var screenTrack = track || publication?.track || null;
+  tile._screenRoom = screenRoom;
+  tile._screenParticipant = screenParticipant;
+  tile._screenPublication = publication;
+  tile._screenTrack = screenTrack;
+}
+
+function registerScreenTrack(trackSid, publication, tile, identity, participant, track, expectedRoom) {
   if (!trackSid || !tile) return;
-  screenTrackMeta.set(trackSid, {
+  var screenRoom = expectedRoom || room;
+  var screenParticipant = participant || getCameraStageParticipant(identity, screenRoom);
+  var screenTrack = track || publication?.track || null;
+  var meta = {
     trackSid,
     publication,
     tile,
@@ -333,8 +358,20 @@ function registerScreenTrack(trackSid, publication, tile, identity) {
     lastKeyframe: 0,
     retryCount: 0,
     identity: identity || "",
+    room: screenRoom,
+    participant: screenParticipant,
+    track: screenTrack,
     createdAt: performance.now()
-  });
+  };
+  screenTrackMeta.set(trackSid, meta);
+  stampScreenTileGeneration(
+    tile,
+    publication,
+    identity,
+    screenParticipant,
+    screenTrack,
+    screenRoom
+  );
   if (typeof maybeStartNativePresenterForScreenTrack === "function") {
     maybeStartNativePresenterForScreenTrack({ trackSid, publication, tile, identity }).catch(function(e) {
       debugLog("[native-presenter] register start failed: " + (e && e.message ? e.message : e));
@@ -359,6 +396,79 @@ function unregisterScreenTrack(trackSid) {
     clearInterval(screenWatchdogTimer);
     screenWatchdogTimer = null;
   }
+}
+
+function hasParticipantScreenPublication(participant) {
+  if (!participant) return false;
+  var LK = getLiveKitClient();
+  var companion = typeof isScreenIdentity === "function" && isScreenIdentity(participant.identity);
+  return getParticipantPublications(participant).some(function(publication) {
+    var source = publication?.source || publication?.track?.source;
+    var kind = publication?.kind || publication?.track?.kind;
+    var video = !kind || kind === LK?.Track?.Kind?.Video || kind === "video";
+    return video && (source === LK?.Track?.Source?.ScreenShare ||
+      (companion && source === LK?.Track?.Source?.Camera));
+  });
+}
+
+function hasRegisteredScreenGenerationForIdentity(identity) {
+  if (!identity) return false;
+  var found = false;
+  screenTrackMeta.forEach(function(meta) {
+    if (!found && meta?.identity === identity && meta.tile?.isConnected) found = true;
+  });
+  return found;
+}
+
+function removeRegisteredScreenGeneration(trackSid, meta) {
+  if (!trackSid || !meta || screenTrackMeta.get(trackSid) !== meta) return false;
+  var tile = meta.tile;
+  if (screenTileBySid.get(trackSid) === tile) {
+    removeScreenTile(trackSid);
+  } else if (tile && tile._screenPublication === meta.publication) {
+    cleanupScreenVideoElement(tile.querySelector("video"));
+    tile.remove();
+  }
+  if (screenTrackMeta.get(trackSid) === meta) unregisterScreenTrack(trackSid);
+  if (screenTileByIdentity.get(meta.identity) === tile) screenTileByIdentity.delete(meta.identity);
+  screenRecoveryAttempts.delete(trackSid);
+  screenResubscribeIntent.delete(trackSid);
+  var state = participantState.get(meta.identity);
+  if (state?.screenTrackSid === trackSid) state.screenTrackSid = null;
+  return true;
+}
+
+function clearScreenParticipantGeneration(participant, expectedRoom, mode) {
+  var mediaIdentity = normalizeScreenMediaIdentity(participant?.identity);
+  var result = { mediaIdentity: mediaIdentity, removed: false, trackSids: [] };
+  if (!participant || !expectedRoom || room !== expectedRoom) return result;
+  var removeReplacement = mode === "replaced";
+  var matches = [];
+  screenTrackMeta.forEach(function(meta, trackSid) {
+    if (!meta || meta.room !== expectedRoom) return;
+    if (meta.participant?.identity !== participant.identity) return;
+    if (removeReplacement ? meta.participant === participant : meta.participant !== participant) return;
+    matches.push([trackSid, meta]);
+  });
+  matches.forEach(function(entry) {
+    if (removeRegisteredScreenGeneration(entry[0], entry[1])) {
+      result.removed = true;
+      result.trackSids.push(entry[0]);
+    }
+  });
+
+  // A SID-less tile still carries the same generation stamp.
+  var tile = screenTileByIdentity.get(mediaIdentity);
+  var tileMatches = tile && tile._screenRoom === expectedRoom &&
+    tile._screenParticipant?.identity === participant.identity &&
+    (removeReplacement ? tile._screenParticipant !== participant : tile._screenParticipant === participant);
+  if (tileMatches) {
+    cleanupScreenVideoElement(tile.querySelector("video"));
+    tile.remove();
+    if (screenTileByIdentity.get(mediaIdentity) === tile) screenTileByIdentity.delete(mediaIdentity);
+    result.removed = true;
+  }
+  return result;
 }
 
 function startScreenWatchdog() {
@@ -550,15 +660,24 @@ function forceReattachVideo(publication, participant) {
     ensureVideoSubscribed(publication, element);
     const tile = addScreenTile(label, element, publication.trackSid);
     tile.dataset.identity = participant.identity;
+    stampScreenTileGeneration(tile, publication, participant.identity, participant, track, room);
     screenTileByIdentity.set(participant.identity, tile);
     if (publication.trackSid) {
-      registerScreenTrack(publication.trackSid, publication, tile, participant.identity);
+      registerScreenTrack(
+        publication.trackSid,
+        publication,
+        tile,
+        participant.identity,
+        participant,
+        track,
+        room
+      );
     }
     requestVideoKeyFrame(publication, track);
     forceVideoLayer(publication, element);
   } else if (source === LK.Track.Source.Camera) {
     const cardRef = ensureParticipantCard(participant);
-    updateAvatarVideo(cardRef, track);
+    ensureCameraVideo(cardRef, track, publication);
     const video = cardRef.avatar.querySelector("video");
     if (video) {
       ensureVideoPlays(track, video);
@@ -581,6 +700,7 @@ function replaceScreenVideoElement(tile, track, publication) {
   if (!newEl) return;
   configureVideoElement(newEl, true);
   if (oldVideo && oldVideo.parentElement) {
+    cleanupScreenVideoElement(oldVideo);
     oldVideo.replaceWith(newEl);
   } else if (overlay && overlay.parentElement) {
     overlay.parentElement.insertBefore(newEl, overlay);
@@ -630,8 +750,18 @@ function scheduleScreenRecovery(trackSid, publication, element) {
   }
   const attempt = screenRecoveryAttempts.get(trackSid) || 0;
   if (attempt >= 1) return;
+  const recoveryGeneration = {
+    room: room,
+    trackSid: trackSid,
+    meta: srMeta,
+    tile: srMeta?.tile || null,
+    publication: publication,
+    track: publication.track,
+    element: element,
+    playGeneration: element._playGeneration || 0,
+  };
   setTimeout(() => {
-    if (!element.isConnected) return;
+    if (!isCurrentRegisteredScreenElementGeneration(recoveryGeneration, true)) return;
     const isBlack = element._isBlack === true;
     const lastFrame = element._lastFrameTs || 0;
     const stalled = performance.now() - lastFrame > 1200;
@@ -640,11 +770,34 @@ function scheduleScreenRecovery(trackSid, publication, element) {
     if (publication.setSubscribed) {
       markResubscribeIntent(trackSid);
       publication.setSubscribed(false);
-      setTimeout(() => publication.setSubscribed(true), 300);
+      setTimeout(() => {
+        if (!isCurrentRegisteredScreenElementGeneration(recoveryGeneration, false)) return;
+        publication.setSubscribed(true);
+      }, 300);
     }
     requestVideoKeyFrame(publication, publication.track);
     element._isBlack = false;
   }, 700);
+}
+
+function isCurrentRegisteredScreenElementGeneration(generation, requireAttachedElement) {
+  if (!generation || room !== generation.room || !generation.meta || !generation.tile) return false;
+  if (screenTrackMeta.get(generation.trackSid) !== generation.meta ||
+      screenTileBySid.get(generation.trackSid) !== generation.tile) return false;
+  if (!generation.tile.isConnected ||
+      generation.meta.publication !== generation.publication ||
+      generation.meta.tile !== generation.tile ||
+      generation.tile._screenPublication !== generation.publication ||
+      generation.tile._screenTrack !== generation.track) return false;
+  if (generation.publication.track && generation.publication.track !== generation.track) return false;
+  if (!generation.element ||
+      (generation.element._playGeneration || 0) !== generation.playGeneration ||
+      generation.element._lkTrack !== generation.track) return false;
+  if (requireAttachedElement) {
+    return generation.element.isConnected &&
+      generation.tile.querySelector("video") === generation.element;
+  }
+  return true;
 }
 
 // ── Video quality ──
@@ -661,10 +814,30 @@ function requestVideoKeyFrame(publication, track) {
   } catch {}
 }
 
-function forceVideoLayer(publication, element) {
-  if (!publication) return;
+function captureVideoLayerGeneration(publication, element) {
+  return {
+    room: room,
+    publication: publication,
+    track: publication?.track || null,
+    element: element,
+    playGeneration: element?._playGeneration || 0,
+  };
+}
+
+function isCurrentVideoLayerGeneration(generation) {
+  return !!generation && room === generation.room &&
+    !!generation.publication && generation.publication.track === generation.track &&
+    !!generation.element && generation.element.isConnected &&
+    generation.element._lkTrack === generation.track &&
+    (generation.element._playGeneration || 0) === generation.playGeneration;
+}
+
+function forceVideoLayer(publication, element, expectedGeneration) {
+  if (!publication || !element) return;
+  const generation = expectedGeneration || captureVideoLayerGeneration(publication, element);
+  if (!isCurrentVideoLayerGeneration(generation)) return;
   if (element && element.videoWidth === 0 && element.videoHeight === 0) {
-    setTimeout(() => forceVideoLayer(publication, element), 800);
+    setTimeout(() => forceVideoLayer(publication, element, generation), 800);
     return;
   }
   const LK = getLiveKitClient();
@@ -697,7 +870,8 @@ function forceVideoLayer(publication, element) {
       var _upgradeAttempts = [2000, 5000, 10000];
       _upgradeAttempts.forEach(function(delay) {
         setTimeout(() => {
-          if (element && element.videoWidth > 0 && targetQuality != null) {
+          if (isCurrentVideoLayerGeneration(generation) &&
+              element.videoWidth > 0 && targetQuality != null) {
             try {
               if (publication.setVideoQuality) {
                 publication.setVideoQuality(targetQuality);
@@ -892,9 +1066,12 @@ if (typeof module === "object" && module.exports) {
     attemptAndroidFirefoxScreenSubscriptionReset,
     attemptAndroidFirefoxConnectedMediaRelayRecovery,
     createVideoFrameRateTracker,
+    getVideoFullscreenControlLabel,
+    getVideoFullscreenMediaName,
     getVideoPresentationSnapshot,
     isAndroidFirefoxConnectedMediaStallCurrent,
     isCurrentScreenRecoveryGeneration,
+    isCurrentVideoLayerGeneration,
   };
 }
 
@@ -906,14 +1083,37 @@ function cleanupVideoDiagnostics(overlay) {
 
 // ── Camera recovery ──
 
+function stampCameraAvatarVideoGeneration(video, participant, publication, track, expectedRoom) {
+  if (!video) return;
+  video._echoCameraRoom = expectedRoom || room;
+  video._echoCameraParticipant = participant || null;
+  video._echoCameraPublication = publication || null;
+  video._echoCameraTrack = track || null;
+}
+
 function scheduleCameraRecovery(identity, cardRef, publication) {
   if (!identity || !cardRef || !publication) return;
   const key = `${identity}-camera`;
   const attempt = cameraRecoveryAttempts.get(key) || 0;
   if (attempt >= 2) return;
+  const expectedRoom = room;
+  const expectedParticipant = getCameraStageParticipant(identity, expectedRoom);
+  const expectedTrack = publication.track;
   setTimeout(() => {
+    // This timer may outlive a Room, participant, or camera publication. Never
+    // let an old generation reattach over a newer same-identity camera.
+    if (participantCards.get(identity) !== cardRef || !isCurrentCameraTrackGeneration(
+      identity,
+      expectedParticipant,
+      publication,
+      expectedTrack,
+      expectedRoom
+    )) {
+      debugLog(`camera recovery skipped ${identity} (stale generation)`);
+      return;
+    }
     // Guard: don't recover if the track has ended or been unsubscribed
-    if (!publication?.isSubscribed || publication?.track?.mediaStreamTrack?.readyState === "ended") {
+    if (!publication?.isSubscribed || expectedTrack?.mediaStreamTrack?.readyState === "ended") {
       debugLog(`camera recovery skipped ${identity} (track ended or unsubscribed)`);
       return;
     }
@@ -930,11 +1130,18 @@ function scheduleCameraRecovery(identity, cardRef, publication) {
     if (publication?.setSubscribed) {
       publication.setSubscribed(true);
     }
-    if (publication?.track) {
-      updateAvatarVideo(cardRef, publication.track);
+    if (expectedTrack) {
+      updateAvatarVideo(cardRef, expectedTrack);
       const next = cardRef.avatar.querySelector("video");
       if (next) {
-        ensureVideoPlays(publication.track, next);
+        stampCameraAvatarVideoGeneration(
+          next,
+          expectedParticipant,
+          publication,
+          expectedTrack,
+          expectedRoom
+        );
+        ensureVideoPlays(expectedTrack, next);
       }
     }
   }, 900);
@@ -953,9 +1160,28 @@ function ensureCameraVideo(cardRef, track, publication) {
     return;
   }
   const cardIdentity = cardRef.card?.dataset?.identity || 'unknown';
+  const currentParticipant = getCameraStageParticipant(cardIdentity, room);
+  if (!isCurrentCameraTrackGeneration(
+    cardIdentity,
+    currentParticipant,
+    publication,
+    track,
+    room
+  )) {
+    debugLog(`[camera-stage] ignored stale camera generation for ${cardIdentity}`);
+    return;
+  }
+  cancelCameraClearTimer(cardIdentity);
+  cardRef.cameraRoom = room;
+  cardRef.cameraParticipant = currentParticipant;
+  cardRef.cameraPublication = publication;
+  cardRef.cameraTrack = track;
+  const cameraLabel = cardRef.card?.querySelector(".user-name")?.textContent || cardIdentity;
+  reconcileCameraStageTrack(cardIdentity, cameraLabel, track, publication);
   debugLog(`ensureCameraVideo called for track ${track.sid || 'unknown'}, participant=${cardIdentity}, cardRef.avatar=${!!cardRef.avatar}`);
   const existing = cardRef.avatar.querySelector("video");
   if (existing && existing._lkTrack === track) {
+    stampCameraAvatarVideoGeneration(existing, currentParticipant, publication, track, room);
     ensureVideoPlays(track, existing);
     ensureVideoSubscribed(publication, existing);
     const age = performance.now() - (existing._attachedAt || 0);
@@ -963,6 +1189,7 @@ function ensureCameraVideo(cardRef, track, publication) {
       updateAvatarVideo(cardRef, track);
       const next = cardRef.avatar.querySelector("video");
       if (next) {
+        stampCameraAvatarVideoGeneration(next, currentParticipant, publication, track, room);
         ensureVideoPlays(track, next);
         ensureVideoSubscribed(publication, next);
         requestVideoKeyFrame(publication, track);
@@ -974,6 +1201,7 @@ function ensureCameraVideo(cardRef, track, publication) {
   updateAvatarVideo(cardRef, track);
   const video = cardRef.avatar.querySelector("video");
   if (video) {
+    stampCameraAvatarVideoGeneration(video, currentParticipant, publication, track, room);
     ensureVideoPlays(track, video);
     ensureVideoSubscribed(publication, video);
     requestVideoKeyFrame(publication, track);

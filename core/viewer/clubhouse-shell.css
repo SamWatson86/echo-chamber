@@ -1366,8 +1366,7 @@
   gap: 0;
 }
 
-:root[data-ui-shell="v2"] .room-layout.utility-collapsed .room-sidebar,
-:root[data-ui-shell="v2"] .room-layout.utility-collapsed .chat-panel {
+:root[data-ui-shell="v2"] .room-layout.utility-collapsed .room-sidebar {
   position: absolute;
   right: 0;
   bottom: 0;
@@ -1602,6 +1601,116 @@
   }
 }
 
+/* --------------------------------------------------------------------------
+   Stage modules
+
+   Chat, Jam, Camera Lobby, and Soundboard are alternate views of the central
+   Stage. The live screen grid stays mounted underneath so switching tools
+   never tears down screen media. Active Users remains an independent rail.
+   -------------------------------------------------------------------------- */
+
+:root[data-ui-shell="v2"] .room-main.stage-module-open > .grid-header,
+:root[data-ui-shell="v2"] .room-main.stage-module-open > .screens-grid {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host {
+  position: absolute;
+  inset: 0;
+  z-index: var(--club-layer-region);
+  min-width: 0;
+  min-height: 0;
+  display: block;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host.hidden {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .clubhouse-stage-module {
+  position: absolute !important;
+  inset: 0 !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  z-index: auto;
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  box-sizing: border-box;
+  transform: none !important;
+  border-radius: var(--club-radius-panel);
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .chat-panel.clubhouse-stage-module {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .jam-panel.clubhouse-stage-module {
+  container-type: inline-size;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .camera-lobby.clubhouse-stage-module {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .camera-lobby.clubhouse-stage-module .camera-lobby-grid {
+  position: relative;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .camera-lobby.clubhouse-stage-module .camera-lobby-tile.enlarged {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard-compact.clubhouse-stage-module {
+  display: flex;
+  width: 100% !important;
+  max-height: none;
+  padding: 16px;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.clubhouse-stage-module {
+  display: grid;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .clubhouse-stage-module.hidden {
+  display: none !important;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host :where(
+  #close-chat,
+  #close-jam,
+  #close-camera-lobby,
+  #close-soundboard,
+  #close-soundboard-stage
+) {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  :root[data-ui-shell="v2"] .stage-module-host :where(
+    #close-chat,
+    #close-jam,
+    #close-camera-lobby,
+    #close-soundboard,
+    #close-soundboard-stage
+  ) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root[data-ui-shell="v2"] *,
   :root[data-ui-shell="v2"] *::before,
@@ -1614,13 +1723,11 @@
 }
 
 /* --------------------------------------------------------------------------
-   Phase 2 — one logical People / Chat / Jam utility host
+   Phase 2 — responsive Active Users rail and Stage module presentation
 
-   Jam remains portaled under #shell-overlay-root while the legacy rollback is
-   available. The legacy .panel backdrop filter creates a fixed-position
-   containing block, so physically nesting Jam under the room panel would move
-   the centered legacy dialog offscreen. V2 gives that same node the exact
-   geometry of the active utility region without recreating or reparenting it.
+   V2 moves persistent module nodes into #stage-module-host without recreating
+   them. Live legacy rollback restores each node to its original portal anchor,
+   where the legacy fixed-position dialog geometry remains authoritative.
    -------------------------------------------------------------------------- */
 
 .utility-host {
@@ -2103,5 +2210,200 @@
   :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-browser button {
     min-width: 44px;
     min-height: 44px;
+  }
+}
+
+/* When a Stage module and Active Users are both visible, they share the
+   workspace instead of allowing the responsive rail to cover module controls. */
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--club-people-rail-size);
+}
+
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+  position: relative;
+  inset: auto;
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  height: 100%;
+}
+
+:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(180px, 42%);
+}
+
+:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .room-main {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+  position: relative;
+  inset: auto;
+  grid-column: 1;
+  grid-row: 2;
+  width: 100%;
+  height: 100%;
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
+    grid-template-columns: minmax(0, 1fr) clamp(220px, 36vw, 300px);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .room-main {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+    grid-column: 2;
+    grid-row: 1;
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: 100% !important;
+    top: auto !important;
+  }
+
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host > .room-sidebar {
+    height: 100%;
+    max-height: none;
+  }
+}
+
+/* The edit surface must remain usable when Soundboard owns a narrow or short
+   Stage. Keep its chrome inside the panel and let the panel scroll to Upload. */
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module {
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module :where(
+  .soundboard-header,
+  .soundboard-actions,
+  .soundboard-search,
+  .soundboard-grid,
+  .soundboard-upload,
+  .soundboard-upload-row,
+  .soundboard-upload-volume
+) {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-header,
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-actions {
+  flex-wrap: wrap;
+}
+
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-actions > button,
+:root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-upload-row > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 700px), (max-height: 520px) {
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module {
+    display: block;
+    padding: 10px;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module > * + * {
+    margin-top: 8px;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module #toggle-soundboard-volume {
+    grid-column: 1 / -1;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-actions > button {
+    width: 100%;
+    padding-inline: 8px;
+    white-space: normal;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-grid {
+    min-height: 96px;
+    max-height: clamp(96px, 30vh, 220px);
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-upload {
+    padding-top: 8px;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-upload-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .sound-file {
+    grid-column: 1 / -1;
+    justify-content: center;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard.soundboard-edit.clubhouse-stage-module .soundboard-upload-volume {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard-compact.clubhouse-stage-module {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: stretch;
+    padding: 10px;
+    gap: 6px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard-compact.clubhouse-stage-module :where(
+    .soundboard-compact-header,
+    .soundboard-volume-compact,
+    .soundboard-compact-search,
+    .soundboard-compact-grid
+  ) {
+    grid-column: 1 / -1;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard-compact.clubhouse-stage-module .soundboard-compact-btn {
+    min-width: 0;
+    padding-inline: 6px;
+    white-space: normal;
+  }
+
+  :root[data-ui-shell="v2"] .stage-module-host > .soundboard-compact.clubhouse-stage-module .soundboard-compact-grid {
+    min-height: 64px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 }

@@ -2,8 +2,13 @@
    CONNECT — Room connection, disconnect, switching, and lifecycle
    ========================================================= */
 
-function hookPublication(publication, participant) {
+function hookPublication(publication, participant, expectedRoom) {
   if (!publication || !participant) return;
+  var publicationRoom = expectedRoom || room;
+  if (!isCurrentRoomParticipantGeneration(participant.identity, participant, publicationRoom)) {
+    debugLog("[room-generation] ignored stale publication hook for " + participant.identity);
+    return;
+  }
   // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
   patchScreenCompanionSource(publication, publication?.track, participant);
   updatePublisherMicrophoneState(publication, participant, true);
@@ -17,9 +22,11 @@ function hookPublication(publication, participant) {
     const unsubscribedEvt = LK?.TrackEvent?.Unsubscribed || "unsubscribed";
     if (publication.on) {
       publication.on(subscribedEvt, (track) => {
+        if (!isCurrentRoomParticipantGeneration(participant.identity, participant, publicationRoom)) return;
         if (track) handleTrackSubscribed(track, publication, participant);
       });
       publication.on(unsubscribedEvt, (track) => {
+        if (!isCurrentRoomParticipantGeneration(participant.identity, participant, publicationRoom)) return;
         if (track) handleTrackUnsubscribed(track, publication, participant);
       });
     }
@@ -759,8 +766,8 @@ async function connectToRoom({
   }
   function scheduleReconnectFlagSafetyReset() {
     setTimeout(() => {
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
+      if (newRoom !== room ||
+          (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom._echoRecoveryDisconnect === true)) {
         return;
       }
       if (_isReconnecting) {
@@ -769,26 +776,25 @@ async function connectToRoom({
       }
     }, 10000);
   }
-  function ignoreAndroidFirefoxStaleRoomEvent(eventName) {
-    if (!androidFirefoxRoomDisconnectRecoveryEnabled ||
-        (newRoom === room && newRoom._echoRecoveryDisconnect !== true)) {
+  function ignoreStaleRoomEvent(eventName) {
+    // Preserve the explicit Android Firefox stale-Room seam used by its
+    // recovery contract, then apply the same generation boundary everywhere.
+    if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
+      debugLog("[android-firefox-room-recovery] ignored stale Room " + eventName);
+      return true;
+    }
+    var controlledRecoveryRoom = androidFirefoxRoomDisconnectRecoveryEnabled &&
+      newRoom._echoRecoveryDisconnect === true;
+    if (!shouldIgnoreRoomMediaEvent(newRoom, room, controlledRecoveryRoom)) {
       return false;
     }
-    debugLog("[android-firefox-room-recovery] ignored stale/controlled Room " + eventName);
+    debugLog("[room-generation] ignored stale/controlled Room " + eventName);
     return true;
   }
   if (LK.RoomEvent?.ConnectionStateChanged) {
     newRoom.on(LK.RoomEvent.ConnectionStateChanged, (state) => {
       if (!state) return;
-      if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room " + state + " state");
-        return;
-      }
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          newRoom._echoRecoveryDisconnect === true) {
-        debugLog("[android-firefox-room-recovery] ignored controlled old Room " + state + " state");
-        return;
-      }
+      if (ignoreStaleRoomEvent("connection state " + state)) return;
       debugLog("[connection] state changed: " + state);
       if (state === "reconnecting") {
         _isReconnecting = true;
@@ -828,10 +834,7 @@ async function connectToRoom({
       // ignore those stale Room instances before they overwrite the active
       // session status or stop its stats monitor. Other platforms retain the
       // existing handler behavior.
-      if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room disconnect");
-        return;
-      }
+      if (ignoreStaleRoomEvent("disconnect")) return;
       const detail = describeDisconnectReason(reason, LK);
       setStatus(`Disconnected: ${detail}`, true);
       if (!_isRoomSwitch) {
@@ -860,11 +863,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.SignalReconnecting) {
     newRoom.on(LK.RoomEvent.SignalReconnecting, () => {
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room signal reconnecting");
-        return;
-      }
+      if (ignoreStaleRoomEvent("signal reconnecting")) return;
       _isReconnecting = true;
       watchAndroidFirefoxRoomReconnect();
       setStatus("Signal reconnecting...", true);
@@ -876,11 +875,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.SignalReconnected) {
     newRoom.on(LK.RoomEvent.SignalReconnected, () => {
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room signal reconnected");
-        return;
-      }
+      if (ignoreStaleRoomEvent("signal reconnected")) return;
       _isReconnecting = false;
       androidFirefoxRoomDisconnectRecovery?.handleConnected({ room: newRoom });
       resetAndroidFirefoxRecoveryMicIntent();
@@ -911,11 +906,7 @@ async function connectToRoom({
   // Room-level reconnecting/reconnected (covers media reconnection too)
   if (LK.RoomEvent?.Reconnecting) {
     newRoom.on(LK.RoomEvent.Reconnecting, () => {
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room reconnecting event");
-        return;
-      }
+      if (ignoreStaleRoomEvent("reconnecting")) return;
       _isReconnecting = true;
       watchAndroidFirefoxRoomReconnect();
       setStatus("Reconnecting...", true);
@@ -926,11 +917,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.Reconnected) {
     newRoom.on(LK.RoomEvent.Reconnected, () => {
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          (newRoom !== room || newRoom._echoRecoveryDisconnect === true)) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room reconnected event");
-        return;
-      }
+      if (ignoreStaleRoomEvent("reconnected")) return;
       _isReconnecting = false;
       androidFirefoxRoomDisconnectRecovery?.handleConnected({ room: newRoom });
       resetAndroidFirefoxRecoveryMicIntent();
@@ -959,15 +946,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.ConnectionError) {
     newRoom.on(LK.RoomEvent.ConnectionError, (err) => {
-      if (androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room) {
-        debugLog("[android-firefox-room-recovery] ignored stale Room connection error");
-        return;
-      }
-      if (androidFirefoxRoomDisconnectRecoveryEnabled &&
-          newRoom._echoRecoveryDisconnect === true) {
-        debugLog("[android-firefox-room-recovery] ignored controlled source Room connection error");
-        return;
-      }
+      if (ignoreStaleRoomEvent("connection error")) return;
       const detail = err?.message || String(err || "unknown");
       recordActiveRoomDiagnostic(newRoom, () => {
         window.EchoWebDiagnosticsRuntime?.recordConnectionState?.("error", err?.name);
@@ -978,7 +957,11 @@ async function connectToRoom({
   const localIdentity = identity;
   ensureParticipantCard({ identity: localIdentity, name }, true);
   newRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-    if (ignoreAndroidFirefoxStaleRoomEvent("track subscribed")) return;
+    if (ignoreStaleRoomEvent("track subscribed")) return;
+    if (!isCurrentRoomParticipantGeneration(participant?.identity, participant, newRoom)) {
+      debugLog("[room-generation] ignored replaced participant track subscribed");
+      return;
+    }
     // DEBUG: log ALL track subscriptions
     console.log('[TRACK-SUB] ' + (participant?.identity || '?') + ' kind=' + track.kind + ' source=' + (publication?.source || track?.source));
     // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
@@ -1012,21 +995,25 @@ async function connectToRoom({
       watchedScreens.add(_effectiveParticipant.identity);
       debugLog("[opt-in] auto-watch on track subscribed " + _effectiveParticipant.identity);
     }
-    handleTrackSubscribed(track, publication, _effectiveParticipant);
+    // Keep the exact LiveKit participant object for media-generation fencing.
+    // handleTrackSubscribed resolves $screen companions to their parent for UI
+    // identity without losing the publisher object needed for disconnect cleanup.
+    handleTrackSubscribed(track, publication, participant);
     scheduleReconcileWaves("track-subscribed");
-    if (participant) hookPublication(publication, participant);
+    if (participant) hookPublication(publication, participant, newRoom);
     debugLog(`track subscribed ${participant?.identity || "unknown"} src=${publication?.source || track.source} kind=${track.kind}`);
 
     // Refresh Camera Lobby if open and it's a camera track (uses outer LK from line 447)
     if (track.kind === 'video' && publication?.source === LK?.Track?.Source?.Camera) {
       if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
-        setTimeout(() => populateCameraLobby(), 100);
+        setTimeout(() => refreshActiveCameraLobbyForRoom(newRoom), 100);
       }
     }
   });
   if (LK.RoomEvent?.TrackSubscriptionFailed) {
     newRoom.on(LK.RoomEvent.TrackSubscriptionFailed, (publication, participant, err) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("track subscription failed")) return;
+      if (ignoreStaleRoomEvent("track subscription failed")) return;
+      if (!isCurrentRoomParticipantGeneration(participant?.identity, participant, newRoom)) return;
       const detail = err?.message || String(err || "track subscription failed");
       setStatus(`Track subscription failed: ${detail}`, true);
       debugLog(`track subscription failed ${participant?.identity || "unknown"} ${detail}`);
@@ -1038,6 +1025,8 @@ async function connectToRoom({
         }
         publication.setSubscribed(false);
         setTimeout(() => {
+          if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom) ||
+              !getParticipantPublications(participant).includes(publication)) return;
           publication.setSubscribed(true);
           if (publication?.track && participant) {
             handleTrackSubscribed(publication.track, publication, participant);
@@ -1049,7 +1038,11 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.TrackPublished) {
     newRoom.on(LK.RoomEvent.TrackPublished, (publication, participant) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("track published")) return;
+      if (ignoreStaleRoomEvent("track published")) return;
+      if (!isCurrentRoomParticipantGeneration(participant?.identity, participant, newRoom)) {
+        debugLog("[room-generation] ignored replaced participant track published");
+        return;
+      }
       // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
       patchScreenCompanionSource(publication, publication?.track, participant);
       var pubSource = getTrackSource(publication, publication?.track);
@@ -1074,13 +1067,13 @@ async function connectToRoom({
           setParticipantScreenWatchAvailable(_pubIdentity, true);
           debugLog(`[opt-in] track published (screen, user-hidden) ${_pubIdentity} src=${pubSource}`);
           // Still hook so we can subscribe later when user opts in
-          if (participant) hookPublication(publication, participant);
+          if (participant) hookPublication(publication, participant, newRoom);
           return;
         }
         watchedScreens.add(_pubIdentity);
         debugLog(`[opt-in] track published (screen, auto-watch) ${_pubIdentity} src=${pubSource}`);
         startWatchingScreenIdentity(_pubIdentity, "track-published");
-        if (participant) hookPublication(publication, participant);
+        if (participant) hookPublication(publication, participant, newRoom);
         return;
       }
 
@@ -1091,14 +1084,21 @@ async function connectToRoom({
       if (publication?.kind === LK.Track.Kind.Video) {
         requestVideoKeyFrame(publication, publication.track);
         var _kfDelay = _isRoomSwitch ? 300 : 700;
-        setTimeout(() => requestVideoKeyFrame(publication, publication.track), _kfDelay);
+        setTimeout(() => {
+          if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom) ||
+              !getParticipantPublications(participant).includes(publication)) return;
+          requestVideoKeyFrame(publication, publication.track);
+        }, _kfDelay);
       }
       if (participant) {
-        hookPublication(publication, participant);
+        hookPublication(publication, participant, newRoom);
       }
       if (participant) {
         var _resubDelay = _isRoomSwitch ? 200 : 900;
-        setTimeout(() => resubscribeParticipantTracks(participant), _resubDelay);
+        setTimeout(() => {
+          if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
+          resubscribeParticipantTracks(participant);
+        }, _resubDelay);
       }
       if (_isRoomSwitch) {
         scheduleReconcileWavesFast("track-published");
@@ -1108,7 +1108,11 @@ async function connectToRoom({
     });
   }
   newRoom.on(LK.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
-    if (ignoreAndroidFirefoxStaleRoomEvent("track unsubscribed")) return;
+    if (ignoreStaleRoomEvent("track unsubscribed")) return;
+    if (!isCurrentRoomParticipantGeneration(participant?.identity, participant, newRoom)) {
+      debugLog("[room-generation] ignored replaced participant track unsubscribed");
+      return;
+    }
     handleTrackUnsubscribed(track, publication, participant);
   });
   // Remote TrackUnpublished — fires AFTER the publication is removed from the
@@ -1117,8 +1121,12 @@ async function connectToRoom({
   // This handler catches screen share tiles and camera cards that got stuck.
   if (LK.RoomEvent?.TrackUnpublished) {
     newRoom.on(LK.RoomEvent.TrackUnpublished, (publication, participant) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("track unpublished")) return;
+      if (ignoreStaleRoomEvent("track unpublished")) return;
       if (!publication || !participant) return;
+      if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) {
+        debugLog("[room-generation] ignored replaced participant track unpublished");
+        return;
+      }
       // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
       patchScreenCompanionSource(publication, publication?.track, participant);
       const source = publication.source;
@@ -1138,6 +1146,12 @@ async function connectToRoom({
         if (!remoteP) room.remoteParticipants.forEach(function(p) { if (p.identity === publicationIdentity) remoteP = p; });
       }
       var pubs = remoteP ? getParticipantPublications(remoteP) : [];
+
+      if (source === LK.Track.Source.Camera &&
+          !isCurrentCameraParticipantGeneration(identity, participant, newRoom)) {
+        debugLog("[camera-stage] ignored stale camera unpublish for " + identity);
+        return;
+      }
 
       // Publisher mute/off is independent from whether this viewer currently
       // has the remote audio track subscribed.  Preserve that truth even when
@@ -1182,24 +1196,43 @@ async function connectToRoom({
       // ── Camera cleanup ──
       if (source === LK.Track.Source.Camera) {
         debugLog("[unpublished] remote camera unpublished: " + identity);
-        var stillHasCam = pubs.some(function(pub) { return pub && pub.source === LK.Track.Source.Camera && pub.track; });
-        if (!stillHasCam) {
-          var cardRef = participantCards.get(identity);
-          if (cardRef) {
-            updateAvatarVideo(cardRef, null);
-            debugLog("[unpublished] camera cleared for " + identity + " (card reverted to avatar)");
+        var replacementCamera = getRemainingCameraPublicationState(remoteP, publication);
+        cancelCameraClearTimer(identity);
+        if (replacementCamera.publication) {
+          removeCameraVisualGeneration(identity, publication, {
+            clearIntent: false,
+          });
+          if (replacementCamera.track) {
+            setParticipantCameraStageAvailable(identity, true);
+            // Reconcile both secondary attachments independently. This is
+            // idempotent when TrackSubscribed already installed the replacement
+            // and repairs whichever of the avatar or Stage tile is still stale.
+            ensureCameraVideo(
+              ensureParticipantCard(remoteP),
+              replacementCamera.track,
+              replacementCamera.publication
+            );
+            debugLog("[camera-stage] preserved live replacement camera for " + identity);
+          } else {
+            // TrackPublished can precede TrackSubscribed. Preserve the user's
+            // Stage intent while the replacement publication acquires a track.
+            setParticipantCameraStageAvailable(identity, false);
+            debugLog("[camera-stage] waiting for replacement camera track for " + identity);
           }
-          var state = participantState.get(identity);
-          if (state) state.cameraTrackSid = null;
-          // Cancel any pending camera clear timer
-          var existingTimer = cameraClearTimers.get(identity);
-          if (existingTimer) { clearTimeout(existingTimer); cameraClearTimers.delete(identity); }
+        } else {
+          removeCameraVisualGeneration(identity, publication, { clearIntent: true });
+          setParticipantCameraStageAvailable(identity, false);
+          debugLog("[unpublished] camera cleared for " + identity + " (no replacement publication)");
         }
       }
     });
   }
   newRoom.on(LK.RoomEvent.ParticipantConnected, (participant) => {
-    if (ignoreAndroidFirefoxStaleRoomEvent("participant connected")) return;
+    if (ignoreStaleRoomEvent("participant connected")) return;
+    if (!isCurrentRoomParticipantGeneration(participant?.identity, participant, newRoom)) {
+      debugLog("[room-generation] ignored replaced participant connected");
+      return;
+    }
     console.log('[PARTICIPANT] connected: ' + participant.identity);
     if (participant.identity.endsWith('$screen')) {
       debugLog('[screen-merge] $screen companion joined: ' + participant.identity);
@@ -1209,23 +1242,49 @@ async function connectToRoom({
     }
     ensureParticipantCard(participant);
     debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
+    var replacedScreenGeneration = clearScreenParticipantGeneration(participant, newRoom, "replaced");
+    var replacedScreenAudio = clearScreenAudioParticipantGeneration(participant, newRoom, "replaced");
+    if (replacedScreenGeneration.removed || replacedScreenAudio.removed) {
+      // Preserve viewer-local hide/watch intent. Only the old participant's
+      // media attachments are removed; a replacement publication stays usable.
+      setParticipantScreenWatchAvailable(
+        replacedScreenGeneration.mediaIdentity || replacedScreenAudio.mediaIdentity,
+        hasParticipantScreenPublication(participant)
+      );
+      debugLog("[screen-generation] cleared replaced participant media for " + participant.identity);
+    }
+    var currentCameraParticipant = newRoom === room
+      ? getCameraStageParticipant(participant.identity, newRoom)
+      : null;
+    var isCurrentParticipantGeneration = currentCameraParticipant === participant;
+    var existingCardRef = participantCards.get(participant.identity);
+    var existingCameraTile = cameraStageTileByIdentity.get(participant.identity);
+    var cameraParticipantReplaced = hasCameraStageGenerationMismatch(
+      participant.identity,
+      participant,
+      newRoom,
+      existingCardRef,
+      existingCameraTile
+    );
     // Cancel any pending disconnect cleanup — this participant just came back
-    var wasPendingDisconnect = _pendingDisconnects.has(participant.identity);
+    var wasPendingDisconnect = isCurrentParticipantGeneration &&
+      _pendingDisconnects.has(participant.identity);
     if (wasPendingDisconnect) {
       clearTimeout(_pendingDisconnects.get(participant.identity));
       _pendingDisconnects.delete(participant.identity);
       debugLog(`[reconnect] participant ${participant.identity} reconnected — cancelled pending disconnect`);
     }
     // Cancel any stale camera-clear timer from a previous unsubscribe
-    var camTimer = cameraClearTimers.get(participant.identity);
-    if (camTimer) {
-      clearTimeout(camTimer);
-      cameraClearTimers.delete(participant.identity);
-    }
-    // Clear stale camera frame on reused card — participant may reconnect without camera
-    if (wasPendingDisconnect) {
-      var cardRef = participantCards.get(participant.identity);
-      if (cardRef) updateAvatarVideo(cardRef, null);
+    if (isCurrentParticipantGeneration && (wasPendingDisconnect || cameraParticipantReplaced)) {
+      cancelCameraClearTimer(participant.identity);
+      // Clear stale camera frame on a reused card. The replacement participant
+      // may reconnect without publishing a camera at all.
+      setParticipantCameraStageAvailable(participant.identity, false);
+      if (existingCardRef) updateAvatarVideo(existingCardRef, null);
+      removeCameraStageTile(participant.identity, { clearIntent: false });
+      var reusedState = participantState.get(participant.identity);
+      if (reusedState?.cameraTrackSid) cameraVideoBySid.delete(reusedState.cameraTrackSid);
+      if (reusedState) reusedState.cameraTrackSid = null;
     }
     // Real-time enter chime — fires instantly via WebSocket, no polling delay
     // Suppress during reconnection (they never actually left) or brief disconnect/rejoin
@@ -1245,17 +1304,13 @@ async function connectToRoom({
     if (_trackDelay === 0) {
       attachParticipantTracks(participant);
       resubscribeParticipantTracks(participant);
-      if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
-        populateCameraLobby();
-      }
+      refreshActiveCameraLobbyForRoom(newRoom);
     } else {
       setTimeout(() => {
-        if (!room) return; // Guard against disconnect during timeout (#68)
+        if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
         attachParticipantTracks(participant);
         resubscribeParticipantTracks(participant);
-        if (cameraLobbyPanel && !cameraLobbyPanel.classList.contains('hidden')) {
-          populateCameraLobby();
-        }
+        refreshActiveCameraLobbyForRoom(newRoom);
       }, _trackDelay);
     }
     if (_isRoomSwitch) {
@@ -1266,7 +1321,8 @@ async function connectToRoom({
     // Re-broadcast own avatar so new participant receives it
     var _avatarDelay = _isRoomSwitch ? 200 : 1000;
     setTimeout(() => {
-      if (!room || !room.localParticipant) return; // Guard against disconnect during timeout (#68)
+      if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom) ||
+          !room?.localParticipant) return;
       const identityBase = getIdentityBase(room.localParticipant.identity);
       var savedAvatar = echoGet("echo-avatar-device") || echoGet("echo-avatar-" + identityBase);
       if (savedAvatar) {
@@ -1287,11 +1343,16 @@ async function connectToRoom({
   });
   if (LK.RoomEvent?.ParticipantNameChanged) {
     newRoom.on(LK.RoomEvent.ParticipantNameChanged, (participant) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("participant name changed")) return;
+      if (ignoreStaleRoomEvent("participant name changed")) return;
+      if (!isCurrentCameraParticipantGeneration(participant?.identity, participant, newRoom)) {
+        debugLog("[camera-stage] ignored stale participant name change");
+        return;
+      }
       const cardRef = participantCards.get(participant.identity);
       if (!cardRef) return;
       const label = participant.name || "Guest";
       if (cardRef.setParticipantDisplayName) cardRef.setParticipantDisplayName(label);
+      updateCameraStageTileLabel(participant.identity, label);
       if (!cardRef.avatar.querySelector("video")) {
         cardRef.avatar.textContent = getInitials(label);
         updateAvatarDisplay(participant.identity);
@@ -1299,8 +1360,12 @@ async function connectToRoom({
     });
   }
   newRoom.on(LK.RoomEvent.ParticipantDisconnected, (participant) => {
-    if (ignoreAndroidFirefoxStaleRoomEvent("participant disconnected")) return;
+    if (ignoreStaleRoomEvent("participant disconnected")) return;
     const key = participant.identity;
+    if (!isCurrentCameraDisconnectGeneration(key, participant, newRoom)) {
+      debugLog(`[reconnect] ignored stale participant disconnect for ${key}`);
+      return;
+    }
     debugLog(`participant disconnected ${participant.identity} (reconnecting=${_isReconnecting})`);
 
     // Always use a grace period for participant disconnects.
@@ -1313,45 +1378,59 @@ async function connectToRoom({
       clearTimeout(_pendingDisconnects.get(key));
     }
     const timer = setTimeout(() => {
+      if (_pendingDisconnects.get(key) !== timer) return;
+      if (!isCurrentCameraDisconnectGeneration(key, participant, newRoom)) {
+        _pendingDisconnects.delete(key);
+        debugLog(`[reconnect] ignored stale disconnect cleanup for ${key}`);
+        return;
+      }
       _pendingDisconnects.delete(key);
       // Cancel any pending camera-clear timer — card is being fully removed
-      var camT = cameraClearTimers.get(key);
-      if (camT) { clearTimeout(camT); cameraClearTimers.delete(key); }
+      cancelCameraClearTimer(key);
       debugLog(`[reconnect] grace period expired for ${key} — cleaning up`);
       const cardRef = participantCards.get(key);
+      var disconnectedMediaIdentity = normalizeScreenMediaIdentity(key);
+      var disconnectedScreenGeneration = clearScreenParticipantGeneration(participant, newRoom, "exact");
+      var disconnectedScreenAudio = clearScreenAudioParticipantGeneration(participant, newRoom, "exact");
+      removeCameraStageTile(key, { clearIntent: true });
       if (cardRef) cardRef.card.remove();
       participantCards.delete(key);
-      participantState.delete(key);
-      // Clean up any screen tiles for this participant (abrupt disconnects
-      // may not fire TrackUnsubscribed, leaving stale tiles in the grid)
-      var disconnectedTile = screenTileByIdentity.get(key);
-      if (disconnectedTile) {
-        // Find the track SID for this tile and clean up all related state
-        var tileSid = disconnectedTile.dataset?.trackSid;
-        if (tileSid) {
-          removeScreenTile(tileSid);
-          unregisterScreenTrack(tileSid);
-          screenRecoveryAttempts.delete(tileSid);
-          screenResubscribeIntent.delete(tileSid);
-        } else {
-          // No SID on tile — just remove from DOM
-          if (disconnectedTile.classList.contains("is-focused")) {
-            screenGridEl.classList.remove("is-focused");
+      // New runtime tiles are generation-stamped. Keep a narrow legacy fallback
+      // for ordinary participants; companion media is always keyed to its parent.
+      if (!hasRegisteredScreenGenerationForIdentity(disconnectedMediaIdentity)) {
+        var disconnectedTile = screenTileByIdentity.get(disconnectedMediaIdentity);
+        if (disconnectedTile && !disconnectedTile._screenParticipant &&
+            disconnectedMediaIdentity === key) {
+          var tileSid = disconnectedTile.dataset?.trackSid;
+          if (tileSid) {
+            removeScreenTile(tileSid);
+            unregisterScreenTrack(tileSid);
+          } else {
+            cleanupScreenVideoElement(disconnectedTile.querySelector("video"));
+            disconnectedTile.remove();
           }
-          disconnectedTile.remove();
+          if (screenTileByIdentity.get(disconnectedMediaIdentity) === disconnectedTile) {
+            screenTileByIdentity.delete(disconnectedMediaIdentity);
+          }
         }
-        screenTileByIdentity.delete(key);
-        debugLog(`[disconnect] removed screen tile for ${key}`);
+        screenTrackMeta.forEach((meta, sid) => {
+          if (!meta?.participant && meta?.identity === disconnectedMediaIdentity &&
+              disconnectedMediaIdentity === key) {
+            removeScreenTile(sid);
+            unregisterScreenTrack(sid);
+            screenRecoveryAttempts.delete(sid);
+            screenResubscribeIntent.delete(sid);
+          }
+        });
+        hiddenScreens.delete(disconnectedMediaIdentity);
+        watchedScreens.delete(disconnectedMediaIdentity);
+        _pubBitrateControl.delete(disconnectedMediaIdentity);
+        setParticipantScreenWatchAvailable(disconnectedMediaIdentity, false);
       }
-      // Also sweep screenTrackMeta for any other tracks from this identity
-      screenTrackMeta.forEach((meta, sid) => {
-        if (meta.identity === key) {
-          removeScreenTile(sid);
-          unregisterScreenTrack(sid);
-          screenRecoveryAttempts.delete(sid);
-          screenResubscribeIntent.delete(sid);
-        }
-      });
+      participantState.delete(key);
+      if (disconnectedScreenGeneration.removed || disconnectedScreenAudio.removed) {
+        debugLog(`[disconnect] removed screen media for ${key} as ${disconnectedMediaIdentity}`);
+      }
       // Check if they moved to another room or fully left
       // Skip ALL personal exit chimes for $screen companion disconnects —
       // those are internal screen-share lifecycle events, not human leaves.
@@ -1395,8 +1474,9 @@ async function connectToRoom({
   });
   if (LK.RoomEvent?.TrackMuted) {
     newRoom.on(LK.RoomEvent.TrackMuted, (publication, participant) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("track muted")) return;
+      if (ignoreStaleRoomEvent("track muted")) return;
       if (!participant) return;
+      if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
       const source = publication?.source;
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
@@ -1409,6 +1489,22 @@ async function connectToRoom({
         }
       } else if (publication?.kind === LK.Track.Kind.Video && source === LK.Track.Source.Camera) {
         const cardRef = participantCards.get(participant.identity);
+        const cameraTile = cameraStageTileByIdentity.get(participant.identity);
+        if (!publication.track || !isCurrentCameraTrackGeneration(
+          participant.identity,
+          participant,
+          publication,
+          publication.track,
+          newRoom
+        ) ||
+          (cardRef?.cameraPublication && cardRef.cameraPublication !== publication) ||
+          (cameraTile?._cameraStagePublication && cameraTile._cameraStagePublication !== publication)) {
+          debugLog(`[camera-stage] ignored stale camera mute for ${participant.identity}`);
+          return;
+        }
+        cancelCameraClearTimer(participant.identity);
+        removeCameraStageTile(participant.identity, { clearIntent: false });
+        setParticipantCameraStageAvailable(participant.identity, false);
         if (cardRef) {
           updateAvatarVideo(cardRef, null);
           debugLog(`camera muted for ${participant.identity}, avatar cleared`);
@@ -1418,8 +1514,9 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.TrackUnmuted) {
     newRoom.on(LK.RoomEvent.TrackUnmuted, (publication, participant) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("track unmuted")) return;
+      if (ignoreStaleRoomEvent("track unmuted")) return;
       if (!participant) return;
+      if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
       const source = publication?.source;
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
@@ -1432,10 +1529,21 @@ async function connectToRoom({
         }
       } else if (publication?.kind === LK.Track.Kind.Video && source === LK.Track.Source.Camera) {
         const cardRef = participantCards.get(participant.identity);
-        if (cardRef && publication.track) {
-          updateAvatarVideo(cardRef, publication.track);
-          const video = cardRef.avatar?.querySelector("video");
-          if (video) ensureVideoPlays(publication.track, video);
+        const cameraTile = cameraStageTileByIdentity.get(participant.identity);
+        if (!publication.track || !isCurrentCameraTrackGeneration(
+          participant.identity,
+          participant,
+          publication,
+          publication.track,
+          newRoom
+        ) ||
+          (cardRef?.cameraPublication && cardRef.cameraPublication !== publication) ||
+          (cameraTile?._cameraStagePublication && cameraTile._cameraStagePublication !== publication)) {
+          debugLog(`[camera-stage] ignored stale camera unmute for ${participant.identity}`);
+          return;
+        }
+        if (cardRef) {
+          ensureCameraVideo(cardRef, publication.track, publication);
           debugLog(`camera unmuted for ${participant.identity}, avatar restored`);
         }
       }
@@ -1443,7 +1551,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.ActiveSpeakers) {
     newRoom.on(LK.RoomEvent.ActiveSpeakers, (speakers) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("active speakers")) return;
+      if (ignoreStaleRoomEvent("active speakers")) return;
       activeSpeakerIds = new Set(speakers.map((p) => p.identity));
       lastActiveSpeakerEvent = performance.now();
       updateActiveSpeakerUi();
@@ -1451,7 +1559,8 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.DataReceived) {
     newRoom.on(LK.RoomEvent.DataReceived, (payload, participant) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("data received")) return;
+      if (ignoreStaleRoomEvent("data received")) return;
+      if (participant && !isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
       try {
         const text = new TextDecoder().decode(payload);
         const msg = JSON.parse(text);
@@ -1546,7 +1655,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.LocalTrackPublished) {
     newRoom.on(LK.RoomEvent.LocalTrackPublished, (publication) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("local track published")) return;
+      if (ignoreStaleRoomEvent("local track published")) return;
       const local = room.localParticipant;
       if (!local || !publication) return;
       updatePublisherMicrophoneState(publication, local, true);
@@ -1554,17 +1663,27 @@ async function connectToRoom({
       if (publication.track?.kind === "video" && source === LK.Track.Source.ScreenShare) {
         localScreenTrackSid = publication.trackSid || "";
         const element = publication.track.attach();
+        element._lkTrack = publication.track;
         const label = `${name} (Screen)`;
         const tile = addScreenTile(label, element, publication.trackSid);
         const localIdentity = local.identity;
         tile.dataset.identity = localIdentity;
+        stampScreenTileGeneration(tile, publication, localIdentity, local, publication.track, newRoom);
         screenTileByIdentity.set(localIdentity, tile);
         if (publication.trackSid) {
-          registerScreenTrack(publication.trackSid, publication, tile, localIdentity);
+          registerScreenTrack(
+            publication.trackSid,
+            publication,
+            tile,
+            localIdentity,
+            local,
+            publication.track,
+            newRoom
+          );
         }
         setParticipantScreenWatchAvailable(localIdentity, true);
       } else if (publication.track?.kind === "video" && source === LK.Track.Source.Camera) {
-        updateAvatarVideo(ensureParticipantCard(local, true), publication.track);
+        ensureCameraVideo(ensureParticipantCard(local, true), publication.track, publication);
       } else if (publication.track?.kind === "audio") {
         const state = participantState.get(local.identity);
         if (!state) return;
@@ -1583,7 +1702,7 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.LocalTrackUnpublished) {
     newRoom.on(LK.RoomEvent.LocalTrackUnpublished, (publication) => {
-      if (ignoreAndroidFirefoxStaleRoomEvent("local track unpublished")) return;
+      if (ignoreStaleRoomEvent("local track unpublished")) return;
       const localParticipant = room?.localParticipant;
       if (localParticipant) updatePublisherMicrophoneState(publication, localParticipant, false);
       const source = publication.source;
@@ -1600,9 +1719,37 @@ async function connectToRoom({
           screenTileByIdentity.delete(localId);
           setParticipantScreenWatchAvailable(localId, false);
         }
-      } else if (publication.track?.kind === "video" && source === LK.Track.Source.Camera) {
-        const cardRef = participantCards.get(room?.localParticipant?.identity || "");
-        if (cardRef) updateAvatarVideo(cardRef, null);
+      } else if (source === LK.Track.Source.Camera) {
+        const localIdentity = room?.localParticipant?.identity || "";
+        if (!isCurrentCameraParticipantGeneration(localIdentity, localParticipant, newRoom)) {
+          debugLog("[camera-stage] ignored stale local camera unpublish for " + localIdentity);
+          return;
+        }
+        // LocalTrackUnpublished may arrive after a replacement publication was
+        // announced but before its track is attached. Remove only the old
+        // generation and preserve the viewer's Stage intent across that gap.
+        var replacementLocalCamera = getRemainingCameraPublicationState(
+          localParticipant,
+          publication
+        );
+        cancelCameraClearTimer(localIdentity);
+        if (replacementLocalCamera.publication) {
+          removeCameraVisualGeneration(localIdentity, publication, { clearIntent: false });
+          if (replacementLocalCamera.track) {
+            setParticipantCameraStageAvailable(localIdentity, true);
+            ensureCameraVideo(
+              ensureParticipantCard(localParticipant, true),
+              replacementLocalCamera.track,
+              replacementLocalCamera.publication
+            );
+          } else {
+            setParticipantCameraStageAvailable(localIdentity, false);
+          }
+          debugLog("[camera-stage] preserved replacement local camera for " + localIdentity);
+          return;
+        }
+        removeCameraVisualGeneration(localIdentity, publication, { clearIntent: true });
+        setParticipantCameraStageAvailable(localIdentity, false);
       } else if (publication.track?.kind === "audio") {
         const local = room?.localParticipant;
         if (!local) return;
@@ -1751,11 +1898,15 @@ async function connectToRoom({
       startWatchingScreenIdentity(effectiveIdentity, "late-join");
     }
   });
+  // clearMedia() tears down old-Room lobby attachments. Refill only after the
+  // destination Room is current and all of its existing participants attach.
+  refreshActiveCameraLobbyForRoom(newRoom);
   // Retry existing participants — fast on room switch, full on first connect
   if (reuseAdmin) {
     // Room switch: single quick retry (ICE warm, tracks arrive fast)
     setTimeout(() => {
       remoteList.forEach((participant) => {
+        if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
         attachParticipantTracks(participant);
         resubscribeParticipantTracks(participant);
       });
@@ -1764,12 +1915,14 @@ async function connectToRoom({
     // First connect: full retry schedule for async track loading
     setTimeout(() => {
       remoteList.forEach((participant) => {
+        if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
         attachParticipantTracks(participant);
         resubscribeParticipantTracks(participant);
       });
     }, 500);
     setTimeout(() => {
       remoteList.forEach((participant) => {
+        if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
         attachParticipantTracks(participant);
         resubscribeParticipantTracks(participant);
       });

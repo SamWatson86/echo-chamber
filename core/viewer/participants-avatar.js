@@ -63,6 +63,14 @@ function setParticipantScreenWatchAvailable(identity, available) {
   }
 }
 
+function setParticipantCameraStageAvailable(identity, available) {
+  if (!identity) return;
+  var cardRef = participantCards.get(identity);
+  if (cardRef && typeof cardRef.setCameraStageAvailable === "function") {
+    cardRef.setCameraStageAvailable(available);
+  }
+}
+
 if (typeof document.addEventListener === "function") {
   document.addEventListener("click", function(event) {
     if (!activeParticipantSettings) return;
@@ -354,7 +362,19 @@ function ensureParticipantCard(participant, isLocal = false) {
   let settingsChimeSlider = null;
   let settingsChimePct = null;
   let settingsWatchButton = null;
+  let cameraStageToggleButton = null;
+  let settingsCameraStageButton = null;
   let screenWatchAvailable = false;
+  let cameraStageAvailable = false;
+
+  function syncLocalStageControlAvailability() {
+    if (!isLocal || !participantSettingsButton) return;
+    var anyStageControl = screenWatchAvailable || cameraStageAvailable;
+    participantSettingsButton.classList.toggle("is-stream-control-unavailable", !anyStageControl);
+    if (!anyStageControl && participantSettingsPopup?.classList.contains("is-open")) {
+      closeParticipantSettings(false);
+    }
+  }
 
   function syncScreenWatchControls() {
     var screenHidden = hiddenScreens.has(key);
@@ -377,17 +397,47 @@ function ensureParticipantCard(participant, isLocal = false) {
     card.classList.toggle("is-screen-sharing", screenWatchAvailable);
     publisherScreenState.hidden = !screenWatchAvailable;
 
-    if (isLocal && participantSettingsButton) {
-      participantSettingsButton.classList.toggle("is-stream-control-unavailable", !screenWatchAvailable);
-      if (!screenWatchAvailable && participantSettingsPopup?.classList.contains("is-open")) {
-        closeParticipantSettings(false);
-      }
-    }
+    syncLocalStageControlAvailability();
   }
 
   function setScreenWatchAvailable(available) {
     screenWatchAvailable = !!available;
     syncScreenWatchControls();
+  }
+
+  function syncCameraStageControls() {
+    var isStaged = stagedCameraIdentities.has(key);
+    [cameraStageToggleButton, settingsCameraStageButton].forEach(function(button) {
+      if (!button) return;
+      button.textContent = isStaged ? "Hide Camera" : "Show Camera";
+      button.setAttribute(
+        "aria-label",
+        (isStaged ? "Hide " : "Show ") + participantDisplayName + "'s camera " +
+          (isStaged ? "from" : "on") + " my Stage"
+      );
+      button.title = button.getAttribute("aria-label");
+      button.classList.toggle("hidden", !cameraStageAvailable);
+    });
+    card.classList.toggle("is-camera-staged", isStaged);
+    syncLocalStageControlAvailability();
+  }
+
+  function setCameraStageAvailable(available) {
+    cameraStageAvailable = !!available;
+    syncCameraStageControls();
+  }
+
+  function createCameraStageToggleButton(className) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = className + " hidden";
+    button.addEventListener("click", function(event) {
+      event.stopPropagation();
+      if (!cameraStageAvailable) return;
+      toggleCameraOnStage(key);
+      syncCameraStageControls();
+    });
+    return button;
   }
 
   if (!isLocal) {
@@ -619,6 +669,7 @@ function ensureParticipantCard(participant, isLocal = false) {
       e.stopPropagation();
       watchToggleBtn.click();
     });
+    cameraStageToggleButton = createCameraStageToggleButton("watch-toggle-btn");
 
     overlayControls.append(ovMicBtn, ovMicMute, ovScreenBtn, ovScreenMute, ovWatchClone);
 
@@ -701,7 +752,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     popChimeRow.append(popChimeLabel, popChimeSlider, popChimePct);
 
     volPopup.append(popMicRow, popScreenRow, popChimeRow);
-    camOverlay.append(overlayName, overlayControls, volPopup);
+    camOverlay.append(overlayName, cameraStageToggleButton, overlayControls, volPopup);
 
     // Close popup when clicking outside
     document.addEventListener("click", function(e) {
@@ -814,10 +865,11 @@ function ensureParticipantCard(participant, isLocal = false) {
       event.stopPropagation();
       watchToggleBtn.click();
     });
+    settingsCameraStageButton = createCameraStageToggleButton("participant-settings-watch");
 
     var settingsFooter = document.createElement("div");
     settingsFooter.className = "participant-settings-footer";
-    settingsFooter.append(settingsWatchButton);
+    settingsFooter.append(settingsWatchButton, settingsCameraStageButton);
     if (isAdminMode()) {
       var settingsServerMute = document.createElement("button");
       settingsServerMute.type = "button";
@@ -925,6 +977,8 @@ function ensureParticipantCard(participant, isLocal = false) {
       syncScreenWatchControls();
     });
     controls.append(watchToggleBtn);
+    cameraStageToggleButton = createCameraStageToggleButton("watch-toggle-btn");
+    controls.append(cameraStageToggleButton);
     meta.append(controls);
     micStatusEl = micControl;
     screenStatusEl = screenControl;
@@ -975,10 +1029,11 @@ function ensureParticipantCard(participant, isLocal = false) {
       event.stopPropagation();
       watchToggleBtn.click();
     });
+    settingsCameraStageButton = createCameraStageToggleButton("participant-settings-watch");
 
     var settingsFooter = document.createElement("div");
     settingsFooter.className = "participant-settings-footer";
-    settingsFooter.append(settingsWatchButton);
+    settingsFooter.append(settingsWatchButton, settingsCameraStageButton);
     participantSettingsPopup.append(settingsHeading, settingsFooter);
     participantSettingsButton.addEventListener("click", function(event) {
       event.stopPropagation();
@@ -1292,6 +1347,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     if (settingsMicSlider) settingsMicSlider.setAttribute("aria-label", "Microphone volume for " + participantDisplayName);
     if (settingsScreenSlider) settingsScreenSlider.setAttribute("aria-label", "Screen volume for " + participantDisplayName);
     if (settingsChimeSlider) settingsChimeSlider.setAttribute("aria-label", "Chime volume for " + participantDisplayName);
+    syncCameraStageControls();
     if (publisherMicState) {
       publisherMicState.setAttribute(
         "aria-label",
@@ -1340,11 +1396,15 @@ function ensureParticipantCard(participant, isLocal = false) {
     settingsScreenSlider,
     settingsChimeSlider,
     settingsWatchButton,
+    settingsCameraStageButton,
     setScreenWatchAvailable,
+    setCameraStageAvailable,
+    syncCameraStageControls,
     setParticipantDisplayName
   });
   participantState.set(key, state);
   setScreenWatchAvailable(false);
+  setCameraStageAvailable(false);
   debugLog(`participant card created and added to DOM for ${key}, card.isConnected=${card.isConnected}, avatar exists=${!!avatar}`);
   // Show avatar image if one exists for this user
   updateAvatarDisplay(key);
@@ -1360,6 +1420,12 @@ function updateAvatarVideo(cardRef, track) {
   }
   var avatar = cardRef.avatar;
   var card = cardRef.card;
+  var priorVideo = avatar.querySelector("video");
+  if (priorVideo && typeof cleanupCameraStageVideo === "function") {
+    // Avatar and Stage use separate muted attachments, but both must release
+    // their exact old element when a camera track is replaced or turned off.
+    cleanupCameraStageVideo(priorVideo);
+  }
   // Preserve the hidden file input for local user avatar upload
   var fileInput = avatar.querySelector('input[type="file"]');
   avatar.innerHTML = "";
@@ -1374,6 +1440,10 @@ function updateAvatarVideo(cardRef, track) {
     if (card) card.classList.add("has-camera");
     if (cardRef.isLocal) avatar.title = "Click to view camera fullscreen";
   } else {
+    cardRef.cameraRoom = null;
+    cardRef.cameraParticipant = null;
+    cardRef.cameraPublication = null;
+    cardRef.cameraTrack = null;
     avatar.textContent = getInitials(card?.querySelector(".user-name")?.textContent || "");
     if (fileInput) avatar.appendChild(fileInput);
     // Show avatar image if one exists (replaces initials)

@@ -295,24 +295,62 @@ async function switchSpeaker(deviceId) {
 // Camera Lobby Management
 let enlargedCameraTile = null;
 
+function clearCameraLobbyMedia() {
+  if (!cameraLobbyGrid) {
+    enlargedCameraTile = null;
+    return;
+  }
+
+  cameraLobbyGrid.querySelectorAll("video").forEach(video => {
+    video._playGeneration = (video._playGeneration || 0) + 1;
+    if (video._monitorTimer) {
+      clearInterval(video._monitorTimer);
+      video._monitorTimer = null;
+    }
+    if (video._objectFitGuard) {
+      video._objectFitGuard.disconnect();
+      video._objectFitGuard = null;
+    }
+    if (window._pausedVideos) window._pausedVideos.delete(video);
+    const track = video._lkTrack;
+    if (track && typeof track.detach === "function") {
+      try { track.detach(video); } catch (_) {}
+    }
+    try { video.pause(); } catch (_) {}
+    try { video.srcObject = null; } catch (_) {}
+    video._lkTrack = null;
+  });
+
+  if (enlargedCameraTile) enlargedCameraTile.classList.remove("enlarged");
+  enlargedCameraTile = null;
+  cameraLobbyGrid.replaceChildren();
+  cameraLobbyGrid.dataset.count = "0";
+  if (typeof window._echoRecalcCameraLobby === "function") {
+    window._echoRecalcCameraLobby();
+  }
+}
+
 function openCameraLobby() {
   if (!cameraLobbyPanel) return;
-  cameraLobbyPanel.classList.remove("hidden");
+  var handledByStage = window.EchoStageModules &&
+    window.EchoStageModules.open("camera", openCameraLobbyButton);
+  if (!handledByStage) cameraLobbyPanel.classList.remove("hidden");
   populateCameraLobby();
   debugLog('Camera Lobby opened');
 }
 
 function closeCameraLobby() {
   if (!cameraLobbyPanel) return;
-  cameraLobbyPanel.classList.add("hidden");
-  enlargedCameraTile = null;
+  var handledByStage = window.EchoStageModules &&
+    window.EchoStageModules.close("camera");
+  if (!handledByStage) cameraLobbyPanel.classList.add("hidden");
+  clearCameraLobbyMedia();
   debugLog('Camera Lobby closed');
 }
 
 function populateCameraLobby() {
+  clearCameraLobbyMedia();
   if (!cameraLobbyGrid || !room) return;
-
-  cameraLobbyGrid.innerHTML = '';
 
   const allParticipants = [room.localParticipant, ...Array.from(room.remoteParticipants.values())];
   let count = 0;

@@ -197,7 +197,13 @@ let lastSubscriptionReset = 0;
 const cameraVideoBySid = new Map();
 const lastTrackHandled = new Map();
 const cameraClearTimers = new Map();
+const cameraClearGenerationByIdentity = new Map();
 const screenTileByIdentity = new Map();
+// Camera tiles shown on this viewer's Stage are intentionally independent from
+// screen-share tiles. One participant may have both media sources on Stage at
+// the same time without either lifecycle clobbering the other.
+const cameraStageTileByIdentity = new Map();
+const stagedCameraIdentities = new Set();
 const hiddenScreens = new Set();
 const watchedScreens = new Set(); // Identities the user explicitly opted in to watch
 

@@ -152,6 +152,67 @@ function cleanupGainNode(state, audioEl, isScreen) {
   }
 }
 
+function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) {
+  var mediaIdentity = normalizeScreenMediaIdentity(participant?.identity);
+  var result = { mediaIdentity: mediaIdentity, removed: 0 };
+  if (!participant || !expectedRoom || room !== expectedRoom) return result;
+  var removeReplacement = mode === "replaced";
+  var screenAudioSource = getLiveKitClient()?.Track?.Source?.ScreenShareAudio;
+  var removals = [];
+  var queuedElements = new Set();
+  function queueRemoval(element, trackSid) {
+    if (!element || queuedElements.has(element)) return;
+    if (element._echoMediaSource !== screenAudioSource) return;
+    if (element._echoRoom !== expectedRoom ||
+        element._echoParticipant?.identity !== participant.identity) return;
+    if (removeReplacement
+      ? element._echoParticipant === participant
+      : element._echoParticipant !== participant) return;
+    queuedElements.add(element);
+    removals.push([trackSid || element._echoTrackSid || element._lkTrack?.sid || "", element]);
+  }
+  audioElBySid.forEach(function(element, trackSid) {
+    queueRemoval(element, trackSid);
+  });
+  // A replacement publication can reuse a SID and overwrite audioElBySid
+  // before ParticipantConnected runs. The participant state still owns the
+  // old element, so sweep it as well to prevent stale audio playout.
+  participantState.forEach(function(state) {
+    state?.screenAudioEls?.forEach(function(element) {
+      queueRemoval(element, element._echoTrackSid);
+    });
+  });
+  removals.forEach(function(entry) {
+    var trackSid = entry[0];
+    var element = entry[1];
+    var state = participantState.get(element._echoMediaIdentity || mediaIdentity);
+    if (state) {
+      cleanupGainNode(state, element, true);
+      state.screenAudioEls.delete(element);
+      if (state.screenAudioSid === trackSid) {
+        var sameSidRemains = Array.from(state.screenAudioEls).some(function(candidate) {
+          return candidate?._echoTrackSid === trackSid;
+        });
+        if (!sameSidRemains) state.screenAudioSid = null;
+      }
+    }
+    try { element._lkTrack?.detach?.(element); } catch (_) {}
+    try { element.pause(); } catch (_) {}
+    try { element.srcObject = null; } catch (_) {}
+    element.remove();
+    if (audioElBySid.get(trackSid) === element) audioElBySid.delete(trackSid);
+    result.removed += 1;
+  });
+  var mediaState = participantState.get(mediaIdentity);
+  if (mediaState && mediaState.screenAudioEls.size === 0) {
+    if (mediaState.screenAnalyser?.cleanup) mediaState.screenAnalyser.cleanup();
+    mediaState.screenAnalyser = null;
+    var tile = screenTileByIdentity.get(mediaIdentity);
+    if (tile?._volWrap) tile._volWrap.classList.add("hidden");
+  }
+  return result;
+}
+
 function startMediaReconciler() {
   scheduleReconcileWaves("start");
 }
@@ -350,6 +411,17 @@ function handleTrackSubscribed(track, publication, participant) {
   debugLog("[track-source] " + effectiveParticipant.identity + " kind=" + track.kind +
     " source=" + source + " pub.source=" + publication?.source +
     " track.source=" + track?.source + (isScreenCompanion ? " (from $screen companion)" : ""));
+  if (track.kind === "video" && source === LK.Track.Source.Camera &&
+      !isCurrentCameraTrackGeneration(
+        effectiveParticipant.identity,
+        effectiveParticipant,
+        publication,
+        track,
+        room
+      )) {
+    debugLog("[camera-stage] ignored stale camera subscribe for " + effectiveParticipant.identity);
+    return;
+  }
   const handleKey = track.kind === "video" ? `${effectiveParticipant.identity}-${source || track.kind}` : getTrackSid(publication, track, `${effectiveParticipant.identity}-${source || track.kind}`);
 
   // Check if recently handled, but also verify track is actually displayed
@@ -424,6 +496,7 @@ function handleTrackSubscribed(track, publication, participant) {
     const screenTrackSid = publication?.trackSid || track?.sid || null;
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
     if (existingTile && existingTile.isConnected) {
+      stampScreenTileGeneration(existingTile, publication, identity, participant, track, room);
       const existingVideo = existingTile.querySelector("video");
       if (!hiddenScreens.has(identity)) {
         existingTile.style.display = "";
@@ -433,6 +506,17 @@ function handleTrackSubscribed(track, publication, participant) {
       // SDP renegotiations fire unsub/resub for the same track every ~2s. Replacing
       // the video element interrupts play(), creating a loop of "interrupted by new load".
       if (existingVideo && existingVideo._lkTrack === track) {
+        if (screenTrackSid) {
+          registerScreenTrack(
+            screenTrackSid,
+            publication,
+            existingTile,
+            identity,
+            participant,
+            track,
+            room
+          );
+        }
         ensureVideoPlays(track, existingVideo);
         ensureVideoSubscribed(publication, existingVideo);
         forceVideoLayer(publication, existingVideo);
@@ -450,7 +534,15 @@ function handleTrackSubscribed(track, publication, participant) {
       if (screenTrackSid) {
         existingTile.dataset.trackSid = screenTrackSid;
         screenTileBySid.set(screenTrackSid, existingTile);
-        registerScreenTrack(screenTrackSid, publication, existingTile, effectiveParticipant.identity);
+        registerScreenTrack(
+          screenTrackSid,
+          publication,
+          existingTile,
+          effectiveParticipant.identity,
+          participant,
+          track,
+          room
+        );
         scheduleScreenRecovery(screenTrackSid, publication, existingTile.querySelector("video"));
       }
       screenTileByIdentity.set(identity, existingTile);
@@ -496,10 +588,26 @@ function handleTrackSubscribed(track, publication, participant) {
     setTimeout(() => requestVideoKeyFrame(publication, track), 600);
     const tile = addScreenTile(label, element, screenTrackSid);
     tile.dataset.identity = effectiveParticipant.identity;
+    stampScreenTileGeneration(
+      tile,
+      publication,
+      effectiveParticipant.identity,
+      participant,
+      track,
+      room
+    );
     debugLog("[screen-tile] CREATED for " + effectiveParticipant.identity + " trackSid=" + screenTrackSid + " label=" + label);
     ensureVideoSubscribed(publication, element);
     if (screenTrackSid) {
-      registerScreenTrack(screenTrackSid, publication, tile, effectiveParticipant.identity);
+      registerScreenTrack(
+        screenTrackSid,
+        publication,
+        tile,
+        effectiveParticipant.identity,
+        participant,
+        track,
+        room
+      );
       scheduleScreenRecovery(screenTrackSid, publication, element);
       screenResubscribeIntent.delete(screenTrackSid);
     }
@@ -594,6 +702,13 @@ function handleTrackSubscribed(track, publication, participant) {
     // Create audio element — use track.attach() then verify srcObject
     const element = track.attach();
     element._lkTrack = track;
+    element._echoRoom = room;
+    element._echoParticipant = participant;
+    element._echoPublication = publication;
+    element._echoMediaTrack = track;
+    element._echoTrackSid = trackSid;
+    element._echoMediaSource = source;
+    element._echoMediaIdentity = effectiveParticipant.identity;
     // Safety: ensure srcObject is set (some SDK versions may not set it immediately)
     if (!element.srcObject && track.mediaStreamTrack) {
       element.srcObject = new MediaStream([track.mediaStreamTrack]);
@@ -628,6 +743,10 @@ function handleTrackSubscribed(track, publication, participant) {
     // Re-trigger play when track's mediaStreamTrack unmutes (first data arrives)
     if (track.mediaStreamTrack) {
       track.mediaStreamTrack.addEventListener("unmute", () => {
+        if (!element.isConnected || element._echoRoom !== room ||
+            element._echoParticipant !== participant ||
+            element._echoPublication !== publication ||
+            element._echoMediaTrack !== track) return;
         debugLog(`audio track unmuted ${effectiveParticipant.identity} src=${source}`);
         ensureAudioPlays(element);
       });
@@ -689,16 +808,17 @@ function handleTrackUnsubscribed(track, publication, participant) {
     screenRecoveryAttempts.delete(trackSid);
   }
   if (track.kind === "video" && source === LK.Track.Source.ScreenShare) {
-    const identity = participant?.identity;
+    const publicationIdentity = participant?.identity;
+    const identity = normalizeScreenMediaIdentity(publicationIdentity);
     const tile = trackSid ? screenTileBySid.get(trackSid) : null;
     // Check if the publisher is still sharing — if so, this is a transient unsub
     // from SDP renegotiation and we should NOT destroy the tile.
     var stillPublishing = false;
-    if (identity && room && room.remoteParticipants) {
+    if (publicationIdentity && room && room.remoteParticipants) {
       var remoteP = null;
-      if (room.remoteParticipants.get) remoteP = room.remoteParticipants.get(identity);
+      if (room.remoteParticipants.get) remoteP = room.remoteParticipants.get(publicationIdentity);
       if (!remoteP) {
-        room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteP = p; });
+        room.remoteParticipants.forEach(function(p) { if (p.identity === publicationIdentity) remoteP = p; });
       }
       if (remoteP) {
         var pubs = getParticipantPublications(remoteP);
@@ -730,9 +850,9 @@ function handleTrackUnsubscribed(track, publication, participant) {
       var stillPublishing = false;
       var remoteP = null;
       if (room && room.remoteParticipants) {
-        if (room.remoteParticipants.get) remoteP = room.remoteParticipants.get(identity);
+        if (room.remoteParticipants.get) remoteP = room.remoteParticipants.get(publicationIdentity);
         if (!remoteP) {
-          room.remoteParticipants.forEach(function(p) { if (p.identity === identity) remoteP = p; });
+          room.remoteParticipants.forEach(function(p) { if (p.identity === publicationIdentity) remoteP = p; });
         }
       }
       if (remoteP) {
@@ -756,26 +876,55 @@ function handleTrackUnsubscribed(track, publication, participant) {
     }
   } else if (track.kind === "video" && source === LK.Track.Source.Camera) {
     const identity = participant?.identity;
-    const cardRef = identity ? participantCards.get(identity) : null;
-    if (trackSid) cameraVideoBySid.delete(trackSid);
     if (identity) {
-      const pubs = participant ? getParticipantPublications(participant) : [];
-      const hasCam = pubs.some((pub) => pub?.source === LK.Track.Source.Camera && pub.track);
+      const expectedRoom = room;
+      if (!isCurrentCameraParticipantGeneration(identity, participant, expectedRoom)) {
+        debugLog(`[camera-stage] ignored stale camera unsubscribe participant ${identity}`);
+        return;
+      }
+      const pubs = getParticipantPublications(participant);
+      if (!pubs.includes(publication) || (publication.track && publication.track !== track)) {
+        debugLog(`[camera-stage] ignored stale camera unsubscribe publication ${identity}`);
+        return;
+      }
+      if (trackSid) {
+        const mappedCameraVideo = cameraVideoBySid.get(trackSid);
+        if (mappedCameraVideo?._echoCameraPublication === publication ||
+            (!mappedCameraVideo?._echoCameraPublication && mappedCameraVideo?._lkTrack === track)) {
+          cameraVideoBySid.delete(trackSid);
+        }
+      }
+      const hasCam = pubs.some((pub) => {
+        const pubSource = pub?.source || pub?.track?.source;
+        return pubSource === LK.Track.Source.Camera && !!pub.track;
+      });
       if (hasCam) {
         debugLog(`camera unsubscribe ignored ${identity} (active cam present)`);
         return;
       }
-      const existingTimer = cameraClearTimers.get(identity);
-      if (existingTimer) clearTimeout(existingTimer);
+      cancelCameraClearTimer(identity);
+      const generation = {
+        identity,
+        room: expectedRoom,
+        participant,
+        publication,
+        track,
+      };
       const timer = setTimeout(() => {
+        if (cameraClearTimers.get(identity) !== timer ||
+            cameraClearGenerationByIdentity.get(identity) !== generation) return;
         cameraClearTimers.delete(identity);
-        const state = participantState.get(identity);
-        const latestPubs = participant ? getParticipantPublications(participant) : [];
-        const activeCam = latestPubs.find((pub) => pub?.source === LK.Track.Source.Camera && pub.track);
-        if (activeCam?.track) {
-          debugLog(`camera clear aborted ${identity} (cam returned)`);
+        cameraClearGenerationByIdentity.delete(identity);
+        if (!isCurrentCameraUnsubscribeGeneration(generation)) {
+          debugLog(`camera clear aborted ${identity} (stale generation)`);
           return;
         }
+        const state = participantState.get(identity);
+        // A transient unsubscribe may recover with a replacement track, so
+        // remove only the stale secondary attachment and preserve Stage intent.
+        removeCameraStageTile(identity, { clearIntent: false });
+        setParticipantCameraStageAvailable(identity, false);
+        const cardRef = participantCards.get(identity);
         if (cardRef) {
           updateAvatarVideo(cardRef, null);
         }
@@ -783,15 +932,14 @@ function handleTrackUnsubscribed(track, publication, participant) {
         debugLog(`camera cleared ${identity} after unsubscribe`);
       }, 800);
       cameraClearTimers.set(identity, timer);
-    } else if (cardRef) {
-      updateAvatarVideo(cardRef, null);
+      cameraClearGenerationByIdentity.set(identity, generation);
     }
   } else if (track.kind === "audio") {
     const audioEl = audioElBySid.get(trackSid);
     // Grace period for screen share audio: delay removal to survive SDP renegotiations
     if (source === LK.Track.Source.ScreenShareAudio && audioEl && participant) {
       debugLog(`screen share audio unsubscribe ${participant.identity} sid=${trackSid} — delaying removal`);
-      const identity = participant.identity;
+      const identity = normalizeScreenMediaIdentity(participant.identity);
       setTimeout(() => {
         // Check if a new audio element was created for this track in the meantime
         const currentEl = audioElBySid.get(trackSid);
@@ -807,8 +955,10 @@ function handleTrackUnsubscribed(track, publication, participant) {
             if (pState) {
               cleanupGainNode(pState, audioEl, true);
               pState.screenAudioEls.delete(audioEl);
-              if (pState.screenAnalyser?.cleanup) pState.screenAnalyser.cleanup();
-              pState.screenAnalyser = null;
+              if (pState.screenAudioEls.size === 0) {
+                if (pState.screenAnalyser?.cleanup) pState.screenAnalyser.cleanup();
+                pState.screenAnalyser = null;
+              }
             }
           } else {
             debugLog(`screen share audio kept (track returned): ${identity} sid=${trackSid}`);
@@ -851,15 +1001,20 @@ function handleTrackUnsubscribed(track, publication, participant) {
       audioElBySid.delete(trackSid);
     }
     if (participant) {
-      const state = participantState.get(participant.identity);
+      const stateIdentity = source === LK.Track.Source.ScreenShareAudio
+        ? normalizeScreenMediaIdentity(participant.identity)
+        : participant.identity;
+      const state = participantState.get(stateIdentity);
       if (state) {
         if (source === LK.Track.Source.ScreenShareAudio) {
           cleanupGainNode(state, audioEl, true);
           state.screenAudioEls.delete(audioEl);
-          if (state.screenAnalyser?.cleanup) {
-            state.screenAnalyser.cleanup();
+          if (state.screenAudioEls.size === 0) {
+            if (state.screenAnalyser?.cleanup) {
+              state.screenAnalyser.cleanup();
+            }
+            state.screenAnalyser = null;
           }
-          state.screenAnalyser = null;
         } else {
           cleanupGainNode(state, audioEl, false);
           state.micAudioEls.delete(audioEl);

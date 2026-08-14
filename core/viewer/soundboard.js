@@ -588,8 +588,17 @@ function exitSoundboardEditMode() {
 
 // ── Panel toggle ──
 
+function positionLegacySoundboardCompact() {
+  if (!openSoundboardButton || !soundboardCompactPanel) return;
+  const rect = openSoundboardButton.getBoundingClientRect();
+  soundboardCompactPanel.style.top = (rect.bottom + 6) + "px";
+  soundboardCompactPanel.style.right = (window.innerWidth - rect.right) + "px";
+}
+
 function openSoundboard() {
   if (!soundboardCompactPanel) return;
+  var handledByStage = window.EchoStageModules &&
+    window.EchoStageModules.open("soundboard", openSoundboardButton);
   soundboardEditingId = null;
   // Reset compact volume panel
   if (soundboardVolumePanelCompact) {
@@ -599,14 +608,15 @@ function openSoundboard() {
   updateSoundboardVolumeUi();
   // Make sure edit mode is hidden, show compact
   if (soundboardPanel) soundboardPanel.classList.add("hidden");
-  // Position compact panel directly below the Soundboard button
-  const btn = openSoundboardButton;
-  if (btn) {
-    const rect = btn.getBoundingClientRect();
-    soundboardCompactPanel.style.top = (rect.bottom + 6) + "px";
-    soundboardCompactPanel.style.right = (window.innerWidth - rect.right) + "px";
+  // Legacy keeps the quick panel below its opener. V2 uses the central Stage.
+  if (openSoundboardButton && !handledByStage) {
+    positionLegacySoundboardCompact();
+  } else {
+    soundboardCompactPanel.style.top = "";
+    soundboardCompactPanel.style.right = "";
   }
   soundboardCompactPanel.classList.remove("hidden");
+  if (handledByStage) window.EchoStageModules.sync();
   if (currentRoomName) {
     void loadSoundboardList();
   }
@@ -623,6 +633,7 @@ function closeSoundboard() {
     updateSoundboardEditControls();
     setSoundboardHint("");
   }
+  if (window.EchoStageModules && window.EchoStageModules.close("soundboard")) return;
 }
 
 function openSoundboardEdit() {
@@ -640,7 +651,9 @@ function openSoundboardEdit() {
   renderSoundboardIconPicker();
   updateSoundboardEditControls();
   soundboardPanel.classList.remove("hidden");
+  if (window.EchoStageModules) window.EchoStageModules.sync();
   renderSoundboard();
+  if (backToSoundboardButton) backToSoundboardButton.focus();
 }
 
 function closeSoundboardEdit() {
@@ -655,6 +668,8 @@ function closeSoundboardEdit() {
     soundboardCompactPanel.classList.remove("hidden");
     renderSoundboardCompact();
   }
+  if (window.EchoStageModules) window.EchoStageModules.sync();
+  if (openSoundboardEditButton) openSoundboardEditButton.focus();
 }
 
 // ── Server operations ──
@@ -850,6 +865,13 @@ if (openSoundboardEditButton) {
 if (backToSoundboardButton) {
   backToSoundboardButton.addEventListener("click", () => {
     closeSoundboardEdit();
+  });
+}
+
+var closeSoundboardStageButton = document.getElementById("close-soundboard-stage");
+if (closeSoundboardStageButton) {
+  closeSoundboardStageButton.addEventListener("click", () => {
+    closeSoundboard();
   });
 }
 

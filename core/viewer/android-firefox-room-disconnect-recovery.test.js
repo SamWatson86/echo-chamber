@@ -324,7 +324,7 @@ test("production wiring is target-gated and invokes only supported connectToRoom
   );
   assert.match(
     connectSource,
-    /ConnectionStateChanged[\s\S]*?if \(androidFirefoxRoomDisconnectRecoveryEnabled && newRoom !== room\) \{[\s\S]*?return;/
+    /ConnectionStateChanged[\s\S]*?ignoreStaleRoomEvent\("connection state " \+ state\)/
   );
   assert.match(
     connectSource,

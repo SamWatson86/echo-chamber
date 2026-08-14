@@ -191,7 +191,7 @@ for (const scenario of [
     name: "many cameras stay balanced and contained in a narrow lobby",
     count: 6,
     viewport: { width: 520, height: 780 },
-    expectedTracks: { columns: 2, rows: 3 },
+    expectedTracks: { columns: 3, rows: 2 },
   },
 ]) {
   test(scenario.name, async ({ page }) => {
@@ -240,9 +240,18 @@ test("layout sizing does not break the Camera Lobby's enlarged tile", async ({ p
   await expect(tile).toHaveClass(/enlarged/);
   const enlarged = await tile.evaluate((element) => {
     const rect = element.getBoundingClientRect();
+    const grid = document.getElementById("camera-lobby-grid").getBoundingClientRect();
+    const header = document.querySelector("#camera-lobby .camera-lobby-header").getBoundingClientRect();
     const panel = document.getElementById("camera-lobby").getBoundingClientRect();
     return {
       bottom: rect.bottom,
+      grid: {
+        bottom: grid.bottom,
+        left: grid.left,
+        right: grid.right,
+        top: grid.top,
+      },
+      headerBottom: header.bottom,
       left: rect.left,
       panel: {
         bottom: panel.bottom,
@@ -254,10 +263,12 @@ test("layout sizing does not break the Camera Lobby's enlarged tile", async ({ p
       top: rect.top,
     };
   });
-  expect(Math.abs(enlarged.left - (enlarged.panel.left + 20))).toBeLessThanOrEqual(2);
-  expect(Math.abs(enlarged.top - (enlarged.panel.top + 20))).toBeLessThanOrEqual(2);
-  expect(Math.abs(enlarged.right - (enlarged.panel.right - 20))).toBeLessThanOrEqual(2);
-  expect(Math.abs(enlarged.bottom - (enlarged.panel.bottom - 20))).toBeLessThanOrEqual(2);
+  expect(Math.abs(enlarged.left - enlarged.grid.left)).toBeLessThanOrEqual(2);
+  expect(Math.abs(enlarged.top - enlarged.grid.top)).toBeLessThanOrEqual(2);
+  expect(Math.abs(enlarged.right - enlarged.grid.right)).toBeLessThanOrEqual(2);
+  expect(Math.abs(enlarged.bottom - enlarged.grid.bottom)).toBeLessThanOrEqual(2);
+  expect(enlarged.top).toBeGreaterThanOrEqual(enlarged.headerBottom - 1);
+  expectContained(enlarged, enlarged.panel, "enlarged camera tile");
 
   await tile.click();
   await expect(tile).not.toHaveClass(/enlarged/);
