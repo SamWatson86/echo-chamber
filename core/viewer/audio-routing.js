@@ -706,7 +706,7 @@ function handleTrackSubscribed(track, publication, participant) {
     element._echoParticipant = participant;
     element._echoPublication = publication;
     element._echoMediaTrack = track;
-    element._echoTrackSid = trackSid;
+    element._echoTrackSid = audioSid;
     element._echoMediaSource = source;
     element._echoMediaIdentity = effectiveParticipant.identity;
     // Safety: ensure srcObject is set (some SDK versions may not set it immediately)
