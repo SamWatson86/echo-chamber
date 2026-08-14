@@ -190,6 +190,18 @@ test.beforeEach(async ({ page }) => {
       });
       return;
     }
+    if (url.pathname === "/api/client-stats-report" && request.method() === "POST") {
+      await route.fulfill({ status: 204, body: "" });
+      return;
+    }
+    if (url.pathname === "/api/soundboard/list" && request.method() === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ sounds: [] }),
+      });
+      return;
+    }
     if (url.pathname === "/api/jam/state" && request.method() === "GET") {
       increment(model, key);
       await route.fulfill({
@@ -700,11 +712,13 @@ async function openPhaseTwoViewer(page, scenario = {}) {
         identity: "layout-fixture-1",
         name: "Fixture Host",
         publishData: async function() {},
+        trackPublications: new Map(),
       },
+      remoteParticipants: new Map(),
     };
     adminToken = "phase-2-admin-token";
     currentAccessToken = "phase-2-participant-token";
-    ["open-chat", "open-jam", "dock-output", "open-settings"].forEach((id) => {
+    ["open-chat", "open-jam", "open-camera-lobby", "open-soundboard", "dock-output", "open-settings"].forEach((id) => {
       const element = document.getElementById(id);
       if (element) element.disabled = false;
     });
@@ -749,30 +763,67 @@ async function searchJam(page, query = "clubhouse") {
   await expect(page.locator(".jam-result-item")).toHaveCount(6);
 }
 
-async function expectActiveTool(page, tool) {
-  await expect(page.locator("#utility-host")).toHaveAttribute("data-active-tool", tool);
-  await expect(page.locator("html")).toHaveAttribute("data-ui-utility", tool);
-  const state = await page.evaluate((activeTool) => {
-    const tools = {
-      people: document.getElementById("room-sidebar"),
+async function expectStageModule(page, module) {
+  const host = page.locator("#stage-module-host");
+  const stage = page.locator(".room-main");
+  const activeModule = module === "screens" ? "" : module;
+  await expect(host).toHaveAttribute("data-active-module", activeModule);
+  if (activeModule) {
+    await expect(page.locator("html")).toHaveAttribute("data-stage-module", activeModule);
+    await expect(stage).toHaveAttribute("data-active-module", activeModule);
+    await expect(stage).toHaveClass(/stage-module-open/);
+    await expect(host).toBeVisible();
+  } else {
+    await expect(page.locator("html")).not.toHaveAttribute("data-stage-module", /.+/);
+    await expect(stage).not.toHaveAttribute("data-active-module", /.+/);
+    await expect(stage).not.toHaveClass(/stage-module-open/);
+    await expect(host).toBeHidden();
+  }
+
+  const state = await page.evaluate((activeModule) => {
+    const modules = {
+      screens: document.getElementById("screen-grid"),
       chat: document.getElementById("chat-panel"),
       jam: document.getElementById("jam-panel"),
+      camera: document.getElementById("camera-lobby"),
+      soundboard: document.getElementById("soundboard-compact"),
     };
-    return Object.fromEntries(Object.entries(tools).map(([name, element]) => [name, {
-      ariaHidden: element.getAttribute("aria-hidden"),
-      hidden: element.classList.contains("hidden"),
-      inert: element.inert,
-      rendered: element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden",
-      expected: name === activeTool,
+    return Object.fromEntries(Object.entries(modules).map(([name, element]) => [name, {
+      ariaHidden: element && element.getAttribute("aria-hidden"),
+      hidden: !element || element.classList.contains("hidden"),
+      inert: !element || element.inert,
+      rendered: !!element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden",
+      expected: name === activeModule,
     }]));
-  }, tool);
+  }, module);
 
   for (const [name, value] of Object.entries(state)) {
     expect(value.rendered, `${name} rendered state`).toBe(value.expected);
-    expect(value.hidden, `${name} hidden class`).toBe(!value.expected);
     expect(value.inert, `${name} inert state`).toBe(!value.expected);
-    expect(value.ariaHidden, `${name} aria-hidden state`).toBe(value.expected ? "false" : "true");
+    if (name !== "screens") {
+      expect(value.hidden, `${name} hidden class`).toBe(!value.expected);
+      expect(value.ariaHidden, `${name} aria-hidden state`).toBe(value.expected ? "false" : "true");
+    }
   }
+}
+
+async function expectUsersVisible(page, visible) {
+  const sidebar = page.locator("#room-sidebar");
+  const presentation = await sidebar.evaluate((element) => ({
+    ariaHidden: element.getAttribute("aria-hidden"),
+    inert: element.inert,
+    rendered: element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden",
+  }));
+  expect(presentation.rendered, "Active Users rendered state").toBe(visible);
+  expect(presentation.inert, "Active Users inert state").toBe(!visible);
+  expect(presentation.ariaHidden, "Active Users aria-hidden state").toBe(visible ? "false" : "true");
+  await expect(page.locator("#shell-toggle-utility")).toHaveAttribute("aria-expanded", String(visible));
+}
+
+async function setUsersVisible(page, visible) {
+  const toggle = page.locator("#shell-toggle-utility");
+  if ((await toggle.getAttribute("aria-expanded")) !== String(visible)) await toggle.click();
+  await expectUsersVisible(page, visible);
 }
 
 async function resizeTo(page, viewport, expectedMode) {
@@ -785,46 +836,97 @@ async function resizeTo(page, viewport, expectedMode) {
   await expect(page.locator("html")).toHaveAttribute("data-ui-mode", expectedMode);
 }
 
-test("one logical utility owns stable People, Chat, and portaled Jam tools without losing form state", async ({ page }) => {
+test("changed Stage-module assets share one cache cohort", async ({ page }) => {
+  await page.goto("/?echo-ui-shell-v2=1", { waitUntil: "domcontentloaded" });
+  const versions = await page.evaluate((assetNames) => {
+    const references = Array.from(document.querySelectorAll("link[href], script[src]"));
+    return Object.fromEntries(assetNames.map((assetName) => {
+      const reference = references.find((element) => {
+        const rawUrl = element.getAttribute("href") || element.getAttribute("src") || "";
+        return new URL(rawUrl, location.href).pathname.endsWith(`/${assetName}`);
+      });
+      const rawUrl = reference && (reference.getAttribute("href") || reference.getAttribute("src"));
+      return [assetName, rawUrl ? new URL(rawUrl, location.href).searchParams.get("v") : null];
+    }));
+  }, [
+    "clubhouse-shell.css",
+    "state.js",
+    "soundboard.js",
+    "participants-grid.js",
+    "grid-layout.js",
+    "participants-avatar.js",
+    "participants-fullscreen.js",
+    "audio-routing.js",
+    "media-controls.js",
+    "connect.js",
+    "app.js",
+  ]);
+  expect(Object.values(versions).every(Boolean), JSON.stringify(versions, null, 2)).toBe(true);
+  expect(new Set(Object.values(versions)).size, JSON.stringify(versions, null, 2)).toBe(1);
+});
+
+test("Stage modules preserve their nodes and form state while Active Users remains independent", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await openPhaseTwoViewer(page);
+  await page.evaluate(() => {
+    const grid = document.getElementById("screen-grid");
+    const tile = grid.querySelector(":scope > .tile");
+    const video = tile.querySelector("video");
+    window.__phase2StageScreenSnapshot = {
+      grid,
+      mediaStreamTrack: video.srcObject && video.srcObject.getVideoTracks()[0],
+      sdkTrack: video._lkTrack,
+      srcObject: video.srcObject,
+      tile,
+      video,
+    };
+  });
 
   const structure = await page.evaluate(() => {
-    const host = document.getElementById("utility-host");
-    const overlay = document.getElementById("shell-overlay-root");
+    const host = document.getElementById("stage-module-host");
+    const stage = document.querySelector(".room-main");
     const jam = document.getElementById("jam-panel");
     window.__phase2JamNode = jam;
     return {
-      ariaOwns: host.getAttribute("aria-owns"),
+      cameraInsideHost: host.contains(document.getElementById("camera-lobby")),
       chatInsideHost: host.contains(document.getElementById("chat-panel")),
       jamInsideHost: host.contains(jam),
-      jamInsideOverlay: overlay.contains(jam),
       jamCount: document.querySelectorAll("#jam-panel").length,
       peopleInsideHost: host.contains(document.getElementById("room-sidebar")),
-      toolCount: document.querySelectorAll("[data-ui-tool]").length,
+      soundboardInsideHost: host.contains(document.getElementById("soundboard-compact")),
+      stageContainsHost: stage.contains(host),
     };
   });
   expect(structure).toEqual({
-    ariaOwns: "jam-panel",
+    cameraInsideHost: true,
     chatInsideHost: true,
-    jamInsideHost: false,
-    jamInsideOverlay: true,
+    jamInsideHost: true,
     jamCount: 1,
-    peopleInsideHost: true,
-    toolCount: 3,
+    peopleInsideHost: false,
+    soundboardInsideHost: true,
+    stageContainsHost: true,
   });
-  await expectActiveTool(page, "people");
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, true);
 
   await page.locator("#open-chat").click();
-  await expectActiveTool(page, "chat");
+  await expectStageModule(page, "chat");
+  await expectUsersVisible(page, true);
   await page.locator("#chat-input").fill("A clubhouse Chat draft that must survive tool switches");
 
   await page.keyboard.press("Escape");
-  await expectActiveTool(page, "people");
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, true);
   await expect(page.locator("#open-chat")).toBeFocused();
 
   await openJam(page);
-  await expectActiveTool(page, "jam");
+  await expectStageModule(page, "jam");
+  await expectUsersVisible(page, true);
+  await page.locator(".room-main").evaluate((stage) => {
+    stage.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await expectStageModule(page, "jam");
+  await expectUsersVisible(page, true);
   await searchJam(page);
   await page.locator("#jam-volume-slider").evaluate((input) => {
     input.value = "73";
@@ -836,71 +938,976 @@ test("one logical utility owns stable People, Chat, and portaled Jam tools witho
   expect(jamScrollTop).toBeGreaterThan(0);
 
   await page.locator("#shell-toggle-utility").click();
-  await expect(page.locator(".room-layout")).toHaveClass(/utility-collapsed/);
-  await expect(page.locator("#jam-panel")).toBeHidden();
-  await expect.poll(() => page.locator("#jam-panel").evaluate((panel) => panel.inert)).toBe(true);
-  await expect.poll(() => page.locator("#utility-host").evaluate((host) => host.inert)).toBe(true);
+  await expectUsersVisible(page, false);
+  await expectStageModule(page, "jam");
 
   await page.locator("#shell-toggle-utility").click();
-  await expectActiveTool(page, "jam");
+  await expectUsersVisible(page, true);
+  await expectStageModule(page, "jam");
   await page.locator("#close-jam").click();
-  await expectActiveTool(page, "people");
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, true);
   await page.locator("#open-chat").click();
-  await expectActiveTool(page, "chat");
+  await expectStageModule(page, "chat");
   await expect(page.locator("#chat-input")).toHaveValue("A clubhouse Chat draft that must survive tool switches");
 
   await page.keyboard.press("Escape");
   await page.locator("#open-jam").click();
-  await expectActiveTool(page, "jam");
+  await expectStageModule(page, "jam");
   await expect(page.locator("#jam-search-input")).toHaveValue("clubhouse");
   await expect(page.locator(".jam-result-item")).toHaveCount(6);
   await expect(page.locator("#jam-volume-slider")).toHaveValue("73");
   expect(await page.locator("#jam-browser").evaluate((browser) => browser.scrollTop)).toBe(jamScrollTop);
   expect(await page.evaluate(() => window.__phase2JamNode === document.getElementById("jam-panel"))).toBe(true);
+  await page.locator("#close-jam").click();
+  await expectStageModule(page, "screens");
+  expect(await page.evaluate(() => {
+    const saved = window.__phase2StageScreenSnapshot;
+    const grid = document.getElementById("screen-grid");
+    const tile = grid.querySelector(":scope > .tile");
+    const video = tile.querySelector("video");
+    return {
+      grid: saved.grid === grid,
+      mediaStreamTrack: saved.mediaStreamTrack === (video.srcObject && video.srcObject.getVideoTracks()[0]),
+      sdkTrack: saved.sdkTrack === video._lkTrack,
+      srcObject: saved.srcObject === video.srcObject,
+      tile: saved.tile === tile && tile.isConnected,
+      trackState: saved.mediaStreamTrack.readyState,
+      video: saved.video === video && video.isConnected,
+    };
+  })).toEqual({
+    grid: true,
+    mediaStreamTrack: true,
+    sdkTrack: true,
+    srcObject: true,
+    tile: true,
+    trackState: "live",
+    video: true,
+  });
 });
 
-test("utility navigation uses stable Tools labels instead of changing meanings", async ({ page }) => {
+test("Stage navigation uses stable Users and Back to Stage labels", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await openPhaseTwoViewer(page);
 
   const utilityToggle = page.locator("#shell-toggle-utility");
-  await expect(utilityToggle).toHaveText("Tools");
-  await expect(utilityToggle).toHaveAttribute("aria-label", "Hide clubhouse tools");
-  await expect(page.locator("#room-sidebar h2")).toHaveText("People & tools");
-  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "People and tools");
+  await expect(utilityToggle).toHaveText("Users");
+  await expect(utilityToggle).toHaveAttribute("aria-label", "Hide active users");
+  await expect(page.locator("#room-sidebar h2")).toHaveText("Active Users");
+  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "Active Users");
+  await expectUsersVisible(page, true);
 
   await page.locator("#open-chat").click();
-  await expectActiveTool(page, "chat");
-  await expect(utilityToggle).toHaveText("Tools");
-  await expect(page.locator("#close-chat")).toHaveText("All tools");
-  await expect(page.locator("#close-chat")).toHaveAttribute("aria-label", "Back to People and tools");
+  await expectStageModule(page, "chat");
+  await expectUsersVisible(page, true);
+  await expect(utilityToggle).toHaveText("Users");
+  await expect(page.locator("#close-chat")).toHaveText("Back to Stage");
   await page.locator("#close-chat").click();
+  await expectStageModule(page, "screens");
 
   await openJam(page);
-  await expectActiveTool(page, "jam");
-  await expect(utilityToggle).toHaveText("Tools");
-  await expect(page.locator("#close-jam")).toHaveText("All tools");
-  await expect(page.locator("#close-jam")).toHaveAttribute("aria-label", "Back to People and tools");
+  await expectStageModule(page, "jam");
+  await expectUsersVisible(page, true);
+  await expect(utilityToggle).toHaveText("Users");
+  await expect(page.locator("#close-jam")).toHaveText("Back to Stage");
 
   await utilityToggle.click();
-  await expect(utilityToggle).toHaveText("Tools");
-  await expect(utilityToggle).toHaveAttribute("aria-label", "Show clubhouse tools");
+  await expectUsersVisible(page, false);
+  await expectStageModule(page, "jam");
+  await expect(utilityToggle).toHaveText("Users");
+  await expect(utilityToggle).toHaveAttribute("aria-label", "Show active users");
   await utilityToggle.click();
-  await expectActiveTool(page, "jam");
-  await expect(utilityToggle).toHaveAttribute("aria-label", "Hide clubhouse tools");
+  await expectUsersVisible(page, true);
+  await expectStageModule(page, "jam");
+  await expect(utilityToggle).toHaveAttribute("aria-label", "Hide active users");
 
   await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
   await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
   await expect(page.locator("#room-sidebar h2")).toHaveText("Active Users");
   await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "People");
-  await expect(page.locator("#close-chat")).toHaveText("Close");
-  await expect(page.locator("#close-chat")).not.toHaveAttribute("aria-label", /.+/);
-  await expect(page.locator("#close-jam")).toHaveText("Close");
-  await expect(page.locator("#close-jam")).not.toHaveAttribute("aria-label", /.+/);
 
   await page.evaluate(() => window.EchoUiShell.applyVariant("v2"));
-  await expect(page.locator("#room-sidebar h2")).toHaveText("People & tools");
-  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "People and tools");
+  await expect(page.locator("#room-sidebar h2")).toHaveText("Active Users");
+  await expect(page.locator("#room-sidebar")).toHaveAttribute("aria-label", "Active Users");
+  await expectUsersVisible(page, true);
+});
+
+test("Active Users preference is independent from Stage modules across desktop and ultrawide widths", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page, {
+    cameras: 1,
+    participants: 3,
+    screenShares: 1,
+    shareAspects: [32 / 9],
+  });
+  await page.evaluate(() => {
+    const grid = document.getElementById("screen-grid");
+    const tile = grid.querySelector(":scope > .tile");
+    const video = tile.querySelector("video");
+    window.__phase2ModuleMatrixScreen = {
+      grid,
+      mediaStreamTrack: video.srcObject && video.srcObject.getVideoTracks()[0],
+      sdkTrack: video._lkTrack,
+      srcObject: video.srcObject,
+      tile,
+      video,
+    };
+  });
+
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 1920, height: 1080 },
+    { width: 3440, height: 1440 },
+    { width: 5120, height: 1440 },
+  ]) {
+    await resizeTo(page, viewport, "theater");
+    for (const usersVisible of [true, false]) {
+      await setUsersVisible(page, usersVisible);
+      await page.evaluate(() => window.EchoStageModules.open("jam", null, { focus: false }));
+      await expectStageModule(page, "jam");
+      await expectUsersVisible(page, usersVisible);
+
+      const geometry = await page.evaluate(() => {
+        function rect(element) {
+          const bounds = element.getBoundingClientRect();
+          return {
+            bottom: bounds.bottom,
+            left: bounds.left,
+            right: bounds.right,
+            top: bounds.top,
+          };
+        }
+        return {
+          host: rect(document.getElementById("stage-module-host")),
+          jam: rect(document.getElementById("jam-panel")),
+          stage: rect(document.querySelector(".room-main")),
+        };
+      });
+      for (const region of [geometry.host, geometry.jam]) {
+        expect(region.left, `${viewport.width}px module left`).toBeGreaterThanOrEqual(geometry.stage.left - 1);
+        expect(region.right, `${viewport.width}px module right`).toBeLessThanOrEqual(geometry.stage.right + 1);
+        expect(region.top, `${viewport.width}px module top`).toBeGreaterThanOrEqual(geometry.stage.top - 1);
+        expect(region.bottom, `${viewport.width}px module bottom`).toBeLessThanOrEqual(geometry.stage.bottom + 1);
+      }
+
+      await page.evaluate(() => window.EchoStageModules.close("jam", { restoreFocus: false }));
+      await expectStageModule(page, "screens");
+      await expectUsersVisible(page, usersVisible);
+    }
+  }
+
+  await setUsersVisible(page, true);
+  for (const module of ["chat", "jam", "camera", "soundboard"]) {
+    await page.evaluate((name) => window.EchoStageModules.open(name, null, { focus: false }), module);
+    await expectStageModule(page, module);
+    await expectUsersVisible(page, true);
+  }
+  await page.evaluate(() => window.EchoStageModules.close("soundboard", { restoreFocus: false }));
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, true);
+
+  expect(await page.evaluate(() => {
+    const saved = window.__phase2ModuleMatrixScreen;
+    const grid = document.getElementById("screen-grid");
+    const tile = grid.querySelector(":scope > .tile");
+    const video = tile.querySelector("video");
+    return {
+      grid: saved.grid === grid,
+      mediaStreamTrack: saved.mediaStreamTrack === (video.srcObject && video.srcObject.getVideoTracks()[0]),
+      sdkTrack: saved.sdkTrack === video._lkTrack,
+      srcObject: saved.srcObject === video.srcObject,
+      tile: saved.tile === tile && tile.isConnected,
+      trackState: saved.mediaStreamTrack.readyState,
+      video: saved.video === video && video.isConnected,
+    };
+  })).toEqual({
+    grid: true,
+    mediaStreamTrack: true,
+    sdkTrack: true,
+    srcObject: true,
+    tile: true,
+    trackState: "live",
+    video: true,
+  });
+});
+
+test("Soundboard quick play and edit remain one inert-safe Stage module", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page);
+
+  const expectSoundboardSurface = async (activeSurface) => {
+    expect(await page.evaluate((expectedSurface) => {
+      const surfaces = {
+        edit: document.getElementById("soundboard"),
+        quick: document.getElementById("soundboard-compact"),
+      };
+      return Object.fromEntries(Object.entries(surfaces).map(([name, element]) => [name, {
+        ariaHidden: element.getAttribute("aria-hidden"),
+        hidden: element.classList.contains("hidden"),
+        inert: element.inert,
+        rendered: element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden",
+        expected: name === expectedSurface,
+      }]));
+    }, activeSurface)).toEqual({
+      edit: {
+        ariaHidden: activeSurface === "edit" ? "false" : "true",
+        expected: activeSurface === "edit",
+        hidden: activeSurface !== "edit",
+        inert: activeSurface !== "edit",
+        rendered: activeSurface === "edit",
+      },
+      quick: {
+        ariaHidden: activeSurface === "quick" ? "false" : "true",
+        expected: activeSurface === "quick",
+        hidden: activeSurface !== "quick",
+        inert: activeSurface !== "quick",
+        rendered: activeSurface === "quick",
+      },
+    });
+  };
+
+  await expectStageModule(page, "screens");
+  await expectSoundboardSurface(null);
+  await expectUsersVisible(page, true);
+
+  await page.locator("#open-soundboard").click();
+  await expectStageModule(page, "soundboard");
+  await expectSoundboardSurface("quick");
+  await expectUsersVisible(page, true);
+
+  await page.locator("#shell-toggle-utility").click();
+  await expectUsersVisible(page, false);
+  await page.locator("#open-soundboard-edit").click();
+  await expect(page.locator("#back-to-soundboard")).toBeFocused();
+  await expect(page.locator("html")).toHaveAttribute("data-stage-module", "soundboard");
+  await expect(page.locator(".room-main")).toHaveClass(/stage-module-open/);
+  await expect(page.locator("#stage-module-host")).toHaveAttribute("data-active-module", "soundboard");
+  await expectSoundboardSurface("edit");
+  await expectUsersVisible(page, false);
+
+  await page.locator("#back-to-soundboard").click();
+  await expect(page.locator("#open-soundboard-edit")).toBeFocused();
+  await expectStageModule(page, "soundboard");
+  await expectSoundboardSurface("quick");
+  await expectUsersVisible(page, false);
+  await page.locator("#close-soundboard").click();
+  await expectStageModule(page, "screens");
+  await expectSoundboardSurface(null);
+  await expectUsersVisible(page, false);
+});
+
+test("Soundboard Quick Play and Edit remain reachable at short and narrow Stage sizes", async ({ page }) => {
+  const viewports = [
+    { width: 640, height: 360 },
+    { width: 844, height: 390 },
+    { width: 360, height: 640 },
+  ];
+
+  await page.setViewportSize(viewports[0]);
+  await openPhaseTwoViewer(page);
+  await page.evaluate(() => {
+    currentRoomName = null;
+    soundboardSounds.clear();
+    for (let index = 1; index <= 48; index += 1) {
+      soundboardSounds.set(`phase2-sound-${index}`, {
+        icon: "🔊",
+        id: `phase2-sound-${index}`,
+        name: `Fixture Sound ${String(index).padStart(2, "0")}`,
+        volume: 100,
+      });
+    }
+  });
+
+  const expectLastQuickSoundReachable = async (label) => {
+    await page.evaluate(() => {
+      const panel = document.getElementById("soundboard-compact");
+      const grid = document.getElementById("soundboard-compact-grid");
+      panel.scrollTop = panel.scrollHeight;
+      grid.scrollTop = grid.scrollHeight;
+    });
+    await nextPaint(page);
+    const geometry = await page.evaluate(() => {
+      const panel = document.getElementById("soundboard-compact");
+      const grid = document.getElementById("soundboard-compact-grid");
+      const last = grid.lastElementChild;
+      const panelRect = panel.getBoundingClientRect();
+      const gridRect = grid.getBoundingClientRect();
+      const lastRect = last.getBoundingClientRect();
+      return {
+        gridClientHeight: grid.clientHeight,
+        gridOverflowsVertically: grid.scrollHeight > grid.clientHeight + 1,
+        lastVisible: lastRect.top >= Math.max(panelRect.top, gridRect.top) - 1 &&
+          lastRect.bottom <= Math.min(panelRect.bottom, gridRect.bottom) + 1,
+        panelHasNoHorizontalOverflow: panel.scrollWidth <= panel.clientWidth + 1,
+      };
+    });
+    expect(geometry.gridClientHeight, `${label} Quick Play grid height`).toBeGreaterThanOrEqual(60);
+    expect(geometry.gridOverflowsVertically, `${label} Quick Play grid overflow`).toBe(true);
+    expect(geometry.lastVisible, `${label} final Quick Play sound`).toBe(true);
+    expect(geometry.panelHasNoHorizontalOverflow, `${label} Quick Play horizontal overflow`).toBe(true);
+  };
+
+  for (const viewport of viewports) {
+    const label = `${viewport.width}x${viewport.height}`;
+    await page.setViewportSize(viewport);
+    await nextPaint(page);
+    await page.locator("#open-soundboard").click();
+    await expectStageModule(page, "soundboard");
+    await page.evaluate(() => {
+      document.getElementById("soundboard-compact").scrollTop = 0;
+    });
+    await nextPaint(page);
+
+    const quick = await page.evaluate(() => {
+      const panel = document.getElementById("soundboard-compact");
+      const panelRect = panel.getBoundingClientRect();
+      const contained = (selector) => {
+        const rect = document.querySelector(selector).getBoundingClientRect();
+        return rect.left >= panelRect.left - 1 && rect.right <= panelRect.right + 1 &&
+          rect.top >= panelRect.top - 1 && rect.bottom <= panelRect.bottom + 1;
+      };
+      return {
+        ariaHidden: panel.getAttribute("aria-hidden"),
+        controlsContained: [
+          "#close-soundboard",
+          "#open-soundboard-edit",
+          "#toggle-soundboard-volume-compact",
+          "#soundboard-compact-search",
+        ].every(contained),
+        inert: panel.inert,
+        noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth + 1,
+      };
+    });
+    expect(quick, `${label} initial Quick Play geometry`).toEqual({
+      ariaHidden: "false",
+      controlsContained: true,
+      inert: false,
+      noHorizontalOverflow: true,
+    });
+    await expectLastQuickSoundReachable(label);
+
+    await page.locator("#toggle-soundboard-volume-compact").click();
+    await expect(page.locator("#toggle-soundboard-volume-compact")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#soundboard-volume-panel-compact")).toHaveAttribute("aria-hidden", "false");
+    await expectLastQuickSoundReachable(`${label} expanded volume`);
+    await page.locator("#toggle-soundboard-volume-compact").click();
+    await expect(page.locator("#toggle-soundboard-volume-compact")).toHaveAttribute("aria-expanded", "false");
+
+    await page.locator("#open-soundboard-edit").click();
+    await expect(page.locator("#back-to-soundboard")).toBeFocused();
+    await page.evaluate(() => {
+      document.getElementById("soundboard").scrollTop = 0;
+    });
+    await nextPaint(page);
+    const edit = await page.evaluate(() => {
+      const panel = document.getElementById("soundboard");
+      const panelRect = panel.getBoundingClientRect();
+      const contained = (selector) => {
+        const rect = document.querySelector(selector).getBoundingClientRect();
+        return rect.left >= panelRect.left - 1 && rect.right <= panelRect.right + 1 &&
+          rect.top >= panelRect.top - 1 && rect.bottom <= panelRect.bottom + 1;
+      };
+      return {
+        ariaHidden: panel.getAttribute("aria-hidden"),
+        controlsContained: [
+          "#toggle-soundboard-volume",
+          "#back-to-soundboard",
+          "#close-soundboard-stage",
+        ].every(contained),
+        inert: panel.inert,
+        noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth + 1,
+        verticallyScrollable: panel.scrollHeight > panel.clientHeight + 1,
+      };
+    });
+    expect(edit, `${label} initial Edit geometry`).toEqual({
+      ariaHidden: "false",
+      controlsContained: true,
+      inert: false,
+      noHorizontalOverflow: true,
+      verticallyScrollable: true,
+    });
+
+    await page.evaluate(() => {
+      const panel = document.getElementById("soundboard");
+      panel.scrollTop = panel.scrollHeight;
+    });
+    await nextPaint(page);
+    const upload = await page.evaluate(() => {
+      const panel = document.getElementById("soundboard");
+      const panelRect = panel.getBoundingClientRect();
+      const uploadPanel = panel.querySelector(".soundboard-upload");
+      const uploadRect = uploadPanel.getBoundingClientRect();
+      const contained = (selector) => {
+        const rect = panel.querySelector(selector).getBoundingClientRect();
+        return rect.left >= panelRect.left - 1 && rect.right <= panelRect.right + 1 &&
+          rect.top >= panelRect.top - 1 && rect.bottom <= panelRect.bottom + 1;
+      };
+      return {
+        controlsContained: [
+          "#sound-name",
+          "#sound-upload-button",
+          ".sound-file",
+          "#sound-clip-volume",
+        ].every(contained),
+        fullyVisible: uploadRect.left >= panelRect.left - 1 && uploadRect.right <= panelRect.right + 1 &&
+          uploadRect.top >= panelRect.top - 1 && uploadRect.bottom <= panelRect.bottom + 1,
+        height: uploadRect.height,
+        noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth + 1,
+      };
+    });
+    expect(upload.controlsContained, `${label} Edit upload controls`).toBe(true);
+    expect(upload.fullyVisible, `${label} Edit upload section`).toBe(true);
+    expect(upload.height, `${label} Edit upload natural height`).toBeGreaterThanOrEqual(120);
+    expect(upload.noHorizontalOverflow, `${label} Edit horizontal overflow after scroll`).toBe(true);
+
+    await page.locator("#close-soundboard-stage").click();
+    await expectStageModule(page, "screens");
+    await expectUsersVisible(page, true);
+  }
+});
+
+test("legacy rollback repairs module geometry, opener ownership, and the latest legacy intent", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page);
+
+  await page.evaluate(() => {
+    const opener = document.createElement("button");
+    opener.id = "phase2-transient-jam-opener";
+    opener.type = "button";
+    opener.textContent = "Transient Jam";
+    document.querySelector(".room-top").appendChild(opener);
+    openJamPanel(opener);
+  });
+  await expectStageModule(page, "jam");
+
+  await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
+  await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
+  await expect(page.locator("#jam-panel")).toBeVisible();
+  await expect(page.locator("#open-jam")).toHaveAttribute("aria-controls", "jam-panel");
+  await expect(page.locator("#phase2-transient-jam-opener")).toHaveAttribute("aria-controls", "jam-panel");
+  await expect(page.locator("#stage-module-host")).toHaveAttribute("aria-hidden", "true");
+  expect(await page.locator("#stage-module-host").evaluate((host) => host.childElementCount)).toBe(0);
+
+  await page.evaluate(() => closeJamPanel());
+  await expect(page.locator("#jam-panel")).toBeHidden();
+  expect(await page.evaluate(() => window.EchoStageModules.activeModule())).toBeNull();
+  await page.evaluate(() => window.EchoUiShell.applyVariant("v2"));
+  await expectStageModule(page, "screens");
+  await expect(page.locator("#open-jam")).toHaveAttribute("aria-controls", "stage-module-host");
+
+  await page.locator("#open-soundboard").click();
+  await expectStageModule(page, "soundboard");
+  await page.evaluate(() => {
+    window.__phase2LegacySoundboardNode = document.getElementById("soundboard-compact");
+    window.EchoUiShell.applyVariant("legacy");
+  });
+  await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
+  await expect(page.locator("#soundboard-compact")).toBeVisible();
+
+  const legacySoundboard = await page.evaluate(() => {
+    const opener = document.getElementById("open-soundboard");
+    const panel = document.getElementById("soundboard-compact");
+    const openerRect = opener.getBoundingClientRect();
+    return {
+      expectedRight: window.innerWidth - openerRect.right,
+      expectedTop: openerRect.bottom + 6,
+      right: Number.parseFloat(panel.style.right),
+      sameNode: window.__phase2LegacySoundboardNode === panel,
+      top: Number.parseFloat(panel.style.top),
+    };
+  });
+  expect(legacySoundboard.sameNode).toBe(true);
+  expect(legacySoundboard.top).toBeCloseTo(legacySoundboard.expectedTop, 1);
+  expect(legacySoundboard.right).toBeCloseTo(legacySoundboard.expectedRight, 1);
+  for (const [opener, controlled] of [
+    ["#open-chat", "chat-panel"],
+    ["#open-jam", "jam-panel"],
+    ["#open-camera-lobby", "camera-lobby"],
+    ["#open-soundboard", "soundboard-compact"],
+  ]) {
+    await expect(page.locator(opener)).toHaveAttribute("aria-controls", controlled);
+  }
+
+  await page.evaluate(() => openChat());
+  await expect(page.locator("#chat-panel")).toBeVisible();
+  expect(await page.evaluate(() => window.EchoStageModules.activeModule())).toBe("chat");
+  await page.evaluate(() => window.EchoUiShell.applyVariant("v2"));
+  await expectStageModule(page, "chat");
+  await expect(page.locator("#soundboard-compact")).toBeHidden();
+  await page.evaluate(() => window.EchoStageModules.close("chat", { restoreFocus: false }));
+  await expectStageModule(page, "screens");
+});
+
+test("leaving Jam pauses its visualizer and a removed opener falls back to canonical focus", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page);
+
+  await page.evaluate(() => {
+    window.__phase2OriginalJamVisualizerController = window._jamAudioVisualizerController;
+    window.__phase2JamPauseCalls = 0;
+    window._jamAudioVisualizerController = {
+      pause() {
+        window.__phase2JamPauseCalls += 1;
+      },
+    };
+    window.EchoStageModules.open("jam", null, { focus: false });
+  });
+  await expectStageModule(page, "jam");
+
+  await page.evaluate(() => window.EchoStageModules.open("chat", null, { focus: false }));
+  await expectStageModule(page, "chat");
+  expect(await page.evaluate(() => window.__phase2JamPauseCalls)).toBeGreaterThan(0);
+  await page.evaluate(() => {
+    window.EchoStageModules.close("chat", { restoreFocus: false });
+    window._jamAudioVisualizerController = window.__phase2OriginalJamVisualizerController;
+    delete window.__phase2OriginalJamVisualizerController;
+    delete window.__phase2JamPauseCalls;
+  });
+  await expectStageModule(page, "screens");
+
+  await page.evaluate(() => {
+    const opener = document.createElement("button");
+    opener.id = "phase2-removed-jam-opener";
+    opener.type = "button";
+    opener.textContent = "Temporary Jam opener";
+    document.querySelector(".room-top").appendChild(opener);
+    window.EchoStageModules.open("jam", opener, { focus: false });
+  });
+  await expectStageModule(page, "jam");
+  await page.evaluate(() => {
+    document.getElementById("phase2-removed-jam-opener").remove();
+    window.EchoStageModules.close("jam");
+  });
+  await expectStageModule(page, "screens");
+  await expect(page.locator("#open-jam")).toBeFocused();
+});
+
+test("Camera Lobby teardown is isolated from avatar and Stage media across module and Room changes", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page, { cameras: 2, participants: 4, screenShares: 1 });
+  await page.evaluate(() => window.EchoLayoutTestScenario.captureIdentitySnapshot());
+
+  await page.evaluate(() => {
+    window.__phase2MakeLobbyParticipant = function(identity, color) {
+      const LK = getLiveKitClient();
+      const canvas = document.createElement("canvas");
+      canvas.width = 640;
+      canvas.height = 360;
+      const context = canvas.getContext("2d");
+      context.fillStyle = color;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      const mediaStreamTrack = canvas.captureStream(1).getVideoTracks()[0];
+      const sdkTrack = {
+        detachCalls: 0,
+        detach: function() { this.detachCalls += 1; },
+        mediaStreamTrack,
+        sid: identity + "-camera",
+      };
+      const publication = {
+        kind: LK.Track.Kind.Video,
+        source: LK.Track.Source.Camera,
+        track: sdkTrack,
+        trackSid: sdkTrack.sid,
+      };
+      return {
+        canvas,
+        participant: {
+          identity,
+          name: identity,
+          trackPublications: new Map([[publication.trackSid, publication]]),
+        },
+        sdkTrack,
+      };
+    };
+    window.__phase2OldLobbyMedia = window.__phase2MakeLobbyParticipant("old-room-camera", "#7c3aed");
+    room = {
+      localParticipant: window.__phase2OldLobbyMedia.participant,
+      remoteParticipants: new Map(),
+    };
+  });
+
+  const mediaKeys = [
+    "cameraStream", "cameraSdkTrack", "cameraTrack", "cameraVideo",
+    "participantCard", "participantState", "screenStream", "screenSdkTrack",
+    "screenTile", "screenTrack", "screenVideo",
+  ];
+  for (const module of ["jam", "chat", "soundboard"]) {
+    await page.evaluate(() => openCameraLobby());
+    await expectStageModule(page, "camera");
+    await expect(page.locator("#camera-lobby-grid > .camera-lobby-tile")).toHaveCount(1);
+    await page.locator("#camera-lobby-grid > .camera-lobby-tile").click();
+    await expect(page.locator("#camera-lobby-grid > .camera-lobby-tile")).toHaveClass(/enlarged/);
+    await page.evaluate(() => {
+      window.__phase2DepartingLobbyVideo = document.querySelector("#camera-lobby-grid video");
+    });
+
+    await page.evaluate((nextModule) => {
+      window.EchoStageModules.open(nextModule, null, { focus: false });
+    }, module);
+    await expectStageModule(page, module);
+    await expect(page.locator("#camera-lobby-grid > .camera-lobby-tile")).toHaveCount(0);
+    expect(await page.evaluate(() => ({
+      connected: window.__phase2DepartingLobbyVideo.isConnected,
+      lkTrack: window.__phase2DepartingLobbyVideo._lkTrack,
+      srcObject: window.__phase2DepartingLobbyVideo.srcObject,
+    }))).toEqual({ connected: false, lkTrack: null, srcObject: null });
+
+    const identity = await page.evaluate(() => window.EchoLayoutTestScenario.inspectIdentitySnapshot());
+    for (const key of mediaKeys) expect(identity[key], `${module} preserves ${key}`).toBe(true);
+    await page.evaluate((activeModule) => {
+      window.EchoStageModules.close(activeModule, { restoreFocus: false });
+    }, module);
+    await expectStageModule(page, "screens");
+  }
+
+  await page.evaluate(() => openCameraLobby());
+  await expectStageModule(page, "camera");
+  await page.evaluate(() => {
+    window.__phase2OldRoomLobbyVideo = document.querySelector("#camera-lobby-grid video");
+    const next = window.__phase2MakeLobbyParticipant("new-room-camera", "#0f766e");
+    window.__phase2NewLobbyMedia = next;
+    const nextRoom = { localParticipant: next.participant, remoteParticipants: new Map() };
+    clearMedia();
+    room = nextRoom;
+    refreshActiveCameraLobbyForRoom(nextRoom);
+  });
+  await expectStageModule(page, "camera");
+  await expect(page.locator('#camera-lobby-grid > .camera-lobby-tile[data-identity="new-room-camera"]')).toHaveCount(1);
+  expect(await page.evaluate(() => ({
+    detachCalls: window.__phase2OldLobbyMedia.sdkTrack.detachCalls,
+    oldConnected: window.__phase2OldRoomLobbyVideo.isConnected,
+    oldReadyState: window.__phase2OldLobbyMedia.sdkTrack.mediaStreamTrack.readyState,
+    oldSrcObject: window.__phase2OldRoomLobbyVideo.srcObject,
+    staleEnlarged: !!document.querySelector("#camera-lobby-grid > .enlarged"),
+  }))).toEqual({
+    detachCalls: 4,
+    oldConnected: false,
+    oldReadyState: "live",
+    oldSrcObject: null,
+    staleEnlarged: false,
+  });
+});
+
+test("hidden Stage grid mutations recover after rapid module reopen on ultrawide displays", async ({ page }) => {
+  await page.setViewportSize({ width: 3440, height: 1440 });
+  await openPhaseTwoViewer(page, { cameras: 1, participants: 3, screenShares: 1, shareAspects: [32 / 9] });
+
+  for (const viewport of [
+    { width: 3440, height: 1440 },
+    { width: 5120, height: 1440 },
+  ]) {
+    await resizeTo(page, viewport, "theater");
+    await page.evaluate(() => {
+      const grid = document.getElementById("screen-grid");
+      const originalTile = grid.querySelector(":scope > .tile");
+      const originalVideo = originalTile.querySelector("video");
+      window.__phase2HiddenGridSnapshot = {
+        grid,
+        mediaStreamTrack: originalVideo.srcObject.getVideoTracks()[0],
+        sdkTrack: originalVideo._lkTrack,
+        srcObject: originalVideo.srcObject,
+        tile: originalTile,
+        video: originalVideo,
+      };
+      window.EchoStageModules.open("jam", null, { focus: false });
+      const lateTile = document.createElement("article");
+      lateTile.className = "tile";
+      lateTile.dataset.identity = "late-ultrawide-share";
+      lateTile.dataset.mediaKind = "screen";
+      lateTile.style.setProperty("--screen-source-aspect-ratio", String(16 / 9));
+      const title = document.createElement("h3");
+      title.textContent = "Late ultrawide share";
+      lateTile.appendChild(title);
+      grid.appendChild(lateTile);
+      window.__phase2LateGridTile = lateTile;
+    });
+    await expectStageModule(page, "jam");
+    // Drain the grid observer's delayed insertion retries, then model the exact
+    // zero-visible state a hidden measurement can publish. The final close must
+    // repair this state on its own; no insertion retry remains to mask a miss.
+    await page.waitForTimeout(1100);
+    await page.evaluate(() => {
+      const grid = document.getElementById("screen-grid");
+      grid.dataset.visibleTiles = "0";
+      grid.style.gridTemplateColumns = "";
+      grid.style.gridTemplateRows = "";
+      grid.querySelectorAll(":scope > .tile").forEach((tile) => {
+        tile.removeAttribute("data-grid-visible");
+        tile.style.width = "";
+        tile.style.height = "";
+      });
+    });
+    await expect(page.locator("#screen-grid")).toHaveAttribute("data-visible-tiles", "0");
+
+    await page.evaluate(() => {
+      window.EchoStageModules.close("jam", { restoreFocus: false });
+      window.EchoStageModules.open("jam", null, { focus: false });
+    });
+    await expectStageModule(page, "jam");
+    await page.evaluate(() => window.EchoStageModules.close("jam", { restoreFocus: false }));
+    await expectStageModule(page, "screens");
+    await expect.poll(() => page.locator("#screen-grid").getAttribute("data-visible-tiles")).toBe("2");
+    await expect(page.locator("#screen-grid > .tile[data-grid-visible]")).toHaveCount(2);
+    await expect.poll(() => page.locator("#screen-grid").evaluate((grid) => grid.style.gridTemplateColumns)).not.toBe("");
+
+    expect(await page.evaluate(() => {
+      const saved = window.__phase2HiddenGridSnapshot;
+      const video = saved.tile.querySelector("video");
+      return {
+        grid: saved.grid === document.getElementById("screen-grid"),
+        mediaStreamTrack: saved.mediaStreamTrack === video.srcObject.getVideoTracks()[0],
+        sdkTrack: saved.sdkTrack === video._lkTrack,
+        srcObject: saved.srcObject === video.srcObject,
+        tile: saved.tile.isConnected,
+        video: saved.video === video && video.isConnected,
+      };
+    })).toEqual({
+      grid: true,
+      mediaStreamTrack: true,
+      sdkTrack: true,
+      srcObject: true,
+      tile: true,
+      video: true,
+    });
+
+    await page.evaluate(() => {
+      window.__phase2LateGridTile.remove();
+      window._echoRecalcGrid();
+    });
+    await expect.poll(() => page.locator("#screen-grid").getAttribute("data-visible-tiles")).toBe("1");
+  }
+});
+
+test("short landscape keeps every Stage module and Active Users independently usable", async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 360 });
+  await openPhaseTwoViewer(page);
+
+  for (const viewport of [
+    { width: 640, height: 360 },
+    { width: 844, height: 390 },
+  ]) {
+    await resizeTo(page, viewport, "mini");
+    await expect(page.locator("html")).toHaveAttribute("data-ui-short", "");
+    for (const module of ["chat", "jam", "camera", "soundboard"]) {
+      await page.evaluate((name) => window.EchoStageModules.open(name, null, { focus: false }), module);
+      await expectStageModule(page, module);
+      await expectUsersVisible(page, true);
+      const geometry = await page.evaluate(() => {
+        const stage = document.querySelector(".room-main").getBoundingClientRect();
+        const users = document.getElementById("room-sidebar").getBoundingClientRect();
+        const host = document.getElementById("stage-module-host").getBoundingClientRect();
+        return {
+          host: { bottom: host.bottom, left: host.left, right: host.right, top: host.top },
+          stage: { bottom: stage.bottom, height: stage.height, left: stage.left, right: stage.right, top: stage.top, width: stage.width },
+          users: { bottom: users.bottom, height: users.height, left: users.left, right: users.right, top: users.top, width: users.width },
+        };
+      });
+      expect(geometry.stage.width).toBeGreaterThanOrEqual(300);
+      expect(geometry.stage.height).toBeGreaterThanOrEqual(180);
+      expect(geometry.users.width).toBeGreaterThanOrEqual(219);
+      expect(geometry.users.height).toBeGreaterThanOrEqual(180);
+      expect(geometry.stage.right).toBeLessThanOrEqual(geometry.users.left + 1);
+      expect(geometry.host.left).toBeGreaterThanOrEqual(geometry.stage.left - 1);
+      expect(geometry.host.right).toBeLessThanOrEqual(geometry.stage.right + 1);
+      await page.evaluate((name) => window.EchoStageModules.close(name, { restoreFocus: false }), module);
+      await expectStageModule(page, "screens");
+      await expectUsersVisible(page, true);
+    }
+  }
+});
+
+test("one participant's 32:9 screen and camera remain independent Stage tiles", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await openPhaseTwoViewer(page, {
+    cameras: 1,
+    participants: 3,
+    screenOwners: [2],
+    screenShares: 1,
+    shareAspects: [32 / 9],
+  });
+
+  const identity = "layout-fixture-2";
+  const card = page.locator(`.user-card[data-identity="${identity}"]`);
+  await expect(card).toHaveClass(/has-camera/);
+  await page.evaluate((participantIdentity) => {
+    const cardRef = participantCards.get(participantIdentity);
+    const cardElement = document.querySelector(`.user-card[data-identity="${participantIdentity}"]`);
+    const sourceVideo = cardElement.querySelector("video");
+    const track = sourceVideo._lkTrack;
+    const LK = getLiveKitClient();
+    const publication = {
+      kind: LK.Track.Kind.Video,
+      source: LK.Track.Source.Camera,
+      track,
+      trackSid: track.sid,
+    };
+    const participant = {
+      identity: participantIdentity,
+      name: "Friend 2",
+      trackPublications: new Map([[publication.trackSid, publication]]),
+    };
+    room.remoteParticipants.set(participantIdentity, participant);
+    cardRef.setCameraStageAvailable(true);
+    const screenTile = screenTileByIdentity.get(participantIdentity);
+    const screenVideo = screenTile.querySelector("video");
+    window.__phase2MixedStageSnapshot = {
+      cameraSdkTrack: track,
+      cameraSourceMediaTrack: sourceVideo.srcObject && sourceVideo.srcObject.getVideoTracks()[0],
+      cameraSourceStream: sourceVideo.srcObject,
+      cameraSourceVideo: sourceVideo,
+      screenMediaTrack: screenVideo.srcObject && screenVideo.srcObject.getVideoTracks()[0],
+      screenSdkTrack: screenVideo._lkTrack,
+      screenStream: screenVideo.srcObject,
+      screenTile,
+      screenVideo,
+    };
+  }, identity);
+
+  const settingsToggle = card.locator(".participant-settings-toggle");
+  await settingsToggle.click();
+  const settings = card.locator(".participant-settings-popover");
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: "Show Friend 2's camera on my Stage" }).click();
+
+  const screenTile = page.locator(`#screen-grid > .tile[data-media-kind="screen"][data-identity="${identity}"]`);
+  const cameraTile = page.locator(`#screen-grid > .tile[data-media-kind="camera"][data-identity="${identity}"]`);
+  await expect(screenTile).toBeVisible();
+  await expect(cameraTile).toBeVisible();
+  await expect(page.locator("#screen-grid > .tile[data-grid-visible]")).toHaveCount(2);
+
+  expect(await page.evaluate((participantIdentity) => {
+    const saved = window.__phase2MixedStageSnapshot;
+    const currentSourceVideo = document.querySelector(
+      `.user-card[data-identity="${participantIdentity}"] video`,
+    );
+    const stageVideo = cameraStageTileByIdentity.get(participantIdentity).querySelector("video");
+    return {
+      distinctVideo: stageVideo !== currentSourceVideo,
+      mediaTrackShared: saved.cameraSourceMediaTrack ===
+        (stageVideo.srcObject && stageVideo.srcObject.getVideoTracks()[0]),
+      sdkTrackShared: saved.cameraSdkTrack === stageVideo._lkTrack,
+      sourceStreamPreserved: saved.cameraSourceStream === currentSourceVideo.srcObject,
+      sourceTrackLive: saved.cameraSourceMediaTrack.readyState,
+      sourceVideoPreserved: saved.cameraSourceVideo === currentSourceVideo && currentSourceVideo.isConnected,
+    };
+  }, identity)).toEqual({
+    distinctVideo: true,
+    mediaTrackShared: true,
+    sdkTrackShared: true,
+    sourceStreamPreserved: true,
+    sourceTrackLive: "live",
+    sourceVideoPreserved: true,
+  });
+
+  for (const viewport of [
+    { width: 1280, height: 720 },
+    { width: 3440, height: 1440 },
+    { width: 5120, height: 1440 },
+  ]) {
+    await resizeTo(page, viewport, "theater");
+    await expect.poll(() => page.evaluate(() => document.getElementById("screen-grid").style.gridTemplateColumns))
+      .not.toBe("");
+    const geometry = await page.evaluate((participantIdentity) => {
+      function rect(element) {
+        const bounds = element.getBoundingClientRect();
+        return {
+          bottom: bounds.bottom,
+          height: bounds.height,
+          left: bounds.left,
+          right: bounds.right,
+          top: bounds.top,
+          width: bounds.width,
+        };
+      }
+      const grid = document.getElementById("screen-grid");
+      const screen = grid.querySelector(
+        `:scope > .tile[data-media-kind="screen"][data-identity="${participantIdentity}"]`,
+      );
+      const camera = grid.querySelector(
+        `:scope > .tile[data-media-kind="camera"][data-identity="${participantIdentity}"]`,
+      );
+      const screenRect = rect(screen);
+      const cameraRect = rect(camera);
+      const overlapWidth = Math.max(0, Math.min(screenRect.right, cameraRect.right) -
+        Math.max(screenRect.left, cameraRect.left));
+      const overlapHeight = Math.max(0, Math.min(screenRect.bottom, cameraRect.bottom) -
+        Math.max(screenRect.top, cameraRect.top));
+      return {
+        camera: cameraRect,
+        cameraFit: getComputedStyle(camera.querySelector("video")).objectFit,
+        grid: rect(grid),
+        overlapArea: overlapWidth * overlapHeight,
+        screen: screenRect,
+        screenFit: getComputedStyle(screen.querySelector("video")).objectFit,
+      };
+    }, identity);
+    for (const region of [geometry.screen, geometry.camera]) {
+      expect(region.left).toBeGreaterThanOrEqual(geometry.grid.left - 1);
+      expect(region.right).toBeLessThanOrEqual(geometry.grid.right + 1);
+      expect(region.top).toBeGreaterThanOrEqual(geometry.grid.top - 1);
+      expect(region.bottom).toBeLessThanOrEqual(geometry.grid.bottom + 1);
+    }
+    expect(geometry.overlapArea).toBeLessThanOrEqual(1);
+    expect(geometry.screen.width / geometry.screen.height).toBeCloseTo(32 / 9, 2);
+    expect(geometry.camera.width / geometry.camera.height).toBeCloseTo(16 / 9, 2);
+    expect(geometry.screenFit).toBe("contain");
+    expect(geometry.cameraFit).toBe("contain");
+  }
+
+  await page.evaluate(() => window.EchoStageModules.open("jam", null, { focus: false }));
+  await expectStageModule(page, "jam");
+  await page.evaluate(() => window.EchoStageModules.close("jam", { restoreFocus: false }));
+  await expectStageModule(page, "screens");
+  expect(await page.evaluate((participantIdentity) => {
+    const saved = window.__phase2MixedStageSnapshot;
+    const currentScreenTile = screenTileByIdentity.get(participantIdentity);
+    const currentScreenVideo = currentScreenTile.querySelector("video");
+    const currentCameraTile = cameraStageTileByIdentity.get(participantIdentity);
+    return {
+      cameraTile: !!currentCameraTile && currentCameraTile.isConnected,
+      screenMediaTrack: saved.screenMediaTrack ===
+        (currentScreenVideo.srcObject && currentScreenVideo.srcObject.getVideoTracks()[0]),
+      screenSdkTrack: saved.screenSdkTrack === currentScreenVideo._lkTrack,
+      screenStream: saved.screenStream === currentScreenVideo.srcObject,
+      screenTile: saved.screenTile === currentScreenTile && currentScreenTile.isConnected,
+      screenVideo: saved.screenVideo === currentScreenVideo && currentScreenVideo.isConnected,
+    };
+  }, identity)).toEqual({
+    cameraTile: true,
+    screenMediaTrack: true,
+    screenSdkTrack: true,
+    screenStream: true,
+    screenTile: true,
+    screenVideo: true,
+  });
+
+  if (!(await settings.isVisible())) await settingsToggle.click();
+  await settings.getByRole("button", { name: /Hide the shared screen from Friend 2 on my Stage/i }).click();
+  await expect(screenTile).toBeHidden();
+  await expect(cameraTile).toBeVisible();
+  await settings.getByRole("button", { name: /Show the shared screen from Friend 2 on my Stage/i }).click();
+  await expect(screenTile).toBeVisible();
+  await settings.getByRole("button", { name: "Hide Friend 2's camera from my Stage" }).click();
+  await expect(cameraTile).toHaveCount(0);
+  await expect(screenTile).toBeVisible();
+
+  expect(await page.evaluate(() => {
+    const saved = window.__phase2MixedStageSnapshot;
+    return {
+      cameraIntentCount: stagedCameraIdentities.size,
+      cameraTileCount: cameraStageTileByIdentity.size,
+      sourceTrackState: saved.cameraSourceMediaTrack.readyState,
+      sourceVideo: saved.cameraSourceVideo.isConnected,
+      sourceVideoTrack: saved.cameraSourceMediaTrack ===
+        (saved.cameraSourceVideo.srcObject && saved.cameraSourceVideo.srcObject.getVideoTracks()[0]),
+    };
+  })).toEqual({
+    cameraIntentCount: 0,
+    cameraTileCount: 0,
+    sourceTrackState: "live",
+    sourceVideo: true,
+    sourceVideoTrack: true,
+  });
 });
 
 test("Ultra Instinct keeps the Goku GIF visible through the Phase 2 stage", async ({ page }) => {
@@ -994,7 +2001,8 @@ test("People actions stay visible and contained in the theater rail and mini she
     [{ width: 360, height: 640 }, "mini"],
   ]) {
     await resizeTo(page, viewport, expectedMode);
-    await expectActiveTool(page, "people");
+    await expectStageModule(page, "screens");
+    await expectUsersVisible(page, true);
     const geometry = await page.evaluate(() => {
       const sidebar = document.getElementById("room-sidebar").getBoundingClientRect();
       const titleRow = document.querySelector("#room-sidebar .sidebar-title-row");
@@ -1054,7 +2062,7 @@ test("People actions stay visible and contained in the theater rail and mini she
   }
 });
 
-test("responsive modes and live legacy rollback retain the same centered Jam node and state", async ({ page }) => {
+test("responsive modes and live legacy rollback retain the same Jam node, state, and Users preference", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await openPhaseTwoViewer(page);
   await openJam(page);
@@ -1069,9 +2077,11 @@ test("responsive modes and live legacy rollback retain the same centered Jam nod
     [{ width: 900, height: 700 }, "lounge"],
     [{ width: 600, height: 900 }, "compact"],
     [{ width: 360, height: 640 }, "mini"],
+    [{ width: 640, height: 360 }, "mini"],
   ]) {
     await resizeTo(page, viewport, expectedMode);
-    await expectActiveTool(page, "jam");
+    await expectStageModule(page, "jam");
+    await expectUsersVisible(page, true);
     expect(await page.evaluate(() => window.__phase2ResponsiveJamNode === document.getElementById("jam-panel"))).toBe(true);
     await expect(page.locator("#jam-search-input")).toHaveValue("anthem");
     await expect(page.locator("#jam-volume-slider")).toHaveValue("64");
@@ -1098,22 +2108,24 @@ test("responsive modes and live legacy rollback retain the same centered Jam nod
 
   await page.evaluate(() => window.EchoUiShell.applyVariant("v2"));
   await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "v2");
-  await expectActiveTool(page, "jam");
+  await expectStageModule(page, "jam");
+  await expectUsersVisible(page, true);
   expect(await page.evaluate(() => window.__phase2ResponsiveJamNode === document.getElementById("jam-panel"))).toBe(true);
 });
 
-test("Jam focus returns through Escape and Settings explicitly inerts the portaled tool", async ({ page }) => {
+test("Jam focus returns through Escape while Settings explicitly inerts the active Stage module", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await openPhaseTwoViewer(page);
   await openJam(page);
 
   await expect(page.locator("#close-jam")).toBeFocused();
   await page.keyboard.press("Escape");
-  await expectActiveTool(page, "people");
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, true);
   await expect(page.locator("#open-jam")).toBeFocused();
 
   await page.locator("#open-jam").click();
-  await expectActiveTool(page, "jam");
+  await expectStageModule(page, "jam");
   const output = page.locator("#dock-output");
   await output.click();
   await expect(page.locator("#settings-panel")).toBeVisible();
@@ -1127,38 +2139,36 @@ test("Jam focus returns through Escape and Settings explicitly inerts the portal
   await expect(output).toBeFocused();
   await expect(page.locator("#jam-panel")).toBeVisible();
   await expect.poll(() => page.locator("#jam-panel").evaluate((panel) => panel.inert)).toBe(false);
-  await expectActiveTool(page, "jam");
+  await expectStageModule(page, "jam");
+  await expectUsersVisible(page, true);
 
   await page.keyboard.press("Escape");
-  await expectActiveTool(page, "people");
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, true);
   await expect(page.locator("#open-jam")).toBeFocused();
 });
 
-test("collapsed Chat records unread messages and a top overlay owns the first Escape", async ({ page }) => {
+test("hidden Users does not close Chat and a top overlay owns the first Escape", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
   await openPhaseTwoViewer(page);
 
   await page.locator("#open-chat").click();
-  await expectActiveTool(page, "chat");
+  await expectStageModule(page, "chat");
+  await expectUsersVisible(page, true);
   await page.locator("#shell-toggle-utility").click();
-  await expect(page.locator(".room-layout")).toHaveClass(/utility-collapsed/);
-
-  await page.evaluate(() => incrementUnreadChat());
-  await expect(page.locator("#chat-badge")).toHaveText("1");
-  await expect(page.locator("#chat-badge")).not.toHaveClass(/hidden/);
-
-  await page.locator("#shell-toggle-utility").click();
-  await expectActiveTool(page, "chat");
-  await expect(page.locator("#chat-badge")).toHaveClass(/hidden/);
+  await expectUsersVisible(page, false);
+  await expectStageModule(page, "chat");
 
   await page.evaluate((src) => openImageLightbox(src), transparentDataUrl);
   await expect(page.locator(".image-lightbox")).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator(".image-lightbox")).toHaveCount(0);
-  await expectActiveTool(page, "chat");
+  await expectStageModule(page, "chat");
+  await expectUsersVisible(page, false);
 
   await page.keyboard.press("Escape");
-  await expectActiveTool(page, "people");
+  await expectStageModule(page, "screens");
+  await expectUsersVisible(page, false);
 });
 
 test("source-PC settings stay collapsed while playback controls remain reachable", async ({ page }) => {
@@ -1278,6 +2288,8 @@ test("populated Jam remains inside the workspace and above the dock at represent
   await searchJam(page, "responsive");
 
   for (const [viewport, expectedMode] of [
+    [{ width: 5120, height: 1440 }, "theater"],
+    [{ width: 3440, height: 1440 }, "theater"],
     [{ width: 1920, height: 1080 }, "theater"],
     [{ width: 1366, height: 768 }, "theater"],
     [{ width: 1280, height: 720 }, "theater"],
@@ -1320,6 +2332,8 @@ test("populated Jam remains inside the workspace and above the dock at represent
         overviewEnd: rect("#jam-status"),
         search: rect("#jam-search-input"),
         scrimVisible: !document.getElementById("utility-scrim").classList.contains("hidden"),
+        screenInert: document.getElementById("screen-grid").inert,
+        stage: rect('[data-ui-region="primary-stage"]'),
         stageInert: document.querySelector('[data-ui-region="primary-stage"]').inert,
         targetSizes,
         textOverflow,
@@ -1328,14 +2342,16 @@ test("populated Jam remains inside the workspace and above the dock at represent
         visualizerCanvasCount: document.querySelectorAll("#jam-audio-visualizer canvas").length,
         visualizerOverflow: document.getElementById("jam-audio-visualizer").scrollWidth - document.getElementById("jam-audio-visualizer").clientWidth,
         viewport: { height: window.innerHeight, width: window.innerWidth },
+        usersInert: document.getElementById("room-sidebar").inert,
+        usersVisible: document.getElementById("room-sidebar").getClientRects().length > 0,
         workspace: rect('.room-layout[data-ui-region="workspace"]'),
       };
     });
 
-    expect(geometry.jam.left).toBeGreaterThanOrEqual(geometry.workspace.left - 1);
-    expect(geometry.jam.right).toBeLessThanOrEqual(geometry.workspace.right + 1);
-    expect(geometry.jam.top).toBeGreaterThanOrEqual(geometry.workspace.top - 1);
-    expect(geometry.jam.bottom).toBeLessThanOrEqual(geometry.workspace.bottom + 1);
+    expect(geometry.jam.left).toBeGreaterThanOrEqual(geometry.stage.left - 1);
+    expect(geometry.jam.right).toBeLessThanOrEqual(geometry.stage.right + 1);
+    expect(geometry.jam.top).toBeGreaterThanOrEqual(geometry.stage.top - 1);
+    expect(geometry.jam.bottom).toBeLessThanOrEqual(geometry.stage.bottom + 1);
     expect(geometry.jam.top).toBeGreaterThanOrEqual(geometry.header.bottom - 1);
     expect(geometry.jam.bottom).toBeLessThanOrEqual(geometry.dock.top - 1);
     expect(geometry.search.top).toBeGreaterThanOrEqual(geometry.jam.top - 1);
@@ -1353,18 +2369,20 @@ test("populated Jam remains inside the workspace and above the dock at represent
       expect(geometry.visualizer.left).toBeGreaterThanOrEqual(geometry.overview.left - 1);
       expect(geometry.visualizer.right).toBeLessThanOrEqual(geometry.overview.right + 1);
     }
-    expect(geometry.scrimVisible).toBe(true);
-    expect(geometry.stageInert).toBe(true);
+    expect(geometry.scrimVisible).toBe(false);
+    expect(geometry.screenInert).toBe(true);
+    expect(geometry.stageInert).toBe(false);
+    expect(geometry.usersInert).toBe(false);
+    expect(geometry.usersVisible).toBe(true);
     expect(geometry.dockInert).toBe(false);
-    if (expectedMode === "theater" || expectedMode === "lounge") {
-      expect(geometry.jam.width).toBeGreaterThanOrEqual(839.5);
-      expect(geometry.jam.width).toBeLessThanOrEqual(1120.5);
-      expect(geometry.jam.height).toBeLessThanOrEqual(840.5);
-      expect(geometry.bodyDisplay).toBe("grid");
+    expect(Math.abs(geometry.jam.width - geometry.stage.width)).toBeLessThanOrEqual(2.5);
+    expect(Math.abs(geometry.jam.height - geometry.stage.height)).toBeLessThanOrEqual(2.5);
+    const expectedJamBodyDisplay = geometry.jam.width >= 854 ? "grid" : "flex";
+    expect(geometry.bodyDisplay).toBe(expectedJamBodyDisplay);
+    if (expectedJamBodyDisplay === "grid") {
       expect(geometry.overview.right).toBeLessThanOrEqual(geometry.browser.left + 1);
       expect(geometry.browser.width).toBeGreaterThanOrEqual(459.5);
     } else {
-      expect(geometry.bodyDisplay).toBe("flex");
       expect(geometry.overviewEnd.bottom).toBeLessThanOrEqual(geometry.browser.top + 1);
     }
     expect(geometry.targetSizes.length).toBeGreaterThan(4);
@@ -2981,7 +3999,8 @@ test("Stop Music preserves the Jam while exact-host End Jam remains a distinct d
   await expect.poll(() => model.counts["POST /api/jam/playback/stop"] || 0).toBe(1);
   expect(model.counts["POST /api/jam/stop"] || 0).toBe(0);
   await expect(page.locator("#jam-panel")).toBeVisible();
-  await expectActiveTool(page, "jam");
+  await expectStageModule(page, "jam");
+  await expectUsersVisible(page, true);
   await expect(page.locator("#jam-now-playing")).toContainText("No music playing");
   expect(model.state.active).toBe(true);
   expect(model.state.generation).toBe(7);

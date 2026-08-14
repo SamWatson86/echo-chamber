@@ -1,7 +1,7 @@
 # Echo Chamber Responsive UI Contract
 
-Status: Phase 0 contract landed; Phase 1 Clubhouse shell and Phase 2 utility
-host are implemented and verified behind the off-by-default flag
+Status: Clubhouse shell, independent Active Users rail, and Stage modules are
+implemented and verified behind the shell flag
 
 Applies to: `core/viewer/` in the browser and Windows desktop shell
 
@@ -26,9 +26,10 @@ from it.
    and container adaptation.
 4. **Primary controls do not move.** Mic, camera, share, output, and leave remain
    in the control dock in the same order after connection.
-5. **One secondary tool at a time.** People, Chat, Jam, and future utility tools
-   share one panel host instead of progressively squeezing the stage with new
-   columns.
+5. **Stage modules and Active Users are independent.** Chat, Jam, Camera Lobby,
+   Soundboard, and future workspace modules share the primary Stage one at a
+   time. Active Users remains visible by default and changes only through its
+   explicit Show/Hide control.
 6. **Progressive disclosure beats removal.** Space-constrained layouts collapse
    labels and secondary controls, but do not make essential actions or state
    inaccessible.
@@ -45,8 +46,8 @@ The connected viewer has these canonical regions:
 | Region | Purpose | Lifetime |
 | --- | --- | --- |
 | Shell header | Brand, room switcher, connection state, account/overflow actions | Mounted for the connected session |
-| Primary stage | Shared screens, focused media, and intentional empty state | Mounted for the connected session |
-| Utility host | Exactly one active secondary tool such as People, Chat, or Jam | Mounted once; presentation changes by mode |
+| Primary stage | Shared screens or exactly one Stage module such as Chat, Jam, Camera Lobby, or Soundboard | Mounted for the connected session; media nodes remain mounted while a module is open |
+| Active Users | Participant presence, controls, and explicit Show/Hide Camera on Stage actions | Visible by default; visibility is independent from the active Stage module |
 | Control dock | Mic, camera, share, output, and leave controls | Mounted and visible for the connected session |
 | Overlay root | Settings, confirmations, pickers, lightboxes, and other modal surfaces | Mounted once; contains the topmost overlay |
 | Notification layer | Toasts, banners, and polite/assertive live regions | Mounted once for the application |
@@ -61,8 +62,8 @@ The preferred DOM relationship is:
 ui-root
 |- shell-header
 |- workspace
-|  |- primary-stage
-|  `- utility-host
+|  |- primary-stage / stage-module-host
+|  `- active-users
 |- control-dock
 |- overlay-root
 `- notification-layer
@@ -130,7 +131,7 @@ canonical initial-load thresholds.
 Any threshold, mode-order, or hysteresis change must update that module, its
 deterministic tests, and this contract in the same PR. Runtime JavaScript
 consumes only `mode`, `isShort`, and `isVeryShort`; CSS owns how those values
-present rails, sheets, docks, and camera strips.
+present the Stage, Active Users, dock, and camera tiles.
 
 Resize observations must be coalesced to an animation frame. The controller
 must emit at most one mode change for a settled measurement and must not add a
@@ -141,7 +142,7 @@ deterministic boundary tests.
 
 The layout policy additionally exposes `isShort` below `650px` and
 `isVeryShort` below `520px`. These flags may reduce nonessential spacing and
-increase panel scroll area. They must not choose a different utility
+increase panel scroll area. They must not choose a different Stage-module
 presentation, hide primary actions, or detach media; those decisions belong to
 the named geometry mode.
 
@@ -153,12 +154,12 @@ interactive surface, they do not have independent hysteresis.
 | Concern | Owner |
 | --- | --- |
 | Region tracks, gaps, padding, fixed/sticky placement | CSS |
-| Drawer, rail, sheet, and full-screen panel geometry | CSS keyed by root mode |
+| Stage-module and Active Users geometry | CSS keyed by root mode |
 | Component adaptation within its allocated width | CSS container queries |
 | Text wrapping, ellipsis, icon/label presentation | CSS |
 | Safe-area insets, coarse-pointer sizing, reduced motion | CSS media queries |
 | Width/height mode selection and hysteresis | One JavaScript mode controller |
-| Active utility tool, panel open state, and return focus | JavaScript UI state |
+| Active Stage module, Active Users visibility, and return focus | JavaScript UI state |
 | Modal focus containment and background inertness | JavaScript behavior plus CSS presentation |
 | Media tile allocation inside the stage or Camera Lobby | Existing media-grid layout owners |
 | Room, publication, subscription, Jam, and participant truth | Existing feature state owners |
@@ -169,7 +170,7 @@ local adaptation declares a containment boundary and uses container queries.
 
 Jam's Echo Pulse canvas is a stable child of the session overview rather than
 the polling-rebuilt Now Playing metadata node. Its CSS surface owns width and
-height, remains within the overview or sheet scroll owner, and contracts only
+height, remains within the Stage module's scroll owner, and contracts only
 under the existing `data-ui-very-short` pressure flag. Its backing resolution
 is device-pixel-ratio and pixel-budget capped; resize and motion changes never
 recreate the canvas or alter the Jam audio graph.
@@ -230,42 +231,35 @@ and geometry change together.
 
 ### Theater Mode
 
-- Workspace columns are `minmax(0, 1fr)` plus a utility rail of
+- Workspace columns are `minmax(0, 1fr)` plus an Active Users rail of
   `clamp(320px, 24vw, 360px)` with a `16px` gap.
-- People and Chat reuse that rail; opening either never adds another workspace
-  column.
-- Jam is the feature-dense exception: it opens as a centered workspace capped
-  at `1120px` wide and `840px` tall. At container widths of at least `820px`,
-  playback/listening controls occupy the left column and
-  Library/Search/Queue/History occupy the flexible right column. The obscured
-  stage is inert behind the utility scrim while the call dock stays available.
-- Closing an optional tool may return its width to the stage. If People is the
-  product's persistent default tool, closing another tool returns to People
-  rather than leaving an empty rail.
-- With a share active, up to four visible cameras use a vertical stage strip.
-  Additional cameras remain available in People without detaching their media.
+- Active Users is visible by default. Its explicit Show/Hide action changes only
+  the rail; opening, switching, or closing a Stage module never changes it.
+- Stage modules fill the primary Stage. Jam uses two internal columns when its
+  container is at least `820px` wide; other modules retain their own internal
+  layout. Outside clicks do not dismiss a Stage module. Back to Stage and Escape
+  are the explicit return paths.
+- A participant's camera may be shown on Stage beside that participant's screen.
+  Screen and camera use independent tiles and attachments; hiding either never
+  unsubscribes, detaches, or reshapes the other.
 
 ### Lounge Mode
 
-- The stage owns the full workspace width.
-- The utility host becomes an end-edge drawer with an inline size of
-  `clamp(320px, 42vw, 380px)`.
-- Jam keeps its centered workspace treatment where at least `820px` of
-  container width is available; otherwise it falls back to one column.
-- Opening the drawer overlays the stage; it does not resize the stage or trigger
-  a media-grid mode change beyond normal occlusion/resize observation.
-- The drawer has a workspace-bounded scrim while open. The obscured stage is
-  inert, but the drawer and call dock remain interactive.
-- The dock retains labels. With a share active, up to four visible cameras use
-  a horizontal stage strip.
+- The Stage and Active Users rail remain side by side. Stage modules replace the
+  screen presentation in the Stage rather than becoming overlays or drawers.
+- Jam falls back to one internal column below its `820px` container breakpoint.
+- The dock retains labels. A staged camera participates in the same contained
+  media grid as screens without changing screen-source geometry.
 
 ### Compact Mode
 
-- The workspace is one column.
-- The utility host is a bottom sheet for short, task-oriented content and a
-  full-screen surface for scroll-heavy tools such as Chat or a populated Jam.
-- A bottom sheet may not cover the control dock. Its maximum block size is the
-  dynamic viewport minus the header, dock, safe areas, and one shell gap.
+- In portrait, the Stage and Active Users compose as two rows. In short
+  landscape they switch to side-by-side columns so the Stage module retains a
+  usable height.
+- Active Users remains visible by default and may be explicitly hidden to return
+  the full workspace to the Stage.
+- Stage modules and Active Users may not cover the control dock. Their maximum
+  block size is the dynamic viewport minus the header, dock, and safe areas.
 - The dock uses icon variants with accessible names.
 - With a share active, one selected camera uses a reserved horizontal strip.
   It remains in normal layout flow and may not overlap the share, controls, or
@@ -275,10 +269,10 @@ and geometry change together.
 
 - The workspace is one column and the dock shows only essential connected-
   session actions; secondary actions move to overflow.
-- The utility host uses a bottom sheet or full-screen surface as in `compact`,
-  with tighter safe-area-aware geometry.
+- The Stage and Active Users follow the compact portrait/short-landscape split,
+  with tighter safe-area-aware geometry and coarse-pointer targets.
 - With a share active, at most one selected camera receives focused placement.
-  Other cameras remain available through People.
+  Other cameras remain available through Active Users.
 - Mini mode must not depend on hover to reveal any action.
 
 ### Layering
@@ -289,8 +283,7 @@ Components use semantic layer tokens rather than one-off `z-index` values:
 | --- | --- |
 | Base regions | `0` |
 | Sticky header and dock | `20` |
-| Utility scrim, bounded above the dock | `25` |
-| Utility drawer/sheet | `30` |
+| Stage module and Active Users region overlays | `30` |
 | True modal scrim | `40` |
 | Modal/picker/lightbox | `50` |
 | Toasts and critical banners | `60` |
@@ -323,24 +316,22 @@ The dock appears only after a room connection has reached the UI's connected
 state. Reconnecting may annotate or temporarily disable affected actions, but
 must not remove the dock and cause the workspace to jump.
 
-## Utility Panel Contract
+## Stage Module and Active Users Contract
 
-- There is one utility host and at most one active tool.
-- Tool selection and open/closed state survive geometry-mode transitions.
-- A mode transition changes the host from pinned rail to overlay drawer to
-  sheet/full-screen without recreating the active tool.
-- Each rail or drawer tool owns one scrollable body. Wide Jam may split that
-  ownership into independent session-overview and music-browser scrollers so a
-  long catalog does not push playback controls away. Its header remains visible.
-- Utility rails, drawers, and sheets are not true modal dialogs. When a utility
-  surface obscures the stage, only the obscured stage becomes inert; the active
-  utility surface and the call dock remain keyboard-operable. Escape closes the
-  surface and focus returns to the invoking control. Confirmations, pickers, and
-  other true dialogs use the overlay root and may contain focus normally.
-- Switching tools deliberately may preserve tool-local state such as an
-  unsent chat draft, Jam search text, queue position, and participant scroll.
-- Opening Chat must never add a third workspace column. Opening Settings must
-  never compete with a still-interactive drawer at the same layer.
+- There is one Stage-module host and at most one active Stage module.
+- Module selection and Active Users visibility are orthogonal states that
+  survive geometry-mode transitions.
+- Each Stage module owns its scrollable body. Wide Jam may split that ownership
+  into independent session-overview and music-browser scrollers so a long
+  catalog does not push playback controls away. Its header remains visible.
+- A Stage module is not a true modal dialog. It makes only the hidden screen-grid
+  presentation inert; Active Users and the call dock remain keyboard-operable.
+  Escape and Back to Stage close it and restore focus. Confirmations, pickers,
+  and other true dialogs use the overlay root and may contain focus normally.
+- Switching modules preserves tool-local state such as an unsent chat draft,
+  Jam search text, queue position, and participant scroll.
+- Opening a Stage module never changes Active Users visibility. Opening Settings
+  never competes with a still-interactive Stage module at the same layer.
 
 ## Cards, Labels, and Truncation
 
@@ -433,12 +424,12 @@ and selected UI state.
   least a `2px` indicator that is not color-confusable with the background.
 - Icon-only controls have an accessible name. Tooltips supplement but do not
   replace that name.
-- Theater's rail follows normal document focus order. Utility drawers and
-  sheets keep both the active utility and call dock in the keyboard order while
-  only the obscured stage is inert; Escape closes them and restores focus to
+- Theater's Active Users rail follows normal document focus order. Stage modules
+  keep Active Users and the call dock in the keyboard order while only the
+  screen-grid presentation is inert; Escape closes them and restores focus to
   their invoker. True modal confirmations, pickers, and dialogs contain focus,
   make their background inert, and close on Escape when safe.
-- Utility-tool selectors use the tabs pattern only if they behave as tabs;
+- Stage-module selectors use the tabs pattern only if they behave as tabs;
   otherwise they use ordinary toggle buttons with `aria-expanded` and
   `aria-controls`.
 - State is never communicated by color alone. Muted, disconnected, warning,
@@ -454,8 +445,8 @@ and selected UI state.
   scroll appears, and clipped text has an accessible expansion route.
 - `prefers-reduced-motion: reduce` disables decorative drift, pulse, shimmer,
   and large panel transitions. Essential state changes remain immediate.
-- Safe-area insets are honored on every edge used by a fixed dock, drawer, or
-  sheet.
+- Safe-area insets are honored on every edge used by the dock, Stage module, or
+  Active Users region.
 
 ## Viewport and Content Matrix
 
@@ -465,19 +456,20 @@ expected mode is the fresh-document classification without hysteresis history.
 
 | Viewport / condition | Expected mode | Required content case | Expected behavior |
 | --- | --- | --- | --- |
-| `1920 x 1080` | `theater` | Four shares, twelve people, People or Chat open | Rail remains within `320-360px`; stage has no horizontal overflow |
-| `1920 x 1080` | `theater` | Populated Jam open | Jam is centered, at least `840px` and at most `1120px` wide, uses two columns, and leaves the dock interactive |
+| `1920 x 1080` | `theater` | Four shares, twelve people, Chat open | Active Users remains within `320-360px`; the Stage module has no horizontal overflow |
+| `1920 x 1080` | `theater` | Populated Jam open | Jam fills the Stage, uses two internal columns, leaves Active Users visible by default, and leaves the dock interactive |
 | `1366 x 768` | `theater` | Two shares, eight long participant names | Dock stays one row; names truncate; stage remains usable |
-| `1280 x 720` | `theater` on initial load | One ultrawide share, People open | Rail uses its minimum range; share preserves aspect ratio |
-| `1024 x 768` | `lounge` | Two shares, Chat open with draft | Overlay does not shrink stage; draft survives close/reopen |
+| `1280 x 720` | `theater` on initial load | One ultrawide share, Active Users visible | Rail uses its minimum range; share preserves aspect ratio |
+| `1024 x 768` | `lounge` | Two shares, Chat open with draft | Chat owns the Stage; Active Users remains independent; draft survives close/reopen |
 | `900 x 700` | `lounge` | Jam populated with long song titles | Internal Jam scrolls; dock and destructive actions remain visible |
-| `900 x 540` | `compact`, `isShort` | One share plus one camera | Sheet and icon dock fit; camera uses a reserved strip without overlap |
-| `768 x 1024` | `compact` | Camera tiles plus People | Sheet fits inside safe area; no hover-only controls |
+| `900 x 540` | `compact`, `isShort` | One share plus one camera | Stage and Active Users fit; camera and screen remain independent without overlap |
+| `768 x 1024` | `compact` | Camera tiles plus Active Users | Both rows fit inside safe area; no hover-only controls |
+| `640 x 360` | `mini`, short landscape | Jam or Camera Lobby plus Active Users | Side-by-side layout keeps Back to Stage usable; no overlap with dock or Users |
 | `640 x 480` | `compact` on initial load, `isShort`, `isVeryShort` | Connected empty stage | Essential empty-state action and dock remain reachable |
-| `600 x 900` | `mini` | Chat history, attachment, software keyboard | Full-screen/sheet content scrolls above dock; composer remains reachable |
+| `600 x 900` | `mini` | Chat history, attachment, software keyboard | Stage-module content scrolls above dock; composer remains reachable |
 | `360 x 640` | `mini`, `isShort` | Prejoin error; connected empty stage | Prejoin scrolls; connected dock uses essential controls; no horizontal scroll |
-| 200% zoom at `1920 x 1080` | Approximately `compact` by CSS geometry | People and status copy | Mode follows CSS viewport; controls do not clip or overlap |
-| Resize `compact` from `768 x 1024` to `600 x 900` | `compact` retained | Connected shell with utility open | Hysteresis prevents a presentation jump inside the lower deadband |
+| 200% zoom at `1920 x 1080` | Approximately `compact` by CSS geometry | Active Users and status copy | Mode follows CSS viewport; controls do not clip or overlap |
+| Resize `compact` from `768 x 1024` to `600 x 900` | `compact` retained | Connected shell with Stage module open | Hysteresis prevents a presentation jump inside the lower deadband |
 | Continue that resize to `591 x 900` | `mini` | Same mounted nodes and state | Mode changes once; no media or feature node is recreated |
 
 Every viewport is also checked with:
@@ -486,7 +478,8 @@ Every viewport is also checked with:
 - one and four simultaneous shares;
 - one, eight, and twenty participants;
 - a 60-character unbroken display name and long localized-style labels;
-- utility closed and each registered utility tool open;
+- screens visible and each registered Stage module open, with Active Users shown
+  and hidden independently;
 - reconnecting, disabled, error, and destructive-confirmation states;
 - mouse, keyboard-only, and coarse-pointer emulation.
 
@@ -497,10 +490,10 @@ Foundation and migration PRs must include proportionate evidence:
 1. Deterministic mode-transition tests covering every threshold and deadband.
 2. DOM-identity tests proving representative media elements survive mode
    changes.
-3. State-preservation tests for active tool, participant volume, focused share,
-   and at least one unsaved text input.
+3. State-preservation tests for active Stage module, Active Users visibility,
+   participant volume, focused share, and at least one unsaved text input.
 4. Geometry assertions or screenshots for the viewport/content matrix.
-5. Keyboard checks for dock, tool selection, drawer/sheet close, modal focus,
+5. Keyboard checks for dock, module selection, Back/Escape, modal focus,
    and focus restoration.
 6. No-horizontal-overflow checks at each required viewport and 200% zoom.
 7. Reduced-motion and coarse-pointer checks.
@@ -534,35 +527,31 @@ but production default changes require an explicit release decision.
 - Verify that toggling the flag never duplicates media or feature listeners.
 
 The Phase 1 implementation also establishes the first real connected-shell
-presentation for the existing primary controls and People/Chat surfaces. It
+presentation for the existing primary controls and participant/Chat surfaces. It
 reuses the original buttons, panels, participant cards, media elements, and
-state owners; resize and live flag changes only alter CSS presentation. Jam
-continues to use its existing panel and is migrated into the shared utility
-host in Phase 2.
+state owners; resize and live flag changes only alter CSS presentation. Phase 2
+migrates feature panels into the Stage-module host.
 
-### Phase 2 - Dock and Utility Host
+### Phase 2 - Dock, Active Users, and Stage Modules
 
-- People, Chat, and Jam are presented as one logical utility host with exactly
-  one active tool. People and Chat are physical descendants of the host. Jam
-  intentionally remains the single portaled feature node under
-  `shell-overlay-root`, linked to the host with `aria-owns`, because nesting its
-  fixed legacy panel inside the filtered shell changes its containing block and
-  breaks legacy positioning.
-- One shell controller owns active-tool presentation, open/collapsed state,
-  inertness, Escape behavior, and focus restoration. The People, Chat, and Jam
-  feature modules retain ownership of their participants, drafts, search,
-  queue, playback, and other feature state.
-- The same utility nodes present as a pinned rail in `theater`, a
-  workspace-bounded drawer in `lounge`, and a sheet or full-workspace surface
-  above the dock in `compact` and `mini`.
-- Resize and live flag changes must restyle the mounted nodes in place. The
-  legacy fallback must remain a one-switch rollback with tool-local state and
-  node identity preserved; it must not duplicate IDs, listeners, or feature
-  state machines.
-- Phase 2 verification covers node and input-state preservation across modes
-  and flag rollback, populated utility geometry and overflow, pointer-target
-  sizing, keyboard/Escape/focus behavior, modal inertness for the portaled Jam,
-  and the distinction between Jam Stop Music and End Jam actions.
+- Active Users is a persistent, independently controlled region. It is visible
+  on a fresh connected session and only its explicit Show/Hide action changes
+  that preference.
+- Chat, Jam, Camera Lobby, and Soundboard are the registered Stage modules. One
+  shell controller owns module selection, Back to Stage, Escape, inertness, and
+  focus restoration. Feature modules retain ownership of drafts, camera media,
+  Jam queue/playback, Soundboard state, and other feature truth.
+- Opening a module hides but does not destroy the screen grid. Closing it
+  recalculates the existing grid without recreating, detaching, subscribing, or
+  replacing screen media nodes. Camera-on-Stage uses a second muted attachment
+  and independent tile state, so a user's screen and camera can coexist.
+- Resize and live flag changes restyle and portal the mounted nodes in place.
+  Legacy rollback remains a one-switch presentation fallback with no duplicate
+  IDs, listeners, or feature state machines.
+- Verification covers node and input-state preservation, Active Users
+  independence, 32:9 screen geometry at desktop and ultrawide viewports,
+  simultaneous screen/camera tiles, short-landscape composition, keyboard and
+  focus restoration, and Jam Stop Music versus End Jam behavior.
 
 ### Phase 3 - Canary Default-On
 

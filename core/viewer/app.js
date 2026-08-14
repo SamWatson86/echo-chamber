@@ -113,6 +113,9 @@ var shellOverflowMenu = document.getElementById("shell-overflow-menu");
 var shellHeader = document.querySelector('[data-ui-region="shell-header"]');
 var shellLayout = document.querySelector('[data-ui-region="workspace"]');
 var shellStage = document.querySelector('[data-ui-region="primary-stage"]');
+var shellStageHeader = shellStage?.querySelector(":scope > .grid-header");
+var shellScreenGrid = document.getElementById("screen-grid");
+var shellStageModuleHost = document.getElementById("stage-module-host");
 var shellUtilityHost = document.getElementById("utility-host");
 var shellUtilityScrim = document.getElementById("utility-scrim");
 var shellPeoplePanel = document.getElementById("room-sidebar");
@@ -120,16 +123,30 @@ var shellPeopleHeading = shellPeoplePanel?.querySelector(".sidebar-title-row h2"
 var shellJamPanel = document.getElementById("jam-panel");
 var shellOpenJamButton = document.getElementById("open-jam");
 var shellCloseJamButton = document.getElementById("close-jam");
+var shellCameraLobbyPanel = document.getElementById("camera-lobby");
+var shellSoundboardCompactPanel = document.getElementById("soundboard-compact");
+var shellSoundboardPanel = document.getElementById("soundboard");
 var clubhouseShell = document.getElementById("clubhouse-shell");
 var settingsScrim = document.getElementById("settings-scrim");
 var settingsReturnFocus = null;
 var settingsModalActive = false;
-var activeUtilityTool = "people";
-var utilityReturnFocus = {
-  people: shellUtilityButton,
+var activeStageModule = null;
+var stageModuleOpeners = {
   chat: openChatButton,
   jam: shellOpenJamButton,
+  camera: openCameraLobbyButton,
+  soundboard: openSoundboardButton,
 };
+var stageModuleReturnFocus = Object.assign({}, stageModuleOpeners);
+var legacyStageModuleControlIds = {
+  chat: "chat-panel",
+  jam: "jam-panel",
+  camera: "camera-lobby",
+  soundboard: "soundboard-compact",
+};
+var stageModulePortalAnchors = new Map();
+var stageModulePortalFocusGeneration = 0;
+var stageModulePortalPendingFocus = null;
 var syncingClubhouseUtility = false;
 
 function setShellOverflowOpen(open, options) {
@@ -221,49 +238,203 @@ function setSettingsPanelOpen(open, returnFocusTarget) {
   }
 }
 
-function normalizeUtilityTool(tool) {
-  return tool === "chat" || tool === "jam" ? tool : "people";
+function normalizeStageModule(module) {
+  return module === "chat" || module === "jam" || module === "camera" || module === "soundboard"
+    ? module
+    : null;
 }
 
-function focusUtilityReturnTarget(preferred) {
-  var candidates = [preferred, shellUtilityButton, shellMoreButton, connectBtn];
+function stageModuleNodes(module) {
+  if (module === "chat") return chatPanel ? [chatPanel] : [];
+  if (module === "jam") return shellJamPanel ? [shellJamPanel] : [];
+  if (module === "camera") return shellCameraLobbyPanel ? [shellCameraLobbyPanel] : [];
+  if (module === "soundboard") {
+    return [shellSoundboardCompactPanel, shellSoundboardPanel].filter(Boolean);
+  }
+  return [];
+}
+
+function allStageModuleNodes() {
+  return ["chat", "jam", "camera", "soundboard"].flatMap(stageModuleNodes);
+}
+
+function stageModuleOpenerNodes(module) {
+  return [stageModuleOpeners[module], stageModuleReturnFocus[module]].filter(function(opener, index, values) {
+    return opener && values.indexOf(opener) === index;
+  });
+}
+
+function rememberStageModulePortals() {
+  allStageModuleNodes().forEach(function(panel) {
+    if (stageModulePortalAnchors.has(panel) || !panel.parentNode) return;
+    var anchor = document.createComment("echo-stage-module:" + (panel.id || "panel"));
+    panel.parentNode.insertBefore(anchor, panel);
+    stageModulePortalAnchors.set(panel, anchor);
+  });
+}
+
+function restoreStageModulePortalFocus(element, panel, generation) {
+  requestAnimationFrame(function() {
+    if (generation !== stageModulePortalFocusGeneration) return;
+    var clearPendingFocus = function() {
+      if (stageModulePortalPendingFocus?.generation === generation) {
+        stageModulePortalPendingFocus = null;
+      }
+    };
+    if (!element || typeof element.focus !== "function" ||
+        element.ownerDocument !== document || panel?.ownerDocument !== document ||
+        !element.isConnected || !panel?.isConnected || !panel.contains(element)) {
+      clearPendingFocus();
+      return;
+    }
+    var current = document.activeElement;
+    if (current !== element && current !== document.body && current !== document.documentElement) {
+      clearPendingFocus();
+      return;
+    }
+    if (!isRenderedFocusable(element)) {
+      clearPendingFocus();
+      return;
+    }
+    element.focus({ preventScroll: true });
+    clearPendingFocus();
+  });
+}
+
+function moveStageModulePanels(useStageHost) {
+  rememberStageModulePortals();
+  var panels = allStageModuleNodes();
+  var focusedElement = document.activeElement;
+  var focusedPanel = panels.find(function(panel) {
+    return focusedElement && panel.contains(focusedElement);
+  });
+  if (!focusedPanel &&
+      (focusedElement === document.body || focusedElement === document.documentElement) &&
+      stageModulePortalPendingFocus?.element?.isConnected &&
+      stageModulePortalPendingFocus.panel?.contains(stageModulePortalPendingFocus.element)) {
+    focusedElement = stageModulePortalPendingFocus.element;
+    focusedPanel = stageModulePortalPendingFocus.panel;
+  }
+  var willMove = panels.some(function(panel) {
+    if (useStageHost && shellStageModuleHost) return panel.parentNode !== shellStageModuleHost;
+    var anchor = stageModulePortalAnchors.get(panel);
+    return !!anchor?.parentNode && panel.parentNode !== anchor.parentNode;
+  });
+  var focusGeneration = willMove
+    ? ++stageModulePortalFocusGeneration
+    : stageModulePortalFocusGeneration;
+  if (willMove) {
+    stageModulePortalPendingFocus = focusedPanel && focusedElement
+      ? { element: focusedElement, panel: focusedPanel, generation: focusGeneration }
+      : null;
+  }
+
+  panels.forEach(function(panel) {
+    if (useStageHost && shellStageModuleHost) {
+      if (panel.parentNode !== shellStageModuleHost) shellStageModuleHost.appendChild(panel);
+      panel.classList.add("clubhouse-stage-module");
+      panel.classList.toggle("clubhouse-utility-tool", panel === shellJamPanel);
+      panel.setAttribute("role", "region");
+      return;
+    }
+    var anchor = stageModulePortalAnchors.get(panel);
+    if (anchor?.parentNode && panel.parentNode !== anchor.parentNode) {
+      anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+    }
+    panel.classList.remove("clubhouse-stage-module", "clubhouse-utility-tool");
+    panel.setAttribute("role", "dialog");
+  });
+
+  if (willMove && focusedPanel && focusedElement) {
+    restoreStageModulePortalFocus(focusedElement, focusedPanel, focusGeneration);
+  }
+}
+
+function inferVisibleStageModule() {
+  return ["chat", "jam", "camera", "soundboard"].find(function(module) {
+    return stageModuleNodes(module).some(function(panel) {
+      return !panel.classList.contains("hidden");
+    });
+  }) || null;
+}
+
+function focusReturnTarget(preferred, module) {
+  var candidates = [preferred, stageModuleOpeners[module], shellUtilityButton, shellMoreButton, connectBtn];
   var target = candidates.find(isRenderedFocusable);
   if (target) target.focus();
 }
 
-function focusActiveUtilityTool(tool) {
-  var peopleTarget = shellPeoplePanel
-    ? Array.from(shellPeoplePanel.querySelectorAll(
-        'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
-      )).find(isRenderedFocusable)
-    : null;
-  var target = tool === "chat" ? chatInput : tool === "jam" ? shellCloseJamButton : peopleTarget;
+function focusActiveStageModule(module) {
+  var target = module === "chat"
+    ? chatInput
+    : module === "jam"
+      ? shellCloseJamButton
+      : module === "camera"
+        ? closeCameraLobbyButton
+        : closeSoundboardButton;
   if (isRenderedFocusable(target)) target.focus();
 }
 
-function inferVisibleUtilityTool() {
-  if (shellJamPanel && !shellJamPanel.classList.contains("hidden")) return "jam";
-  if (chatPanel && !chatPanel.classList.contains("hidden") && shellLayout?.classList.contains("chat-open")) {
-    return "chat";
-  }
-  return "people";
+function scheduleStageGridRecalc() {
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+      if (shellStage?.classList.contains("stage-module-open")) return;
+      if (typeof window._echoRecalcGrid === "function") window._echoRecalcGrid();
+    });
+  });
+}
+
+function syncStageModulePanels() {
+  ["chat", "jam", "camera", "soundboard"].forEach(function(module) {
+    var isActive = activeStageModule === module;
+    var nodes = stageModuleNodes(module);
+    if (isActive && module !== "soundboard") {
+      nodes.forEach(function(panel) { panel.classList.remove("hidden"); });
+    }
+    if (isActive && module === "soundboard" && nodes.every(function(panel) {
+      return panel.classList.contains("hidden");
+    })) {
+      shellSoundboardCompactPanel?.classList.remove("hidden");
+    }
+    nodes.forEach(function(panel) {
+      if (!isActive) panel.classList.add("hidden");
+      var visible = isActive && !panel.classList.contains("hidden");
+      panel.inert = !visible || settingsModalActive;
+      panel.setAttribute("aria-hidden", visible ? "false" : "true");
+    });
+  });
 }
 
 function syncClubhouseUtilityPresentation() {
-  if (!shellLayout || !shellStage || !shellUtilityHost) return;
+  if (!shellLayout || !shellStage || !shellUtilityHost || !shellStageModuleHost) return;
   if (syncingClubhouseUtility) return;
   syncingClubhouseUtility = true;
   try {
     var isV2 = document.documentElement.dataset.uiShell === "v2";
-    var mode = document.documentElement.dataset.uiMode;
     var collapsed = shellLayout.classList.contains("utility-collapsed");
 
     if (!isV2) {
-      if (!collapsed) activeUtilityTool = inferVisibleUtilityTool();
+      var stageModuleWasOpen = shellStage.classList.contains("stage-module-open");
+      if (!activeStageModule) activeStageModule = inferVisibleStageModule();
+      moveStageModulePanels(false);
       delete document.documentElement.dataset.uiUtility;
+      delete document.documentElement.dataset.stageModule;
       delete shellLayout.dataset.activeUtility;
+      delete shellStage.dataset.activeModule;
       if (shellLayout.classList.contains("jam-open")) shellLayout.classList.remove("jam-open");
+      if (activeStageModule === "chat" && !chatPanel?.classList.contains("hidden")) {
+        if (!shellLayout.classList.contains("chat-open")) shellLayout.classList.add("chat-open");
+      } else if (shellLayout.classList.contains("chat-open")) {
+        shellLayout.classList.remove("chat-open");
+      }
+      shellStage.classList.remove("stage-module-open");
       shellStage.inert = false;
+      if (shellStageHeader) shellStageHeader.inert = false;
+      if (shellScreenGrid) shellScreenGrid.inert = false;
+      shellStageModuleHost.classList.add("hidden");
+      shellStageModuleHost.inert = true;
+      shellStageModuleHost.dataset.activeModule = "";
+      shellStageModuleHost.setAttribute("aria-hidden", "true");
       shellUtilityHost.inert = false;
       shellUtilityHost.removeAttribute("aria-hidden");
       shellPeoplePanel?.classList.remove("hidden");
@@ -273,14 +444,19 @@ function syncClubhouseUtilityPresentation() {
         shellPeoplePanel.removeAttribute("aria-hidden");
       }
       if (shellPeopleHeading) shellPeopleHeading.textContent = "Active Users";
-      if (chatPanel) {
-        chatPanel.inert = false;
-        chatPanel.removeAttribute("aria-hidden");
-      }
-      if (shellJamPanel) {
-        shellJamPanel.inert = false;
-        shellJamPanel.removeAttribute("aria-hidden");
-        shellJamPanel.classList.remove("clubhouse-utility-tool");
+      allStageModuleNodes().forEach(function(panel) {
+        panel.inert = false;
+        panel.removeAttribute("aria-hidden");
+      });
+      Object.keys(stageModuleOpeners).forEach(function(module) {
+        stageModuleOpenerNodes(module).forEach(function(opener) {
+          opener.setAttribute("aria-controls", legacyStageModuleControlIds[module]);
+          opener.setAttribute("aria-expanded", "false");
+        });
+      });
+      if (shellSoundboardCompactPanel && !shellSoundboardCompactPanel.classList.contains("hidden") &&
+          typeof positionLegacySoundboardCompact === "function") {
+        positionLegacySoundboardCompact();
       }
       shellUtilityScrim?.classList.add("hidden");
       if (closeChatButton) {
@@ -291,63 +467,84 @@ function syncClubhouseUtilityPresentation() {
         shellCloseJamButton.textContent = "Close";
         shellCloseJamButton.removeAttribute("aria-label");
       }
+      if (closeCameraLobbyButton) {
+        closeCameraLobbyButton.textContent = "Close";
+        closeCameraLobbyButton.removeAttribute("aria-label");
+      }
+      if (closeSoundboardButton) {
+        closeSoundboardButton.textContent = "Back";
+        closeSoundboardButton.title = "Close";
+        closeSoundboardButton.removeAttribute("aria-label");
+      }
+      if (stageModuleWasOpen) scheduleStageGridRecalc();
       return;
     }
 
-    var externallyVisibleTool = inferVisibleUtilityTool();
-    if (externallyVisibleTool !== "people") {
-      activeUtilityTool = externallyVisibleTool;
-    } else if (!collapsed && activeUtilityTool !== "people") {
-      activeUtilityTool = "people";
-    }
-    activeUtilityTool = normalizeUtilityTool(activeUtilityTool);
-    var overlaysStage = activeUtilityTool === "jam" ||
-      mode === "lounge" || mode === "compact" || mode === "mini";
-    shellUtilityHost.dataset.activeTool = activeUtilityTool;
-    shellLayout.dataset.activeUtility = activeUtilityTool;
-    document.documentElement.dataset.uiUtility = activeUtilityTool;
-    shellLayout.classList.toggle("chat-open", activeUtilityTool === "chat");
-    shellLayout.classList.toggle("jam-open", activeUtilityTool === "jam");
+    if (!activeStageModule) activeStageModule = inferVisibleStageModule();
+    activeStageModule = normalizeStageModule(activeStageModule);
+    moveStageModulePanels(true);
+    shellUtilityHost.dataset.activeTool = "people";
+    shellLayout.dataset.activeUtility = "people";
+    document.documentElement.dataset.uiUtility = "people";
+    if (shellLayout.classList.contains("chat-open")) shellLayout.classList.remove("chat-open");
+    if (shellLayout.classList.contains("jam-open")) shellLayout.classList.remove("jam-open");
 
+    if (activeStageModule) {
+      document.documentElement.dataset.stageModule = activeStageModule;
+      shellStage.dataset.activeModule = activeStageModule;
+      shellStageModuleHost.dataset.activeModule = activeStageModule;
+    } else {
+      delete document.documentElement.dataset.stageModule;
+      delete shellStage.dataset.activeModule;
+      shellStageModuleHost.dataset.activeModule = "";
+    }
+    shellStage.classList.toggle("stage-module-open", !!activeStageModule);
+    shellStage.inert = false;
+    if (shellStageHeader) shellStageHeader.inert = !!activeStageModule || settingsModalActive;
+    if (shellScreenGrid) shellScreenGrid.inert = !!activeStageModule || settingsModalActive;
+    shellStageModuleHost.classList.toggle("hidden", !activeStageModule);
+    shellStageModuleHost.inert = !activeStageModule || settingsModalActive;
+    shellStageModuleHost.setAttribute("aria-hidden", activeStageModule ? "false" : "true");
+    syncStageModulePanels();
+    Object.keys(stageModuleOpeners).forEach(function(module) {
+      stageModuleOpenerNodes(module).forEach(function(opener) {
+        opener.setAttribute("aria-controls", "stage-module-host");
+        opener.setAttribute("aria-expanded", String(activeStageModule === module));
+      });
+    });
+
+    shellPeoplePanel?.classList.remove("hidden");
     if (shellPeoplePanel) {
-      var peopleActive = activeUtilityTool === "people";
-      shellPeoplePanel.setAttribute("aria-label", "People and tools");
-      shellPeoplePanel.classList.toggle("hidden", !peopleActive);
-      shellPeoplePanel.inert = !peopleActive || collapsed || settingsModalActive;
-      shellPeoplePanel.setAttribute("aria-hidden", peopleActive && !collapsed ? "false" : "true");
+      shellPeoplePanel.setAttribute("aria-label", "Active Users");
+      shellPeoplePanel.inert = collapsed || settingsModalActive;
+      shellPeoplePanel.setAttribute("aria-hidden", collapsed ? "true" : "false");
     }
-    if (shellPeopleHeading) shellPeopleHeading.textContent = "People & tools";
-    if (chatPanel) {
-      var chatActive = activeUtilityTool === "chat";
-      chatPanel.classList.toggle("hidden", !chatActive);
-      chatPanel.inert = !chatActive || collapsed || settingsModalActive;
-      chatPanel.setAttribute("aria-hidden", chatActive && !collapsed ? "false" : "true");
-    }
-    if (shellJamPanel) {
-      var jamActive = activeUtilityTool === "jam";
-      shellJamPanel.classList.toggle("hidden", !jamActive || collapsed);
-      shellJamPanel.classList.add("clubhouse-utility-tool");
-      shellJamPanel.inert = !jamActive || collapsed || settingsModalActive;
-      shellJamPanel.setAttribute("aria-hidden", jamActive && !collapsed ? "false" : "true");
-    }
-
+    if (shellPeopleHeading) shellPeopleHeading.textContent = "Active Users";
     shellUtilityHost.inert = collapsed || settingsModalActive;
     shellUtilityHost.setAttribute("aria-hidden", collapsed ? "true" : "false");
-    shellStage.inert = !!(overlaysStage && !collapsed && !settingsModalActive);
-    shellUtilityScrim?.classList.toggle("hidden", !overlaysStage || collapsed || settingsModalActive);
+    shellUtilityScrim?.classList.add("hidden");
+
     if (closeChatButton) {
-      closeChatButton.textContent = "All tools";
-      closeChatButton.setAttribute("aria-label", "Back to People and tools");
+      closeChatButton.textContent = "Back to Stage";
+      closeChatButton.setAttribute("aria-label", "Back to Stage");
     }
     if (shellCloseJamButton) {
-      shellCloseJamButton.textContent = "All tools";
-      shellCloseJamButton.setAttribute("aria-label", "Back to People and tools");
+      shellCloseJamButton.textContent = "Back to Stage";
+      shellCloseJamButton.setAttribute("aria-label", "Back to Stage");
     }
-
+    if (closeCameraLobbyButton) {
+      closeCameraLobbyButton.textContent = "Back to Stage";
+      closeCameraLobbyButton.setAttribute("aria-label", "Back to Stage");
+    }
+    if (closeSoundboardButton) {
+      closeSoundboardButton.textContent = "Back to Stage";
+      closeSoundboardButton.title = "Back to Stage";
+      closeSoundboardButton.setAttribute("aria-label", "Back to Stage");
+    }
     if (shellUtilityButton) {
-      shellUtilityButton.textContent = "Tools";
+      shellUtilityButton.textContent = "Users";
       shellUtilityButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      shellUtilityButton.setAttribute("aria-label", (collapsed ? "Show" : "Hide") + " clubhouse tools");
+      shellUtilityButton.setAttribute("aria-label", (collapsed ? "Show" : "Hide") + " active users");
     }
   } finally {
     syncingClubhouseUtility = false;
@@ -357,51 +554,48 @@ function syncClubhouseUtilityPresentation() {
 function setClubhouseUtilityCollapsed(collapsed, options) {
   if (!shellLayout) return false;
   shellLayout.classList.toggle("utility-collapsed", !!collapsed);
-  // Collapsing hides the active tool. Restore its presentation before syncing
-  // on reopen so visibility inference does not accidentally reset it to People.
-  if (!collapsed && document.documentElement.dataset.uiShell === "v2") {
-    chatPanel?.classList.toggle("hidden", activeUtilityTool !== "chat");
-    shellJamPanel?.classList.toggle("hidden", activeUtilityTool !== "jam");
-  }
   syncClubhouseUtilityPresentation();
-  if (!collapsed && activeUtilityTool === "chat" && typeof clearUnreadChat === "function") {
-    clearUnreadChat();
-  }
   if (collapsed && options && options.restoreFocus) {
-    requestAnimationFrame(function() { focusUtilityReturnTarget(shellUtilityButton); });
+    requestAnimationFrame(function() { focusReturnTarget(shellUtilityButton); });
   }
   return true;
 }
 
-function openClubhouseUtility(tool, opener, options) {
-  activeUtilityTool = normalizeUtilityTool(tool);
-  if (isRenderedFocusable(opener)) utilityReturnFocus[activeUtilityTool] = opener;
+function openStageModule(module, opener, options) {
+  var normalized = normalizeStageModule(module);
+  if (!normalized) return false;
+  if (activeStageModule === "jam" && normalized !== "jam" &&
+      typeof pauseJamAudioVisualizer === "function") {
+    pauseJamAudioVisualizer();
+  }
+  if (activeStageModule === "camera" && normalized !== "camera" &&
+      typeof clearCameraLobbyMedia === "function") {
+    clearCameraLobbyMedia();
+  }
+  activeStageModule = normalized;
+  if (isRenderedFocusable(opener)) stageModuleReturnFocus[normalized] = opener;
   if (document.documentElement.dataset.uiShell !== "v2") return false;
-  shellLayout?.classList.remove("utility-collapsed");
-  shellLayout?.classList.toggle("chat-open", activeUtilityTool === "chat");
-  shellLayout?.classList.toggle("jam-open", activeUtilityTool === "jam");
-  chatPanel?.classList.toggle("hidden", activeUtilityTool !== "chat");
-  shellJamPanel?.classList.toggle("hidden", activeUtilityTool !== "jam");
   syncClubhouseUtilityPresentation();
   if (!options || options.focus !== false) {
-    requestAnimationFrame(function() { focusActiveUtilityTool(activeUtilityTool); });
+    requestAnimationFrame(function() { focusActiveStageModule(normalized); });
   }
   return true;
 }
 
-function closeClubhouseUtility(tool, options) {
-  var closingTool = normalizeUtilityTool(tool || activeUtilityTool);
-  var returnTarget = utilityReturnFocus[closingTool];
+function closeStageModule(module, options) {
+  var normalized = normalizeStageModule(module || activeStageModule);
+  if (!normalized) return false;
   if (document.documentElement.dataset.uiShell !== "v2") {
-    activeUtilityTool = inferVisibleUtilityTool();
+    if (activeStageModule === normalized) activeStageModule = null;
     return false;
   }
-  activeUtilityTool = "people";
-  if (shellJamPanel) shellJamPanel.classList.add("hidden");
-  if (chatPanel) chatPanel.classList.add("hidden");
+  var returnTarget = stageModuleReturnFocus[normalized];
+  stageModuleNodes(normalized).forEach(function(panel) { panel.classList.add("hidden"); });
+  if (activeStageModule === normalized) activeStageModule = null;
   syncClubhouseUtilityPresentation();
-  if (!options || options.restoreFocus !== false) {
-    requestAnimationFrame(function() { focusUtilityReturnTarget(returnTarget); });
+  if (!activeStageModule) scheduleStageGridRecalc();
+  if ((!options || options.restoreFocus !== false) && !activeStageModule) {
+    requestAnimationFrame(function() { focusReturnTarget(returnTarget, normalized); });
   }
   return true;
 }
@@ -422,14 +616,11 @@ function hasHigherPriorityEscapeSurface() {
 
 function keepFocusedUtilityControlVisible() {
   if (document.documentElement.dataset.uiShell !== "v2" ||
-      shellLayout?.classList.contains("utility-collapsed") ||
       settingsModalActive) return;
   var active = document.activeElement;
-  var activePanel = activeUtilityTool === "chat"
-    ? chatPanel
-    : activeUtilityTool === "jam"
-      ? shellJamPanel
-      : shellPeoplePanel;
+  var activePanel = activeStageModule
+    ? stageModuleNodes(activeStageModule).find(function(panel) { return panel.contains(active); })
+    : shellPeoplePanel;
   if (!active || !activePanel?.contains(active) || typeof active.scrollIntoView !== "function") return;
   requestAnimationFrame(function() {
     if (document.activeElement === active) {
@@ -438,11 +629,20 @@ function keepFocusedUtilityControlVisible() {
   });
 }
 
+window.EchoStageModules = Object.freeze({
+  activeModule: function() { return activeStageModule; },
+  close: closeStageModule,
+  open: openStageModule,
+  sync: syncClubhouseUtilityPresentation,
+});
+
+// Compatibility bridge for the existing Chat and Jam state owners. In V2 they
+// now target the Stage; legacy continues to use each feature's original panel.
 window.EchoClubhouseUtility = Object.freeze({
-  activeTool: function() { return activeUtilityTool; },
-  close: closeClubhouseUtility,
+  activeTool: function() { return activeStageModule || "people"; },
+  close: closeStageModule,
   collapse: setClubhouseUtilityCollapsed,
-  open: openClubhouseUtility,
+  open: openStageModule,
   sync: syncClubhouseUtilityPresentation,
 });
 
@@ -486,12 +686,6 @@ if (shellOverflowMenu) {
 if (shellUtilityButton && shellLayout) {
   shellUtilityButton.addEventListener("click", function() {
     setClubhouseUtilityCollapsed(!shellLayout.classList.contains("utility-collapsed"));
-  });
-}
-
-if (shellUtilityScrim) {
-  shellUtilityScrim.addEventListener("click", function() {
-    setClubhouseUtilityCollapsed(true, { restoreFocus: true });
   });
 }
 
@@ -547,21 +741,18 @@ document.addEventListener("keydown", function(event) {
     return;
   }
   // A single Escape dismisses only the topmost surface. Dynamic lightboxes,
-  // capture pickers, fullscreen media, and feature dialogs own it before the
-  // underlying People / Chat / Jam utility presentation.
+  // capture pickers, fullscreen media, and true modal dialogs own it before a
+  // Stage module. The Active Users rail is changed only by its explicit button.
   if (hasHigherPriorityEscapeSurface()) return;
-  if (document.documentElement.dataset.uiShell !== "v2" || shellLayout?.classList.contains("utility-collapsed")) {
-    return;
-  }
-  if (activeUtilityTool !== "people") {
+  if (document.documentElement.dataset.uiShell !== "v2") return;
+  if (activeStageModule) {
     event.preventDefault();
-    closeClubhouseUtility(activeUtilityTool);
+    if (activeStageModule === "chat" && typeof closeChat === "function") closeChat();
+    else if (activeStageModule === "jam" && typeof closeJamPanel === "function") closeJamPanel();
+    else if (activeStageModule === "camera" && typeof closeCameraLobby === "function") closeCameraLobby();
+    else if (activeStageModule === "soundboard" && typeof closeSoundboard === "function") closeSoundboard();
+    else closeStageModule(activeStageModule);
     return;
-  }
-  var mode = document.documentElement.dataset.uiMode;
-  if (mode === "lounge" || mode === "compact" || mode === "mini") {
-    event.preventDefault();
-    setClubhouseUtilityCollapsed(true, { restoreFocus: true });
   }
 });
 

@@ -114,7 +114,7 @@ async function openStageFixture(page, scenario) {
 }
 
 async function closeClubhouseTools(page) {
-  const toolsToggle = page.getByRole("button", { name: "Hide clubhouse tools" });
+  const toolsToggle = page.getByRole("button", { name: "Hide active users" });
   if (await toolsToggle.isVisible()) {
     await toolsToggle.click();
     await waitForLayout(page, 3);

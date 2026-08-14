@@ -281,21 +281,28 @@ test("canonical nodes, media tracks, participant state, and Chat draft survive r
     window.EchoLayoutTestScenario.captureIdentitySnapshot();
   }, { selectors: shellSelectors, draft: preservedDraft });
 
-  async function expectPreserved(label) {
+  async function expectPreserved(label, expectedShell) {
     const preserved = await page.evaluate((selectors) => {
       const savedNodes = window.__echoCanonicalNodeSnapshot;
+      const panel = document.getElementById("chat-panel");
+      const stageHost = document.getElementById("stage-module-host");
       return {
         canonicalNodes: selectors.every((selector, index) => (
           document.querySelectorAll(selector).length === 1 &&
           document.querySelector(selector) === savedNodes[index] &&
           savedNodes[index].isConnected
         )),
+        chatInStageHost: stageHost.contains(panel),
+        chatRendered: panel.getClientRects().length > 0 && getComputedStyle(panel).visibility !== "hidden",
         identity: window.EchoLayoutTestScenario.inspectIdentitySnapshot(),
+        stageModule: window.EchoStageModules.activeModule(),
       };
     }, shellSelectors);
 
     expect(preserved, label).toEqual({
       canonicalNodes: true,
+      chatInStageHost: expectedShell === "v2",
+      chatRendered: true,
       identity: {
         cameraSdkTrack: true,
         cameraStream: true,
@@ -304,7 +311,7 @@ test("canonical nodes, media tracks, participant state, and Chat draft survive r
         cameraVideo: true,
         chatFocused: true,
         chatInput: true,
-        chatOpen: true,
+        chatOpen: expectedShell === "legacy",
         chatPanel: true,
         draft: preservedDraft,
         participantCard: true,
@@ -320,22 +327,23 @@ test("canonical nodes, media tracks, participant state, and Chat draft survive r
         screenVideo: true,
         shareFocused: true,
       },
+      stageModule: "chat",
     });
   }
 
-  await expectPreserved("initial V2 state");
+  await expectPreserved("initial V2 state", "v2");
   await settleResize(page, { width: 1024, height: 768 }, "lounge");
-  await expectPreserved("lounge resize");
+  await expectPreserved("lounge resize", "v2");
   await settleResize(page, { width: 640, height: 480 }, "compact");
-  await expectPreserved("compact resize");
+  await expectPreserved("compact resize", "v2");
 
   await page.evaluate(() => window.EchoUiShell.applyVariant("legacy"));
   await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "legacy");
-  await expectPreserved("legacy live toggle");
+  await expectPreserved("legacy live toggle", "legacy");
 
   await page.evaluate(() => window.EchoUiShell.applyVariant("v2"));
   await expect(page.locator("html")).toHaveAttribute("data-ui-shell", "v2");
-  await expectPreserved("V2 live toggle");
+  await expectPreserved("V2 live toggle", "v2");
   await expectCanonicalStructure(page);
 });
 
@@ -1304,7 +1312,7 @@ for (const viewport of [
   { width: 390, height: 844 },
   { width: 412, height: 915 },
 ]) {
-  test(`${viewport.width}x${viewport.height} mini default People sheet exposes a dismissible live Stage`, async ({ page }) => {
+  test(`${viewport.width}x${viewport.height} mini default Active Users preserves a live Stage and hides only through Users`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await openPhaseOneViewer(page, {
       participants: 2,
@@ -1317,10 +1325,12 @@ for (const viewport of [
     const layout = page.locator('.room-layout[data-ui-region="workspace"]');
     const stage = page.locator('.room-main[data-ui-region="primary-stage"]');
     const utility = page.locator('.utility-host[data-ui-region="utility-host"]');
+    const users = page.locator("#room-sidebar");
     const grid = page.locator("#screen-grid");
     const tile = grid.locator(":scope > .tile");
     const video = tile.locator("video.screen-video-surface");
     const fullscreen = tile.locator(".tile-fullscreen-btn");
+    const toggle = page.locator("#shell-toggle-utility");
 
     await expect(layout).not.toHaveClass(/utility-collapsed/);
     await expect(utility).toHaveAttribute("data-active-tool", "people");
@@ -1328,7 +1338,12 @@ for (const viewport of [
     await expect(tile).toHaveAttribute("data-grid-visible", "");
     await expect(video).toHaveCount(1);
     await expect(fullscreen).toBeVisible();
-    await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(true);
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => grid.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => utility.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => users.evaluate((element) => element.inert)).toBe(false);
+    await expect(page.locator("#utility-scrim")).toBeHidden();
     await expect.poll(() => video.evaluate((element) => ({
       hasCurrentData: element.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA,
       sourceTrackState: element.srcObject?.getVideoTracks()[0]?.readyState || null,
@@ -1350,7 +1365,6 @@ for (const viewport of [
       const workspace = document.querySelector('.room-layout[data-ui-region="workspace"]');
       const primaryStage = document.querySelector('.room-main[data-ui-region="primary-stage"]');
       const utilityHost = document.querySelector('.utility-host[data-ui-region="utility-host"]');
-      const scrim = document.getElementById("utility-scrim");
       const screenTile = document.querySelector("#screen-grid > .tile[data-grid-visible]");
       const screenVideo = screenTile.querySelector("video.screen-video-surface");
       const fullscreenButton = screenTile.querySelector(".tile-fullscreen-btn");
@@ -1378,12 +1392,15 @@ for (const viewport of [
       return {
         exposedTile,
         hitPoint,
-        hitTargetIsScrim: hitTarget === scrim || scrim.contains(hitTarget),
+        hitTargetOnTile: hitTarget === screenTile || screenTile.contains(hitTarget),
+        stage: stageRect,
         tile: tileRect,
+        utility: utilityRect,
         utilityHeightRatio: utilityRect.height / workspaceRect.height,
         video: videoRect,
         videoHeight: screenVideo.videoHeight,
         videoWidth: screenVideo.videoWidth,
+        workspace: workspaceRect,
       };
     });
 
@@ -1396,11 +1413,26 @@ for (const viewport of [
     expect(geometry.video.height).toBeGreaterThan(1);
     expect(geometry.videoWidth).toBeGreaterThan(0);
     expect(geometry.videoHeight).toBeGreaterThan(0);
-    expect(geometry.hitTargetIsScrim).toBe(true);
+    expect(geometry.hitTargetOnTile).toBe(true);
+    for (const region of [geometry.stage, geometry.utility]) {
+      expect(region.left).toBeGreaterThanOrEqual(geometry.workspace.left - 1);
+      expect(region.right).toBeLessThanOrEqual(geometry.workspace.right + 1);
+      expect(region.top).toBeGreaterThanOrEqual(geometry.workspace.top - 1);
+      expect(region.bottom).toBeLessThanOrEqual(geometry.workspace.bottom + 1);
+    }
 
     await page.mouse.click(geometry.hitPoint.x, geometry.hitPoint.y);
+    await expect(tile).toHaveClass(/is-focused/);
+    await expect(layout).not.toHaveClass(/utility-collapsed/);
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    await toggle.click();
     await expect(layout).toHaveClass(/utility-collapsed/);
     await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => grid.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => utility.evaluate((element) => element.inert)).toBe(true);
+    await expect(users).toHaveAttribute("aria-hidden", "true");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect.poll(() => utility.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
 
     const restored = await page.evaluate(() => {
@@ -1494,7 +1526,7 @@ for (const viewport of [
   { width: 1024, height: 768, mode: "lounge" },
   { width: 800, height: 600, mode: "compact" },
 ]) {
-  test(`${viewport.mode} utility expansion gates the stage and collapse restores it`, async ({ page }) => {
+  test(`${viewport.mode} Active Users remains independent while explicit hiding leaves the Stage live`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await openPhaseOneViewer(page, { participants: 4, cameras: 1, screenShares: 1 });
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", viewport.mode);
@@ -1502,12 +1534,22 @@ for (const viewport of [
     const stage = page.locator('.room-main[data-ui-region="primary-stage"]');
     const layout = page.locator('.room-layout[data-ui-region="workspace"]');
     const utility = page.locator('.utility-host[data-ui-region="utility-host"]');
+    const users = page.locator("#room-sidebar");
+    const grid = page.locator("#screen-grid");
     const toggle = page.locator("#shell-toggle-utility");
-    await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(true);
+    await expect(layout).not.toHaveClass(/utility-collapsed/);
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => grid.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => utility.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => users.evaluate((element) => element.inert)).toBe(false);
 
     await toggle.click();
     await expect(layout).toHaveClass(/utility-collapsed/);
     await expect.poll(() => stage.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => grid.evaluate((element) => element.inert)).toBe(false);
+    await expect.poll(() => utility.evaluate((element) => element.inert)).toBe(true);
+    await expect(users).toHaveAttribute("aria-hidden", "true");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect.poll(() => utility.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
 
@@ -1525,7 +1567,7 @@ for (const viewport of [
   { width: 800, height: 600, mode: "compact" },
   { width: 600, height: 900, mode: "mini" },
 ]) {
-  test(`${viewport.mode} Chat uses essentially the full workspace`, async ({ page }) => {
+  test(`${viewport.mode} Chat fills its Stage while Active Users remains independently visible`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await openPhaseOneViewer(page, {
       participants: 4,
@@ -1534,22 +1576,62 @@ for (const viewport of [
       chatOpen: true,
     });
     await expect(page.locator("html")).toHaveAttribute("data-ui-mode", viewport.mode);
+    await expect(page.locator("html")).toHaveAttribute("data-stage-module", "chat");
+    const toggle = page.locator("#shell-toggle-utility");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#room-sidebar")).toBeVisible();
+    await page.locator("#chat-input").fill("Chat draft survives independent Users visibility");
+
     const geometry = await page.evaluate(() => {
       const workspace = document.querySelector('.room-layout[data-ui-region="workspace"]').getBoundingClientRect();
+      const stage = document.querySelector('.room-main[data-ui-region="primary-stage"]').getBoundingClientRect();
       const chat = document.getElementById("chat-panel").getBoundingClientRect();
+      const users = document.getElementById("room-sidebar").getBoundingClientRect();
       return {
-        heightRatio: chat.height / workspace.height,
-        widthRatio: chat.width / workspace.width,
+        heightRatio: chat.height / stage.height,
+        widthRatio: chat.width / stage.width,
         chat: { bottom: chat.bottom, left: chat.left, right: chat.right, top: chat.top },
+        stage: { bottom: stage.bottom, height: stage.height, left: stage.left, right: stage.right, top: stage.top, width: stage.width },
+        users: { bottom: users.bottom, height: users.height, left: users.left, right: users.right, top: users.top, width: users.width },
         workspace: { bottom: workspace.bottom, left: workspace.left, right: workspace.right, top: workspace.top },
       };
     });
     expect(geometry.widthRatio).toBeGreaterThanOrEqual(0.95);
     expect(geometry.heightRatio).toBeGreaterThanOrEqual(0.95);
-    expect(geometry.chat.left).toBeGreaterThanOrEqual(geometry.workspace.left - 1);
-    expect(geometry.chat.right).toBeLessThanOrEqual(geometry.workspace.right + 1);
-    expect(geometry.chat.top).toBeGreaterThanOrEqual(geometry.workspace.top - 1);
-    expect(geometry.chat.bottom).toBeLessThanOrEqual(geometry.workspace.bottom + 1);
+    expect(geometry.chat.left).toBeGreaterThanOrEqual(geometry.stage.left - 1);
+    expect(geometry.chat.right).toBeLessThanOrEqual(geometry.stage.right + 1);
+    expect(geometry.chat.top).toBeGreaterThanOrEqual(geometry.stage.top - 1);
+    expect(geometry.chat.bottom).toBeLessThanOrEqual(geometry.stage.bottom + 1);
+    expect(geometry.stage.bottom).toBeLessThanOrEqual(geometry.users.top + 1);
+    for (const region of [geometry.stage, geometry.users]) {
+      expect(region.left).toBeGreaterThanOrEqual(geometry.workspace.left - 1);
+      expect(region.right).toBeLessThanOrEqual(geometry.workspace.right + 1);
+      expect(region.top).toBeGreaterThanOrEqual(geometry.workspace.top - 1);
+      expect(region.bottom).toBeLessThanOrEqual(geometry.workspace.bottom + 1);
+    }
+
+    const chatNode = await page.locator("#chat-panel").elementHandle();
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator("#room-sidebar")).toBeHidden();
+    await expect(page.locator("#chat-input")).toHaveValue("Chat draft survives independent Users visibility");
+    expect(await page.locator("#chat-panel").evaluate((panel, saved) => panel === saved, chatNode)).toBe(true);
+
+    const expanded = await page.evaluate(() => {
+      const workspace = document.querySelector('.room-layout[data-ui-region="workspace"]').getBoundingClientRect();
+      const stage = document.querySelector('.room-main[data-ui-region="primary-stage"]').getBoundingClientRect();
+      const chat = document.getElementById("chat-panel").getBoundingClientRect();
+      return {
+        chatHeightRatio: chat.height / stage.height,
+        chatWidthRatio: chat.width / stage.width,
+        stageHeightRatio: stage.height / workspace.height,
+        stageWidthRatio: stage.width / workspace.width,
+      };
+    });
+    expect(expanded.chatWidthRatio).toBeGreaterThanOrEqual(0.95);
+    expect(expanded.chatHeightRatio).toBeGreaterThanOrEqual(0.95);
+    expect(expanded.stageWidthRatio).toBeGreaterThanOrEqual(0.95);
+    expect(expanded.stageHeightRatio).toBeGreaterThanOrEqual(0.95);
   });
 }
 

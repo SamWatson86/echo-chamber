@@ -835,6 +835,6 @@ test("mic preservation policy remains recovery-only and production wiring tears 
   assert.match(connectSource, /handleConnectedMediaStall\(\{[\s\S]*?micWasEnabled: desiredMicEnabledForRoomSwitch\(\) === true/);
   assert.match(connectSource, /if \(forceAndroidFirefoxRelay\) \{\s+rtcConfig\.iceTransportPolicy = "relay"/);
   assert.match(connectSource, /androidFirefoxForceRelay: recoveryState\?\.forceRelay === true/);
-  assert.match(connectSource, /ignoreAndroidFirefoxStaleRoomEvent\("local track unpublished"\)/);
+  assert.match(connectSource, /ignoreStaleRoomEvent\("local track unpublished"\)/);
   assert.match(connectSource, /androidFirefoxRoomDisconnectRecovery\?\.cancel\(room\);[\s\S]*?connectSequence \+= 1;[\s\S]*?room\._echoExpectedDisconnect = true/);
 });

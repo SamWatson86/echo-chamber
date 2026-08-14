@@ -107,6 +107,11 @@
       return;
     }
 
+    // Stage modules visually replace (but never tear down) the screen grid.
+    // Preserve the last visible-tile count and geometry while it is hidden so
+    // mutations cannot publish a false zero-tile layout before Back to Stage.
+    if (grid.closest(".room-main.stage-module-open")) return;
+
     // Single-share immersion and focused mode have purpose-built CSS layouts.
     // Remove our multi-share inline geometry so those rules retain ownership.
     var tiles = visibleTiles(grid);
