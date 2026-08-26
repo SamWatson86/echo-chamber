@@ -265,6 +265,7 @@ function createControllerHarness() {
   const storage = new Map();
   const listeners = new Map();
   let portrait = true;
+  let workspaceResize = null;
   const window = {
     navigator: { userAgent: ANDROID_PHONE },
     innerWidth: 390,
@@ -281,6 +282,11 @@ function createControllerHarness() {
     cancelAnimationFrame() {},
     setTimeout() { return 1; },
     clearTimeout() {},
+    ResizeObserver: class {
+      constructor(callback) { workspaceResize = callback; }
+      observe() {}
+      disconnect() {}
+    },
   };
   return {
     document,
@@ -292,6 +298,10 @@ function createControllerHarness() {
     utility,
     window,
     workspace,
+    resizeWorkspace() {
+      assert.equal(typeof workspaceResize, "function");
+      workspaceResize();
+    },
     setPortrait(value) { portrait = value; },
   };
 }
@@ -334,6 +344,19 @@ test("phone controller defaults visible at half and restores its snap across ori
   assert.equal(toolbar.children[0].attributes.get("role"), "separator");
   assert.equal(toolbar.children[1].attributes.get("aria-label"), "Make People and Tools smaller");
   assert.equal(toolbar.children[2].attributes.get("aria-label"), "Make People and Tools larger");
+});
+
+test("phone workspace waits for its first visible size instead of locking to zero", () => {
+  const harness = createControllerHarness();
+  harness.workspace.clientHeight = 0;
+  const controller = createPhonePresentationController(harness);
+  controller.start();
+  assert.equal(harness.utility.style.getPropertyValue("--echo-phone-sheet-height"), "");
+  assert.equal(harness.root.dataset.echoPhoneSheetSnap, "half");
+
+  harness.workspace.clientHeight = 600;
+  harness.resizeWorkspace();
+  assert.equal(harness.utility.style.getPropertyValue("--echo-phone-sheet-height"), "204px");
 });
 
 test("phone presentation CSS has no unscoped desktop selectors", () => {

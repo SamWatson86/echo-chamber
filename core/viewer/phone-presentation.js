@@ -262,6 +262,7 @@
     var started = false;
     var drag = null;
     var latestHeights = resolveSheetHeights(0);
+    var workspaceResizeObserver = null;
     var stabilizeFullscreenExit = createFullscreenExitStabilizer({ window: win, document: doc });
 
     function workspaceHeight() {
@@ -306,9 +307,15 @@
         syncPeekAccessibility();
         return null;
       }
-      latestHeights = resolveSheetHeights(workspaceHeight());
-      utilityHost.style.setProperty("--echo-phone-sheet-height", latestHeights[snap] + "px");
+      var measuredWorkspaceHeight = workspaceHeight();
       rootElement.dataset.echoPhoneSheetSnap = snap;
+      if (measuredWorkspaceHeight <= 0) {
+        utilityHost.style.removeProperty("--echo-phone-sheet-height");
+        syncControls();
+        return Object.freeze({ snap: snap, height: null, heights: latestHeights });
+      }
+      latestHeights = resolveSheetHeights(measuredWorkspaceHeight);
+      utilityHost.style.setProperty("--echo-phone-sheet-height", latestHeights[snap] + "px");
       syncControls();
       return Object.freeze({ snap: snap, height: latestHeights[snap], heights: latestHeights });
     }
@@ -389,6 +396,10 @@
       if (win.visualViewport && typeof win.visualViewport.addEventListener === "function") {
         win.visualViewport.addEventListener("resize", scheduleMeasure, { passive: true });
       }
+      if (typeof win.ResizeObserver === "function") {
+        workspaceResizeObserver = new win.ResizeObserver(scheduleMeasure);
+        workspaceResizeObserver.observe(workspace);
+      }
       return measureNow();
     }
 
@@ -401,6 +412,8 @@
       if (win.visualViewport && typeof win.visualViewport.removeEventListener === "function") {
         win.visualViewport.removeEventListener("resize", scheduleMeasure);
       }
+      if (workspaceResizeObserver) workspaceResizeObserver.disconnect();
+      workspaceResizeObserver = null;
       if (scheduledFrame != null) cancelFrame(scheduledFrame);
       scheduledFrame = null;
       controls.toolbar.remove();
