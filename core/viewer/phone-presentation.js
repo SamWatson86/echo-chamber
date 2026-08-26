@@ -9,7 +9,6 @@
   }
 
   var api = factory();
-  Object.defineProperty(api, "__echoPhonePresentationApi", { value: true });
   root.EchoPhonePresentation = api;
 
   if (!root.document) return;
@@ -460,6 +459,7 @@
   }
 
   return Object.freeze({
+    __echoPhonePresentationApi: true,
     PHONE_SHEET_SNAPS: PHONE_SHEET_SNAPS,
     adjacentSnap: adjacentSnap,
     createFullscreenExitStabilizer: createFullscreenExitStabilizer,

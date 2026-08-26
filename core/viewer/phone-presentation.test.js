@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
   createFullscreenExitStabilizer,
@@ -16,6 +17,35 @@ const ANDROID_TABLET = "Mozilla/5.0 (Linux; Android 16; Pixel Tablet) AppleWebKi
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1";
 const IPAD = "Mozilla/5.0 (iPad; CPU OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1";
 const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153.0 Safari/537.36";
+
+test("browser bootstrap publishes one frozen idempotent API without throwing", () => {
+  const source = fs.readFileSync(path.join(__dirname, "phone-presentation.js"), "utf8");
+  const domReadyListeners = [];
+  const context = {
+    document: {
+      readyState: "loading",
+      documentElement: { dataset: {} },
+      addEventListener(type, listener) {
+        if (type === "DOMContentLoaded") domReadyListeners.push(listener);
+      },
+    },
+    navigator: { userAgent: ANDROID_PHONE },
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+
+  assert.doesNotThrow(() => vm.runInContext(source, context, { filename: "phone-presentation.js" }));
+  const firstApi = context.EchoPhonePresentation;
+  assert.ok(firstApi);
+  assert.equal(firstApi.__echoPhonePresentationApi, true);
+  assert.equal(Object.isFrozen(firstApi), true);
+  assert.equal(context.document.documentElement.dataset.echoPhone, "true");
+  assert.equal(domReadyListeners.length, 1);
+
+  assert.doesNotThrow(() => vm.runInContext(source, context, { filename: "phone-presentation.js" }));
+  assert.equal(context.EchoPhonePresentation, firstApi);
+  assert.equal(domReadyListeners.length, 1, "duplicate load must not install a second bootstrap");
+});
 
 test("phone classification requires a non-native phone hint or exact phone UA", () => {
   const fixtures = [
