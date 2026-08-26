@@ -28,7 +28,7 @@ function isTauriCommandMissingError(err, commandName) {
 /**
  * Show the capture source picker modal.
  * Returns a Promise that resolves with the selected source or null if cancelled.
- * @returns {Promise<{id: number, title: string, sourceType: string, isMonitor: boolean} | null>}
+ * @returns {Promise<{id: number, title: string, sourceType: string, isMonitor: boolean, pid: number, exeName: (string|null)} | null>}
  */
 function showCapturePicker() {
     return new Promise(function(resolve, reject) {
@@ -37,6 +37,19 @@ function showCapturePicker() {
         _selectedSource = null;
         _buildPickerModal();
     });
+}
+
+function captureSourceFromCard(card) {
+    var sourceType = card.dataset.type;
+    return {
+        id: parseInt(card.dataset.id),
+        title: card.dataset.title,
+        sourceType: sourceType,
+        isMonitor: sourceType === 'monitor',
+        pid: parseInt(card.dataset.pid) || 0,
+        exeName: card.dataset.exeName || null,
+        captureMode: sourceType === 'game' ? 'auto' : null,
+    };
 }
 
 function _buildPickerModal() {
@@ -202,15 +215,7 @@ async function _loadSources() {
                     c.classList.remove('selected');
                 });
                 card.classList.add('selected');
-                var sourceType = card.dataset.type;
-                _selectedSource = {
-                    id: parseInt(card.dataset.id),
-                    title: card.dataset.title,
-                    sourceType: sourceType,
-                    isMonitor: sourceType === 'monitor',
-                    pid: parseInt(card.dataset.pid) || 0,
-                    captureMode: sourceType === 'game' ? 'auto' : null,
-                };
+                _selectedSource = captureSourceFromCard(card);
                 document.getElementById('cp-share').disabled = false;
             };
             // Double-click = select + share immediately
@@ -264,6 +269,7 @@ function _renderSection(title, badge, sources, disabled) {
             '" data-title="' + _escHtml(s.title) +
             '" data-type="' + s.source_type +
             '" data-pid="' + (s.pid || 0) +
+            '" data-exe-name="' + _escHtml(s.exe_name || '') +
             '" data-unsupported="' + (disabled ? '1' : '0') + '">' +
             '<div class="capture-source-thumb" id="thumb-container-' + s.id + '">' +
                 '<div class="shimmer" id="thumb-' + s.id + '"></div>' +
@@ -329,5 +335,10 @@ function _escHtml(s) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-    module.exports = { isTauriCommandMissingError, isUnsupportedSystemCaptureSource };
+    module.exports = {
+        captureSourceFromCard,
+        isTauriCommandMissingError,
+        isUnsupportedSystemCaptureSource,
+        _renderSection,
+    };
 }

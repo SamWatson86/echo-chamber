@@ -308,14 +308,24 @@ test("missing canvas or Worker capability safely selects direct-track sharing", 
   }), true);
 });
 
-test("conservative display request omits Chromium-only system-audio hints", () => {
+test("conservative display request is video-only and omits Chromium-only hints", () => {
   const { context } = loadScreenShareNative();
   const constraints = context.buildBrowserDisplayMediaConstraints(true);
 
   assert.equal(constraints.video.frameRate.ideal, 30);
-  assert.equal(constraints.audio, true);
+  assert.equal(constraints.audio, false);
   assert.equal("systemAudio" in constraints, false);
   assert.equal("surfaceSwitching" in constraints, false);
+});
+
+test("capable Chromium display request explicitly excludes system audio", () => {
+  const { context } = loadScreenShareNative();
+  const constraints = context.buildBrowserDisplayMediaConstraints(false);
+
+  assert.equal(constraints.video.frameRate.ideal, 60);
+  assert.equal(constraints.video.resizeMode, "none");
+  assert.equal(constraints.audio, false);
+  assert.equal(constraints.systemAudio, "exclude");
 });
 
 test("browser capture cleanup stops every acquired track", () => {
@@ -331,11 +341,27 @@ test("browser capture cleanup stops every acquired track", () => {
   assert.deepEqual(stopped, ["video", "audio"]);
 });
 
+test("browser audio guard stops unexpected audio without stopping video", () => {
+  const { context } = loadScreenShareNative();
+  const stopped = [];
+  const count = context.stopUnexpectedBrowserAudioTracks({
+    getAudioTracks: () => [
+      { stop: () => stopped.push("audio-1") },
+      { stop: () => stopped.push("audio-2") },
+    ],
+  });
+
+  assert.equal(count, 2);
+  assert.deepEqual(stopped, ["audio-1", "audio-2"]);
+});
+
 test("Mac browser start publishes the original display track without creating a canvas", async () => {
   const { context } = loadScreenShareNative();
   const published = [];
   const optionCalls = [];
+  const toasts = [];
   let canvasCreated = false;
+  let unexpectedAudioStopped = false;
   const videoTrack = {
     id: "mac-display-track",
     readyState: "live",
@@ -346,10 +372,13 @@ test("Mac browser start publishes the original display track without creating a 
     addEventListener() {},
     stop() {},
   };
+  const unexpectedAudioTrack = {
+    stop() { unexpectedAudioStopped = true; },
+  };
   const stream = {
     getVideoTracks: () => [videoTrack],
-    getAudioTracks: () => [],
-    getTracks: () => [videoTrack],
+    getAudioTracks: () => [unexpectedAudioTrack],
+    getTracks: () => [videoTrack, unexpectedAudioTrack],
   };
 
   context.window.__ECHO_NATIVE__ = false;
@@ -365,6 +394,7 @@ test("Mac browser start publishes the original display track without creating a 
   context._screenShareStatsInterval = null;
   context.logEvent = () => {};
   context.renderPublishButtons = () => {};
+  context.showToast = (message) => toasts.push(message);
   context.getScreenSharePublishOptions = (width, height, conservative) => {
     optionCalls.push({ width, height, conservative });
     return { simulcast: false };
@@ -394,6 +424,74 @@ test("Mac browser start publishes the original display track without creating a 
   assert.equal(published[0].options.source, "screen_share");
   assert.deepEqual(optionCalls, [{ width: 1728, height: 1117, conservative: true }]);
   assert.equal(context.window._echoCaptureSourceReport.capture_route, "browser-direct");
+  assert.equal(unexpectedAudioStopped, true);
+  assert.deepEqual(toasts, [
+    "Screen shared without computer audio. Use the Echo Windows app for safe game audio.",
+  ]);
+});
+
+test("old native picker fallback remains video-only", async () => {
+  const { context } = loadScreenShareNative();
+  const published = [];
+  const toasts = [];
+  let unexpectedAudioStopped = false;
+  const videoTrack = {
+    id: "legacy-native-display-track",
+    readyState: "live",
+    enabled: true,
+    muted: false,
+    label: "Screen 1",
+    getSettings: () => ({ width: 1920, height: 1080, frameRate: 30, displaySurface: "monitor" }),
+    addEventListener() {},
+    stop() {},
+  };
+  const unexpectedAudioTrack = {
+    stop() { unexpectedAudioStopped = true; },
+  };
+  const stream = {
+    getVideoTracks: () => [videoTrack],
+    getAudioTracks: () => [unexpectedAudioTrack],
+    getTracks: () => [videoTrack, unexpectedAudioTrack],
+  };
+
+  context.showCapturePicker = async () => {
+    throw new Error("Command list_screen_sources not found");
+  };
+  context.isTauriCommandMissingError = () => true;
+  context.navigator = {
+    platform: "Win32",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    mediaDevices: { getDisplayMedia: async () => stream },
+  };
+  context.prewarmedRooms = new Map();
+  context._screenShareStatsInterval = null;
+  context.logEvent = () => {};
+  context.renderPublishButtons = () => {};
+  context.showToast = (message) => toasts.push(message);
+  context.getScreenSharePublishOptions = () => ({ simulcast: false });
+  context.getLiveKitClient = () => ({
+    Track: { Source: { ScreenShare: "screen_share", ScreenShareAudio: "screen_share_audio" } },
+    LocalVideoTrack: class {
+      constructor(mediaStreamTrack) {
+        this.mediaStreamTrack = mediaStreamTrack;
+        this.sender = null;
+      }
+    },
+  });
+  context.room.localParticipant.publishTrack = async (track, options) => {
+    published.push({ track, options });
+  };
+
+  await context.startScreenShareManual();
+
+  assert.equal(unexpectedAudioStopped, true);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].track.mediaStreamTrack, videoTrack);
+  assert.equal(published[0].options.source, "screen_share");
+  assert.deepEqual(toasts, [
+    "Native screen picker unavailable; using browser picker",
+    "Screen shared without computer audio. Use the Echo Windows app for safe game audio.",
+  ]);
 });
 
 test("monitor audio capture requests system audio with Echo playback excluded", () => {
@@ -413,6 +511,19 @@ test("monitor audio capture requests system audio with Echo playback excluded", 
   assert.equal(
     context.nativeAudioCaptureRequestForSource({ sourceType: "window", pid: 0 }),
     null
+  );
+});
+
+test("native audio routes use fixed non-sensitive LiveKit track names", () => {
+  const { context } = loadScreenShareNative();
+
+  assert.equal(
+    context.nativeAudioTrackNameForOptions({ systemExcludeEcho: true }),
+    "echo-screen-audio-system-exclude"
+  );
+  assert.equal(
+    context.nativeAudioTrackNameForOptions({}),
+    "echo-screen-audio-process"
   );
 });
 
@@ -499,6 +610,7 @@ test("Battlefield 6 audio routing does not mutate capture geometry", () => {
 
 test("native audio capture uses the Echo-excluding system command for monitor audio", async () => {
   const { context, calls } = loadScreenShareNative();
+  const published = [];
 
   context.hasTauriIPC = () => true;
   context.getLiveKitClient = () => ({
@@ -534,7 +646,9 @@ test("native audio capture uses the Echo-excluding system command for monitor au
     revokeObjectURL() {},
   };
   context.tauriListen = async () => () => {};
-  context.room.localParticipant.publishTrack = async () => {};
+  context.room.localParticipant.publishTrack = async (track, options) => {
+    published.push({ track, options });
+  };
 
   await context.startNativeAudioCapture(0, { systemExcludeEcho: true });
 
@@ -546,6 +660,8 @@ test("native audio capture uses the Echo-excluding system command for monitor au
     calls.some((call) => call.command === "start_system_audio_capture"),
     false
   );
+  assert.equal(published.length, 1);
+  assert.equal(published[0].options.name, "echo-screen-audio-system-exclude");
 });
 
 test("Battlefield 6 audio request invokes only the Echo-excluding system command", async () => {
