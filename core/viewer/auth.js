@@ -86,6 +86,7 @@ function createParticipantTokenLifecycle(options) {
       token: context.token,
       expiresAtMs: decodeParticipantTokenExpirationMs(context.token),
       refreshNotBeforeMs: 0,
+      forcedRefreshNotBeforeMs: 0,
     };
     inFlight = null;
     return generation;
@@ -124,7 +125,7 @@ function createParticipantTokenLifecycle(options) {
       getCurrentToken() === capture.token;
   }
 
-  async function performRefresh(capture) {
+  async function performRefresh(capture, forced) {
     try {
       var nextToken;
       var currentAdminToken = getAdminToken();
@@ -149,6 +150,7 @@ function createParticipantTokenLifecycle(options) {
       active.token = nextToken;
       active.expiresAtMs = decodeParticipantTokenExpirationMs(nextToken);
       active.refreshNotBeforeMs = 0;
+      active.forcedRefreshNotBeforeMs = 0;
       onTokenCommitted({
         controlUrl: capture.controlUrl,
         roomId: capture.roomId,
@@ -158,7 +160,10 @@ function createParticipantTokenLifecycle(options) {
       });
       return { status: "refreshed", token: nextToken, previousToken: capture.token };
     } catch (error) {
-      if (isCaptureCurrent(capture)) active.refreshNotBeforeMs = now() + refreshRetryMs;
+      if (isCaptureCurrent(capture)) {
+        active.refreshNotBeforeMs = now() + refreshRetryMs;
+        if (forced) active.forcedRefreshNotBeforeMs = now() + refreshRetryMs;
+      }
       return { status: "failed", error: error };
     }
   }
@@ -169,12 +174,16 @@ function createParticipantTokenLifecycle(options) {
     if (!capture) {
       return Promise.resolve({ status: active ? "superseded" : "inactive" });
     }
+    var forced = request.force === true;
     var due = Number.isFinite(capture.expiresAtMs) &&
       capture.expiresAtMs - now() <= refreshMarginMs;
-    if (request.force !== true && !due) {
+    if (!forced && !due) {
       return Promise.resolve({ status: "current", token: capture.token });
     }
-    if (request.force !== true && active.refreshNotBeforeMs > now()) {
+    var refreshNotBeforeMs = forced
+      ? active.forcedRefreshNotBeforeMs
+      : active.refreshNotBeforeMs;
+    if (refreshNotBeforeMs > now()) {
       return Promise.resolve({ status: "deferred", token: capture.token });
     }
     if (inFlight &&
@@ -183,7 +192,7 @@ function createParticipantTokenLifecycle(options) {
       return inFlight.promise;
     }
 
-    var refresh = performRefresh(capture);
+    var refresh = performRefresh(capture, forced);
     inFlight = {
       generation: capture.generation,
       token: capture.token,

@@ -306,6 +306,7 @@ function hideStaleBanner() {
 }
 
 function showSessionExpiredBanner() {
+  if (document.getElementById("stale-banner")) return;
   if (document.getElementById("session-expired-banner")) return;
   var banner = document.createElement("div");
   banner.id = "session-expired-banner";

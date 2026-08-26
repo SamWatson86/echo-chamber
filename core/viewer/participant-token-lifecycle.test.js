@@ -147,6 +147,17 @@ test("a failed retry preserves the connected token and never loops", async () =>
   assert.equal(harness.calls.renew.length, 1);
   assert.equal(harness.currentToken(), oldToken);
   assert.equal(harness.calls.committed.length, 0);
+
+  const deferred = await harness.lifecycle.ensureFresh({ force: true, expectedToken: oldToken });
+  assert.equal(deferred.status, "deferred");
+  assert.equal(harness.calls.issue.length, 2, "heartbeat 401s must not hot-loop forced refresh");
+  assert.equal(harness.calls.renew.length, 1);
+
+  harness.setNow(nowMs + 60_001);
+  const retried = await harness.lifecycle.ensureFresh({ force: true, expectedToken: oldToken });
+  assert.equal(retried.status, "failed");
+  assert.equal(harness.calls.issue.length, 4);
+  assert.equal(harness.calls.renew.length, 2);
 });
 
 test("a network failure preserves the active credential for a later heartbeat", async () => {
