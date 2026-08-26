@@ -346,6 +346,41 @@ test("phone controller defaults visible at half and restores its snap across ori
   assert.equal(toolbar.children[2].attributes.get("aria-label"), "Make People and Tools larger");
 });
 
+test("phone sheet drag and buttons move only between the three bounded snaps", () => {
+  const harness = createControllerHarness();
+  const controller = createPhonePresentationController(harness);
+  controller.start();
+  const toolbar = harness.people.children[0];
+  const handle = toolbar.children[0];
+  const minimize = toolbar.children[1];
+  const expand = toolbar.children[2];
+  const pointerEvent = (overrides) => Object.assign({
+    button: 0,
+    pointerId: 7,
+    clientY: 400,
+    preventDefault() {},
+  }, overrides);
+
+  handle.dispatch("pointerdown", pointerEvent());
+  handle.dispatch("pointermove", pointerEvent({ clientY: 100 }));
+  handle.dispatch("pointerup", pointerEvent({ clientY: 100 }));
+  assert.equal(controller.snap(), "full");
+  assert.equal(harness.utility.style.getPropertyValue("--echo-phone-sheet-height"), "504px");
+
+  handle.dispatch("pointerdown", pointerEvent({ clientY: 100 }));
+  handle.dispatch("pointermove", pointerEvent({ clientY: 600 }));
+  handle.dispatch("pointerup", pointerEvent({ clientY: 600 }));
+  assert.equal(controller.snap(), "peek");
+  assert.equal(harness.utility.style.getPropertyValue("--echo-phone-sheet-height"), "72px");
+
+  expand.dispatch("click", {});
+  assert.equal(controller.snap(), "half");
+  minimize.dispatch("click", {});
+  assert.equal(controller.snap(), "peek");
+  assert.equal(harness.people.children[1], harness.header, "existing People header must not be cloned");
+  assert.equal(harness.people.children[2], harness.users, "existing user list must not be cloned");
+});
+
 test("phone workspace waits for its first visible size instead of locking to zero", () => {
   const harness = createControllerHarness();
   harness.workspace.clientHeight = 0;
