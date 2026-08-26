@@ -34,6 +34,9 @@ pub struct CaptureSource {
     pub source_type: String,
     /// Process ID (0 for monitors)
     pub pid: u32,
+    /// Executable file name for window/game sources (omitted for monitors or inaccessible processes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_name: Option<String>,
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -371,6 +374,7 @@ pub fn list_sources() -> Vec<CaptureSource> {
                 is_monitor: true,
                 source_type: "monitor".to_string(),
                 pid: 0,
+                exe_name: None,
             });
         }
         TRUE
@@ -497,6 +501,7 @@ pub fn list_sources() -> Vec<CaptureSource> {
                         "window".to_string()
                     },
                     pid,
+                    exe_name: exe,
                 });
             }
         }
@@ -1594,6 +1599,36 @@ mod tests {
             "PowerPoint - Quarterly Review",
             Some("POWERPNT.EXE")
         ));
+    }
+
+    #[test]
+    fn capture_source_serializes_window_executable_metadata() {
+        let source = CaptureSource {
+            id: 42,
+            title: "Battlefield 6".to_string(),
+            is_monitor: false,
+            source_type: "game".to_string(),
+            pid: 9001,
+            exe_name: Some("bf6.exe".to_string()),
+        };
+
+        let value = serde_json::to_value(source).expect("capture source should serialize");
+        assert_eq!(value["exe_name"], "bf6.exe");
+    }
+
+    #[test]
+    fn capture_source_omits_executable_metadata_for_monitors() {
+        let source = CaptureSource {
+            id: 7,
+            title: "Monitor 1".to_string(),
+            is_monitor: true,
+            source_type: "monitor".to_string(),
+            pid: 0,
+            exe_name: None,
+        };
+
+        let value = serde_json::to_value(source).expect("capture source should serialize");
+        assert!(value.get("exe_name").is_none());
     }
 
     #[test]

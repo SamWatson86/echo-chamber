@@ -59,11 +59,11 @@ function shouldUseConservativeBrowserScreenShare(options) {
 
 function buildBrowserDisplayMediaConstraints(conservative) {
   if (conservative) {
-    // Safari and Mac Chromium get the standards-only, lower-cost request.
-    // System audio is intentionally not promised on the web canary.
+    // Safari and Mac Chromium get the standards-only, lower-cost video request.
+    // Browser display audio is disabled because it can include Echo playback.
     return {
       video: { frameRate: { ideal: 30 } },
-      audio: true,
+      audio: false,
     };
   }
   return {
@@ -74,12 +74,8 @@ function buildBrowserDisplayMediaConstraints(conservative) {
     surfaceSwitching: "exclude",
     selfBrowserSurface: "exclude",
     preferCurrentTab: false,
-    audio: {
-      autoGainControl: false,
-      echoCancellation: false,
-      noiseSuppression: false,
-    },
-    systemAudio: "include",
+    audio: false,
+    systemAudio: "exclude",
   };
 }
 
@@ -88,6 +84,15 @@ function stopBrowserCaptureStream(stream) {
   stream.getTracks().forEach(function(track) {
     try { track.stop(); } catch (e) {}
   });
+}
+
+function stopUnexpectedBrowserAudioTracks(stream) {
+  if (!stream || typeof stream.getAudioTracks !== "function") return 0;
+  var audioTracks = stream.getAudioTracks();
+  audioTracks.forEach(function(track) {
+    try { track.stop(); } catch (e) {}
+  });
+  return audioTracks.length;
 }
 
 function buildCaptureSourceReport(source, captureRoute, publishProfile) {
@@ -153,6 +158,12 @@ function nativeAudioCaptureRequestForSource(source) {
     };
   }
   return null;
+}
+
+function nativeAudioTrackNameForOptions(options) {
+  return options && options.systemExcludeEcho
+    ? 'echo-screen-audio-system-exclude'
+    : 'echo-screen-audio-process';
 }
 
 function _stopSourceVisibilityMonitor() {
@@ -591,6 +602,10 @@ async function startScreenShareManual() {
   });
   var gdmConstraints = buildBrowserDisplayMediaConstraints(conservativeBrowserShare);
   const stream = await navigator.mediaDevices.getDisplayMedia(gdmConstraints);
+  var unexpectedBrowserAudioTracks = stopUnexpectedBrowserAudioTracks(stream);
+  if (unexpectedBrowserAudioTracks > 0) {
+    debugLog("Blocked " + unexpectedBrowserAudioTracks + " unexpected browser screen audio track(s)");
+  }
 
   // Log the actual capture frame rate
   const videoMst = stream.getVideoTracks()[0];
@@ -1211,31 +1226,8 @@ async function startScreenShareManual() {
     });
   }
 
-  // Publish audio track if available
-  const audioTracks = stream.getAudioTracks();
-  debugLog("Screen share audio tracks: " + audioTracks.length);
-  const audioMst = audioTracks[0];
-  if (audioMst) {
-    debugLog("Screen share audio track: label=" + audioMst.label + " enabled=" + audioMst.enabled + " muted=" + audioMst.muted);
-    _screenShareAudioTrack = new LK.LocalAudioTrack(audioMst, undefined, false);
-    await room.localParticipant.publishTrack(_screenShareAudioTrack, {
-      source: LK.Track.Source.ScreenShareAudio,
-      dtx: false,        // DTX kills non-voice audio (games, music) — must be off
-      red: false,         // No redundant encoding needed for continuous audio
-      audioBitrate: 128000, // 128kbps for high quality screen audio
-    });
-    debugLog("Screen share audio published via LiveKit");
-  } else {
-    debugLog("No screen share audio track available (user may not have checked 'Share audio' or sharing a window)");
-  }
-
-  // In native client, auto-detect and capture per-process audio via WASAPI
-  if (isNativeClient && hasTauriIPC()) {
-    var shareTrackLabel = videoMst ? videoMst.label : "";
-    autoDetectNativeAudio(shareTrackLabel).catch(function(err) {
-      debugLog("[native-audio] autoDetect error: " + err);
-    });
-  }
+  debugLog("Browser screen sharing is video-only; no display audio was published");
+  showToast("Screen shared without computer audio. Use the Echo Windows app for safe game audio.", 6000);
 }
 
 async function stopScreenShareManual() {
@@ -1542,9 +1534,9 @@ async function startNativeAudioCapture(pid, opts) {
 
   var LK = getLiveKitClient();
   var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
-  var trackName = opts.name || undefined;
   var useSystemLoopback = !!opts.system;
   var useSystemExcludeEcho = !!opts.systemExcludeEcho;
+  var trackName = nativeAudioTrackNameForOptions(opts);
 
   // Create AudioContext — DON'T hardcode sample rate, let it match system default
   // WASAPI will report its actual format and we adapt
@@ -1671,9 +1663,9 @@ async function startNativeAudioCapture(pid, opts) {
       red: false,
       audioBitrate: 128000,
     };
-    if (trackName) publishOpts.name = trackName;
+    publishOpts.name = trackName;
     await room.localParticipant.publishTrack(_nativeAudioTrack, publishOpts);
-    debugLog("[native-audio] published to LiveKit as " + (trackName || "ScreenShareAudio"));
+    debugLog("[native-audio] published to LiveKit as " + trackName);
   } else {
     debugLog("[native-audio] ERROR: no audio track from MediaStreamDestination!");
   }
