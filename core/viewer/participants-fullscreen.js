@@ -186,6 +186,118 @@ function restoreFullscreenResponsiveState(snapshot) {
   });
 }
 
+function capturePhoneFullscreenMediaGeneration(host, videoEl, currentRoom) {
+  if (!host || !videoEl) return null;
+  var track = videoEl._lkTrack || host._screenTrack || videoEl._echoCameraTrack || null;
+  if (!track) return null;
+  var isScreen = !!(host._screenTrack || host._screenPublication);
+  return {
+    room: isScreen ? (host._screenRoom || currentRoom) : (videoEl._echoCameraRoom || currentRoom),
+    host: host,
+    element: videoEl,
+    track: track,
+    publication: isScreen
+      ? (host._screenPublication || null)
+      : (videoEl._echoCameraPublication || null),
+    playGeneration: videoEl._playGeneration || 0,
+    isScreen: isScreen,
+  };
+}
+
+function isCurrentPhoneFullscreenMediaGeneration(generation, currentRoom) {
+  if (!generation || currentRoom !== generation.room ||
+      !generation.host?.isConnected || !generation.element?.isConnected) return false;
+  if (generation.element._lkTrack !== generation.track ||
+      (generation.element._playGeneration || 0) !== generation.playGeneration) return false;
+  if (generation.track?.mediaStreamTrack?.readyState === "ended") return false;
+  if (generation.publication?.track && generation.publication.track !== generation.track) return false;
+  if (typeof generation.host.querySelector === "function" &&
+      generation.host.querySelector("video") !== generation.element) return false;
+  if (generation.isScreen) {
+    return generation.host._screenTrack === generation.track &&
+      generation.host._screenPublication === generation.publication &&
+      generation.host._screenRoom === generation.room;
+  }
+  if (generation.element._echoCameraTrack &&
+      generation.element._echoCameraTrack !== generation.track) return false;
+  if (generation.element._echoCameraPublication &&
+      generation.element._echoCameraPublication !== generation.publication) return false;
+  if (generation.element._echoCameraRoom &&
+      generation.element._echoCameraRoom !== generation.room) return false;
+  return true;
+}
+
+function capturePhoneFullscreenFrameMarker(element) {
+  var snapshot = getVideoPresentationSnapshot(element);
+  return Object.freeze({
+    currentTime: Number(element?.currentTime) || 0,
+    lastFrameTs: Number(element?._lastFrameTs) || 0,
+    presentedFrames: Number.isFinite(Number(snapshot?.presentedFrames))
+      ? Number(snapshot.presentedFrames)
+      : null,
+  });
+}
+
+function didPhoneFullscreenFrameAdvance(element, marker) {
+  if (!element || !marker) return false;
+  var snapshot = getVideoPresentationSnapshot(element);
+  var presentedFrames = Number(snapshot?.presentedFrames);
+  if (marker.presentedFrames !== null && Number.isFinite(presentedFrames) &&
+      presentedFrames > marker.presentedFrames) return true;
+  if ((Number(element._lastFrameTs) || 0) > marker.lastFrameTs) return true;
+  return (Number(element.currentTime) || 0) > marker.currentTime + 0.001;
+}
+
+function createPhoneFullscreenRecoveryContext(generation, options) {
+  if (!generation) return null;
+  var input = options || {};
+  var getCurrentRoom = typeof input.getCurrentRoom === "function"
+    ? input.getCurrentRoom
+    : function() { return room; };
+  var marker = capturePhoneFullscreenFrameMarker(generation.element);
+  var recovered = false;
+  return {
+    isCurrent: function() {
+      return isCurrentPhoneFullscreenMediaGeneration(generation, getCurrentRoom());
+    },
+    measure: function() {
+      var shell = input.shell || (typeof window !== "undefined" ? window.EchoUiShell : null);
+      if (shell && typeof shell.measureNow === "function") shell.measureNow();
+      var recalc = input.recalculateGrid ||
+        (typeof window !== "undefined" ? window._echoRecalcGrid : null);
+      if (typeof recalc === "function") recalc();
+    },
+    hasAdvanced: function() {
+      return didPhoneFullscreenFrameAdvance(generation.element, marker);
+    },
+    isPaused: function() {
+      return generation.element.paused === true;
+    },
+    recover: function() {
+      if (recovered || !isCurrentPhoneFullscreenMediaGeneration(generation, getCurrentRoom())) {
+        return false;
+      }
+      recovered = true;
+      try {
+        var playResult = generation.element.play();
+        if (playResult && typeof playResult.catch === "function") playResult.catch(function() {});
+      } catch (_playError) {}
+      var requestKeyFrame = input.requestKeyFrame || requestVideoKeyFrame;
+      requestKeyFrame(generation.publication, generation.track);
+      return true;
+    },
+  };
+}
+
+function schedulePhoneFullscreenExitStabilization(generation) {
+  var phonePresentation = typeof window !== "undefined" ? window.EchoPhonePresentation : null;
+  if (!generation || !phonePresentation ||
+      typeof phonePresentation.isPhone !== "function" || !phonePresentation.isPhone() ||
+      typeof phonePresentation.stabilizeFullscreenExit !== "function") return false;
+  var context = createPhoneFullscreenRecoveryContext(generation);
+  return !!context && phonePresentation.stabilizeFullscreenExit(context) === true;
+}
+
 // Fullscreen the existing stable media host. Keeping the live video inside its
 // Stage tile lets subscription reconciliation, diagnostics, and the watchdog
 // continue to find the same node throughout the transition.
@@ -228,6 +340,7 @@ function enterVideoFullscreen(videoEl) {
   var priorControlLabel = fullscreenControl && fullscreenControl.getAttribute("aria-label");
   var priorControlTitle = fullscreenControl && fullscreenControl.title;
   var responsiveSnapshot = captureFullscreenResponsiveState();
+  var phoneFullscreenGeneration = capturePhoneFullscreenMediaGeneration(host, videoEl, room);
   var entered = false;
   var cleaned = false;
 
@@ -261,7 +374,10 @@ function enterVideoFullscreen(videoEl) {
     if (isolatedMarker) isolatedMarker.remove();
     setControlPresentation(false);
     activeVideoFullscreenSession = null;
-    if (restoreResponsiveState) restoreFullscreenResponsiveState(responsiveSnapshot);
+    if (restoreResponsiveState &&
+        !schedulePhoneFullscreenExitStabilization(phoneFullscreenGeneration)) {
+      restoreFullscreenResponsiveState(responsiveSnapshot);
+    }
     if (fullscreenControl && fullscreenControl.isConnected) {
       try { fullscreenControl.focus({ preventScroll: true }); } catch (_focusError) {}
     }
@@ -1066,11 +1182,16 @@ if (typeof module === "object" && module.exports) {
     attemptAndroidFirefoxScreenSubscriptionReset,
     attemptAndroidFirefoxConnectedMediaRelayRecovery,
     createVideoFrameRateTracker,
+    capturePhoneFullscreenFrameMarker,
+    capturePhoneFullscreenMediaGeneration,
+    createPhoneFullscreenRecoveryContext,
+    didPhoneFullscreenFrameAdvance,
     getVideoFullscreenControlLabel,
     getVideoFullscreenMediaName,
     getVideoPresentationSnapshot,
     isAndroidFirefoxConnectedMediaStallCurrent,
     isCurrentScreenRecoveryGeneration,
+    isCurrentPhoneFullscreenMediaGeneration,
     isCurrentVideoLayerGeneration,
   };
 }

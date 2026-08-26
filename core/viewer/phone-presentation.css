@@ -1,0 +1,117 @@
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout,
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
+  display: block;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout > .room-main,
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .room-main {
+  width: 100%;
+  height: 100%;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout > .utility-host,
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+  position: absolute;
+  top: auto;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: var(--club-layer-utility);
+  width: 100%;
+  height: var(--echo-phone-sheet-height, 34%);
+  max-height: calc(100% - 96px);
+  min-height: 72px;
+  grid-column: auto;
+  grid-row: auto;
+  transition: height 160ms ease-out;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"][data-echo-phone-sheet-dragging] .room-layout > .utility-host {
+  transition: none;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .utility-host > .room-sidebar {
+  height: 100%;
+  max-height: none;
+  padding-top: 4px;
+  border-radius: 18px 18px 12px 12px;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .utility-host > .room-sidebar::before {
+  content: none;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .phone-sheet-toolbar {
+  min-width: 0;
+  height: 44px;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
+  align-items: center;
+  gap: 4px;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .phone-sheet-toolbar[hidden] {
+  display: none;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .phone-sheet-handle {
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  color: var(--club-text);
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .phone-sheet-grip {
+  width: 38px;
+  height: 4px;
+  flex: 0 0 38px;
+  border-radius: var(--club-radius-pill);
+  background: var(--club-border-strong);
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .phone-sheet-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] :is(.phone-sheet-minimize, .phone-sheet-expand) {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  color: var(--club-text);
+  font-size: 22px;
+  line-height: 1;
+  border-color: var(--club-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] :is(.phone-sheet-minimize, .phone-sheet-expand):disabled {
+  opacity: 0.35;
+}
+
+:root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"][data-echo-phone-sheet-snap="peek"] .utility-host > .room-sidebar {
+  gap: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-ui-shell="v2"][data-echo-phone="true"][data-echo-phone-orientation="portrait"] .room-layout > .utility-host {
+    transition: none;
+  }
+}

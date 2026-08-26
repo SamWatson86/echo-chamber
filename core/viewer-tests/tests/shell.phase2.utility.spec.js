@@ -850,6 +850,8 @@ test("changed Stage-module assets share one cache cohort", async ({ page }) => {
     }));
   }, [
     "clubhouse-shell.css",
+    "phone-presentation.css",
+    "phone-presentation.js",
     "state.js",
     "soundboard.js",
     "participants-grid.js",
