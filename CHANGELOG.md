@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.36
+
+- Sessions: Active participant credentials renew before expiration without replacing the connected room or media; only a confirmed viewer update triggers the reconnect banner, while expired authentication and transient network failures report truthfully.
+- Screen Audio: Browser and compatibility-fallback shares are video-only, and native Windows shares label their audio route while excluding Echo playback from supported system-audio capture.
+- Game Capture: Battlefield 6 routing now uses executable identity, with the exact-title match retained for older desktop clients.
+- Mobile: Phone browsers receive a dedicated People & Tools bottom sheet and bounded fullscreen-exit recovery without duplicating media or reconnecting the room.
+- Desktop Safety: Phone presentation behavior is exact-target gated; the established Windows stage, ultrawide containment, screen track identity, camera, microphone, and Jam paths remain protected by regression coverage.
+- Release: Desktop and control package versions are aligned at 0.6.36.
+
 ## 0.6.35
 
 - Mobile: Android Firefox presentation recovery now loads only on that exact browser target and can recover a stalled screen sink without changing shared desktop stage, ultrawide, fullscreen, or Jam behavior.
