@@ -1826,6 +1826,13 @@ async function connectToRoom({
       typeof window.EchoRoomSwitchState.commitConnectedAccessToken !== "function") {
     tokenCache.delete(roomId);
   }
+  commitConnectedParticipantToken({
+    controlUrl: controlUrl,
+    roomId: roomId,
+    identity: identity,
+    name: name,
+    token: currentAccessToken,
+  });
   _connectedRoomName = currentRoomName; // Heartbeat now safe to report this room
   // Recreate local participant card immediately so it's first in the list
   ensureParticipantCard({ identity: localIdentity, name }, true);
@@ -2246,6 +2253,7 @@ async function disconnect() {
   cleanupPrewarmedRooms(); // Clean up pre-warmed connections and token cache
   clearMedia();
   clearSoundboardState();
+  clearConnectedParticipantToken();
   currentAccessToken = "";
   if (openSoundboardButton) openSoundboardButton.disabled = true;
   if (openCameraLobbyButton) openCameraLobbyButton.disabled = true;

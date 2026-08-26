@@ -2,6 +2,206 @@
    AUTH — LiveKit client, admin tokens, room tokens, and prefetch
    ========================================================= */
 
+const PARTICIPANT_TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+const PARTICIPANT_TOKEN_REFRESH_RETRY_MS = 60 * 1000;
+
+function decodeParticipantTokenExpirationMs(token) {
+  try {
+    var part = String(token || "").split(".")[1];
+    if (!part) return null;
+    var normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    while (normalized.length % 4) normalized += "=";
+    var json;
+    if (typeof Buffer !== "undefined") {
+      json = Buffer.from(normalized, "base64").toString("utf8");
+    } else if (typeof atob === "function") {
+      var binary = atob(normalized);
+      var bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      json = typeof TextDecoder === "function"
+        ? new TextDecoder().decode(bytes)
+        : decodeURIComponent(Array.from(bytes, function (value) {
+            return "%" + value.toString(16).padStart(2, "0");
+          }).join(""));
+    } else {
+      return null;
+    }
+    var payload = JSON.parse(json);
+    return Number.isFinite(payload.exp) ? payload.exp * 1000 : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isParticipantTokenAuthorizationError(error) {
+  return !!error && (Number(error.status) === 401 || Number(error.status) === 403);
+}
+
+function createParticipantTokenLifecycle(options) {
+  var opts = options || {};
+  var now = typeof opts.now === "function" ? opts.now : Date.now;
+  var refreshMarginMs = Number.isFinite(opts.refreshMarginMs)
+    ? opts.refreshMarginMs
+    : PARTICIPANT_TOKEN_REFRESH_MARGIN_MS;
+  var refreshRetryMs = Number.isFinite(opts.refreshRetryMs)
+    ? opts.refreshRetryMs
+    : PARTICIPANT_TOKEN_REFRESH_RETRY_MS;
+  var getCurrentToken = opts.getCurrentToken;
+  var setCurrentToken = opts.setCurrentToken;
+  var getAdminToken = opts.getAdminToken;
+  var setAdminToken = opts.setAdminToken;
+  var getPassword = opts.getPassword;
+  var issueRoomToken = opts.issueRoomToken;
+  var renewAdminToken = opts.renewAdminToken;
+  var onTokenCommitted = typeof opts.onTokenCommitted === "function"
+    ? opts.onTokenCommitted
+    : function () {};
+
+  if (typeof getCurrentToken !== "function" ||
+      typeof setCurrentToken !== "function" ||
+      typeof getAdminToken !== "function" ||
+      typeof setAdminToken !== "function" ||
+      typeof getPassword !== "function" ||
+      typeof issueRoomToken !== "function" ||
+      typeof renewAdminToken !== "function") {
+    throw new Error("Participant token lifecycle dependencies are incomplete");
+  }
+
+  var generation = 0;
+  var active = null;
+  var inFlight = null;
+
+  function commitConnected(context) {
+    if (!context || !context.controlUrl || !context.roomId ||
+        !context.identity || !context.token) {
+      throw new Error("Connected participant token context is incomplete");
+    }
+    generation += 1;
+    active = {
+      generation: generation,
+      controlUrl: context.controlUrl,
+      roomId: context.roomId,
+      identity: context.identity,
+      name: context.name || "Viewer",
+      token: context.token,
+      expiresAtMs: decodeParticipantTokenExpirationMs(context.token),
+      refreshNotBeforeMs: 0,
+    };
+    inFlight = null;
+    return generation;
+  }
+
+  function clearConnected() {
+    generation += 1;
+    active = null;
+    inFlight = null;
+  }
+
+  function captureActive(expectedToken) {
+    if (!active) return null;
+    var currentToken = getCurrentToken();
+    if (!currentToken || currentToken !== active.token) return null;
+    if (expectedToken && expectedToken !== currentToken) return null;
+    return {
+      generation: active.generation,
+      controlUrl: active.controlUrl,
+      roomId: active.roomId,
+      identity: active.identity,
+      name: active.name,
+      token: active.token,
+      expiresAtMs: active.expiresAtMs,
+    };
+  }
+
+  function isCaptureCurrent(capture) {
+    return !!capture && !!active &&
+      generation === capture.generation &&
+      active.generation === capture.generation &&
+      active.controlUrl === capture.controlUrl &&
+      active.roomId === capture.roomId &&
+      active.identity === capture.identity &&
+      active.token === capture.token &&
+      getCurrentToken() === capture.token;
+  }
+
+  async function performRefresh(capture) {
+    try {
+      var nextToken;
+      var currentAdminToken = getAdminToken();
+      try {
+        nextToken = await issueRoomToken(capture, currentAdminToken);
+      } catch (error) {
+        if (!isParticipantTokenAuthorizationError(error)) throw error;
+        var password = getPassword();
+        if (!password) throw error;
+        var renewedAdminToken = await renewAdminToken(capture.controlUrl, password);
+        if (!isCaptureCurrent(capture)) return { status: "superseded" };
+        setAdminToken(renewedAdminToken);
+        nextToken = await issueRoomToken(capture, renewedAdminToken);
+      }
+
+      if (typeof nextToken !== "string" || !nextToken) {
+        throw new Error("Participant token refresh returned an empty token");
+      }
+      if (!isCaptureCurrent(capture)) return { status: "superseded" };
+
+      setCurrentToken(nextToken);
+      active.token = nextToken;
+      active.expiresAtMs = decodeParticipantTokenExpirationMs(nextToken);
+      active.refreshNotBeforeMs = 0;
+      onTokenCommitted({
+        controlUrl: capture.controlUrl,
+        roomId: capture.roomId,
+        identity: capture.identity,
+        previousToken: capture.token,
+        token: nextToken,
+      });
+      return { status: "refreshed", token: nextToken, previousToken: capture.token };
+    } catch (error) {
+      if (isCaptureCurrent(capture)) active.refreshNotBeforeMs = now() + refreshRetryMs;
+      return { status: "failed", error: error };
+    }
+  }
+
+  function ensureFresh(options) {
+    var request = options || {};
+    var capture = captureActive(request.expectedToken);
+    if (!capture) {
+      return Promise.resolve({ status: active ? "superseded" : "inactive" });
+    }
+    var due = Number.isFinite(capture.expiresAtMs) &&
+      capture.expiresAtMs - now() <= refreshMarginMs;
+    if (request.force !== true && !due) {
+      return Promise.resolve({ status: "current", token: capture.token });
+    }
+    if (request.force !== true && active.refreshNotBeforeMs > now()) {
+      return Promise.resolve({ status: "deferred", token: capture.token });
+    }
+    if (inFlight &&
+        inFlight.generation === capture.generation &&
+        inFlight.token === capture.token) {
+      return inFlight.promise;
+    }
+
+    var refresh = performRefresh(capture);
+    inFlight = {
+      generation: capture.generation,
+      token: capture.token,
+      promise: refresh,
+    };
+    refresh.finally(function () {
+      if (inFlight && inFlight.promise === refresh) inFlight = null;
+    });
+    return refresh;
+  }
+
+  return {
+    commitConnected: commitConnected,
+    clearConnected: clearConnected,
+    ensureFresh: ensureFresh,
+  };
+}
+
 function getLiveKitClient() {
   return window.LiveKitClient || window.LivekitClient || window.LiveKit;
 }
@@ -12,7 +212,11 @@ async function fetchAdminToken(baseUrl, password) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
   });
-  if (!login.ok) throw new Error(`Login failed (${login.status})`);
+  if (!login.ok) {
+    const error = new Error(`Login failed (${login.status})`);
+    error.status = login.status;
+    throw error;
+  }
   const loginData = await login.json();
   return loginData.token;
 }
@@ -32,10 +236,67 @@ async function fetchRoomToken(baseUrl, adminToken, room, identity, name) {
       participantAuthKey: ensureParticipantAuthKey()
     }),
   });
-  if (token.status === 409) throw new Error("Name is already in use by another connected user. Please choose a different name.");
-  if (!token.ok) throw new Error(`Token failed (${token.status})`);
+  if (token.status === 409) {
+    const error = new Error("Name is already in use by another connected user. Please choose a different name.");
+    error.status = token.status;
+    throw error;
+  }
+  if (!token.ok) {
+    const error = new Error(`Token failed (${token.status})`);
+    error.status = token.status;
+    throw error;
+  }
   const tokenData = await token.json();
   return tokenData.token;
+}
+
+// The participant token authenticates heartbeat, Jam reconnects, chat, and
+// native-presenter requests after LiveKit has connected. Rotate that shared
+// credential without replacing the active LiveKit Room or its media tracks.
+var _participantTokenLifecycle = typeof window !== "undefined"
+  ? createParticipantTokenLifecycle({
+      getCurrentToken: function() { return currentAccessToken; },
+      setCurrentToken: function(token) { currentAccessToken = token; },
+      getAdminToken: function() { return adminToken; },
+      setAdminToken: function(token) { adminToken = token; },
+      getPassword: function() {
+        var current = passwordInput && passwordInput.value ? passwordInput.value : "";
+        if (current) return current;
+        try { return echoGet(REMEMBER_PASS_KEY) || ""; } catch (_) { return ""; }
+      },
+      issueRoomToken: function(context, token) {
+        return fetchRoomToken(
+          context.controlUrl,
+          token,
+          context.roomId,
+          context.identity,
+          context.name
+        );
+      },
+      renewAdminToken: fetchAdminToken,
+      onTokenCommitted: function(context) {
+        tokenCache.delete(context.roomId);
+        debugLog("[participant-token] refreshed active room credential");
+      },
+    })
+  : null;
+
+function commitConnectedParticipantToken(context) {
+  if (!_participantTokenLifecycle) {
+    throw new Error("Participant token lifecycle helper is unavailable");
+  }
+  return _participantTokenLifecycle.commitConnected(context);
+}
+
+function clearConnectedParticipantToken() {
+  _participantTokenLifecycle?.clearConnected();
+}
+
+function ensureFreshParticipantToken(options) {
+  if (!_participantTokenLifecycle) {
+    return Promise.resolve({ status: "failed", error: new Error("Participant token lifecycle helper is unavailable") });
+  }
+  return _participantTokenLifecycle.ensureFresh(options);
 }
 
 async function ensureRoomExists(baseUrl, adminToken, roomId) {
@@ -323,4 +584,12 @@ async function bootAdminFromStorage() {
     renderAdminBadge();
     // Intentionally do NOT auto-open the panel on restore.
   }
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    PARTICIPANT_TOKEN_REFRESH_MARGIN_MS,
+    decodeParticipantTokenExpirationMs,
+    createParticipantTokenLifecycle,
+  };
 }

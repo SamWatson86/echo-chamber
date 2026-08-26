@@ -124,6 +124,33 @@ and Git SHA, `/health` is OK, and the host log's control path exactly matches
 the immutable `control_exe` path in the active host JSON. Do not use a stale
 hard-coded version or checkout path as release evidence.
 
+## Restart and disconnect incident triage
+
+Gather evidence before restarting Echo. Record the current `EchoCoreHost`,
+control, LiveKit, and TURN process IDs and creation times, then correlate the
+incident timestamp with the Windows System log and LiveKit/control logs.
+
+- Unchanged Echo process IDs plus Intel `e2fnexpress` Event ID 27 followed by
+  Event ID 32 means the host Ethernet link dropped and recovered; it is not an
+  Echo server restart.
+- A new host or direct-child process ID is evidence of an actual service or
+  child-process restart. Complete the normal version, health, listener, LAN,
+  and off-LAN checks before assigning a cause.
+- One identity showing DTLS/ICE timeouts with no host link event points to that
+  endpoint or its network path.
+- Multiple identities dropping together with no host link event requires
+  broader network/log correlation, but still does not justify a speculative
+  service restart.
+
+For a recurring host link drop, isolate one physical variable at a time while
+users are signed off. First replace only the Ethernet cable, then require zero
+new Event ID 27 records for seven days and three multi-user sessions. If it
+recurs, change only the switch/router port and repeat the same gate. If it still
+recurs, verify the exact adapter and property before disabling only Energy
+Efficient Ethernet, expect a link reset, and repeat the full network checks and
+gate. Stop and review the evidence before changing drivers, BIOS, offloads,
+MTU, NIC hardware, TURN policy, or adding a watchdog.
+
 ## Start / stop
 
 From repo root:

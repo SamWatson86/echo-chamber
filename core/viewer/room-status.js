@@ -6,6 +6,7 @@
 var _updateCheckTimer = null;
 var _updateDismissed = false;
 var _heartbeatAbort = null; // AbortController for in-flight heartbeat — prevents ghost presence (#50)
+var _heartbeatResumeHandler = null;
 
 // ─── Who's Online polling (pre-connect) ───
 async function fetchOnlineUsers(controlUrl) {
@@ -268,100 +269,10 @@ function showUpdateBanner(version) {
   document.body.appendChild(banner);
 }
 
-// ─── Stale Version Banner (FORCED — non-dismissable, auto-reloads) ───
-// When heartbeat reports stale: true (server has been restarted/updated),
+// ─── Updated Viewer Banner (FORCED — non-dismissable, auto-reloads) ───
+// When an authenticated heartbeat reports stale: true,
 // show a full-width banner with a 5-second countdown, then force window.location.reload().
-// Friends were getting stuck talking to no one after server restarts because they didn't
-// know to refresh. This makes it impossible to miss.
-//
-// Plays a 5-second procedural smooth-jazz ii-V-I chord progression (Dm7 → G7 → Cmaj7)
-// via Web Audio API, with a robot-voiced "The server is restarting" via SpeechSynthesis
-// layered on top. Entirely synthesized — no audio files.
 var _staleReloadTimer = null;
-
-function playStaleJazz() {
-  try {
-    var AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return;
-    var ctx = new AC();
-    var now = ctx.currentTime;
-
-    // Master gain — keep it gentle, this is smooth jazz not metal
-    var master = ctx.createGain();
-    master.gain.value = 0.18;
-    master.connect(ctx.destination);
-
-    // Soft hi-pass to remove muddiness
-    var filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.value = 2400;
-    filter.Q.value = 0.7;
-    filter.connect(master);
-
-    // ii-V-I in C major: Dm7 → G7 → Cmaj7
-    // Each chord ≈ 1.5s, total ≈ 4.5s of music + 0.5s tail
-    var chords = [
-      { time: 0.0, dur: 1.5, freqs: [146.83, 220.00, 261.63, 349.23] }, // Dm7  (D2, A3, C4, F4)
-      { time: 1.5, dur: 1.5, freqs: [196.00, 246.94, 349.23, 440.00] }, // G7   (G3, B3, F4, A4)
-      { time: 3.0, dur: 2.0, freqs: [130.81, 261.63, 329.63, 493.88] }, // Cmaj7 (C3, C4, E4, B4)
-    ];
-
-    chords.forEach(function(ch) {
-      ch.freqs.forEach(function(f, idx) {
-        // Two layered oscillators per note for warmth: sine (fundamental) + triangle (slight detune)
-        ["sine", "triangle"].forEach(function(type, layer) {
-          var osc = ctx.createOscillator();
-          osc.type = type;
-          osc.frequency.value = f * (layer === 1 ? 1.003 : 1.0); // tiny detune on layer 2
-
-          var g = ctx.createGain();
-          // Soft attack + release ADSR per note
-          var startT = now + ch.time;
-          var peakT = startT + 0.08;
-          var releaseT = startT + ch.dur - 0.15;
-          var endT = startT + ch.dur;
-          var peakGain = (layer === 0 ? 0.22 : 0.14) / Math.max(1, idx === 0 ? 1 : 1.4); // bass slightly louder
-          g.gain.setValueAtTime(0, startT);
-          g.gain.linearRampToValueAtTime(peakGain, peakT);
-          g.gain.linearRampToValueAtTime(peakGain * 0.7, releaseT);
-          g.gain.linearRampToValueAtTime(0, endT);
-
-          osc.connect(g).connect(filter);
-          osc.start(startT);
-          osc.stop(endT + 0.05);
-        });
-      });
-    });
-
-    // Robot voice over the top — layered around 1.0-4.0s so it sits in the chord progression
-    if (window.speechSynthesis && window.SpeechSynthesisUtterance) {
-      // Cancel anything currently speaking
-      window.speechSynthesis.cancel();
-      var utter = new SpeechSynthesisUtterance("The server is restarting");
-      utter.rate = 0.65;     // slow = more deliberate, more robotic
-      utter.pitch = 0.3;     // very low = robot
-      utter.volume = 0.95;
-      // Try to grab a robot/synthetic voice if one exists
-      var voices = window.speechSynthesis.getVoices();
-      var robotVoice = voices.find(function(v) {
-        return /microsoft david|google.*us|robot|synth/i.test(v.name);
-      });
-      if (robotVoice) utter.voice = robotVoice;
-      // Slight delay so the chord lands first
-      setTimeout(function() {
-        try { window.speechSynthesis.speak(utter); } catch (e) {}
-      }, 600);
-    }
-
-    // Clean up the audio context after the music finishes
-    setTimeout(function() {
-      try { ctx.close(); } catch (e) {}
-    }, 5500);
-  } catch (e) {
-    // Audio is best-effort — never block the reload
-    console.warn("[stale-banner] jazz playback failed:", e);
-  }
-}
 
 function showStaleBanner() {
   if (document.getElementById("stale-banner")) return;
@@ -369,11 +280,8 @@ function showStaleBanner() {
   banner.id = "stale-banner";
   banner.className = "stale-banner stale-banner-forced";
   banner.innerHTML =
-    '<span class="stale-banner-text">🎷 Server was updated — reloading in <strong class="stale-countdown">5</strong>s…</span>';
+    '<span class="stale-banner-text">Echo was updated — reconnecting in <strong class="stale-countdown">5</strong>s…</span>';
   document.body.appendChild(banner);
-
-  // Smooth jazz robot serenade
-  playStaleJazz();
 
   var secondsLeft = 5;
   var countdownEl = banner.querySelector(".stale-countdown");
@@ -397,14 +305,100 @@ function hideStaleBanner() {
   }
 }
 
+function showSessionExpiredBanner() {
+  if (document.getElementById("session-expired-banner")) return;
+  var banner = document.createElement("div");
+  banner.id = "session-expired-banner";
+  banner.className = "stale-banner";
+  banner.innerHTML = '<span>Session expired — reconnect to Echo.</span>';
+  document.body.appendChild(banner);
+}
+
+function hideSessionExpiredBanner() {
+  var banner = document.getElementById("session-expired-banner");
+  if (banner) banner.remove();
+}
+
 // ─── Heartbeat ───
 function startHeartbeat() {
   stopHeartbeat();
   const controlUrl = controlUrlInput.value.trim();
   if (!controlUrl || !currentAccessToken) return;
-  _heartbeatAbort = new AbortController();
+  const heartbeatAbort = new AbortController();
+  _heartbeatAbort = heartbeatAbort;
+  const postHeartbeat = (token, beatRoom, identity, name) => fetch(`${controlUrl}/v1/participants/heartbeat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ room: beatRoom, identity, name, viewer_version: _viewerVersion }),
+    signal: heartbeatAbort.signal,
+  });
+  var authRecoveryPromise = null;
+  const acceptHeartbeat = async (resp, beatToken, beatRoom, identity, name, mayRefresh) => {
+    if (resp.status === 401 || resp.status === 403) {
+      // A late response for a replaced participant token has no authority over
+      // the current session and must not trigger another refresh or any UI.
+      if (beatToken !== currentAccessToken) return;
+      if (mayRefresh) {
+        if (authRecoveryPromise) return authRecoveryPromise;
+        var recovery = (async function() {
+          const refreshed = await ensureFreshParticipantToken({
+            force: true,
+            expectedToken: beatToken,
+          });
+          if (_heartbeatAbort !== heartbeatAbort || heartbeatAbort.signal.aborted) return;
+          if (refreshed.status === "superseded" || refreshed.status === "inactive") return;
+          if (refreshed.status === "refreshed" && currentAccessToken !== beatToken) {
+            const retryToken = currentAccessToken;
+            const retry = await postHeartbeat(retryToken, beatRoom, identity, name);
+            return acceptHeartbeat(retry, retryToken, beatRoom, identity, name, false);
+          }
+          if (refreshed.status === "failed") {
+            var refreshStatus = Number(refreshed.error && refreshed.error.status);
+            var networkFailure = refreshed.error && refreshed.error.name === "TypeError";
+            if (networkFailure || refreshStatus === 429 || refreshStatus >= 500) return;
+          }
+          window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
+          showSessionExpiredBanner();
+        })();
+        authRecoveryPromise = recovery;
+        var clearRecovery = function() {
+          if (authRecoveryPromise === recovery) authRecoveryPromise = null;
+        };
+        recovery.then(clearRecovery, clearRecovery);
+        return recovery;
+      }
+      window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
+      showSessionExpiredBanner();
+      return;
+    }
+    if (resp.status !== 200) return;
+
+    const data = await resp.json().catch(() => null);
+    if (data && data.stale === true) {
+      hideSessionExpiredBanner();
+      window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
+      showStaleBanner();
+    } else if (data && data.stale === false) {
+      hideStaleBanner();
+      hideSessionExpiredBanner();
+      if (beatToken === currentAccessToken) {
+        window.EchoWebDiagnosticsRuntime?.heartbeatSucceeded?.({
+          controlUrl,
+          token: beatToken,
+        });
+      }
+    } else {
+      window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
+    }
+  };
   const sendBeat = async () => {
-    if (!_heartbeatAbort || _heartbeatAbort.signal.aborted) return;
+    if (_heartbeatAbort !== heartbeatAbort || heartbeatAbort.signal.aborted) return;
+    const expectedToken = currentAccessToken;
+    const freshness = await ensureFreshParticipantToken({ expectedToken: expectedToken });
+    if (_heartbeatAbort !== heartbeatAbort || heartbeatAbort.signal.aborted) return;
+    if (freshness.status === "failed") {
+      debugLog("[participant-token] scheduled refresh failed; heartbeat will use the current credential");
+    }
     const beatToken = currentAccessToken;
     const identity = identityInput ? identityInput.value : "";
     const name = nameInput.value.trim() || "Viewer";
@@ -412,40 +406,18 @@ function startHeartbeat() {
       ? roomSwitchState.heartbeatRoomName()
       : currentRoomName;
     try {
-      const resp = await fetch(`${controlUrl}/v1/participants/heartbeat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${beatToken}` },
-        body: JSON.stringify({ room: beatRoom, identity, name, viewer_version: _viewerVersion }),
-        signal: _heartbeatAbort.signal,
-      });
-      if (resp.status === 401 || resp.status === 403) {
-        window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
-        // A control restart clears the in-memory participant binding even when
-        // the old LiveKit JWT still verifies cryptographically. Treat that as
-        // the same forced-stale condition as an explicit stale heartbeat so the
-        // viewer reloads, obtains a fresh binding, and rejoins cleanly.
-        showStaleBanner();
-      } else if (resp.ok) {
-        const data = await resp.json().catch(() => null);
-        if (data && data.stale === true) {
-          window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
-          showStaleBanner();
-        } else if (data && data.stale === false) {
-          hideStaleBanner();
-          if (beatToken === currentAccessToken) {
-            window.EchoWebDiagnosticsRuntime?.heartbeatSucceeded?.({
-              controlUrl,
-              token: beatToken,
-            });
-          }
-        } else {
-          window.EchoWebDiagnosticsRuntime?.invalidateHeartbeat?.();
-        }
-      }
+      const resp = await postHeartbeat(beatToken, beatRoom, identity, name);
+      await acceptHeartbeat(resp, beatToken, beatRoom, identity, name, true);
     } catch {}
   };
   sendBeat();
   heartbeatTimer = setInterval(sendBeat, 10000);
+  _heartbeatResumeHandler = function() {
+    if (document.hidden === true || navigator.onLine === false) return;
+    sendBeat();
+  };
+  document.addEventListener("visibilitychange", _heartbeatResumeHandler);
+  window.addEventListener("online", _heartbeatResumeHandler);
 }
 
 function stopHeartbeat() {
@@ -459,6 +431,12 @@ function stopHeartbeat() {
     _heartbeatAbort.abort();
     _heartbeatAbort = null;
   }
+  if (_heartbeatResumeHandler) {
+    document.removeEventListener("visibilitychange", _heartbeatResumeHandler);
+    window.removeEventListener("online", _heartbeatResumeHandler);
+    _heartbeatResumeHandler = null;
+  }
+  hideSessionExpiredBanner();
 }
 
 function sendLeaveNotification() {
