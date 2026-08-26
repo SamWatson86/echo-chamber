@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "v0.6.36",
+    title: "Safer Sharing & Phone Controls",
+    notes: [
+      "Long Echo sessions renew quietly, and only a confirmed viewer update can trigger the reconnect banner.",
+      "Browser sharing is video-only for safety; the Windows app identifies Battlefield 6 by its executable and excludes Echo voices from supported system-audio capture.",
+      "Phones get a dedicated People & Tools bottom sheet and bounded fullscreen recovery while the desktop and ultrawide stage stay on their established path."
+    ]
+  },
+  {
     version: "v0.6.35",
     title: "Safer Mobile Screens & Jam Recovery",
     notes: [
