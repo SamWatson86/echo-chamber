@@ -116,6 +116,19 @@ function loadParticipantsAvatar({ deviceId, imageResults, isLocal = false } = {}
   return { context, avatar, card };
 }
 
+function loadScreenAudioStateHarness() {
+  const harness = loadParticipantsAvatar();
+  harness.context.roomAudioMuted = false;
+  harness.context.screenTileByIdentity = new Map();
+  harness.context.participantState = new Map();
+  vm.runInContext(
+    fs.readFileSync(path.join(__dirname, "audio-routing.js"), "utf8"),
+    harness.context,
+    { filename: "audio-routing.js" }
+  );
+  return harness;
+}
+
 test("remote avatar falls back to the server identity avatar when no broadcast URL arrived", () => {
   const { context, avatar } = loadParticipantsAvatar();
 
@@ -172,3 +185,53 @@ for (const isLocal of [true, false]) {
     assert.equal(card.classList.contains("has-camera"), false);
   });
 }
+
+test("visible screen restore preserves authoritative zero, mute, room mute, and boost gain", () => {
+  const { context } = loadScreenAudioStateHarness();
+  const identity = "jeff-1";
+  const audio = { muted: true, volume: 0 };
+  const gain = { gain: { gain: { value: -1 } } };
+  const state = {
+    micAudioEls: new Set(),
+    micGainNodes: new Map(),
+    micVolume: 1,
+    micUserMuted: false,
+    screenAudioEls: new Set([audio]),
+    screenGainNodes: new Map([[audio, gain]]),
+    screenVolume: 0,
+    screenUserMuted: false,
+  };
+  const tile = { style: { display: "none" } };
+  context.participantState.set(identity, state);
+  context.screenTileByIdentity.set(identity, tile);
+
+  context.restoreVisibleScreenAudioState(identity);
+  assert.equal(tile.style.display, "");
+  assert.equal(audio.muted, false);
+  assert.equal(gain.gain.gain.value, 0);
+
+  audio.muted = true;
+  state.screenVolume = 1.8;
+  state.screenUserMuted = true;
+  context.restoreVisibleScreenAudioState(identity);
+  assert.equal(audio.muted, false);
+  assert.equal(gain.gain.gain.value, 0);
+
+  state.screenUserMuted = false;
+  context.roomAudioMuted = true;
+  context.restoreVisibleScreenAudioState(identity);
+  assert.equal(gain.gain.gain.value, 0);
+
+  context.roomAudioMuted = false;
+  context.restoreVisibleScreenAudioState(identity);
+  assert.equal(gain.gain.gain.value, 1.8);
+});
+
+test("remote watch and local Stage show share the authoritative restore path", () => {
+  const source = fs.readFileSync(path.join(__dirname, "participants-avatar.js"), "utf8");
+  assert.equal(
+    Array.from(source.matchAll(/restoreVisibleScreenAudioState\(identity\);/g)).length,
+    2
+  );
+  assert.doesNotMatch(source, /screenVolume\s*\|\|\s*1/);
+});

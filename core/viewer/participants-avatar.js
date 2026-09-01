@@ -114,6 +114,21 @@ function getRemoteParticipantsForScreenIdentity(identity) {
   return matches;
 }
 
+function restoreVisibleScreenAudioState(identity) {
+  var tile = screenTileByIdentity.get(identity);
+  if (tile) tile.style.display = "";
+
+  var pState = participantState.get(identity);
+  if (!pState || !pState.screenAudioEls) return;
+  pState.screenAudioEls.forEach(function(el) {
+    // This mute belongs only to Stage hide/show. The authoritative volume
+    // application below must still enforce room mute, per-screen mute, zero,
+    // attenuation, and any existing boost GainNode.
+    el.muted = false;
+  });
+  applyParticipantAudioVolumes(pState);
+}
+
 function startWatchingScreenIdentity(identity, reason) {
   if (!identity) return;
 
@@ -121,18 +136,7 @@ function startWatchingScreenIdentity(identity, reason) {
   watchedScreens.add(identity);
 
   setParticipantScreenWatchAvailable(identity, true);
-
-  var tile = screenTileByIdentity.get(identity);
-  if (tile) tile.style.display = "";
-
-  var pState = participantState.get(identity);
-  if (pState && pState.screenAudioEls) {
-    pState.screenAudioEls.forEach(function(el) {
-      el.muted = false;
-      var gn = pState.screenGainNodes?.get(el);
-      if (gn) gn.gain.gain.value = pState.screenVolume || 1;
-    });
-  }
+  restoreVisibleScreenAudioState(identity);
 
   function formatPubState(pub, remote) {
     patchScreenCompanionSource(pub, pub?.track, remote);
@@ -947,15 +951,7 @@ function ensureParticipantCard(participant, isLocal = false) {
       var pState = participantState.get(identity);
       if (hiddenScreens.has(identity)) {
         hiddenScreens.delete(identity);
-        var tile = screenTileByIdentity.get(identity);
-        if (tile) tile.style.display = "";
-        if (pState && pState.screenAudioEls) {
-          pState.screenAudioEls.forEach(function(el) {
-            el.muted = false;
-            var gn = pState.screenGainNodes?.get(el);
-            if (gn) gn.gain.gain.value = pState.screenVolume || 1;
-          });
-        }
+        restoreVisibleScreenAudioState(identity);
       } else {
         hiddenScreens.add(identity);
         var tile = screenTileByIdentity.get(identity);

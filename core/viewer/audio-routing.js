@@ -258,6 +258,23 @@ function applyParticipantAudioVolumes(state) {
   });
 }
 
+// Screen audio and video are separate LiveKit publications and can subscribe in
+// either order. Keep the Stage control derived from the already-attached audio
+// state so a video tile created after its audio does not stay at the hidden,
+// default-volume state until the viewer reconnects.
+function syncScreenAudioVolumeControl(identity, tile) {
+  var state = participantState.get(identity);
+  var screenTile = tile || screenTileByIdentity.get(identity);
+  if (!state || !screenTile?._volWrap) return;
+  var hasAttachedAudio = Array.from(state.screenAudioEls || []).some(function(element) {
+    return element?.isConnected;
+  });
+  screenTile._volWrap.classList.toggle("hidden", !hasAttachedAudio);
+  if (hasAttachedAudio && screenTile._volSlider) {
+    screenTile._volSlider.value = state.screenVolume;
+  }
+}
+
 function updateActiveSpeakerUi() {
   participantCards.forEach((cardRef, identity) => {
     const micEl = cardRef.micStatusEl;
@@ -497,6 +514,7 @@ function handleTrackSubscribed(track, publication, participant) {
     const existingTile = screenTileByIdentity.get(identity) || (screenTrackSid ? screenTileBySid.get(screenTrackSid) : null);
     if (existingTile && existingTile.isConnected) {
       stampScreenTileGeneration(existingTile, publication, identity, participant, track, room);
+      syncScreenAudioVolumeControl(identity, existingTile);
       const existingVideo = existingTile.querySelector("video");
       if (!hiddenScreens.has(identity)) {
         existingTile.style.display = "";
@@ -612,6 +630,7 @@ function handleTrackSubscribed(track, publication, participant) {
       screenResubscribeIntent.delete(screenTrackSid);
     }
     screenTileByIdentity.set(effectiveParticipant.identity, tile);
+    syncScreenAudioVolumeControl(effectiveParticipant.identity, tile);
     // Start inbound stats monitor for remote screen shares
     var _isLocalTile = room && room.localParticipant && effectiveParticipant.identity === room.localParticipant.identity;
     if (!_isLocalTile) startInboundScreenStatsMonitor();
@@ -759,12 +778,7 @@ function handleTrackSubscribed(track, publication, participant) {
     if (source === LK.Track.Source.ScreenShareAudio) {
       state.screenAudioSid = getTrackSid(publication, track, `${effectiveParticipant.identity}-screen-audio`);
       state.screenAudioEls.add(element);
-      // Show volume slider on the screen tile now that audio is attached
-      var screenTile = screenTileByIdentity.get(effectiveParticipant.identity);
-      if (screenTile && screenTile._volWrap) {
-        screenTile._volWrap.classList.remove("hidden");
-        if (screenTile._volSlider) screenTile._volSlider.value = state.screenVolume;
-      }
+      syncScreenAudioVolumeControl(effectiveParticipant.identity);
       // Mute screen audio if user has unwatched this screen share
       if (hiddenScreens.has(effectiveParticipant.identity)) {
         element.muted = true;
@@ -959,6 +973,7 @@ function handleTrackUnsubscribed(track, publication, participant) {
                 if (pState.screenAnalyser?.cleanup) pState.screenAnalyser.cleanup();
                 pState.screenAnalyser = null;
               }
+              syncScreenAudioVolumeControl(identity);
             }
           } else {
             debugLog(`screen share audio kept (track returned): ${identity} sid=${trackSid}`);
@@ -1015,6 +1030,7 @@ function handleTrackUnsubscribed(track, publication, participant) {
             }
             state.screenAnalyser = null;
           }
+          syncScreenAudioVolumeControl(stateIdentity);
         } else {
           cleanupGainNode(state, audioEl, false);
           state.micAudioEls.delete(audioEl);
