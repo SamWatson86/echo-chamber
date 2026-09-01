@@ -57,6 +57,65 @@ use crate::native_presenter::{
 
 const DEFAULT_SERVER: &str = "https://echo.fellowshipoftheboatrace.party:9443";
 
+/// Linearizes native audio start/stop commands across viewer reloads.
+///
+/// A navigation creates a fresh JavaScript context, so viewer-side promises
+/// cannot fence an older in-flight Tauri command. Every command reserves a
+/// generation before any await, then installs or stops capture only while it
+/// owns this gate and is still the newest command.
+struct AudioCaptureCommandCoordinator {
+    generation: std::sync::atomic::AtomicU64,
+    gate: std::sync::Mutex<()>,
+}
+
+impl AudioCaptureCommandCoordinator {
+    const fn new() -> Self {
+        Self {
+            generation: std::sync::atomic::AtomicU64::new(0),
+            gate: std::sync::Mutex::new(()),
+        }
+    }
+
+    fn reserve(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(1)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.gate.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+static AUDIO_CAPTURE_COMMANDS: AudioCaptureCommandCoordinator =
+    AudioCaptureCommandCoordinator::new();
+
+fn audio_capture_command_superseded() -> String {
+    "Native audio command was superseded by a newer start or stop".to_string()
+}
+
+#[cfg(test)]
+mod audio_capture_command_coordinator_tests {
+    use super::AudioCaptureCommandCoordinator;
+
+    #[test]
+    fn newest_reservation_fences_old_start_and_stale_stop() {
+        let commands = AudioCaptureCommandCoordinator::new();
+        let old_start = commands.reserve();
+        let stale_stop = commands.reserve();
+        let replacement_start = commands.reserve();
+
+        let _gate = commands.lock();
+        assert!(!commands.is_current(old_start));
+        assert!(!commands.is_current(stale_stop));
+        assert!(commands.is_current(replacement_start));
+    }
+}
+
 #[derive(Deserialize)]
 struct Config {
     server: Option<String>,
@@ -420,24 +479,116 @@ fn list_capturable_windows() -> Vec<audio_capture::WindowInfo> {
 }
 
 #[tauri::command]
-fn start_audio_capture(app: tauri::AppHandle, pid: u32) -> Result<(), String> {
-    audio_capture::start_capture(pid, app).map_err(|e| e.to_string())
+async fn start_audio_capture(app: tauri::AppHandle, pid: u32) -> Result<(), String> {
+    let generation = AUDIO_CAPTURE_COMMANDS.reserve();
+    tokio::task::spawn_blocking(move || {
+        let _gate = AUDIO_CAPTURE_COMMANDS.lock();
+        if !AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+            return Err(audio_capture_command_superseded());
+        }
+
+        let result = audio_capture::start_capture(pid, app).map_err(|error| error.to_string());
+        if !AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+            audio_capture::stop_capture();
+            return Err(audio_capture_command_superseded());
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("Process audio capture startup task failed: {}", error))?
+}
+
+#[cfg(target_os = "windows")]
+async fn current_webview2_browser_process_id(app: &tauri::AppHandle) -> Result<u32, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Echo main WebView2 window is not available".to_string())?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    window
+        .with_webview(move |webview| {
+            let result = unsafe {
+                (|| {
+                    let core_webview = webview
+                        .controller()
+                        .CoreWebView2()
+                        .map_err(|error| format!("Cannot access Echo CoreWebView2: {}", error))?;
+                    let mut browser_pid = 0_u32;
+                    core_webview
+                        .BrowserProcessId(&mut browser_pid)
+                        .map_err(|error| {
+                            format!("Cannot read CoreWebView2 BrowserProcessId: {}", error)
+                        })?;
+                    Ok(browser_pid)
+                })()
+            };
+            let _ = tx.send(result);
+        })
+        .map_err(|error| format!("Cannot inspect Echo's WebView2 process: {}", error))?;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .map_err(|_| "Timed out reading CoreWebView2 BrowserProcessId".to_string())?
+        .map_err(|_| "CoreWebView2 BrowserProcessId lookup was cancelled".to_string())?
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_attested_system_audio_capture_excluding_echo(
+    app: tauri::AppHandle,
+) -> Result<audio_capture::SystemAudioIsolationAttestation, String> {
+    let generation = AUDIO_CAPTURE_COMMANDS.reserve();
+    let browser_pid_result = current_webview2_browser_process_id(&app).await;
+    if !AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+        return Err(audio_capture_command_superseded());
+    }
+    let browser_pid = browser_pid_result?;
+    tokio::task::spawn_blocking(move || {
+        let _gate = AUDIO_CAPTURE_COMMANDS.lock();
+        if !AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+            return Err(audio_capture_command_superseded());
+        }
+
+        let result = audio_capture::start_attested_system_capture_excluding_echo(browser_pid, app)
+            .map_err(|error| error.to_string());
+        if !AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+            audio_capture::stop_capture();
+            return Err(audio_capture_command_superseded());
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("System audio capture startup task failed: {}", error))?
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+async fn start_attested_system_audio_capture_excluding_echo(
+    app: tauri::AppHandle,
+) -> Result<audio_capture::SystemAudioIsolationAttestation, String> {
+    let generation = AUDIO_CAPTURE_COMMANDS.reserve();
+    let _gate = AUDIO_CAPTURE_COMMANDS.lock();
+    if !AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+        return Err(audio_capture_command_superseded());
+    }
+    audio_capture::start_attested_system_capture_excluding_echo(0, app)
 }
 
 #[tauri::command]
-fn start_system_audio_capture(app: tauri::AppHandle) -> Result<(), String> {
-    audio_capture::start_system_capture(app).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn start_system_audio_capture_excluding_echo(app: tauri::AppHandle) -> Result<(), String> {
-    audio_capture::start_system_capture_excluding_echo(app).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn stop_audio_capture() -> Result<(), String> {
-    audio_capture::stop_capture();
-    Ok(())
+async fn stop_audio_capture() -> Result<(), String> {
+    let generation = AUDIO_CAPTURE_COMMANDS.reserve();
+    tokio::task::spawn_blocking(move || {
+        let _gate = AUDIO_CAPTURE_COMMANDS.lock();
+        if AUDIO_CAPTURE_COMMANDS.is_current(generation) {
+            // A newer start always calls stop_capture() under this same gate
+            // before installing its replacement. Therefore a stale stop may
+            // safely no-op instead of tearing down that newer owner.
+            audio_capture::stop_capture();
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Audio capture stop task failed: {}", error))?
 }
 
 #[tauri::command]
@@ -761,8 +912,7 @@ fn main() {
             load_settings,
             list_capturable_windows,
             start_audio_capture,
-            start_system_audio_capture,
-            start_system_audio_capture_excluding_echo,
+            start_attested_system_audio_capture_excluding_echo,
             stop_audio_capture,
             list_audio_output_devices,
             check_for_updates,

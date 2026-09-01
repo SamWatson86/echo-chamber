@@ -33,6 +33,10 @@ const LOOPBACK_MODE_EXCLUDE_TREE: u32 = 1;
 const VT_BLOB: u16 = 65;
 const BITS_PER_BYTE: u16 = 8;
 const OWNED_CAPTURE_CHANNEL_CAPACITY: usize = 64;
+const WEBVIEW2_PROCESS_NAME: &str = "msedgewebview2.exe";
+const PROCESS_LOOPBACK_ACTIVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const ATTESTED_SYSTEM_CAPTURE_START_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(8);
 
 /// Manual repr(C) structs for process loopback activation params.
 /// These may not be available in all versions of the windows crate.
@@ -46,6 +50,77 @@ struct ProcessLoopbackParams {
 struct AudioClientActivationParams {
     activation_type: u32,
     loopback_params: ProcessLoopbackParams,
+}
+
+/// The VT_BLOB arm of PROPVARIANT, represented with the platform ABI instead
+/// of casting an under-aligned byte array. The blob points to activation
+/// parameters that remain live until ActivateAudioInterfaceAsync completes.
+#[repr(C)]
+struct ProcessLoopbackPropVariant {
+    vt: u16,
+    reserved1: u16,
+    reserved2: u16,
+    reserved3: u16,
+    blob: BLOB,
+}
+
+const _: [(); std::mem::size_of::<PROPVARIANT>()] =
+    [(); std::mem::size_of::<ProcessLoopbackPropVariant>()];
+const _: [(); std::mem::align_of::<PROPVARIANT>()] =
+    [(); std::mem::align_of::<ProcessLoopbackPropVariant>()];
+
+impl ProcessLoopbackPropVariant {
+    fn new(params: &mut AudioClientActivationParams) -> Self {
+        Self {
+            vt: VT_BLOB,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+            blob: BLOB {
+                cbSize: std::mem::size_of::<AudioClientActivationParams>() as u32,
+                pBlobData: params as *mut AudioClientActivationParams as *mut u8,
+            },
+        }
+    }
+
+    fn as_propvariant(&self) -> &PROPVARIANT {
+        // SAFETY: ProcessLoopbackPropVariant is repr(C), has the same size and
+        // alignment as PROPVARIANT, and models its VT_BLOB arm exactly. Unit
+        // tests lock those ABI properties down for the compiled target.
+        unsafe { &*(self as *const Self as *const PROPVARIANT) }
+    }
+}
+
+/// Heap-stable activation data owned by the COM completion handler.
+///
+/// `ActivateAudioInterfaceAsync` may still be using the PROPVARIANT after the
+/// initiating thread's bounded wait times out. Keeping both allocations inside
+/// the handler makes Windows' retained handler reference the lifetime owner,
+/// including a late completion after our local timeout.
+struct ProcessLoopbackActivationStorage {
+    _params: Box<AudioClientActivationParams>,
+    value: Box<ProcessLoopbackPropVariant>,
+}
+
+impl ProcessLoopbackActivationStorage {
+    fn new(pid: u32, process_loopback_mode: u32) -> Self {
+        let mut params = Box::new(AudioClientActivationParams {
+            activation_type: ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            loopback_params: ProcessLoopbackParams {
+                target_process_id: pid,
+                process_loopback_mode,
+            },
+        });
+        let value = Box::new(ProcessLoopbackPropVariant::new(params.as_mut()));
+        Self {
+            _params: params,
+            value,
+        }
+    }
+
+    fn propvariant_ptr(&self) -> *const PROPVARIANT {
+        self.value.as_propvariant() as *const PROPVARIANT
+    }
 }
 
 fn process_loopback_initialize_flags(use_autoconvert: bool) -> u32 {
@@ -108,6 +183,15 @@ pub struct WindowInfo {
     pub hwnd: u64,
     pub title: String,
     pub exe_name: String,
+}
+
+#[derive(Serialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemAudioIsolationAttestation {
+    pub isolation_mode: &'static str,
+    pub excluded_pid: u32,
+    pub excluded_process: String,
+    pub activation_started: bool,
 }
 
 /// Native process-loopback events for callers that own their capture handle.
@@ -303,6 +387,108 @@ fn process_session_id(pid: u32) -> Option<u32> {
     }
 }
 
+fn live_process_exe_name(pid: u32) -> std::result::Result<String, String> {
+    if pid == 0 {
+        return Err("WebView2 reported an invalid browser process ID".to_string());
+    }
+
+    unsafe {
+        let handle =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|error| {
+                format!(
+                    "WebView2 browser process {} is not available: {}",
+                    pid, error
+                )
+            })?;
+
+        let result = (|| {
+            let mut exit_code = 0_u32;
+            GetExitCodeProcess(handle, &mut exit_code).map_err(|error| {
+                format!(
+                    "Cannot verify WebView2 browser process {} state: {}",
+                    pid, error
+                )
+            })?;
+            if exit_code != STILL_ACTIVE.0 as u32 {
+                return Err(format!(
+                    "WebView2 browser process {} is no longer running",
+                    pid
+                ));
+            }
+
+            let mut buf = [0_u16; 260];
+            let mut size = buf.len() as u32;
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut size,
+            )
+            .map_err(|error| {
+                format!(
+                    "Cannot identify WebView2 browser process {}: {}",
+                    pid, error
+                )
+            })?;
+
+            let path = String::from_utf16_lossy(&buf[..size as usize]);
+            path.rsplit('\\')
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("WebView2 browser process {} has no executable name", pid))
+        })();
+
+        let _ = CloseHandle(handle);
+        result
+    }
+}
+
+fn validate_webview2_process_facts(
+    pid: u32,
+    process_name: &str,
+    process_session: Option<u32>,
+    echo_session: Option<u32>,
+) -> std::result::Result<String, String> {
+    if pid == 0 {
+        return Err("WebView2 reported an invalid browser process ID".to_string());
+    }
+    if !process_name.eq_ignore_ascii_case(WEBVIEW2_PROCESS_NAME) {
+        return Err(format!(
+            "WebView2 browser PID {} resolved to unexpected process {}",
+            pid, process_name
+        ));
+    }
+
+    let process_session = process_session.ok_or_else(|| {
+        format!(
+            "Cannot determine Windows session for WebView2 browser process {}",
+            pid
+        )
+    })?;
+    let echo_session =
+        echo_session.ok_or_else(|| "Cannot determine Echo's Windows session".to_string())?;
+    if process_session != echo_session {
+        return Err(format!(
+            "WebView2 browser process {} is in Windows session {}, not Echo session {}",
+            pid, process_session, echo_session
+        ));
+    }
+
+    Ok(WEBVIEW2_PROCESS_NAME.to_string())
+}
+
+fn validate_webview2_exclusion_target(pid: u32) -> std::result::Result<String, String> {
+    let process_name = live_process_exe_name(pid)?;
+    let echo_pid = unsafe { GetCurrentProcessId() };
+    validate_webview2_process_facts(
+        pid,
+        &process_name,
+        process_session_id(pid),
+        process_session_id(echo_pid),
+    )
+}
+
 fn select_root_process_pid_for_session(
     processes: &[(u32, u32, u32)],
     session_id: u32,
@@ -375,18 +561,6 @@ fn validate_selected_spotify_root_pid(
             expected_pid, selected_pid
         ))
     }
-}
-
-fn current_playback_feedback_exclusion_target() -> (String, u32) {
-    let exe_name = std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "Echo desktop".to_string());
-    let pid = unsafe { GetCurrentProcessId() };
-    (exe_name, pid)
 }
 
 fn system_audio_feedback_capture_loopback_mode() -> u32 {
@@ -577,66 +751,67 @@ pub fn start_capture(pid: u32, app: AppHandle) -> Result<()> {
     Ok(())
 }
 
-pub fn start_system_capture(app: AppHandle) -> Result<()> {
-    log_audio_capture("[audio-capture] start_system_capture requested");
-    stop_capture();
-
-    let running = Arc::new(AtomicBool::new(true));
-    let r2 = running.clone();
-    let sink = tauri_capture_sink(app);
-
-    let thread = std::thread::spawn(move || {
-        if let Err(e) = capture_system_loop(&sink, &r2) {
-            log_audio_capture(&format!("[audio-capture] error: {}", e));
-            sink(ProcessCaptureEvent::Error(e.to_string()));
-        }
-        sink(ProcessCaptureEvent::Stopped);
-        log_audio_capture("[audio-capture] thread exited");
-    });
-
-    *global_state().lock().unwrap() = Some(CaptureHandle {
-        running,
-        thread: Some(thread),
-    });
-
-    Ok(())
-}
-
-pub fn start_system_capture_excluding_echo(app: AppHandle) -> Result<()> {
-    if let Err(msg) = check_process_loopback_support() {
-        log_audio_capture(&format!("[audio-capture] {}", msg));
-        return Err(Error::new(E_FAIL, msg));
+pub fn start_attested_system_capture_excluding_echo(
+    exclude_pid: u32,
+    app: AppHandle,
+) -> Result<SystemAudioIsolationAttestation> {
+    if let Err(message) = check_process_loopback_support() {
+        log_audio_capture(&format!("[audio-capture] {}", message));
+        return Err(Error::new(E_FAIL, message));
     }
 
-    // Echo's WebView2 playback processes are children of this Tauri process.
-    // Target the current process tree directly so a stale or second Echo
-    // instance can never be selected for exclusion instead of this one.
-    let (exe_name, exclude_pid) = current_playback_feedback_exclusion_target();
+    // BrowserProcessId comes from the active CoreWebView2 instance. Validate
+    // the exact process before touching an existing capture or activating a
+    // new one; an untrusted/stale PID must fail closed.
+    let excluded_process = validate_webview2_exclusion_target(exclude_pid).map_err(|message| {
+        log_audio_capture(&format!(
+            "[audio-capture] isolation attestation failed: {}",
+            message
+        ));
+        Error::new(E_FAIL, message)
+    })?;
 
     log_audio_capture(&format!(
-        "[audio-capture] start_system_capture_excluding_echo requested exclude={} pid={}",
-        exe_name, exclude_pid
+        "[audio-capture] start_attested_system_capture_excluding_echo requested exclude={} pid={}",
+        excluded_process, exclude_pid
     ));
     stop_capture();
 
     let running = Arc::new(AtomicBool::new(true));
-    let r2 = running.clone();
-    let label = format!("system excluding {} tree", exe_name);
-    let sink = tauri_capture_sink(app);
+    let thread_running = running.clone();
+    let app_sink = tauri_capture_sink(app);
+    let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
+    let sink: ProcessCaptureSink = Arc::new(move |event| {
+        let startup_result = match &event {
+            ProcessCaptureEvent::Started { pid } => Some(Ok(*pid)),
+            ProcessCaptureEvent::Error(message) => Some(Err(message.clone())),
+            ProcessCaptureEvent::Stopped => Some(Err(
+                "System audio capture stopped before activation completed".to_string(),
+            )),
+            ProcessCaptureEvent::Format(_) | ProcessCaptureEvent::Data(_) => None,
+        };
+
+        app_sink(event);
+        if let Some(result) = startup_result {
+            let _ = startup_tx.try_send(result);
+        }
+    });
+    let thread_sink = sink.clone();
+    let label = format!("system excluding {} tree", excluded_process);
 
     let thread = std::thread::spawn(move || {
-        if let Err(e) = capture_loop(
+        if let Err(error) = capture_loop(
             exclude_pid,
             system_audio_feedback_capture_loopback_mode(),
             &label,
-            &sink,
-            &r2,
+            &thread_sink,
+            &thread_running,
         ) {
-            log_audio_capture(&format!("[audio-capture] error: {}", e));
-            sink(ProcessCaptureEvent::Error(e.to_string()));
+            log_audio_capture(&format!("[audio-capture] error: {}", error));
+            thread_sink(ProcessCaptureEvent::Error(error.to_string()));
         }
-        sink(ProcessCaptureEvent::Stopped);
-        log_audio_capture("[audio-capture] thread exited");
+        thread_sink(ProcessCaptureEvent::Stopped);
+        log_audio_capture("[audio-capture] attested system capture thread exited");
     });
 
     *global_state().lock().unwrap() = Some(CaptureHandle {
@@ -644,7 +819,42 @@ pub fn start_system_capture_excluding_echo(app: AppHandle) -> Result<()> {
         thread: Some(thread),
     });
 
-    Ok(())
+    match startup_rx.recv_timeout(ATTESTED_SYSTEM_CAPTURE_START_TIMEOUT) {
+        Ok(Ok(started_pid)) if started_pid == exclude_pid => Ok(SystemAudioIsolationAttestation {
+            isolation_mode: "webview2-process-tree",
+            excluded_pid: exclude_pid,
+            excluded_process,
+            activation_started: true,
+        }),
+        Ok(Ok(started_pid)) => {
+            stop_capture();
+            Err(Error::new(
+                E_FAIL,
+                format!(
+                    "System audio capture started for unexpected PID {} instead of {}",
+                    started_pid, exclude_pid
+                ),
+            ))
+        }
+        Ok(Err(message)) => {
+            stop_capture();
+            Err(Error::new(
+                E_FAIL,
+                format!("System audio capture activation failed: {}", message),
+            ))
+        }
+        Err(error) => {
+            stop_capture();
+            Err(Error::new(
+                E_FAIL,
+                format!(
+                    "System audio capture did not start within {} seconds: {}",
+                    ATTESTED_SYSTEM_CAPTURE_START_TIMEOUT.as_secs(),
+                    error
+                ),
+            ))
+        }
+    }
 }
 
 pub fn stop_capture() {
@@ -661,6 +871,7 @@ pub fn stop_capture() {
 #[implement(IActivateAudioInterfaceCompletionHandler)]
 struct ActivationHandler {
     tx: std::sync::mpsc::SyncSender<windows::core::Result<IAudioClient>>,
+    _activation_storage: ProcessLoopbackActivationStorage,
 }
 
 impl IActivateAudioInterfaceCompletionHandler_Impl for ActivationHandler_Impl {
@@ -949,29 +1160,6 @@ fn capture_with_audio_client(
     }
 }
 
-fn capture_system_loop(
-    sink: &ProcessCaptureSink,
-    running: &AtomicBool,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    unsafe {
-        log_audio_capture("[audio-capture] system capture_loop starting");
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
-        log_audio_capture("[audio-capture] COM initialized");
-
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-        let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
-        log_audio_capture("[audio-capture] got default render endpoint");
-
-        let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
-        log_audio_capture("[audio-capture] activated default render endpoint");
-
-        let result = capture_with_audio_client(client, sink, running, "system loopback", 0);
-        CoUninitialize();
-        result
-    }
-}
-
 // --- Main capture loop ---
 
 fn capture_loop(
@@ -989,37 +1177,17 @@ fn capture_loop(
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         log_audio_capture("[audio-capture] COM initialized");
 
-        // Build activation params
-        let params = AudioClientActivationParams {
-            activation_type: ACTIVATION_TYPE_PROCESS_LOOPBACK,
-            loopback_params: ProcessLoopbackParams {
-                target_process_id: pid,
-                process_loopback_mode,
-            },
-        };
         let params_size = std::mem::size_of::<AudioClientActivationParams>() as u32;
-
-        // Build PROPVARIANT with VT_BLOB pointing to our params.
-        // PROPVARIANT layout on x64:
-        //   offset 0:  vt (u16)
-        //   offset 2:  3x u16 reserved
-        //   offset 8:  BLOB.cbSize (u32)
-        //   offset 12: padding (u32)
-        //   offset 16: BLOB.pBlobData (*const u8)
-        let mut pv = [0u8; 24];
-        // VT_BLOB
-        *(pv.as_mut_ptr() as *mut u16) = VT_BLOB;
-        // cbSize at offset 8
-        *(pv.as_mut_ptr().add(8) as *mut u32) = params_size;
-        // pBlobData at offset 16
-        *(pv.as_mut_ptr().add(16) as *mut *const u8) =
-            &params as *const AudioClientActivationParams as *const u8;
-
-        let propvariant = &pv as *const _ as *const PROPVARIANT;
 
         // Completion handler
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler { tx }.into();
+        let activation_storage = ProcessLoopbackActivationStorage::new(pid, process_loopback_mode);
+        let propvariant = activation_storage.propvariant_ptr();
+        let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
+            tx,
+            _activation_storage: activation_storage,
+        }
+        .into();
 
         // Activate audio interface for process loopback
         // VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK = "VAD\\Process_Loopback"
@@ -1027,19 +1195,28 @@ fn capture_loop(
             "[audio-capture] calling ActivateAudioInterfaceAsync for PID {} (params_size={})",
             pid, params_size
         ));
-        let _operation = ActivateAudioInterfaceAsync(
+        let operation = ActivateAudioInterfaceAsync(
             w!("VAD\\Process_Loopback"),
             &IAudioClient::IID,
-            Some(propvariant),
+            Some(&*propvariant),
             &handler,
         )?;
         log_audio_capture(
             "[audio-capture] ActivateAudioInterfaceAsync call succeeded, waiting for completion...",
         );
 
-        // Wait for activation (5 second timeout)
-        let client = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+        // Wait for COM activation. The attested command has a longer outer
+        // deadline so successful activation still has time to Initialize and
+        // Start before the command decides startup failed.
+        let activation_result = rx.recv_timeout(PROCESS_LOOPBACK_ACTIVATION_TIMEOUT);
+
+        // The callback object owns the heap-stable PROPVARIANT and pointed-to
+        // activation params. Windows retains the callback until completion, so
+        // a late completion remains memory-safe after this local timeout.
+        drop(operation);
+        drop(handler);
+
+        let client = activation_result
             .map_err(|e| format!("activation timeout: {}", e))?
             .map_err(|e| {
                 log_audio_capture(&format!("[audio-capture] activation FAILED: {}", e));
@@ -1057,17 +1234,20 @@ fn capture_loop(
 mod tests {
     use super::{
         audio_capture_frame_diagnostic, audio_capture_peak_from_f32_bytes,
-        current_playback_feedback_exclusion_target, process_loopback_fallback_format,
-        process_loopback_initialize_flags, select_root_process_pid,
-        select_root_process_pid_for_session, system_audio_feedback_capture_loopback_mode,
-        system_loopback_initialize_flags, try_send_owned_capture_event,
-        validate_selected_spotify_root_pid, ProcessCaptureEvent, LOOPBACK_MODE_EXCLUDE_TREE,
+        process_loopback_fallback_format, process_loopback_initialize_flags,
+        select_root_process_pid, select_root_process_pid_for_session,
+        system_audio_feedback_capture_loopback_mode, system_loopback_initialize_flags,
+        try_send_owned_capture_event, validate_selected_spotify_root_pid,
+        validate_webview2_process_facts, AudioClientActivationParams, ProcessCaptureEvent,
+        ProcessLoopbackActivationStorage, ProcessLoopbackParams, ProcessLoopbackPropVariant,
+        SystemAudioIsolationAttestation, ATTESTED_SYSTEM_CAPTURE_START_TIMEOUT,
+        LOOPBACK_MODE_EXCLUDE_TREE, PROCESS_LOOPBACK_ACTIVATION_TIMEOUT, VT_BLOB,
     };
+    use windows::core::PROPVARIANT;
     use windows::Win32::Media::Audio::{
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         AUDCLNT_STREAMFLAGS_LOOPBACK,
     };
-    use windows::Win32::System::Threading::GetCurrentProcessId;
 
     #[test]
     fn process_loopback_fallback_uses_pcm16_format() {
@@ -1115,10 +1295,102 @@ mod tests {
     }
 
     #[test]
-    fn feedback_exclusion_targets_this_echo_process() {
-        let (_exe_name, selected_pid) = current_playback_feedback_exclusion_target();
+    fn process_loopback_propvariant_matches_native_abi() {
+        assert_eq!(
+            std::mem::size_of::<ProcessLoopbackPropVariant>(),
+            std::mem::size_of::<PROPVARIANT>()
+        );
+        assert_eq!(
+            std::mem::align_of::<ProcessLoopbackPropVariant>(),
+            std::mem::align_of::<PROPVARIANT>()
+        );
+        assert_eq!(std::mem::offset_of!(ProcessLoopbackPropVariant, blob), 8);
+    }
 
-        assert_eq!(selected_pid, unsafe { GetCurrentProcessId() });
+    #[test]
+    fn attested_start_deadline_exceeds_com_activation_deadline() {
+        assert!(ATTESTED_SYSTEM_CAPTURE_START_TIMEOUT > PROCESS_LOOPBACK_ACTIVATION_TIMEOUT);
+    }
+
+    #[test]
+    fn process_loopback_propvariant_points_to_live_activation_params() {
+        let mut params = AudioClientActivationParams {
+            activation_type: 1,
+            loopback_params: ProcessLoopbackParams {
+                target_process_id: 42,
+                process_loopback_mode: LOOPBACK_MODE_EXCLUDE_TREE,
+            },
+        };
+        let expected_params = &mut params as *mut AudioClientActivationParams as *mut u8;
+        let value = ProcessLoopbackPropVariant::new(&mut params);
+
+        assert_eq!(value.vt, VT_BLOB);
+        assert_eq!(
+            value.blob.cbSize,
+            std::mem::size_of::<AudioClientActivationParams>() as u32
+        );
+        assert_eq!(value.blob.pBlobData, expected_params);
+    }
+
+    #[test]
+    fn activation_storage_keeps_propvariant_and_params_heap_stable_when_moved() {
+        let storage = ProcessLoopbackActivationStorage::new(42, LOOPBACK_MODE_EXCLUDE_TREE);
+        let value_ptr_before_move = storage.propvariant_ptr();
+        let params_ptr_before_move = storage.value.blob.pBlobData;
+
+        let moved_storage = storage;
+
+        assert_eq!(moved_storage.propvariant_ptr(), value_ptr_before_move);
+        assert_eq!(moved_storage.value.blob.pBlobData, params_ptr_before_move);
+        assert_eq!(
+            moved_storage._params.as_ref() as *const AudioClientActivationParams as *mut u8,
+            params_ptr_before_move
+        );
+    }
+
+    #[test]
+    fn webview2_exclusion_target_requires_expected_live_session_identity() {
+        assert_eq!(
+            validate_webview2_process_facts(4242, "MSEdgeWebView2.exe", Some(3), Some(3)).unwrap(),
+            "msedgewebview2.exe"
+        );
+
+        assert!(
+            validate_webview2_process_facts(4242, "echo-core-client.exe", Some(3), Some(3))
+                .unwrap_err()
+                .contains("unexpected process")
+        );
+        assert!(
+            validate_webview2_process_facts(4242, "msedgewebview2.exe", Some(4), Some(3))
+                .unwrap_err()
+                .contains("not Echo session")
+        );
+        assert!(
+            validate_webview2_process_facts(0, "msedgewebview2.exe", Some(3), Some(3))
+                .unwrap_err()
+                .contains("invalid browser process ID")
+        );
+    }
+
+    #[test]
+    fn system_audio_isolation_attestation_serializes_camel_case_contract() {
+        let value = serde_json::to_value(SystemAudioIsolationAttestation {
+            isolation_mode: "webview2-process-tree",
+            excluded_pid: 4242,
+            excluded_process: "msedgewebview2.exe".to_string(),
+            activation_started: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "isolationMode": "webview2-process-tree",
+                "excludedPid": 4242,
+                "excludedProcess": "msedgewebview2.exe",
+                "activationStarted": true
+            })
+        );
     }
 
     #[test]

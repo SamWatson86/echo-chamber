@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-client"
-version = "0.6.36"
+version = "0.6.37"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "echo-core-control"
-version = "0.6.36"
+version = "0.6.37"
 dependencies = [
  "argon2",
  "axum",

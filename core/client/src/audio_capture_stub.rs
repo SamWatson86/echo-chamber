@@ -11,6 +11,15 @@ pub struct WindowInfo {
     pub exe_name: String,
 }
 
+#[derive(Serialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemAudioIsolationAttestation {
+    pub isolation_mode: &'static str,
+    pub excluded_pid: u32,
+    pub excluded_process: String,
+    pub activation_started: bool,
+}
+
 pub fn list_capturable_windows() -> Vec<WindowInfo> {
     Vec::new()
 }
@@ -19,11 +28,10 @@ pub fn start_capture(_pid: u32, _app: tauri::AppHandle) -> Result<(), String> {
     Err("Per-process audio capture is not supported on this platform. Share your screen with system audio enabled instead.".to_string())
 }
 
-pub fn start_system_capture(_app: tauri::AppHandle) -> Result<(), String> {
-    Err("System audio capture is not supported on this platform.".to_string())
-}
-
-pub fn start_system_capture_excluding_echo(_app: tauri::AppHandle) -> Result<(), String> {
+pub fn start_attested_system_capture_excluding_echo(
+    _excluded_pid: u32,
+    _app: tauri::AppHandle,
+) -> Result<SystemAudioIsolationAttestation, String> {
     Err("System audio capture is not supported on this platform.".to_string())
 }
 

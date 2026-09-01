@@ -1,9 +1,17 @@
 # Changelog
 
+## 0.6.37
+
+- Screen Audio: Battlefield 6 and entire-monitor sharing publish system audio only after the Windows app identifies Echo's exact WebView2 playback process tree and confirms the exclusion capture started.
+- App Audio: Normal Windows app and browser-window shares retain selected-process audio; the direct-browser and compatibility fallback remain video-only.
+- Reliability: Native screen-audio starts and stops are generation-fenced across viewer reloads, and failed or stale starts clean up without replacing a newer capture or publishing unverified audio.
+- Safety: The stage, video profiles, canvas sizing, screen geometry, ultrawide containment, microphone, camera, and Jam paths are unchanged.
+- Release: Desktop and control package versions are aligned at 0.6.37.
+
 ## 0.6.36
 
 - Sessions: Active participant credentials renew before expiration without replacing the connected room or media; only a confirmed viewer update triggers the reconnect banner, while expired authentication and transient network failures report truthfully.
-- Screen Audio: Browser and compatibility-fallback shares are video-only, and native Windows shares label their audio route while excluding Echo playback from supported system-audio capture.
+- Screen Audio: Browser and compatibility-fallback shares are video-only; selected Windows app audio remains available, while unverified monitor and Battlefield 6 system-audio routes fail closed.
 - Game Capture: Battlefield 6 routing now uses executable identity, with the exact-title match retained for older desktop clients.
 - Mobile: Phone browsers receive a dedicated People & Tools bottom sheet and bounded fullscreen-exit recovery without duplicating media or reconnecting the room.
 - Desktop Safety: Phone presentation behavior is exact-target gated; the established Windows stage, ultrawide containment, screen track identity, camera, microphone, and Jam paths remain protected by regression coverage.

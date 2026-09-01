@@ -107,6 +107,61 @@ function assertFloatArrayApprox(actual, expected) {
   }
 }
 
+function installNativeAudioRuntime(context, published, lifecycle) {
+  const state = lifecycle || {};
+  state.contextClosed = 0;
+  state.workletDisconnected = 0;
+  state.trackStopped = 0;
+  state.unlistened = 0;
+
+  context.getLiveKitClient = () => ({
+    Track: { Source: { ScreenShareAudio: "screen_share_audio" } },
+    LocalAudioTrack: class {
+      constructor(mediaStreamTrack) {
+        this.mediaStreamTrack = mediaStreamTrack;
+      }
+    },
+  });
+  context.AudioContext = class {
+    constructor() {
+      this.state = "running";
+      this.sampleRate = 48000;
+      this.audioWorklet = { addModule: async () => {} };
+    }
+    createMediaStreamDestination() {
+      return {
+        stream: {
+          getAudioTracks: () => [{
+            enabled: true,
+            muted: false,
+            readyState: "live",
+            stop() { state.trackStopped += 1; },
+          }],
+        },
+      };
+    }
+    async resume() {}
+    async close() { state.contextClosed += 1; }
+  };
+  context.AudioWorkletNode = class {
+    constructor() {
+      this.port = { postMessage() {} };
+    }
+    connect() {}
+    disconnect() { state.workletDisconnected += 1; }
+  };
+  context.Blob = Blob;
+  context.URL = {
+    createObjectURL: () => "blob:native-audio",
+    revokeObjectURL() {},
+  };
+  context.tauriListen = async () => () => { state.unlistened += 1; };
+  context.room.localParticipant.publishTrack = async (track, options) => {
+    published.push({ track, options });
+  };
+  return state;
+}
+
 test("game auto capture does not silently fallback to desktop duplication on WGC-supported Windows", async () => {
   const { context, calls } = loadScreenShareNative();
   context.tauriInvoke = async (command, args) => {
@@ -494,7 +549,7 @@ test("old native picker fallback remains video-only", async () => {
   ]);
 });
 
-test("system-wide native audio fails closed while process-only routes remain available", () => {
+test("monitor routes request attested Echo-excluding audio while process-only routes remain available", () => {
   const { context } = loadScreenShareNative();
 
   assert.equal(
@@ -506,12 +561,11 @@ test("system-wide native audio fails closed while process-only routes remain ava
     JSON.stringify({ mode: "process", pid: 5678, toast: "Game audio streaming" })
   );
   const request = context.nativeAudioCaptureRequestForSource({ sourceType: "monitor", pid: 0 });
-  assert.equal(request.mode, "video-only");
+  assert.equal(request.mode, "system-exclude-echo");
   assert.equal(request.pid, 0);
-  assert.equal(request.reason, "system-exclusion-unattested");
   assert.equal(
     request.toast,
-    "Screen shared without computer audio — Echo voice isolation could not be verified."
+    "System audio streaming (Echo voice excluded)"
   );
   assert.equal(
     context.nativeAudioCaptureRequestForSource({ sourceType: "window", pid: 0 }),
@@ -532,7 +586,7 @@ test("native audio routes use fixed non-sensitive LiveKit track names", () => {
   );
 });
 
-test("Battlefield 6 executable variants fail closed to video-only", () => {
+test("Battlefield 6 executable variants request attested Echo-excluding audio", () => {
   const { context } = loadScreenShareNative();
   const sources = [
     { sourceType: "game", pid: 601, title: "Loading", exe_name: "BF6.exe" },
@@ -541,9 +595,8 @@ test("Battlefield 6 executable variants fail closed to video-only", () => {
 
   for (const source of sources) {
     const request = context.nativeAudioCaptureRequestForSource(source);
-    assert.equal(request.mode, "video-only");
+    assert.equal(request.mode, "system-exclude-echo");
     assert.equal(request.pid, 0);
-    assert.equal(request.reason, "system-exclusion-unattested");
   }
 });
 
@@ -555,8 +608,7 @@ test("Battlefield 6 exact title variants are used only when executable identity 
       pid: 603,
       title,
     });
-    assert.equal(request.mode, "video-only", title);
-    assert.equal(request.reason, "system-exclusion-unattested", title);
+    assert.equal(request.mode, "system-exclude-echo", title);
   }
 });
 
@@ -615,7 +667,7 @@ test("Battlefield 6 audio routing does not mutate capture geometry", () => {
   assert.equal(JSON.stringify(source), before);
 });
 
-test("unattested system audio is rejected before native capture or LiveKit publication", async () => {
+test("raw system audio is rejected before native capture or LiveKit publication", async () => {
   const { context, calls } = loadScreenShareNative();
   const published = [];
 
@@ -624,13 +676,15 @@ test("unattested system audio is rejected before native capture or LiveKit publi
     published.push({ track, options });
   };
 
-  for (const options of [{ system: true }, { systemExcludeEcho: true }]) {
-    await assert.rejects(
-      context.startNativeAudioCapture(0, options),
-      /Echo voice isolation could not be verified/
-    );
-  }
+  await assert.rejects(
+    context.startNativeAudioCapture(0, { system: true }),
+    /Echo voice isolation could not be verified/
+  );
 
+  assert.equal(
+    calls.some((call) => call.command === "start_attested_system_audio_capture_excluding_echo"),
+    false
+  );
   assert.equal(
     calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"),
     false
@@ -643,47 +697,298 @@ test("unattested system audio is rejected before native capture or LiveKit publi
   assert.equal(published.length, 0);
 });
 
+test("attested Echo-excluding system audio publishes only after exact native proof", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+  const order = [];
+
+  context.hasTauriIPC = () => true;
+  installNativeAudioRuntime(context, published);
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "start_attested_system_audio_capture_excluding_echo") {
+      order.push("attestation");
+      return {
+        isolationMode: "webview2-process-tree",
+        excludedPid: 4242,
+        excludedProcess: "msedgewebview2.exe",
+        activationStarted: true,
+      };
+    }
+    return null;
+  };
+  context.room.localParticipant.publishTrack = async (track, options) => {
+    order.push("publish");
+    published.push({ track, options });
+  };
+
+  await context.startNativeAudioCapture(0, { systemExcludeEcho: true });
+
+  assert.deepEqual(order, ["attestation", "publish"]);
+  assert.equal(
+    calls.filter((call) => call.command === "start_attested_system_audio_capture_excluding_echo").length,
+    1
+  );
+  assert.equal(
+    calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"),
+    false
+  );
+  assert.equal(published.length, 1);
+  assert.equal(published[0].options.name, "echo-screen-audio-system-exclude");
+});
+
+test("Stop during deferred isolation attestation invalidates the start and publishes nothing", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+  const lifecycle = installNativeAudioRuntime(context, published);
+  let resolveAttestation;
+  let markAttestationStarted;
+  const attestationStarted = new Promise((resolve) => { markAttestationStarted = resolve; });
+  const deferredAttestation = new Promise((resolve) => { resolveAttestation = resolve; });
+
+  context.hasTauriIPC = () => true;
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "start_attested_system_audio_capture_excluding_echo") {
+      markAttestationStarted();
+      return deferredAttestation;
+    }
+    return null;
+  };
+
+  const pendingStart = context.startNativeAudioCapture(0, { systemExcludeEcho: true });
+  await attestationStarted;
+  const pendingStop = context.stopNativeAudioCapture();
+  resolveAttestation({
+    isolationMode: "webview2-process-tree",
+    excludedPid: 4242,
+    excludedProcess: "msedgewebview2.exe",
+    activationStarted: true,
+  });
+  await pendingStop;
+
+  await assert.rejects(
+    pendingStart,
+    (error) => error && error.code === "ECHO_NATIVE_AUDIO_CANCELLED"
+  );
+  assert.equal(published.length, 0);
+  assert.equal(calls.filter((call) => call.command === "stop_audio_capture").length, 2);
+  assert.equal(lifecycle.contextClosed, 1);
+  assert.equal(lifecycle.workletDisconnected, 1);
+  assert.equal(lifecycle.unlistened, 4);
+  assert.equal(context._nativeAudioActive, false);
+  assert.equal(context._nativeAudioOperation, null);
+});
+
+test("a replacement start owns Rust and a delayed older start cannot publish or stop it", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+  const ipcOrder = [];
+  let nativeOwner = null;
+  installNativeAudioRuntime(context, published);
+  let resolveOldAttestation;
+  let markOldAttestationStarted;
+  const oldAttestationStarted = new Promise((resolve) => { markOldAttestationStarted = resolve; });
+  const oldAttestation = new Promise((resolve) => { resolveOldAttestation = resolve; });
+
+  context.hasTauriIPC = () => true;
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "start_attested_system_audio_capture_excluding_echo") {
+      ipcOrder.push("A-start");
+      markOldAttestationStarted();
+      return oldAttestation.then((attestation) => {
+        ipcOrder.push("A-settled");
+        nativeOwner = "A";
+        return attestation;
+      });
+    }
+    if (command === "stop_audio_capture") {
+      ipcOrder.push("stop");
+      nativeOwner = null;
+    }
+    if (command === "start_audio_capture") {
+      ipcOrder.push("B-start");
+      nativeOwner = "B";
+    }
+    return null;
+  };
+
+  const oldStart = context.startNativeAudioCapture(0, { systemExcludeEcho: true });
+  await oldAttestationStarted;
+  const pendingStop = context.stopNativeAudioCapture();
+  const replacementStart = context.startNativeAudioCapture(7777, {});
+
+  resolveOldAttestation({
+    isolationMode: "webview2-process-tree",
+    excludedPid: 4242,
+    excludedProcess: "msedgewebview2.exe",
+    activationStarted: true,
+  });
+  await pendingStop;
+  await replacementStart;
+  const stopsAfterReplacement = calls.filter((call) => call.command === "stop_audio_capture").length;
+  await assert.rejects(
+    oldStart,
+    (error) => error && error.code === "ECHO_NATIVE_AUDIO_CANCELLED"
+  );
+
+  assert.equal(published.length, 1);
+  assert.equal(published[0].options.name, "echo-screen-audio-process");
+  const settledIndex = ipcOrder.indexOf("A-settled");
+  const stopAIndex = ipcOrder.indexOf("stop", settledIndex + 1);
+  const replacementIndex = ipcOrder.indexOf("B-start");
+  assert.ok(settledIndex >= 0);
+  assert.ok(stopAIndex > settledIndex);
+  assert.ok(replacementIndex > stopAIndex);
+  assert.equal(nativeOwner, "B");
+  assert.equal(
+    calls.filter((call) => call.command === "stop_audio_capture").length,
+    stopsAfterReplacement
+  );
+  assert.equal(context._nativeAudioActive, true);
+  assert.equal(context._nativeAudioOperation.generation, context._nativeAudioGeneration);
+});
+
+test("missing or malformed isolation attestation stops capture, cleans JS state, and fails closed", async () => {
+  const invalidAttestations = [
+    undefined,
+    null,
+    {},
+    {
+      isolationMode: "echo-process-tree",
+      excludedPid: 4242,
+      excludedProcess: "msedgewebview2.exe",
+      activationStarted: true,
+    },
+    {
+      isolationMode: "webview2-process-tree",
+      excludedPid: 0,
+      excludedProcess: "msedgewebview2.exe",
+      activationStarted: true,
+    },
+    {
+      isolationMode: "webview2-process-tree",
+      excludedPid: "4242",
+      excludedProcess: "msedgewebview2.exe",
+      activationStarted: true,
+    },
+    {
+      isolationMode: "webview2-process-tree",
+      excludedPid: 4242.5,
+      excludedProcess: "msedgewebview2.exe",
+      activationStarted: true,
+    },
+    {
+      isolationMode: "webview2-process-tree",
+      excludedPid: 4242,
+      excludedProcess: "echo-core-client.exe",
+      activationStarted: true,
+    },
+    {
+      isolationMode: "webview2-process-tree",
+      excludedPid: 4242,
+      excludedProcess: "msedgewebview2.exe",
+      activationStarted: false,
+    },
+  ];
+
+  for (const attestation of invalidAttestations) {
+    const { context, calls } = loadScreenShareNative();
+    const published = [];
+    const lifecycle = installNativeAudioRuntime(context, published);
+    context.hasTauriIPC = () => true;
+    context.tauriInvoke = async (command, args) => {
+      calls.push({ command, args });
+      if (command === "start_attested_system_audio_capture_excluding_echo") return attestation;
+      return null;
+    };
+
+    await assert.rejects(
+      context.startNativeAudioCapture(0, { systemExcludeEcho: true }),
+      /Echo voice isolation could not be verified/
+    );
+
+    assert.equal(published.length, 0, JSON.stringify(attestation));
+    assert.equal(
+      calls.filter((call) => call.command === "stop_audio_capture").length,
+      2,
+      JSON.stringify(attestation)
+    );
+    assert.equal(lifecycle.contextClosed, 1, JSON.stringify(attestation));
+    assert.equal(lifecycle.workletDisconnected, 1, JSON.stringify(attestation));
+    assert.equal(lifecycle.unlistened, 4, JSON.stringify(attestation));
+    assert.equal(context._nativeAudioCtx, null, JSON.stringify(attestation));
+    assert.equal(context._nativeAudioWorklet, null, JSON.stringify(attestation));
+    assert.equal(context._nativeAudioDest, null, JSON.stringify(attestation));
+    assert.equal(context._nativeAudioUnlisten, null, JSON.stringify(attestation));
+  }
+});
+
+test("missing attested isolation IPC on an old client cleans partial state and returns the update warning", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+  const lifecycle = installNativeAudioRuntime(context, published);
+  context.hasTauriIPC = () => true;
+  context.isTauriCommandMissingError = (error, command) =>
+    command === "start_attested_system_audio_capture_excluding_echo" &&
+    String(error).includes("unknown IPC command");
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "start_attested_system_audio_capture_excluding_echo") {
+      throw new Error("unknown IPC command");
+    }
+    return null;
+  };
+
+  await assert.rejects(
+    context.startNativeAudioCapture(0, { systemExcludeEcho: true }),
+    /update the Echo Windows app so Echo voice isolation can be verified/
+  );
+
+  assert.equal(published.length, 0);
+  assert.equal(calls.filter((call) => call.command === "stop_audio_capture").length, 2);
+  assert.equal(calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"), false);
+  assert.equal(lifecycle.contextClosed, 1);
+  assert.equal(lifecycle.workletDisconnected, 1);
+  assert.equal(lifecycle.unlistened, 4);
+});
+
+test("current attested isolation failures preserve the exact native diagnostic after cleanup", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+  const lifecycle = installNativeAudioRuntime(context, published);
+  const nativeFailure = new Error("WebView2 playback process validation failed");
+  context.hasTauriIPC = () => true;
+  context.isTauriCommandMissingError = () => false;
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "start_attested_system_audio_capture_excluding_echo") {
+      throw nativeFailure;
+    }
+    return null;
+  };
+
+  await assert.rejects(
+    context.startNativeAudioCapture(0, { systemExcludeEcho: true }),
+    (error) => error === nativeFailure
+  );
+
+  assert.equal(published.length, 0);
+  assert.equal(calls.filter((call) => call.command === "stop_audio_capture").length, 2);
+  assert.equal(lifecycle.contextClosed, 1);
+  assert.equal(lifecycle.workletDisconnected, 1);
+  assert.equal(lifecycle.unlistened, 4);
+  assert.equal(context._nativeAudioOperation, null);
+  assert.equal(context._nativeAudioTrack, null);
+});
+
 test("process-only native audio still captures the selected PID and publishes its fixed route", async () => {
   const { context, calls } = loadScreenShareNative();
   const published = [];
 
   context.hasTauriIPC = () => true;
-  context.getLiveKitClient = () => ({
-    Track: { Source: { ScreenShareAudio: "screen_share_audio" } },
-    LocalAudioTrack: class {
-      constructor(mediaStreamTrack) {
-        this.mediaStreamTrack = mediaStreamTrack;
-      }
-    },
-  });
-  context.AudioContext = class {
-    constructor() {
-      this.state = "running";
-      this.sampleRate = 48000;
-      this.audioWorklet = { addModule: async () => {} };
-    }
-    createMediaStreamDestination() {
-      return { stream: { getAudioTracks: () => [{ enabled: true, muted: false, readyState: "live" }] } };
-    }
-    async resume() {}
-    async close() {}
-  };
-  context.AudioWorkletNode = class {
-    constructor() {
-      this.port = { postMessage() {} };
-    }
-    connect() {}
-    disconnect() {}
-  };
-  context.Blob = Blob;
-  context.URL = {
-    createObjectURL: () => "blob:native-audio",
-    revokeObjectURL() {},
-  };
-  context.tauriListen = async () => () => {};
-  context.room.localParticipant.publishTrack = async (track, options) => {
-    published.push({ track, options });
-  };
+  installNativeAudioRuntime(context, published);
 
   await context.startNativeAudioCapture(5678, {});
 
@@ -691,16 +996,51 @@ test("process-only native audio still captures the selected PID and publishes it
   assert.equal(starts.length, 1);
   assert.equal(starts[0].args.pid, 5678);
   assert.equal(calls.some((call) => call.command === "start_system_audio_capture"), false);
+  assert.equal(calls.some((call) => call.command === "start_attested_system_audio_capture_excluding_echo"), false);
   assert.equal(calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"), false);
   assert.equal(published.length, 1);
   assert.equal(published[0].options.name, "echo-screen-audio-process");
 });
 
-test("Battlefield 6 starts native video but never starts or publishes unsafe system audio", async () => {
+test("LiveKit publish rejection stops Rust and cleans every partially-created audio resource", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+  const lifecycle = installNativeAudioRuntime(context, published);
+  let unpublishCalls = 0;
+  context.hasTauriIPC = () => true;
+  context.room.localParticipant.publishTrack = async () => {
+    throw new Error("publish rejected");
+  };
+  context.room.localParticipant.unpublishTrack = async () => {
+    unpublishCalls += 1;
+  };
+
+  await assert.rejects(
+    context.startNativeAudioCapture(5678, {}),
+    /publish rejected/
+  );
+
+  assert.equal(published.length, 0);
+  assert.equal(calls.filter((call) => call.command === "start_audio_capture").length, 1);
+  assert.equal(calls.filter((call) => call.command === "stop_audio_capture").length, 2);
+  assert.ok(unpublishCalls >= 1);
+  assert.equal(lifecycle.trackStopped, 1);
+  assert.equal(lifecycle.contextClosed, 1);
+  assert.equal(lifecycle.workletDisconnected, 1);
+  assert.equal(lifecycle.unlistened, 4);
+  assert.equal(context._nativeAudioActive, false);
+  assert.equal(context._nativeAudioOperation, null);
+  assert.equal(context._nativeAudioTrack, null);
+  assert.equal(context._nativeAudioCtx, null);
+  assert.equal(context._nativeAudioWorklet, null);
+  assert.equal(context._nativeAudioDest, null);
+  assert.equal(context._nativeAudioUnlisten, null);
+});
+
+test("Battlefield 6 starts native video and requests only the attested Echo-excluding route", async () => {
   const { context, calls } = loadScreenShareNative();
   const audioInvocations = [];
   const toasts = [];
-  let audioStops = 0;
   context.showCapturePicker = async () => ({
     sourceType: "game",
     id: 4242,
@@ -716,20 +1056,19 @@ test("Battlefield 6 starts native video but never starts or publishes unsafe sys
   context.startNativeAudioCapture = async (pid, options) => {
     audioInvocations.push({ pid, options });
   };
-  context.stopNativeAudioCapture = async () => {
-    audioStops += 1;
-  };
   context.showToast = (message) => toasts.push(message);
   context._startQualityWarnListener = () => {};
 
   await context.startScreenShareManual();
   await Promise.resolve();
 
-  assert.equal(audioInvocations.length, 0);
-  assert.equal(audioStops, 1);
+  assert.equal(audioInvocations.length, 1);
+  assert.equal(audioInvocations[0].pid, 0);
+  assert.equal(audioInvocations[0].options.system, false);
+  assert.equal(audioInvocations[0].options.systemExcludeEcho, true);
   assert.equal(calls.some((call) => call.command === "start_screen_share"), true);
   assert.equal(
-    toasts.includes("Screen shared without computer audio — Echo voice isolation could not be verified."),
+    toasts.includes("System audio streaming (Echo voice excluded)"),
     true
   );
 });
