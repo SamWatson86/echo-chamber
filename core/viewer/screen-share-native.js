@@ -146,21 +146,25 @@ function _isBattlefield6NativeGameSource(source) {
 
 var NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE =
   'Screen shared without computer audio — Echo voice isolation could not be verified.';
+var NATIVE_SYSTEM_AUDIO_UPDATE_MESSAGE =
+  'Screen shared without computer audio — update the Echo Windows app so Echo voice isolation can be verified.';
+
+function _isValidSystemAudioIsolationAttestation(attestation) {
+  return !!(
+    attestation &&
+    attestation.isolationMode === 'webview2-process-tree' &&
+    typeof attestation.excludedPid === 'number' &&
+    Number.isInteger(attestation.excludedPid) &&
+    attestation.excludedPid > 0 &&
+    attestation.excludedProcess === 'msedgewebview2.exe' &&
+    attestation.activationStarted === true
+  );
+}
 
 function nativeAudioCaptureRequestForSource(source) {
   if (!source) return null;
   if (source.sourceType === 'monitor' || _isBattlefield6NativeGameSource(source)) {
-    // Windows process-loopback only promises to exclude audio attributed to the
-    // requested process tree. Echo playback can come from WebView2 child/utility
-    // processes, and the current native contract does not attest that Windows
-    // associated those render streams with the Tauri process tree. Fail closed
-    // until that ownership can be proven on the publishing machine.
-    return {
-      mode: 'video-only',
-      pid: 0,
-      reason: 'system-exclusion-unattested',
-      toast: NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE,
-    };
+    return { mode: 'system-exclude-echo', pid: 0, toast: 'System audio streaming (Echo voice excluded)' };
   }
   if ((source.sourceType === 'game' || source.sourceType === 'window') &&
       source.pid && source.pid > 0) {
@@ -593,7 +597,13 @@ async function startScreenShareManual() {
           showToast(audioRequest.toast, 3000);
         }).catch(function(e) {
           debugLog('[audio] native audio failed: ' + e);
-          showToast('Screen audio failed: ' + e, 8000);
+          if (e && e.code === "ECHO_NATIVE_AUDIO_CANCELLED") {
+            return;
+          } else if (e && e.message === NATIVE_SYSTEM_AUDIO_UPDATE_MESSAGE) {
+            showToast(NATIVE_SYSTEM_AUDIO_UPDATE_MESSAGE, 8000);
+          } else {
+            showToast('Screen audio failed: ' + e, 8000);
+          }
         });
       } else {
         debugLog('[audio] skipped — type=' + source.sourceType + ' pid=' + (source.pid || 'none'));
@@ -1339,6 +1349,10 @@ var _nativeAudioWorklet = null;
 var _nativeAudioDest = null;
 var _nativeAudioTrack = null;
 var _nativeAudioUnlisten = null;
+var _nativeAudioGeneration = 0;
+var _nativeAudioOperation = null;
+var _nativeAudioRustGeneration = 0;
+var _nativeAudioRustIpcTail = Promise.resolve();
 
 var _nativeAudioWorkletCode = [
   "class NativeAudioProcessor extends AudioWorkletProcessor {",
@@ -1542,48 +1556,196 @@ async function autoDetectNativeAudio(trackLabel) {
   }
 }
 
+function _nativeAudioCancelledError() {
+  var error = new Error("Native audio start was superseded");
+  error.code = "ECHO_NATIVE_AUDIO_CANCELLED";
+  return error;
+}
+
+function _drainNativeAudioUnlisteners(operation) {
+  if (!operation || !operation.unlisteners) return;
+  while (operation.unlisteners.length > 0) {
+    var unlisten = operation.unlisteners.pop();
+    try { unlisten(); } catch (e) {}
+  }
+}
+
+function _queueNativeAudioRustIpc(action) {
+  var attempt = _nativeAudioRustIpcTail.then(action, action);
+  _nativeAudioRustIpcTail = attempt.catch(function() {});
+  return attempt;
+}
+
+function _queueNativeAudioRustStop() {
+  var stopAttempt = _queueNativeAudioRustIpc(async function() {
+    if (hasTauriIPC()) await tauriInvoke("stop_audio_capture");
+  });
+  return stopAttempt.catch(function(e) {
+    debugLog("[native-audio] stop_audio_capture error: " + e);
+  });
+}
+
+async function _unpublishNativeAudioOperationTrack(operation) {
+  if (!operation || !operation.track) return;
+  try {
+    if (room && room.localParticipant && typeof room.localParticipant.unpublishTrack === "function") {
+      await room.localParticipant.unpublishTrack(operation.track, true);
+    }
+  } catch (e) {
+    debugLog("[native-audio] unpublish cleanup error: " + e);
+  }
+  if (!operation.trackStopped) {
+    operation.trackStopped = true;
+    try { operation.track.mediaStreamTrack?.stop(); } catch (e) {}
+  }
+}
+
+function _clearNativeAudioGlobalsForOperation(operation) {
+  if (_nativeAudioOperation !== operation) return;
+  _nativeAudioOperation = null;
+  _nativeAudioActive = false;
+  _nativeAudioCtx = null;
+  _nativeAudioWorklet = null;
+  _nativeAudioDest = null;
+  _nativeAudioTrack = null;
+  _nativeAudioUnlisten = null;
+}
+
+async function _cleanupNativeAudioOperation(operation, options) {
+  options = options || {};
+  if (operation) {
+    operation.cancelled = true;
+    _clearNativeAudioGlobalsForOperation(operation);
+    _drainNativeAudioUnlisteners(operation);
+    if (operation.worklet && !operation.workletDisconnected) {
+      operation.workletDisconnected = true;
+      try { operation.worklet.disconnect(); } catch (e) {}
+    }
+  }
+
+  var ownsRustCapture = !!(
+    operation && operation.rustStarted &&
+    _nativeAudioRustGeneration === operation.generation
+  );
+  var rustStop = Promise.resolve();
+  if (options.forceRustStop || ownsRustCapture) {
+    _nativeAudioRustGeneration = 0;
+    rustStop = _queueNativeAudioRustStop();
+  }
+
+  if (operation && !operation.cleanupPromise) {
+    operation.cleanupPromise = (async function() {
+      await _unpublishNativeAudioOperationTrack(operation);
+      if (operation.context && !operation.contextClosed) {
+        operation.contextClosed = true;
+        try { await operation.context.close(); } catch (e) {}
+      }
+    })();
+  }
+
+  await rustStop;
+  if (operation && operation.cleanupPromise) await operation.cleanupPromise;
+  if (operation) {
+    _drainNativeAudioUnlisteners(operation);
+    if (options.retryTrackCleanup) await _unpublishNativeAudioOperationTrack(operation);
+  }
+}
+
+function _nativeAudioOperationFromCurrentGlobals() {
+  if (_nativeAudioOperation) return _nativeAudioOperation;
+  if (!(_nativeAudioCtx || _nativeAudioWorklet || _nativeAudioDest || _nativeAudioTrack || _nativeAudioUnlisten)) {
+    return null;
+  }
+  var operation = {
+    generation: _nativeAudioGeneration,
+    context: _nativeAudioCtx,
+    worklet: _nativeAudioWorklet,
+    destination: _nativeAudioDest,
+    track: _nativeAudioTrack,
+    unlisteners: _nativeAudioUnlisten ? [_nativeAudioUnlisten] : [],
+    rustStarted: true,
+  };
+  _nativeAudioOperation = operation;
+  return operation;
+}
+
+async function _resetNativeAudioCaptureForStart(generation) {
+  var existingOperation = _nativeAudioOperationFromCurrentGlobals();
+  await _cleanupNativeAudioOperation(existingOperation, { forceRustStop: true, retryTrackCleanup: true });
+  if (_nativeAudioGeneration !== generation) throw _nativeAudioCancelledError();
+}
+
+async function _ensureNativeAudioOperationCurrent(operation) {
+  if (operation && !operation.cancelled &&
+      _nativeAudioGeneration === operation.generation &&
+      _nativeAudioOperation === operation) {
+    return;
+  }
+  await _cleanupNativeAudioOperation(operation, { retryTrackCleanup: true });
+  throw _nativeAudioCancelledError();
+}
+
 async function startNativeAudioCapture(pid, opts) {
   opts = opts || {};
-  // Stop existing capture first
-  await stopNativeAudioCapture();
+  var generation = ++_nativeAudioGeneration;
+  await _resetNativeAudioCaptureForStart(generation);
 
   if (!hasTauriIPC()) throw new Error("Tauri IPC not available");
 
   var useSystemLoopback = !!opts.system;
   var useSystemExcludeEcho = !!opts.systemExcludeEcho;
 
-  // A fixed track name describes the requested route; it does not prove that
-  // Windows excluded Echo's WebView2 playback. Never let either system-wide
-  // route reach LiveKit until the native side can return a trustworthy process
-  // ownership attestation. Process-only game/window capture remains available.
-  if (useSystemLoopback || useSystemExcludeEcho) {
-    debugLog('[native-audio] blocked unattested system audio before IPC/publication');
+  // Raw system loopback can include Echo playback and is never publishable.
+  // The Echo-excluding route is allowed only after the current native client
+  // attests the exact WebView2 process-tree exclusion it activated.
+  if (useSystemLoopback) {
+    debugLog('[native-audio] blocked raw system audio before IPC/publication');
     throw new Error(NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE);
   }
 
   var LK = getLiveKitClient();
   var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
   var trackName = nativeAudioTrackNameForOptions(opts);
+  var operation = {
+    generation: generation,
+    context: null,
+    worklet: null,
+    destination: null,
+    track: null,
+    unlisteners: [],
+    rustStarted: false,
+    cancelled: false,
+  };
+  _nativeAudioOperation = operation;
 
+  try {
   // Create AudioContext — DON'T hardcode sample rate, let it match system default
   // WASAPI will report its actual format and we adapt
-  _nativeAudioCtx = new AudioContext();
+  operation.context = new AudioContext();
+  _nativeAudioCtx = operation.context;
   // Resume immediately — Chrome suspends new AudioContexts by default
-  if (_nativeAudioCtx.state === "suspended") {
-    await _nativeAudioCtx.resume();
+  if (operation.context.state === "suspended") {
+    await operation.context.resume();
+    await _ensureNativeAudioOperationCurrent(operation);
   }
-  debugLog("[native-audio] AudioContext state=" + _nativeAudioCtx.state + " sampleRate=" + _nativeAudioCtx.sampleRate);
+  debugLog("[native-audio] AudioContext state=" + operation.context.state + " sampleRate=" + operation.context.sampleRate);
 
   var blob = new Blob([_nativeAudioWorkletCode], { type: "application/javascript" });
   var url = URL.createObjectURL(blob);
-  await _nativeAudioCtx.audioWorklet.addModule(url);
-  URL.revokeObjectURL(url);
+  try {
+    await operation.context.audioWorklet.addModule(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+  await _ensureNativeAudioOperationCurrent(operation);
 
-  _nativeAudioWorklet = new AudioWorkletNode(_nativeAudioCtx, "native-audio-proc", {
+  operation.worklet = new AudioWorkletNode(operation.context, "native-audio-proc", {
     outputChannelCount: [2],
   });
-  _nativeAudioDest = _nativeAudioCtx.createMediaStreamDestination();
-  _nativeAudioWorklet.connect(_nativeAudioDest);
+  operation.destination = operation.context.createMediaStreamDestination();
+  operation.worklet.connect(operation.destination);
+  _nativeAudioWorklet = operation.worklet;
+  _nativeAudioDest = operation.destination;
 
   // Debug: track data flow
   var _dataChunkCount = 0;
@@ -1593,22 +1755,27 @@ async function startNativeAudioCapture(pid, opts) {
   // Listen for audio data from Rust via Tauri events
   var captureFormat = null;
   var formatUn = await tauriListen("audio-capture-format", function (ev) {
+    if (operation.cancelled) return;
     captureFormat = ev.payload;
     debugLog("[native-audio] WASAPI format: " + JSON.stringify(captureFormat));
-    if (_nativeAudioWorklet) {
-      _nativeAudioWorklet.port.postMessage({
+    if (operation.worklet) {
+      operation.worklet.port.postMessage({
         type: "format",
         channels: Number(captureFormat && captureFormat.channels) || 2,
-        sampleRate: Number(captureFormat && captureFormat.sampleRate) || _nativeAudioCtx.sampleRate,
+        sampleRate: Number(captureFormat && captureFormat.sampleRate) || operation.context.sampleRate,
       });
     }
-    if (captureFormat && (Number(captureFormat.channels) !== 2 || Number(captureFormat.sampleRate) !== _nativeAudioCtx.sampleRate)) {
+    if (captureFormat && (Number(captureFormat.channels) !== 2 || Number(captureFormat.sampleRate) !== operation.context.sampleRate)) {
       debugLog("[native-audio] adapting WASAPI " + captureFormat.channels + "ch @" + captureFormat.sampleRate +
-        "Hz to browser stereo @" + _nativeAudioCtx.sampleRate + "Hz");
+        "Hz to browser stereo @" + operation.context.sampleRate + "Hz");
     }
   });
+  operation.unlisteners.push(formatUn);
+  _nativeAudioUnlisten = function () { _drainNativeAudioUnlisteners(operation); };
+  await _ensureNativeAudioOperationCurrent(operation);
 
-  _nativeAudioUnlisten = await tauriListen("audio-capture-data", function (ev) {
+  var dataUn = await tauriListen("audio-capture-data", function (ev) {
+    if (operation.cancelled) return;
     try {
       // Decode base64 → ArrayBuffer → Float32Array
       var b64 = ev.payload;
@@ -1642,60 +1809,87 @@ async function startNativeAudioCapture(pid, opts) {
       }
 
       // Send to AudioWorklet
-      if (_nativeAudioWorklet) {
-        _nativeAudioWorklet.port.postMessage({ type: "samples", samples: floats });
+      if (operation.worklet) {
+        operation.worklet.port.postMessage({ type: "samples", samples: floats });
       }
     } catch (e) {
       debugLog("[native-audio] decode error: " + e);
     }
   });
+  operation.unlisteners.push(dataUn);
+  await _ensureNativeAudioOperationCurrent(operation);
 
   // Also listen for errors/stopped
   var errorUn = await tauriListen("audio-capture-error", function (ev) {
+    if (operation.cancelled) return;
     debugLog("[native-audio] capture error: " + ev.payload);
     var st = document.getElementById("native-audio-status");
     if (st) { st.textContent = "Error: " + ev.payload; st.classList.remove("active"); }
   });
+  operation.unlisteners.push(errorUn);
+  await _ensureNativeAudioOperationCurrent(operation);
 
   var stoppedUn = await tauriListen("audio-capture-stopped", function () {
-    debugLog("[native-audio] capture stopped by Rust");
+    if (!operation.cancelled) debugLog("[native-audio] capture stopped by Rust");
   });
-
-  // Store unlisteners for cleanup
-  var origUnlisten = _nativeAudioUnlisten;
-  _nativeAudioUnlisten = function () {
-    origUnlisten(); formatUn(); errorUn(); stoppedUn();
-  };
+  operation.unlisteners.push(stoppedUn);
+  await _ensureNativeAudioOperationCurrent(operation);
 
   // Start the WASAPI capture on Rust side
+  operation.rustStarted = true;
+  _nativeAudioRustGeneration = generation;
   if (useSystemExcludeEcho) {
-    await tauriInvoke("start_system_audio_capture_excluding_echo");
-    debugLog("[native-audio] WASAPI started for system loopback excluding Echo playback");
-  } else if (useSystemLoopback) {
-    await tauriInvoke("start_system_audio_capture");
-    debugLog("[native-audio] WASAPI started for system loopback");
+    var isolationAttestation = null;
+    try {
+      operation.rustStartPromise = _queueNativeAudioRustIpc(function() {
+        return tauriInvoke("start_attested_system_audio_capture_excluding_echo");
+      });
+      isolationAttestation = await operation.rustStartPromise;
+    } catch (isolationStartError) {
+      debugLog("[native-audio] system exclusion could not be attested: " + isolationStartError);
+      var missingAttestedCommand = typeof isTauriCommandMissingError === "function" &&
+        isTauriCommandMissingError(
+          isolationStartError,
+          "start_attested_system_audio_capture_excluding_echo"
+        );
+      if (missingAttestedCommand) throw new Error(NATIVE_SYSTEM_AUDIO_UPDATE_MESSAGE);
+      throw isolationStartError;
+    }
+    await _ensureNativeAudioOperationCurrent(operation);
+    if (!_isValidSystemAudioIsolationAttestation(isolationAttestation)) {
+      debugLog("[native-audio] rejected invalid system exclusion attestation: " + JSON.stringify(isolationAttestation));
+      throw new Error(NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE);
+    }
+    debugLog("[native-audio] WASAPI isolation attested for WebView2 PID " + isolationAttestation.excludedPid);
   } else {
-    await tauriInvoke("start_audio_capture", { pid: pid });
+    operation.rustStartPromise = _queueNativeAudioRustIpc(function() {
+      return tauriInvoke("start_audio_capture", { pid: pid });
+    });
+    await operation.rustStartPromise;
+    await _ensureNativeAudioOperationCurrent(operation);
     debugLog("[native-audio] WASAPI started for PID " + pid);
   }
 
   // Publish the audio track via LiveKit
-  var audioTrack = _nativeAudioDest.stream.getAudioTracks()[0];
+  var audioTrack = operation.destination.stream.getAudioTracks()[0];
   debugLog("[native-audio] MediaStream track: " + (audioTrack ? "exists, enabled=" + audioTrack.enabled + " muted=" + audioTrack.muted + " state=" + audioTrack.readyState : "MISSING"));
-  if (audioTrack) {
-    _nativeAudioTrack = new LK.LocalAudioTrack(audioTrack, undefined, false);
-    var publishOpts = {
-      source: trackSource,
-      dtx: false,
-      red: false,
-      audioBitrate: 128000,
-    };
-    publishOpts.name = trackName;
-    await room.localParticipant.publishTrack(_nativeAudioTrack, publishOpts);
-    debugLog("[native-audio] published to LiveKit as " + trackName);
-  } else {
-    debugLog("[native-audio] ERROR: no audio track from MediaStreamDestination!");
-  }
+  if (!audioTrack) throw new Error("Native audio track is unavailable");
+
+  operation.track = new LK.LocalAudioTrack(audioTrack, undefined, false);
+  _nativeAudioTrack = operation.track;
+  var publishOpts = {
+    source: trackSource,
+    dtx: false,
+    red: false,
+    audioBitrate: 128000,
+    name: trackName,
+  };
+  await _ensureNativeAudioOperationCurrent(operation);
+  operation.publishAttempted = true;
+  await room.localParticipant.publishTrack(operation.track, publishOpts);
+  operation.publishResolved = true;
+  await _ensureNativeAudioOperationCurrent(operation);
+  debugLog("[native-audio] published to LiveKit as " + trackName);
 
   _nativeAudioActive = true;
 
@@ -1709,17 +1903,16 @@ async function startNativeAudioCapture(pid, opts) {
   }
   indicator.textContent = "Native Audio Active";
   indicator.style.display = "";
+  } catch (error) {
+    await _cleanupNativeAudioOperation(operation, { retryTrackCleanup: true });
+    throw error;
+  }
 }
 
 async function stopNativeAudioCapture() {
-  var hadLocalState = !!(
-    _nativeAudioActive ||
-    _nativeAudioCtx ||
-    _nativeAudioWorklet ||
-    _nativeAudioDest ||
-    _nativeAudioTrack ||
-    _nativeAudioUnlisten
-  );
+  ++_nativeAudioGeneration;
+  var operation = _nativeAudioOperationFromCurrentGlobals();
+  var hadLocalState = !!(operation || _nativeAudioActive);
   _nativeAudioActive = false;
   debugLog(hadLocalState
     ? "[native-audio] stopping capture"
@@ -1728,43 +1921,7 @@ async function stopNativeAudioCapture() {
   // Hide native audio indicator
   var indicator = document.getElementById("native-audio-indicator");
   if (indicator) indicator.style.display = "none";
-
-  // Tell Rust to stop
-  try {
-    if (hasTauriIPC()) {
-      await tauriInvoke("stop_audio_capture");
-    }
-  } catch (e) {
-    debugLog("[native-audio] stop_audio_capture error: " + e);
-  }
-
-  // Unlisten Tauri events
-  if (_nativeAudioUnlisten) {
-    try { _nativeAudioUnlisten(); } catch (e) {}
-    _nativeAudioUnlisten = null;
-  }
-
-  // Unpublish LiveKit track
-  if (_nativeAudioTrack) {
-    try {
-      if (room && room.localParticipant) {
-        await room.localParticipant.unpublishTrack(_nativeAudioTrack, true);
-      }
-      _nativeAudioTrack.mediaStreamTrack?.stop();
-    } catch (e) {}
-    _nativeAudioTrack = null;
-  }
-
-  // Close AudioContext
-  if (_nativeAudioWorklet) {
-    try { _nativeAudioWorklet.disconnect(); } catch (e) {}
-    _nativeAudioWorklet = null;
-  }
-  _nativeAudioDest = null;
-  if (_nativeAudioCtx) {
-    try { await _nativeAudioCtx.close(); } catch (e) {}
-    _nativeAudioCtx = null;
-  }
+  await _cleanupNativeAudioOperation(operation, { forceRustStop: true, retryTrackCleanup: true });
 
   var st = document.getElementById("native-audio-status");
   if (st) { st.textContent = ""; st.classList.remove("active"); }
