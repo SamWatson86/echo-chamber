@@ -24,6 +24,19 @@ function loadAudioRoutingHarness() {
     startAudio() { this.startAudioCalls += 1; },
   };
   const handled = new Set();
+  const createdScreenTiles = [];
+  function createClassList(initial) {
+    const values = new Set(initial || []);
+    return {
+      contains(value) { return values.has(value); },
+      add(value) { values.add(value); },
+      remove(value) { values.delete(value); },
+      toggle(value, force) {
+        if (force === undefined ? !values.has(value) : force) values.add(value);
+        else values.delete(value);
+      },
+    };
+  }
   const context = {
     window: {},
     room,
@@ -80,6 +93,40 @@ function loadAudioRoutingHarness() {
     configureAudioElement(element) { element.configured = true; },
     ensureAudioPlays(element) { element.playAttempts = (element.playAttempts || 0) + 1; },
     applySpeakerToMedia() { return Promise.resolve(); },
+    requestVideoKeyFrame() {},
+    clearScreenTracksForIdentity() {},
+    createAttachedVideoElement(track) {
+      return {
+        _lkTrack: track,
+        isConnected: true,
+        paused: false,
+        readyState: 4,
+        style: {},
+      };
+    },
+    configureVideoElement() {},
+    ensureVideoPlays() {},
+    kickStartScreenVideo() {},
+    addScreenTile(label, video, trackSid) {
+      const tile = {
+        isConnected: true,
+        dataset: { trackSid },
+        style: {},
+        classList: createClassList(),
+        _volWrap: { classList: createClassList(["hidden"]) },
+        _volSlider: { value: "1" },
+        querySelector(selector) { return selector === "video" ? video : null; },
+      };
+      createdScreenTiles.push(tile);
+      return tile;
+    },
+    stampScreenTileGeneration() {},
+    ensureVideoSubscribed() {},
+    registerScreenTrack() {},
+    scheduleScreenRecovery() {},
+    startInboundScreenStatsMonitor() {},
+    setParticipantScreenWatchAvailable() {},
+    forceVideoLayer() {},
     updateCameraLobbySpeakingIndicators() {},
     debugLog() {},
   };
@@ -90,13 +137,11 @@ function loadAudioRoutingHarness() {
     context,
     { filename: "audio-routing.js" }
   );
-  return { context, audioBucketEl, audioElBySid, participantState, room };
+  return { context, audioBucketEl, audioElBySid, participantState, room, createdScreenTiles };
 }
 
-test("first remote microphone attachment stamps and indexes the exact audio SID", () => {
-  const harness = loadAudioRoutingHarness();
-  const participant = { identity: "desktop-1", name: "Desktop" };
-  const state = {
+function createParticipantAudioState(overrides) {
+  return Object.assign({
     micAudioEls: new Set(),
     screenAudioEls: new Set(),
     micGainNodes: new Map(),
@@ -107,7 +152,13 @@ test("first remote microphone attachment stamps and indexes the exact audio SID"
     screenUserMuted: false,
     micAnalyser: null,
     screenAnalyser: null,
-  };
+  }, overrides);
+}
+
+test("first remote microphone attachment stamps and indexes the exact audio SID", () => {
+  const harness = loadAudioRoutingHarness();
+  const participant = { identity: "desktop-1", name: "Desktop" };
+  const state = createParticipantAudioState();
   harness.participantState.set(participant.identity, state);
 
   const unmuteListeners = [];
@@ -154,4 +205,114 @@ test("first remote microphone attachment stamps and indexes the exact audio SID"
   assert.equal(harness.room.startAudioCalls, 1);
   assert.deepEqual(publication.setSubscribedCalls, [true]);
   assert.equal(unmuteListeners.length, 1);
+});
+
+test("screen audio subscribed before video exposes the later Stage volume control", () => {
+  const harness = loadAudioRoutingHarness();
+  const participant = { identity: "desktop-1", name: "Desktop" };
+  const state = createParticipantAudioState({ screenVolume: 0.42 });
+  harness.participantState.set(participant.identity, state);
+  harness.room.remoteParticipants.set(participant.identity, participant);
+
+  const audioElement = {
+    isConnected: false,
+    srcObject: {},
+    volume: 0,
+  };
+  const audioTrack = {
+    sid: "screen-audio-track",
+    kind: "audio",
+    source: "screen_share_audio",
+    mediaStreamTrack: {
+      enabled: true,
+      muted: false,
+      addEventListener() {},
+    },
+    attach() { return audioElement; },
+  };
+  const audioPublication = {
+    trackSid: "screen-audio-publication",
+    source: "screen_share_audio",
+    kind: "audio",
+    isSubscribed: true,
+    setSubscribed() {},
+  };
+
+  harness.context.handleTrackSubscribed(audioTrack, audioPublication, participant);
+  assert.equal(harness.createdScreenTiles.length, 0);
+  assert.equal(audioElement.volume, 0.42);
+
+  const videoTrack = {
+    sid: "screen-video-track",
+    kind: "video",
+    source: "screen_share",
+    mediaStreamTrack: null,
+  };
+  const videoPublication = {
+    trackSid: "screen-video-publication",
+    source: "screen_share",
+    kind: "video",
+    isSubscribed: true,
+    setSubscribed() {},
+  };
+
+  harness.context.handleTrackSubscribed(videoTrack, videoPublication, participant);
+
+  assert.equal(harness.createdScreenTiles.length, 1);
+  const tile = harness.createdScreenTiles[0];
+  assert.equal(tile._volWrap.classList.contains("hidden"), false);
+  assert.equal(tile._volSlider.value, 0.42);
+  assert.equal(harness.context.screenTileByIdentity.get(participant.identity), tile);
+  assert.equal(state.screenAudioEls.has(audioElement), true);
+});
+
+test("removing the last screen audio track hides its Stage volume control", () => {
+  const harness = loadAudioRoutingHarness();
+  const participant = {
+    identity: "desktop-1",
+    name: "Desktop",
+    trackPublications: new Map(),
+  };
+  const state = createParticipantAudioState({ screenVolume: 0.42 });
+  const audioElement = {
+    isConnected: true,
+    remove() { this.isConnected = false; },
+  };
+  const tile = {
+    isConnected: true,
+    _volWrap: {
+      classList: {
+        hidden: false,
+        toggle(name, force) {
+          if (name === "hidden") this.hidden = force;
+        },
+      },
+    },
+    _volSlider: { value: 0.42 },
+  };
+  const track = {
+    sid: "screen-audio-publication",
+    kind: "audio",
+    source: "screen_share_audio",
+  };
+  const publication = {
+    trackSid: "screen-audio-publication",
+    source: "screen_share_audio",
+  };
+
+  state.screenAudioEls.add(audioElement);
+  harness.participantState.set(participant.identity, state);
+  harness.context.screenTileByIdentity.set(participant.identity, tile);
+  harness.audioElBySid.set(publication.trackSid, audioElement);
+  harness.context.normalizeScreenMediaIdentity = (identity) => identity;
+  harness.context.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+
+  harness.context.handleTrackUnsubscribed(track, publication, participant);
+
+  assert.equal(state.screenAudioEls.size, 0);
+  assert.equal(harness.audioElBySid.has(publication.trackSid), false);
+  assert.equal(tile._volWrap.classList.hidden, true);
 });

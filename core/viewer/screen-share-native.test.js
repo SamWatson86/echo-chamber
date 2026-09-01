@@ -494,7 +494,7 @@ test("old native picker fallback remains video-only", async () => {
   ]);
 });
 
-test("monitor audio capture requests system audio with Echo playback excluded", () => {
+test("system-wide native audio fails closed while process-only routes remain available", () => {
   const { context } = loadScreenShareNative();
 
   assert.equal(
@@ -506,8 +506,13 @@ test("monitor audio capture requests system audio with Echo playback excluded", 
     JSON.stringify({ mode: "process", pid: 5678, toast: "Game audio streaming" })
   );
   const request = context.nativeAudioCaptureRequestForSource({ sourceType: "monitor", pid: 0 });
-  assert.equal(request.mode, "system-exclude-echo");
+  assert.equal(request.mode, "video-only");
   assert.equal(request.pid, 0);
+  assert.equal(request.reason, "system-exclusion-unattested");
+  assert.equal(
+    request.toast,
+    "Screen shared without computer audio — Echo voice isolation could not be verified."
+  );
   assert.equal(
     context.nativeAudioCaptureRequestForSource({ sourceType: "window", pid: 0 }),
     null
@@ -527,7 +532,7 @@ test("native audio routes use fixed non-sensitive LiveKit track names", () => {
   );
 });
 
-test("Battlefield 6 executable variants request system audio with Echo excluded", () => {
+test("Battlefield 6 executable variants fail closed to video-only", () => {
   const { context } = loadScreenShareNative();
   const sources = [
     { sourceType: "game", pid: 601, title: "Loading", exe_name: "BF6.exe" },
@@ -536,8 +541,9 @@ test("Battlefield 6 executable variants request system audio with Echo excluded"
 
   for (const source of sources) {
     const request = context.nativeAudioCaptureRequestForSource(source);
-    assert.equal(request.mode, "system-exclude-echo");
+    assert.equal(request.mode, "video-only");
     assert.equal(request.pid, 0);
+    assert.equal(request.reason, "system-exclusion-unattested");
   }
 });
 
@@ -549,7 +555,8 @@ test("Battlefield 6 exact title variants are used only when executable identity 
       pid: 603,
       title,
     });
-    assert.equal(request.mode, "system-exclude-echo", title);
+    assert.equal(request.mode, "video-only", title);
+    assert.equal(request.reason, "system-exclusion-unattested", title);
   }
 });
 
@@ -608,7 +615,35 @@ test("Battlefield 6 audio routing does not mutate capture geometry", () => {
   assert.equal(JSON.stringify(source), before);
 });
 
-test("native audio capture uses the Echo-excluding system command for monitor audio", async () => {
+test("unattested system audio is rejected before native capture or LiveKit publication", async () => {
+  const { context, calls } = loadScreenShareNative();
+  const published = [];
+
+  context.hasTauriIPC = () => true;
+  context.room.localParticipant.publishTrack = async (track, options) => {
+    published.push({ track, options });
+  };
+
+  for (const options of [{ system: true }, { systemExcludeEcho: true }]) {
+    await assert.rejects(
+      context.startNativeAudioCapture(0, options),
+      /Echo voice isolation could not be verified/
+    );
+  }
+
+  assert.equal(
+    calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"),
+    false
+  );
+  assert.equal(
+    calls.some((call) => call.command === "start_system_audio_capture"),
+    false
+  );
+  assert.equal(calls.some((call) => call.command === "stop_audio_capture"), true);
+  assert.equal(published.length, 0);
+});
+
+test("process-only native audio still captures the selected PID and publishes its fixed route", async () => {
   const { context, calls } = loadScreenShareNative();
   const published = [];
 
@@ -650,23 +685,22 @@ test("native audio capture uses the Echo-excluding system command for monitor au
     published.push({ track, options });
   };
 
-  await context.startNativeAudioCapture(0, { systemExcludeEcho: true });
+  await context.startNativeAudioCapture(5678, {});
 
-  assert.equal(
-    calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"),
-    true
-  );
-  assert.equal(
-    calls.some((call) => call.command === "start_system_audio_capture"),
-    false
-  );
+  const starts = calls.filter((call) => call.command === "start_audio_capture");
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].args.pid, 5678);
+  assert.equal(calls.some((call) => call.command === "start_system_audio_capture"), false);
+  assert.equal(calls.some((call) => call.command === "start_system_audio_capture_excluding_echo"), false);
   assert.equal(published.length, 1);
-  assert.equal(published[0].options.name, "echo-screen-audio-system-exclude");
+  assert.equal(published[0].options.name, "echo-screen-audio-process");
 });
 
-test("Battlefield 6 audio request invokes only the Echo-excluding system command", async () => {
+test("Battlefield 6 starts native video but never starts or publishes unsafe system audio", async () => {
   const { context, calls } = loadScreenShareNative();
   const audioInvocations = [];
+  const toasts = [];
+  let audioStops = 0;
   context.showCapturePicker = async () => ({
     sourceType: "game",
     id: 4242,
@@ -682,16 +716,31 @@ test("Battlefield 6 audio request invokes only the Echo-excluding system command
   context.startNativeAudioCapture = async (pid, options) => {
     audioInvocations.push({ pid, options });
   };
+  context.stopNativeAudioCapture = async () => {
+    audioStops += 1;
+  };
+  context.showToast = (message) => toasts.push(message);
   context._startQualityWarnListener = () => {};
 
   await context.startScreenShareManual();
   await Promise.resolve();
 
-  assert.equal(audioInvocations.length, 1);
-  assert.equal(audioInvocations[0].pid, 0);
-  assert.equal(audioInvocations[0].options.system, false);
-  assert.equal(audioInvocations[0].options.systemExcludeEcho, true);
+  assert.equal(audioInvocations.length, 0);
+  assert.equal(audioStops, 1);
   assert.equal(calls.some((call) => call.command === "start_screen_share"), true);
+  assert.equal(
+    toasts.includes("Screen shared without computer audio — Echo voice isolation could not be verified."),
+    true
+  );
+});
+
+test("native audio stop clears Rust capture even when viewer state says inactive", async () => {
+  const { context, calls } = loadScreenShareNative();
+  context.hasTauriIPC = () => true;
+
+  await context.stopNativeAudioCapture();
+
+  assert.equal(calls.filter((call) => call.command === "stop_audio_capture").length, 1);
 });
 
 test("native stop clears local screen tile and removes the screen companion", async () => {

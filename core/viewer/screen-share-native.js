@@ -144,10 +144,23 @@ function _isBattlefield6NativeGameSource(source) {
   return /^(?:bf6|battlefield(?:[\u2122\u00ae])? 6(?:[\u2122\u00ae])?)$/i.test(title);
 }
 
+var NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE =
+  'Screen shared without computer audio — Echo voice isolation could not be verified.';
+
 function nativeAudioCaptureRequestForSource(source) {
   if (!source) return null;
   if (source.sourceType === 'monitor' || _isBattlefield6NativeGameSource(source)) {
-    return { mode: 'system-exclude-echo', pid: 0, toast: 'System audio streaming (Echo voice excluded)' };
+    // Windows process-loopback only promises to exclude audio attributed to the
+    // requested process tree. Echo playback can come from WebView2 child/utility
+    // processes, and the current native contract does not attest that Windows
+    // associated those render streams with the Tauri process tree. Fail closed
+    // until that ownership can be proven on the publishing machine.
+    return {
+      mode: 'video-only',
+      pid: 0,
+      reason: 'system-exclusion-unattested',
+      toast: NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE,
+    };
   }
   if ((source.sourceType === 'game' || source.sourceType === 'window') &&
       source.pid && source.pid > 0) {
@@ -563,7 +576,11 @@ async function startScreenShareManual() {
 
       // Immediately start WASAPI per-process audio + publish pipeline using picker's PID
       var audioRequest = nativeAudioCaptureRequestForSource(source);
-      if (audioRequest) {
+      if (audioRequest && audioRequest.mode === 'video-only') {
+        await stopNativeAudioCapture();
+        debugLog('[audio] blocked native system audio before capture/publication: ' + audioRequest.reason);
+        showToast(audioRequest.toast, 8000);
+      } else if (audioRequest) {
         var audioLabel = audioRequest.mode === 'system-exclude-echo'
           ? 'system loopback excluding Echo'
           : (audioRequest.mode === 'system' ? 'system loopback' : 'PID ' + audioRequest.pid);
@@ -1532,10 +1549,20 @@ async function startNativeAudioCapture(pid, opts) {
 
   if (!hasTauriIPC()) throw new Error("Tauri IPC not available");
 
-  var LK = getLiveKitClient();
-  var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
   var useSystemLoopback = !!opts.system;
   var useSystemExcludeEcho = !!opts.systemExcludeEcho;
+
+  // A fixed track name describes the requested route; it does not prove that
+  // Windows excluded Echo's WebView2 playback. Never let either system-wide
+  // route reach LiveKit until the native side can return a trustworthy process
+  // ownership attestation. Process-only game/window capture remains available.
+  if (useSystemLoopback || useSystemExcludeEcho) {
+    debugLog('[native-audio] blocked unattested system audio before IPC/publication');
+    throw new Error(NATIVE_SYSTEM_AUDIO_BLOCKED_MESSAGE);
+  }
+
+  var LK = getLiveKitClient();
+  var trackSource = opts.source || LK.Track.Source.ScreenShareAudio;
   var trackName = nativeAudioTrackNameForOptions(opts);
 
   // Create AudioContext — DON'T hardcode sample rate, let it match system default
@@ -1685,9 +1712,18 @@ async function startNativeAudioCapture(pid, opts) {
 }
 
 async function stopNativeAudioCapture() {
-  if (!_nativeAudioActive) return;
+  var hadLocalState = !!(
+    _nativeAudioActive ||
+    _nativeAudioCtx ||
+    _nativeAudioWorklet ||
+    _nativeAudioDest ||
+    _nativeAudioTrack ||
+    _nativeAudioUnlisten
+  );
   _nativeAudioActive = false;
-  debugLog("[native-audio] stopping capture");
+  debugLog(hadLocalState
+    ? "[native-audio] stopping capture"
+    : "[native-audio] ensuring native capture is stopped");
 
   // Hide native audio indicator
   var indicator = document.getElementById("native-audio-indicator");
@@ -1709,9 +1745,11 @@ async function stopNativeAudioCapture() {
   }
 
   // Unpublish LiveKit track
-  if (_nativeAudioTrack && room) {
+  if (_nativeAudioTrack) {
     try {
-      await room.localParticipant.unpublishTrack(_nativeAudioTrack, true);
+      if (room && room.localParticipant) {
+        await room.localParticipant.unpublishTrack(_nativeAudioTrack, true);
+      }
       _nativeAudioTrack.mediaStreamTrack?.stop();
     } catch (e) {}
     _nativeAudioTrack = null;
@@ -1724,7 +1762,7 @@ async function stopNativeAudioCapture() {
   }
   _nativeAudioDest = null;
   if (_nativeAudioCtx) {
-    try { _nativeAudioCtx.close(); } catch (e) {}
+    try { await _nativeAudioCtx.close(); } catch (e) {}
     _nativeAudioCtx = null;
   }
 
