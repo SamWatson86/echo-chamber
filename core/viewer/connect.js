@@ -963,6 +963,7 @@ async function connectToRoom({
       }
       _pendingDisconnects.clear();
       reconcileLocalPublishIndicators("reconnected");
+      requestStreamActivities();
       // Reset adaptive layer tracker to HIGH after reconnection so quality recovers immediately
       for (const [dtKey, dtVal] of _inboundDropTracker) {
         if (dtVal.currentQuality !== "HIGH" && LK?.VideoQuality) {
@@ -1393,6 +1394,7 @@ async function connectToRoom({
         broadcastAvatar(identityBase, relativePath);
       }
       broadcastDeviceId();
+      broadcastStreamActivity(participant.identity);
       // Re-broadcast PG-13 state so late joiners pick it up (target only the new joiner)
       if (pg13ModeActive) {
         var enc = new TextEncoder();
@@ -1633,7 +1635,12 @@ async function connectToRoom({
         const text = new TextDecoder().decode(payload);
         const msg = JSON.parse(text);
         if (!msg || !msg.type) return;
-        if (msg.type === "sound-play" && msg.soundId) {
+        if (msg.type === "stream-activity") {
+          receiveStreamActivity(msg, participant, newRoom);
+        } else if (msg.type === "stream-activity-query" && msg.version === 1 && participant &&
+                   !isScreenIdentity(participant.identity)) {
+          broadcastStreamActivity(participant.identity);
+        } else if (msg.type === "sound-play" && msg.soundId) {
           primeSoundboardAudio();
           playSoundboardSound(msg.soundId).catch(() => {});
           // Show toast with who triggered it and what sound
@@ -2157,7 +2164,11 @@ async function connectToRoom({
     }
     // Broadcast device ID so other participants can map identity -> device for chime lookups
     var deviceIdDelay = reuseAdmin ? 100 : 1500;
-    setTimeout(() => broadcastDeviceId(), deviceIdDelay);
+    setTimeout(() => {
+      if (room !== newRoom) return;
+      broadcastDeviceId();
+      requestStreamActivities();
+    }, deviceIdDelay);
   }
 
   // ── Fast room switching: prefetch tokens then pre-warm connections ──

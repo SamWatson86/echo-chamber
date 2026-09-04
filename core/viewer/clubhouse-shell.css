@@ -612,12 +612,10 @@
 }
 
 :root[data-ui-shell="v2"] .tile-volume-wrap,
-:root[data-ui-shell="v2"] .screens-grid .tile:focus-within .tile-volume-wrap:not(.hidden),
 :root[data-ui-shell="v2"] .tile-volume-wrap:focus-within:not(.hidden) {
   transition-duration: var(--club-motion-fast);
 }
 
-:root[data-ui-shell="v2"] .screens-grid .tile:focus-within .tile-volume-wrap:not(.hidden),
 :root[data-ui-shell="v2"] .tile-volume-wrap:focus-within:not(.hidden) {
   opacity: 1;
   pointer-events: auto;
@@ -774,6 +772,17 @@
   position: relative;
   grid-template-columns: 54px minmax(0, 1fr);
   gap: 10px;
+}
+
+:root[data-ui-shell="v2"] .user-card.is-screen-sharing:not(.has-camera) .user-header {
+  min-height: 74px;
+}
+:root[data-ui-shell="v2"] .user-card:not(.has-camera) .participant-stream-description {
+  position: absolute;
+  top: 31px;
+  left: 74px;
+  right: 58px;
+  color: var(--club-text-muted);
 }
 
 :root[data-ui-shell="v2"] .user-card:not(.has-camera) .user-avatar {
@@ -1105,6 +1114,10 @@
   font-size: 12px;
 }
 
+:root[data-ui-shell="v2"] .user-card.is-screen-sharing.is-local.has-camera .user-name {
+  bottom: 30px;
+}
+
 :root[data-ui-shell="v2"] .user-card.has-camera .user-header,
 :root[data-ui-shell="v2"] .user-card.has-camera .user-avatar,
 :root[data-ui-shell="v2"] .user-card.has-camera .user-avatar video {
@@ -1127,6 +1140,10 @@
   pointer-events: auto;
   border-radius: 0 0 var(--club-radius-card) var(--club-radius-card);
   background: linear-gradient(transparent, rgba(3, 5, 8, 0.92));
+}
+
+:root[data-ui-shell="v2"] .user-card.is-screen-sharing.has-camera .cam-overlay {
+  padding-bottom: 29px;
 }
 
 :root[data-ui-shell="v2"] .user-card.has-camera .cam-overlay-name {
@@ -1594,8 +1611,7 @@
     min-height: 44px;
   }
 
-  :root[data-ui-shell="v2"] .cam-overlay,
-  :root[data-ui-shell="v2"] .tile-volume-wrap:not(.hidden) {
+  :root[data-ui-shell="v2"] .cam-overlay {
     opacity: 1;
     pointer-events: auto;
   }

@@ -81,9 +81,22 @@ function addScreenTile(label, element, trackSid) {
   });
   tile.appendChild(fsBtn);
 
-  // Volume slider — shown on hover when tile has audio
+  // Bottom-only controls: reveal on footer hover, keyboard focus, or touch.
   var volWrap = document.createElement("div");
   volWrap.className = "tile-volume-wrap hidden";
+  volWrap.tabIndex = 0;
+  volWrap.setAttribute("role", "group");
+  volWrap.setAttribute("aria-label", "Screen volume for " + label);
+  volWrap.addEventListener("click", function(event) { event.stopPropagation(); });
+  volWrap.addEventListener("pointerdown", function(event) {
+    event.stopPropagation();
+    if (event.target === volWrap) volWrap.focus({ preventScroll: true });
+  });
+  volWrap.addEventListener("keydown", function(event) {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    if (volWrap.contains(document.activeElement)) document.activeElement.blur();
+  });
   var volSlider = document.createElement("input");
   volSlider.type = "range";
   volSlider.className = "tile-volume-slider";
@@ -92,6 +105,7 @@ function addScreenTile(label, element, trackSid) {
   volSlider.step = "0.01";
   volSlider.value = "1";
   volSlider.title = "Screen volume";
+  volSlider.setAttribute("aria-label", "Screen volume for " + label);
   volSlider.addEventListener("click", function(e) { e.stopPropagation(); });
   volSlider.addEventListener("pointerdown", function(e) { e.stopPropagation(); });
   volSlider.addEventListener("input", function(e) {

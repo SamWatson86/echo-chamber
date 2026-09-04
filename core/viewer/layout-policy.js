@@ -280,31 +280,41 @@
       GRID_SCORE_WEIGHTS.occupancy * occupancy;
 
     if (input.aspectRatios) {
-      const columnWidths = Array.from({ length: columns }, function () { return 0; });
-      const rowHeights = Array.from({ length: rows }, function () { return 0; });
-      let totalTileArea = 0;
-      const tileLayouts = input.aspectRatios.map(function (aspectRatio, index) {
-        const fitted = fitAspectRatio(cellWidth, cellHeight, aspectRatio);
-        const column = index % columns;
-        const row = Math.floor(index / columns);
-        columnWidths[column] = Math.max(columnWidths[column], fitted.width);
-        rowHeights[row] = Math.max(rowHeights[row], fitted.height);
-        totalTileArea += fitted.area;
-        return {
-          index,
-          column,
-          row,
-          aspectRatio,
-          width: fitted.width,
-          height: fitted.height,
-          area: fitted.area,
-        };
+      // Justify each row by source shape, then scale every row together to fit
+      // the available height. Equal cells make wide shares unnecessarily short.
+      const rowAspects = Array.from({ length: rows }, function (_, row) {
+        return input.aspectRatios.slice(row * columns, (row + 1) * columns);
       });
-      const tileArea = totalTileArea / input.tileCount;
-      const totalWidth = columnWidths.reduce(function (sum, width) { return sum + width; }, 0) +
-        input.gap * (columns - 1);
+      const naturalHeights = rowAspects.map(function (aspects) {
+        return (input.width - input.gap * (aspects.length - 1)) /
+          aspects.reduce(function (sum, aspect) { return sum + aspect; }, 0);
+      });
+      const scale = Math.min(1, availableHeight /
+        naturalHeights.reduce(function (sum, height) { return sum + height; }, 0));
+      const rowHeights = naturalHeights.map(function (height) { return height * scale; });
+      const rowWidths = rowAspects.map(function (aspects, row) {
+        return aspects.reduce(function (sum, aspect) { return sum + aspect * rowHeights[row]; }, 0) +
+          input.gap * (aspects.length - 1);
+      });
+      const totalWidth = Math.max(...rowWidths);
       const totalHeight = rowHeights.reduce(function (sum, height) { return sum + height; }, 0) +
         input.gap * (rows - 1);
+      let totalTileArea = 0;
+      const tileLayouts = [];
+      let y = 0;
+      rowAspects.forEach(function (aspects, row) {
+        let x = (totalWidth - rowWidths[row]) / 2;
+        aspects.forEach(function (aspectRatio, column) {
+          const height = rowHeights[row];
+          const width = height * aspectRatio;
+          const area = width * height;
+          tileLayouts.push({ index: tileLayouts.length, column, row, aspectRatio, width, height, area, x, y });
+          totalTileArea += area;
+          x += width + input.gap;
+        });
+        y += rowHeights[row] + input.gap;
+      });
+      const tileArea = totalTileArea / input.tileCount;
 
       return {
         valid: true,
@@ -322,7 +332,8 @@
         tileArea,
         totalTileArea,
         tileLayouts,
-        columnWidths,
+        positioned: true,
+        rowWidths,
         rowHeights,
         balance,
         occupancy,

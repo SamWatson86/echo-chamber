@@ -383,19 +383,19 @@ test("mixed source aspects select and expose source-aware tile geometry", () => 
   });
 
   assert.deepEqual({ columns: uniformFallback.columns, rows: uniformFallback.rows }, { columns: 2, rows: 1 });
-  assert.deepEqual({ columns: layout.columns, rows: layout.rows }, { columns: 1, rows: 2 });
   assert.deepEqual(layout.aspectRatios, aspectRatios);
   assert.equal(layout.tileLayouts.length, aspectRatios.length);
-  assert.equal(layout.columnWidths.length, layout.columns);
+  assert.equal(layout.positioned, true);
+  assert.equal(layout.rowWidths.length, layout.rows);
   assert.equal(layout.rowHeights.length, layout.rows);
   assert.ok(layout.totalWidth <= options.width + EPSILON);
   assert.ok(layout.totalHeight <= options.height + EPSILON);
 
   layout.tileLayouts.forEach((tile, index) => {
     approximatelyEqual(tile.width / tile.height, aspectRatios[index], 1e-9);
-    assert.ok(tile.width <= layout.cellWidth + EPSILON);
-    assert.ok(tile.height <= layout.cellHeight + EPSILON);
-    assert.ok(tile.width <= layout.columnWidths[tile.column] + EPSILON);
+    assert.ok(tile.x >= -EPSILON && tile.y >= -EPSILON);
+    assert.ok(tile.x + tile.width <= layout.totalWidth + EPSILON);
+    assert.ok(tile.y + tile.height <= layout.totalHeight + EPSILON);
     assert.ok(tile.height <= layout.rowHeights[tile.row] + EPSILON);
   });
 
@@ -426,6 +426,40 @@ test("mixed source grid selection is deterministic across representative display
     assert.ok(first.totalHeight <= container.height + EPSILON);
     for (let index = 0; index < 25; index += 1) {
       assert.deepEqual(chooseOptimalGrid(input), first);
+    }
+  }
+});
+
+test("ultrawide and 16:9 shares align at a common height in a wide Stage", () => {
+  const layout = chooseOptimalGrid({ width: 3022, height: 1121, tileCount: 2, gap: 12, aspectRatios: [1916 / 802, 16 / 9] });
+  assert.equal(layout.columns, 2);
+  const [wide, regular] = layout.tileLayouts;
+  approximatelyEqual(wide.height, regular.height, 1e-9);
+  approximatelyEqual(regular.x - (wide.x + wide.width), 12, 1e-9);
+  assert.ok(wide.width > 1700, "ultrawide gets proportional width instead of a half-width cell");
+  approximatelyEqual(wide.width + regular.width + 12, 3022, 1e-9);
+});
+
+test("mixed rows stay contained, uncropped, and separated as the available Stage resizes", () => {
+  const aspects = [1916 / 802, 16 / 9, 9 / 16, 32 / 9, 4 / 3, 16 / 10];
+  for (const width of [280, 480, 976, 1502, 3022, 5000]) {
+    for (const height of [160, 479, 791, 1121, 2160]) {
+      for (const count of [2, 3, 4, 5, 6]) {
+        const layout = chooseOptimalGrid({ width, height, tileCount: count, gap: 12, aspectRatios: aspects.slice(0, count) });
+        assert.equal(layout.valid, true);
+        assert.ok(layout.totalWidth <= width + EPSILON && layout.totalHeight <= height + EPSILON);
+        layout.tileLayouts.forEach((tile, index, tiles) => {
+          assert.ok(tile.width > 0 && tile.height > 0);
+          approximatelyEqual(tile.width / tile.height, aspects[index], 1e-9);
+          assert.ok(tile.x + tile.width <= layout.totalWidth + EPSILON);
+          assert.ok(tile.y + tile.height <= layout.totalHeight + EPSILON);
+          for (const other of tiles.slice(index + 1)) {
+            const overlapX = Math.min(tile.x + tile.width, other.x + other.width) - Math.max(tile.x, other.x);
+            const overlapY = Math.min(tile.y + tile.height, other.y + other.height) - Math.max(tile.y, other.y);
+            assert.ok(overlapX <= EPSILON || overlapY <= EPSILON);
+          }
+        });
+      }
     }
   }
 });
