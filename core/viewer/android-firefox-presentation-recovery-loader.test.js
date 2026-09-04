@@ -118,7 +118,7 @@ test("loader is idempotent after its automatic exact-target request", () => {
 test("loader independently cache-busts the corrected presentation module", () => {
   const result = loadLoader({ userAgent: androidFirefox });
   assert.deepEqual(result.requests, [
-    "android-firefox-presentation-recovery.js?v=0.6.35.1786648741",
+    "android-firefox-presentation-recovery.js?v=0.6.37.phone.2",
   ]);
   assert.equal(result.api.RECOVERY_SCRIPT, result.requests[0]);
 });

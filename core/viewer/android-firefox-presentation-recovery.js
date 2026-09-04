@@ -66,6 +66,10 @@
     if (String(room.state || "").toLowerCase() !== "connected") return null;
     if (room.localParticipant && meta.identity === room.localParticipant.identity) return null;
     if (typeof hiddenScreens === "object" && hiddenScreens.has(meta.identity)) return null;
+    if (typeof shouldSubscribeParticipantPublication === "function" &&
+        !shouldSubscribeParticipantPublication(meta.publication, meta.participant, expected.room)) {
+      return null;
+    }
     return { meta: meta, publication: meta.publication, tile: tile };
   }
 

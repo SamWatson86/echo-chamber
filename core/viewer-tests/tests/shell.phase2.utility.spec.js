@@ -853,14 +853,17 @@ test("changed Stage-module assets share one cache cohort", async ({ page }) => {
     "phone-presentation.css",
     "phone-presentation.js",
     "state.js",
+    "auth.js",
     "soundboard.js",
     "participants-grid.js",
     "grid-layout.js",
     "participants-avatar.js",
     "participants-fullscreen.js",
+    "participants.js",
     "audio-routing.js",
     "media-controls.js",
     "connect.js",
+    "android-firefox-presentation-recovery-loader.js",
     "app.js",
   ]);
   expect(Object.values(versions).every(Boolean), JSON.stringify(versions, null, 2)).toBe(true);

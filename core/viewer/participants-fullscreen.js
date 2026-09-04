@@ -6,6 +6,30 @@
 var activeVideoFullscreenSession = null;
 var androidFirefoxScreenRecoveryBySid = new Map();
 
+function getRegisteredScreenPublicationContext(publication) {
+  if (!publication || typeof screenTrackMeta !== "object") return null;
+  var trackSid = publication.trackSid || publication.track?.sid || null;
+  var meta = trackSid ? screenTrackMeta.get(trackSid) : null;
+  if (!meta && screenTrackMeta?.forEach) {
+    screenTrackMeta.forEach(function(candidate) {
+      if (!meta && candidate?.publication === publication) meta = candidate;
+    });
+  }
+  return meta || null;
+}
+
+function shouldSubscribeRegisteredScreenPublication(publication, participant, expectedRoom) {
+  if (typeof isPhoneScreenVideoBudgetEnabled !== "function" ||
+      !isPhoneScreenVideoBudgetEnabled() ||
+      typeof shouldSubscribeParticipantPublication !== "function") return true;
+  var meta = getRegisteredScreenPublicationContext(publication);
+  return shouldSubscribeParticipantPublication(
+    publication,
+    participant || meta?.participant || null,
+    expectedRoom || meta?.room || room
+  );
+}
+
 function isCurrentScreenRecoveryGeneration(options) {
   if (!options || !options.trackSid || !options.meta || !options.publication || !options.tile) return false;
   if (!options.tile.isConnected) return false;
@@ -24,6 +48,7 @@ function attemptAndroidFirefoxScreenSubscriptionReset(options) {
   var trackSid = options.trackSid;
   var tile = options.tile;
   if (!isCurrentScreenRecoveryGeneration(options)) return false;
+  if (!shouldSubscribeRegisteredScreenPublication(publication, meta.participant, meta.room)) return false;
   if (!options.recoveryStateBySid) return false;
   var recoveryState = options.recoveryStateBySid.get(trackSid);
   if (recoveryState?.subscriptionResetAttempted === true) return false;
@@ -60,6 +85,7 @@ function attemptAndroidFirefoxScreenSubscriptionReset(options) {
       tile: tile,
     });
     if (!isCurrentScreenRecoveryGeneration(currentOptions)) return;
+    if (!shouldSubscribeRegisteredScreenPublication(publication, meta.participant, meta.room)) return;
     publication.setSubscribed(true);
     if (typeof options.requestKeyFrame === "function") {
       options.requestKeyFrame(publication, publication.track || originalTrack);
@@ -707,7 +733,11 @@ function startScreenWatchdog() {
           if (publication?.setSubscribed) {
             markResubscribeIntent(trackSid);
             publication.setSubscribed(false);
-            setTimeout(() => publication.setSubscribed(true), 500);
+            setTimeout(() => {
+              if (shouldSubscribeRegisteredScreenPublication(publication, meta.participant, meta.room)) {
+                publication.setSubscribed(true);
+              }
+            }, 500);
           }
         }
       }
@@ -728,7 +758,8 @@ function startScreenWatchdog() {
       if (meta.retryCount > 5) return;
 
       if (track) {
-        if (publication?.setSubscribed) {
+        if (publication?.setSubscribed &&
+            shouldSubscribeRegisteredScreenPublication(publication, meta.participant, meta.room)) {
           publication.setSubscribed(true);
         }
         try {
@@ -845,7 +876,8 @@ function kickStartScreenVideo(publication, track, element) {
     if (!element.isConnected) return;
     if (element.videoWidth > 0 || element.videoHeight > 0) return;
     attempts += 1;
-    if (publication?.setSubscribed) {
+    if (publication?.setSubscribed &&
+        shouldSubscribeRegisteredScreenPublication(publication, ksMeta?.participant, ksMeta?.room)) {
       publication.setSubscribed(true);
     }
     requestVideoKeyFrame(publication, track);
@@ -888,6 +920,11 @@ function scheduleScreenRecovery(trackSid, publication, element) {
       publication.setSubscribed(false);
       setTimeout(() => {
         if (!isCurrentRegisteredScreenElementGeneration(recoveryGeneration, false)) return;
+        if (!shouldSubscribeRegisteredScreenPublication(
+          publication,
+          recoveryGeneration.meta?.participant,
+          recoveryGeneration.room
+        )) return;
         publication.setSubscribed(true);
       }, 300);
     }
@@ -1016,6 +1053,11 @@ function ensureVideoSubscribed(publication, element) {
       var evsLocal = room && room.localParticipant && room.localParticipant.identity === evsMeta.identity;
       if (!evsLocal) return;
     }
+    if (!shouldSubscribeRegisteredScreenPublication(
+      publication,
+      evsMeta?.participant,
+      evsMeta?.room
+    )) return;
   }
   // Just ensure subscription is active — NEVER toggle off/on here.
   // Subscription cycling from multiple code paths creates cascading

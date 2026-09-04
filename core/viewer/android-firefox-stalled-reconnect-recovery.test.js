@@ -836,5 +836,13 @@ test("mic preservation policy remains recovery-only and production wiring tears 
   assert.match(connectSource, /if \(forceAndroidFirefoxRelay\) \{\s+rtcConfig\.iceTransportPolicy = "relay"/);
   assert.match(connectSource, /androidFirefoxForceRelay: recoveryState\?\.forceRelay === true/);
   assert.match(connectSource, /ignoreStaleRoomEvent\("local track unpublished"\)/);
-  assert.match(connectSource, /androidFirefoxRoomDisconnectRecovery\?\.cancel\(room\);[\s\S]*?connectSequence \+= 1;[\s\S]*?room\._echoExpectedDisconnect = true/);
+  const explicitDisconnect = connectSource.slice(connectSource.indexOf("async function disconnect()"));
+  const capturedRoomIndex = explicitDisconnect.indexOf("const disconnectingRoom = room;");
+  const cancelledRecoveryIndex = explicitDisconnect.indexOf("androidFirefoxRoomDisconnectRecovery?.cancel(room);");
+  const invalidatedConnectIndex = explicitDisconnect.indexOf("connectSequence++;");
+  const markedExpectedIndex = explicitDisconnect.indexOf("disconnectingRoom._echoExpectedDisconnect = true;");
+  assert.ok(capturedRoomIndex >= 0);
+  assert.ok(cancelledRecoveryIndex > capturedRoomIndex);
+  assert.ok(invalidatedConnectIndex > cancelledRecoveryIndex);
+  assert.ok(markedExpectedIndex > invalidatedConnectIndex);
 });

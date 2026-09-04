@@ -6,7 +6,10 @@ const vm = require("node:vm");
 
 const {
   createFullscreenExitStabilizer,
+  createPhoneAudioPlaybackRecovery,
   createPhonePresentationController,
+  createPhoneScreenVideoBudget,
+  createPhoneWakeLockManager,
   isPhoneBrowser,
   nearestSnap,
   resolveSheetHeights,
@@ -439,4 +442,655 @@ test("phone presentation CSS has no unscoped desktop selectors", () => {
   });
   assert.match(css, /max-height:\s*calc\(100% - 96px\)/);
   assert.doesNotMatch(css, /@media\s*\(max-width:/);
+});
+
+function createMediaRoom(sid, localIdentity = "local") {
+  return {
+    sid,
+    localParticipant: { identity: localIdentity },
+    remoteParticipants: new Map(),
+  };
+}
+
+function addRemote(room, identity) {
+  const participant = { identity };
+  room.remoteParticipants.set(identity, participant);
+  return participant;
+}
+
+function screenPublication(trackSid) {
+  return { trackSid, source: "screen_share", kind: "video" };
+}
+
+test("phone screen budget permits every track except all but one exact remote screen video", () => {
+  const budget = createPhoneScreenVideoBudget({ isEnabled: true });
+  const room = createMediaRoom("RM_one");
+  const alex = addRemote(room, "alex$screen");
+  const blake = addRemote(room, "blake");
+  const alexScreen = screenPublication("TR_alex");
+  const blakeScreen = screenPublication("TR_blake");
+  budget.beginRoom(room);
+  assert.equal(budget.observe(alexScreen, alex, room), true);
+  assert.equal(budget.observe(blakeScreen, blake, room), true);
+  assert.equal(budget.selectedIdentity(room), "alex");
+  assert.equal(budget.isSelected(alexScreen, alex, room), true);
+  assert.equal(budget.isSelected(blakeScreen, blake, room), false);
+
+  assert.equal(budget.hide(room), true);
+  assert.equal(budget.isSelected(alexScreen, alex, room), false);
+  assert.equal(budget.isSelected(blakeScreen, blake, room), false);
+  assert.equal(budget.selectIdentity("blake", room), true);
+  assert.equal(budget.isSelected(blakeScreen, blake, room), true);
+  assert.equal(budget.isSelected(alexScreen, alex, room), false);
+});
+
+test("phone screen budget fences publication, participant, room SID, and room generations", () => {
+  const budget = createPhoneScreenVideoBudget({ isEnabled: true });
+  const roomOne = createMediaRoom("RM_one");
+  const firstParticipant = addRemote(roomOne, "alex$screen");
+  const firstPublication = screenPublication("TR_first");
+  budget.beginRoom(roomOne);
+  budget.observe(firstPublication, firstParticipant, roomOne);
+
+  const replacementPublication = screenPublication("TR_replacement");
+  assert.equal(budget.observe(replacementPublication, firstParticipant, roomOne), true);
+  assert.equal(budget.isSelected(firstPublication, firstParticipant, roomOne), false);
+  assert.equal(budget.isSelected(replacementPublication, firstParticipant, roomOne), true);
+  assert.equal(budget.forget(firstPublication, firstParticipant, roomOne), false,
+    "a late unpublish cannot remove its replacement");
+
+  const replacementParticipant = { identity: "alex$screen" };
+  roomOne.remoteParticipants.set(replacementParticipant.identity, replacementParticipant);
+  const nextGenerationPublication = screenPublication("TR_next_generation");
+  assert.equal(budget.observe(nextGenerationPublication, replacementParticipant, roomOne), true);
+  assert.equal(budget.forgetParticipant(firstParticipant, roomOne), false,
+    "a departed participant object cannot clear the current participant generation");
+  assert.equal(budget.isSelected(nextGenerationPublication, replacementParticipant, roomOne), true);
+
+  const roomTwo = createMediaRoom("RM_two");
+  const roomTwoParticipant = addRemote(roomTwo, "blake");
+  const roomTwoPublication = screenPublication("TR_room_two");
+  budget.beginRoom(roomTwo);
+  assert.equal(budget.observe(roomTwoPublication, roomTwoParticipant, roomTwo), true);
+  assert.equal(budget.clearRoom(roomOne), false, "a stale room cannot clear the new generation");
+  assert.equal(budget.isSelected(nextGenerationPublication, replacementParticipant, roomOne), false);
+  assert.equal(budget.isSelected(roomTwoPublication, roomTwoParticipant, roomTwo), true);
+
+  roomTwo.sid = "RM_mutated";
+  assert.equal(budget.hide(roomTwo), false, "a changed room SID fails the exact-room fence");
+});
+
+test("disabled phone screen budget is an inert desktop pass-through", () => {
+  const budget = createPhoneScreenVideoBudget({ isEnabled: false });
+  const room = createMediaRoom("RM_desktop");
+  const participant = addRemote(room, "desktop-publisher");
+  const publication = screenPublication("TR_desktop");
+  budget.beginRoom(room);
+  assert.equal(budget.observe(publication, participant, room), false);
+  assert.equal(budget.isSelected(publication, participant, room), true);
+  assert.deepEqual(budget.entries(room), []);
+});
+
+function createEventTarget(initial = {}) {
+  const listeners = new Map();
+  return Object.assign(initial, {
+    addEventListener(type, listener) {
+      const values = listeners.get(type) || [];
+      values.push(listener);
+      listeners.set(type, values);
+    },
+    removeEventListener(type, listener) {
+      const values = listeners.get(type) || [];
+      listeners.set(type, values.filter((value) => value !== listener));
+    },
+    dispatch(type, event = {}) {
+      (listeners.get(type) || []).slice().forEach((listener) => listener(event));
+    },
+    listenerCount(type) { return (listeners.get(type) || []).length; },
+  });
+}
+
+function createWakeSentinel(name) {
+  const target = createEventTarget({ name, released: false, releases: 0 });
+  target.release = async function () {
+    if (!target.released) {
+      target.released = true;
+      target.releases += 1;
+      target.dispatch("release");
+    }
+  };
+  return target;
+}
+
+async function flushMicrotasks(turns = 6) {
+  for (let index = 0; index < turns; index += 1) await Promise.resolve();
+}
+
+test("phone wake lock is single-flight and follows visible, hidden, pageshow, and pagehide", async () => {
+  const document = createEventTarget({ visibilityState: "visible" });
+  const window = createEventTarget();
+  const sentinels = [];
+  let requests = 0;
+  const manager = createPhoneWakeLockManager({
+    isEnabled: true,
+    document,
+    window,
+    navigator: {
+      wakeLock: {
+        async request(type) {
+          assert.equal(type, "screen");
+          requests += 1;
+          const sentinel = createWakeSentinel(`sentinel-${requests}`);
+          sentinels.push(sentinel);
+          return sentinel;
+        },
+      },
+    },
+  });
+  const room = { sid: "RM_wake" };
+
+  await Promise.all([manager.setRoom(room), manager.setRoom(room), manager.setRoom(room)]);
+  assert.equal(requests, 1);
+  assert.equal(sentinels[0].released, false);
+  assert.equal(document.listenerCount("visibilitychange"), 1);
+  assert.equal(window.listenerCount("pageshow"), 1);
+  assert.equal(window.listenerCount("pagehide"), 1);
+
+  document.visibilityState = "hidden";
+  document.dispatch("visibilitychange");
+  await flushMicrotasks();
+  assert.equal(sentinels[0].releases, 1);
+  assert.equal(sentinels[0].released, true);
+
+  document.visibilityState = "visible";
+  document.dispatch("visibilitychange");
+  document.dispatch("visibilitychange");
+  window.dispatch("pageshow");
+  await flushMicrotasks();
+  assert.equal(requests, 2, "resume events coalesce into one wake-lock request");
+  assert.equal(sentinels[1].released, false);
+
+  window.dispatch("pagehide");
+  await flushMicrotasks();
+  assert.equal(sentinels[1].releases, 1);
+  assert.equal(sentinels[1].released, true);
+  await manager.clearRoom(room);
+  assert.equal(document.listenerCount("visibilitychange"), 0);
+  assert.equal(window.listenerCount("pageshow"), 0);
+  assert.equal(window.listenerCount("pagehide"), 0);
+});
+
+test("phone wake lock forgets a terminal pagehide before a later room reconnect", async () => {
+  const document = createEventTarget({ visibilityState: "visible" });
+  const window = createEventTarget();
+  let requests = 0;
+  const manager = createPhoneWakeLockManager({
+    isEnabled: true,
+    document,
+    window,
+    navigator: {
+      wakeLock: {
+        async request() {
+          requests += 1;
+          return createWakeSentinel(`sentinel-${requests}`);
+        },
+      },
+    },
+  });
+  const roomOne = { sid: "RM_one" };
+  const roomTwo = { sid: "RM_two" };
+
+  assert.equal(await manager.setRoom(roomOne), true);
+  window.dispatch("pagehide");
+  await flushMicrotasks();
+  assert.equal(await manager.clearRoom(roomOne), false);
+
+  // The old lifecycle removed its pageshow listener. A new visible Room must
+  // still request a fresh lock instead of inheriting the stale pagehide flag.
+  window.dispatch("pageshow");
+  assert.equal(await manager.setRoom(roomTwo), true);
+  assert.equal(requests, 2);
+  await manager.clearRoom(roomTwo);
+});
+
+test("phone wake lock releases a late stale-room grant and only retains the exact new room", async () => {
+  const document = createEventTarget({ visibilityState: "visible" });
+  const window = createEventTarget();
+  const firstSentinel = createWakeSentinel("first");
+  const secondSentinel = createWakeSentinel("second");
+  let resolveFirst;
+  let requests = 0;
+  const firstRequest = new Promise((resolve) => { resolveFirst = resolve; });
+  const manager = createPhoneWakeLockManager({
+    isEnabled: true,
+    document,
+    window,
+    navigator: {
+      wakeLock: {
+        request() {
+          requests += 1;
+          return requests === 1 ? firstRequest : Promise.resolve(secondSentinel);
+        },
+      },
+    },
+  });
+  const roomOne = { sid: "RM_one" };
+  const roomTwo = { sid: "RM_two" };
+  const oldSet = manager.setRoom(roomOne);
+  await flushMicrotasks();
+  assert.equal(requests, 1);
+  const newSet = manager.setRoom(roomTwo);
+  resolveFirst(firstSentinel);
+  assert.equal(await oldSet, false);
+  assert.equal(await newSet, true);
+  assert.equal(requests, 2);
+  assert.equal(firstSentinel.releases, 1, "the stale grant is immediately released");
+  assert.equal(secondSentinel.released, false);
+  assert.equal(await manager.clearRoom(roomOne), false, "a stale room cannot release the new room lock");
+  assert.equal(secondSentinel.released, false);
+  assert.equal(await manager.clearRoom(roomTwo), true);
+  assert.equal(secondSentinel.releases, 1);
+});
+
+test("phone wake lock stays held across an exact room switch", async () => {
+  const document = createEventTarget({ visibilityState: "visible" });
+  const window = createEventTarget();
+  const sentinel = createWakeSentinel("shared");
+  let requests = 0;
+  const manager = createPhoneWakeLockManager({
+    isEnabled: true,
+    document,
+    window,
+    navigator: { wakeLock: { async request() { requests += 1; return sentinel; } } },
+  });
+  const roomOne = { sid: "RM_one" };
+  const roomTwo = { sid: "RM_two" };
+
+  assert.equal(await manager.setRoom(roomOne), true);
+  assert.equal(await manager.setRoom(roomTwo), true);
+  assert.equal(requests, 1, "a held screen lock is not released and reacquired while switching rooms");
+  assert.equal(sentinel.releases, 0);
+  assert.equal(await manager.clearRoom(roomOne), false);
+  assert.equal(await manager.clearRoom(roomTwo), true);
+  assert.equal(sentinel.releases, 1);
+});
+
+test("phone wake lock releases instead of transferring during a hidden-state room switch", async () => {
+  const document = createEventTarget({ visibilityState: "visible" });
+  const window = createEventTarget();
+  const firstSentinel = createWakeSentinel("first");
+  const secondSentinel = createWakeSentinel("second");
+  let requests = 0;
+  const manager = createPhoneWakeLockManager({
+    isEnabled: true,
+    document,
+    window,
+    navigator: { wakeLock: { async request() { requests += 1; return requests === 1 ? firstSentinel : secondSentinel; } } },
+  });
+  const roomOne = { sid: "RM_one" };
+  const roomTwo = { sid: "RM_two" };
+
+  await manager.setRoom(roomOne);
+  document.visibilityState = "hidden";
+  assert.equal(await manager.setRoom(roomTwo), false);
+  assert.equal(firstSentinel.releases, 1);
+  assert.equal(requests, 1);
+  document.visibilityState = "visible";
+  document.dispatch("visibilitychange");
+  await flushMicrotasks();
+  assert.equal(requests, 2);
+  await manager.clearRoom(roomTwo);
+});
+
+test("disabled phone wake lock never touches the desktop lifecycle", async () => {
+  const document = createEventTarget({ visibilityState: "visible" });
+  const window = createEventTarget();
+  let requests = 0;
+  const manager = createPhoneWakeLockManager({
+    isEnabled: false,
+    document,
+    window,
+    navigator: { wakeLock: { request() { requests += 1; } } },
+  });
+  assert.equal(await manager.setRoom({ sid: "RM_desktop" }), false);
+  assert.equal(requests, 0);
+  assert.equal(document.listenerCount("visibilitychange"), 0);
+  assert.equal(window.listenerCount("pageshow"), 0);
+});
+
+test("phone audio recovery queues all current audio and clears only after confirmed single-flight success", async () => {
+  let videoPlayCalls = 0;
+  const video = {
+    id: "pending-video",
+    tagName: "VIDEO",
+    async play() { videoPlayCalls += 1; },
+  };
+  const voice = { id: "voice" };
+  const screenAudio = { id: "screen-audio" };
+  const detachedAudio = { id: "detached", isConnected: false };
+  const pending = new Set([video]);
+  const prompts = [];
+  let currentRoom;
+  let resolveStart;
+  let starts = 0;
+  const startFlight = new Promise((resolve) => { resolveStart = resolve; });
+  const room = {
+    sid: "RM_audio",
+    canPlaybackAudio: false,
+    startAudio() {
+      starts += 1;
+      return startFlight;
+    },
+  };
+  currentRoom = room;
+  const recovery = createPhoneAudioPlaybackRecovery({
+    isEnabled: true,
+    getCurrentRoom: () => currentRoom,
+    getAudioElements: () => [voice, screenAudio, detachedAudio],
+    getPendingElements: () => pending,
+    onPromptChange: (state) => prompts.push(state),
+  });
+
+  recovery.setRoom(room);
+  assert.equal(recovery.handlePlaybackStatus(room, false), true);
+  assert.deepEqual(new Set(pending), new Set([video, voice, screenAudio]));
+  assert.deepEqual(prompts.at(-1), { visible: true, label: "Restore audio", blocked: true });
+  const firstRecover = recovery.recover(room);
+  const secondRecover = recovery.recover(room);
+  assert.equal(firstRecover, secondRecover, "concurrent recovery attempts share one promise");
+  await flushMicrotasks();
+  assert.equal(starts, 1);
+  room.canPlaybackAudio = true;
+  resolveStart();
+  assert.equal(await firstRecover, true);
+  assert.equal(videoPlayCalls, 1, "the same gesture also retries legacy pending video");
+  assert.deepEqual(new Set(pending), new Set(), "confirmed audio and video playback clear their own entries");
+  assert.equal(recovery.isBlocked(room), false);
+  assert.deepEqual(prompts.at(-1), { visible: false, label: "Enable Videos", blocked: false });
+});
+
+test("phone audio recovery keeps the prompt and queue on rejection or unconfirmed playback", async () => {
+  const audio = { id: "audio" };
+  const blockedVideo = {
+    id: "blocked-video",
+    tagName: "VIDEO",
+    play: () => Promise.reject(new Error("video still blocked")),
+  };
+  const pending = new Set([blockedVideo]);
+  const prompts = [];
+  let currentRoom;
+  let attempt = 0;
+  const room = {
+    sid: "RM_audio_failure",
+    canPlaybackAudio: false,
+    startAudio() {
+      attempt += 1;
+      if (attempt === 1) return Promise.reject(new Error("gesture lost"));
+      return Promise.resolve();
+    },
+  };
+  currentRoom = room;
+  const recovery = createPhoneAudioPlaybackRecovery({
+    isEnabled: true,
+    getCurrentRoom: () => currentRoom,
+    getAudioElements: () => [audio],
+    getPendingElements: () => pending,
+    onPromptChange: (state) => prompts.push(state),
+  });
+  recovery.setRoom(room);
+
+  assert.equal(await recovery.recover(room), false);
+  assert.equal(recovery.isBlocked(room), true);
+  assert.equal(pending.has(audio), true);
+  assert.equal(pending.has(blockedVideo), true, "a failed video retry remains available to the next gesture");
+  assert.deepEqual(prompts.at(-1), { visible: true, label: "Restore audio", blocked: true });
+  assert.equal(await recovery.recover(room), false, "a resolved startAudio without canPlaybackAudio is not success");
+  assert.equal(pending.has(audio), true);
+  assert.equal(recovery.isBlocked(room), true);
+
+  room.canPlaybackAudio = true;
+  assert.equal(recovery.handlePlaybackStatus(room, true), true);
+  assert.equal(pending.has(audio), false);
+  assert.equal(pending.has(blockedVideo), true);
+  assert.equal(recovery.isBlocked(room), false);
+  assert.deepEqual(prompts.at(-1), { visible: true, label: "Enable Videos", blocked: false });
+});
+
+test("late audio success and stale status cannot clear a replacement room generation", async () => {
+  const roomOneAudio = { id: "room-one-audio" };
+  const roomTwoAudio = { id: "room-two-audio" };
+  const pending = new Set();
+  let currentRoom;
+  let currentAudio = [roomOneAudio];
+  let resolveOldStart;
+  const oldStart = new Promise((resolve) => { resolveOldStart = resolve; });
+  const roomOne = { sid: "RM_one", canPlaybackAudio: false, startAudio: () => oldStart };
+  const roomTwo = { sid: "RM_two", canPlaybackAudio: false, startAudio: () => Promise.resolve() };
+  currentRoom = roomOne;
+  const recovery = createPhoneAudioPlaybackRecovery({
+    isEnabled: true,
+    getCurrentRoom: () => currentRoom,
+    getAudioElements: () => currentAudio,
+    getPendingElements: () => pending,
+    onPromptChange() {},
+  });
+  recovery.setRoom(roomOne);
+  recovery.handlePlaybackStatus(roomOne, false);
+  const staleRecovery = recovery.recover(roomOne);
+  await flushMicrotasks();
+
+  currentRoom = roomTwo;
+  currentAudio = [roomTwoAudio];
+  recovery.setRoom(roomTwo);
+  recovery.handlePlaybackStatus(roomTwo, false);
+  assert.equal(pending.has(roomTwoAudio), true);
+  roomOne.canPlaybackAudio = true;
+  resolveOldStart();
+  assert.equal(await staleRecovery, false);
+  assert.equal(pending.has(roomTwoAudio), true, "late success cannot clear the current room queue");
+  assert.equal(recovery.isBlocked(roomTwo), true);
+  assert.equal(recovery.handlePlaybackStatus(roomOne, true), false, "stale playback events are ignored");
+  assert.equal(recovery.isBlocked(roomTwo), true);
+});
+
+test("a never-settling old Room cannot block new-Room audio recovery", async () => {
+  const pending = new Set();
+  let currentRoom;
+  let newStarts = 0;
+  const roomOne = { sid: "RM_stuck", canPlaybackAudio: false, startAudio: () => new Promise(() => {}) };
+  const roomTwo = {
+    sid: "RM_current",
+    canPlaybackAudio: true,
+    startAudio() { newStarts += 1; return Promise.resolve(); },
+  };
+  currentRoom = roomOne;
+  const recovery = createPhoneAudioPlaybackRecovery({
+    isEnabled: true,
+    getCurrentRoom: () => currentRoom,
+    getAudioElements: () => [],
+    getPendingElements: () => pending,
+    onPromptChange() {},
+  });
+  recovery.setRoom(roomOne);
+  recovery.recover(roomOne);
+  currentRoom = roomTwo;
+  recovery.setRoom(roomTwo);
+  assert.equal(await recovery.recover(roomTwo), true);
+  assert.equal(newStarts, 1);
+});
+
+test("room boundaries and retries prune removed pending media", async () => {
+  const removedVideo = {
+    isConnected: false,
+    play: () => Promise.reject(new Error("removed")),
+  };
+  const currentVideo = {
+    isConnected: true,
+    play: () => Promise.reject(new Error("still blocked")),
+  };
+  const pending = new Set([removedVideo, currentVideo]);
+  let currentRoom;
+  const room = { sid: "RM_prune", canPlaybackAudio: false, startAudio: () => Promise.reject(new Error("blocked")) };
+  currentRoom = room;
+  const recovery = createPhoneAudioPlaybackRecovery({
+    isEnabled: true,
+    getCurrentRoom: () => currentRoom,
+    getAudioElements: () => [],
+    getPendingElements: () => pending,
+    onPromptChange() {},
+  });
+  recovery.setRoom(room);
+  await recovery.recover(room);
+  assert.equal(pending.has(removedVideo), false);
+  assert.equal(pending.has(currentVideo), true);
+  recovery.clearRoom(room);
+  assert.equal(pending.size, 0, "terminal room cleanup removes its stale retry nodes");
+});
+
+test("strict phone gate owns all three LiveKit auto-subscribe seams", () => {
+  const stateSource = fs.readFileSync(path.join(__dirname, "state.js"), "utf8");
+  const authSource = fs.readFileSync(path.join(__dirname, "auth.js"), "utf8");
+  const connectSource = fs.readFileSync(path.join(__dirname, "connect.js"), "utf8");
+  const indexSource = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+  const combined = authSource + "\n" + connectSource;
+
+  assert.match(stateSource, /function isPhoneSessionStabilityEnabled\(\)[\s\S]*?EchoPhonePresentation\?\.isPhoneBrowser[\s\S]*?isNativeShell:\s*window\.__ECHO_NATIVE__ === true/);
+  assert.equal((combined.match(/autoSubscribe:\s*!isPhoneSessionStabilityEnabled\(\)/g) || []).length, 3);
+  assert.doesNotMatch(combined, /autoSubscribe:\s*true/);
+
+  const orderedAssets = ["phone-presentation.js", "state.js", "auth.js", "audio-routing.js", "connect.js"];
+  let previous = -1;
+  orderedAssets.forEach((asset) => {
+    const position = indexSource.indexOf(`src="${asset}?`);
+    assert.ok(position > previous, `${asset} must load after the preceding stability dependency`);
+    previous = position;
+  });
+  assert.equal((indexSource.match(/src="phone-presentation\.js\?/g) || []).length, 1);
+});
+
+test("phone integration subscribes all audio and switches only one screen video", () => {
+  const participantSource = fs.readFileSync(path.join(__dirname, "participants.js"), "utf8");
+  const calls = [];
+  const makePublication = (owner, sid, source, kind) => ({
+    owner,
+    trackSid: sid,
+    source,
+    kind,
+    isDesired: false,
+    isSubscribed: false,
+    setSubscribed(value) {
+      this.isDesired = value;
+      this.isSubscribed = value;
+      calls.push(`${this.trackSid}:${value}`);
+    },
+  });
+  const room = createMediaRoom("RM_integrated");
+  const alex = addRemote(room, "alex$screen");
+  const blake = addRemote(room, "blake$screen");
+  alex.publications = [
+    makePublication("alex", "alex-mic", "microphone", "audio"),
+    makePublication("alex", "alex-game", "screen_share_audio", "audio"),
+    makePublication("alex", "alex-video", "screen_share", "video"),
+  ];
+  blake.publications = [
+    makePublication("blake", "blake-mic", "microphone", "audio"),
+    makePublication("blake", "blake-game", "screen_share_audio", "audio"),
+    makePublication("blake", "blake-video", "screen_share", "video"),
+  ];
+  const budget = createPhoneScreenVideoBudget({ isEnabled: true });
+  budget.beginRoom(room);
+  const context = {
+    room,
+    phoneScreenVideoBudget: budget,
+    isPhoneSessionStabilityEnabled: () => true,
+    getLiveKitClient: () => ({
+      Track: {
+        Kind: { Audio: "audio", Video: "video" },
+        Source: { Camera: "camera", Microphone: "microphone", ScreenShare: "screen_share", ScreenShareAudio: "screen_share_audio" },
+      },
+    }),
+    patchScreenCompanionSource() {},
+    getParticipantPublications: (participant) => participant.publications || [],
+    hiddenScreens: new Set(),
+    participantCards: new Map(),
+    participantState: new Map(),
+    screenTrackMeta: new Map(),
+    removeScreenTile() {},
+    unregisterScreenTrack() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(participantSource, context, { filename: "participants.js" });
+
+  assert.equal(context.reconcilePhoneScreenVideoSubscriptions(room), true);
+  const all = [...alex.publications, ...blake.publications];
+  assert.equal(all.filter((publication) => publication.kind === "audio" && publication.isDesired).length, 4);
+  assert.deepEqual(all.filter((publication) => publication.source === "screen_share" && publication.isDesired)
+    .map((publication) => publication.trackSid), ["alex-video"]);
+
+  calls.length = 0;
+  assert.equal(context.selectPhoneScreenVideoIdentity("blake", room), true);
+  assert.deepEqual(calls.filter((value) => /-video:/.test(value)), ["alex-video:false", "blake-video:true"],
+    "the old video is disabled before the replacement is enabled");
+  assert.equal(all.filter((publication) => publication.kind === "audio" && publication.isDesired).length, 4);
+
+  calls.length = 0;
+  assert.equal(context.hidePhoneScreenVideo(room), true);
+  assert.deepEqual(calls.filter((value) => /-video:/.test(value)), ["blake-video:false"]);
+  assert.equal(all.filter((publication) => publication.kind === "audio" && publication.isDesired).length, 4,
+    "hiding Stage video never hides voice or shared audio");
+});
+
+test("phone managers bind and clear at exact room boundaries", () => {
+  const source = fs.readFileSync(path.join(__dirname, "connect.js"), "utf8");
+  const swap = source.indexOf("room = newRoom;");
+  const remoteScan = source.indexOf("const remoteList = room.remoteParticipants", swap);
+  [
+    "phoneScreenVideoBudget?.beginRoom?.(newRoom);",
+    "phoneAudioPlaybackRecovery?.setRoom?.(newRoom);",
+    "phoneWakeLockManager?.setRoom?.(newRoom);",
+  ].forEach((statement) => {
+    const position = source.indexOf(statement, swap);
+    assert.ok(position > swap && position < remoteScan, `${statement} must bind the committed Room before media scan`);
+  });
+
+  const terminalStart = source.indexOf("newRoom.on(LK.RoomEvent.Disconnected");
+  const terminalEnd = source.indexOf("if (LK.RoomEvent?.AudioPlaybackStatusChanged)", terminalStart);
+  const terminal = source.slice(terminalStart, terminalEnd);
+  const controlledReturn = terminal.indexOf("newRoom._echoRecoveryDisconnect === true");
+  ["phoneWakeLockManager", "phoneAudioPlaybackRecovery", "phoneScreenVideoBudget"].forEach((name) => {
+    const clear = terminal.indexOf(`${name}?.clearRoom?.(newRoom);`);
+    assert.ok(clear >= 0 && clear < controlledReturn, `${name} must release the exact terminal Room`);
+  });
+
+  const disconnectStart = source.indexOf("async function disconnect()");
+  const disconnectBody = source.slice(disconnectStart);
+  const disconnectCall = disconnectBody.indexOf("disconnectingRoom.disconnect();");
+  ["phoneWakeLockManager", "phoneAudioPlaybackRecovery", "phoneScreenVideoBudget"].forEach((name) => {
+    const clear = disconnectBody.indexOf(`${name}?.clearRoom?.(disconnectingRoom);`);
+    assert.ok(clear >= 0 && clear < disconnectCall, `${name} must clear before explicit disconnect`);
+  });
+});
+
+test("phone audio attempts report through one recovery boundary", () => {
+  const connectSource = fs.readFileSync(path.join(__dirname, "connect.js"), "utf8");
+  const routingSource = fs.readFileSync(path.join(__dirname, "audio-routing.js"), "utf8");
+  const helperStart = connectSource.indexOf("async function startRoomAudioWithRecovery(roomRef)");
+  const helperEnd = connectSource.indexOf("function unlockAudio()", helperStart);
+  const helper = connectSource.slice(helperStart, helperEnd);
+  assert.match(helper, /await roomRef\.startAudio\(\)/);
+  assert.match(helper, /phoneAudioPlaybackRecovery\.handlePlaybackStatus/);
+  assert.match(helper, /phoneAudioPlaybackRecovery\.noteStartAudioFailure/);
+  assert.ok((connectSource.match(/startRoomAudioWithRecovery\((?:newRoom|room)\)/g) || []).length >= 2);
+  assert.match(routingSource, /startRoomAudioWithRecovery\(room\)\.catch/);
+
+  const statusStart = connectSource.indexOf("LK.RoomEvent.AudioPlaybackStatusChanged");
+  const staleGuard = connectSource.indexOf('ignoreStaleRoomEvent("audio playback status")', statusStart);
+  const statusHandled = connectSource.indexOf("phoneAudioPlaybackRecovery?.handlePlaybackStatus", statusStart);
+  assert.ok(statusStart >= 0 && staleGuard > statusStart && statusHandled > staleGuard);
+
+  const interactionStart = connectSource.indexOf("const enableAllMedia = async () =>");
+  const phoneRecover = connectSource.indexOf("await phoneAudioPlaybackRecovery.recover(room);", interactionStart);
+  const desktopLegacy = connectSource.indexOf("room?.startAudio?.()", interactionStart);
+  assert.ok(phoneRecover > interactionStart && desktopLegacy > phoneRecover,
+    "phone recovery must return before the unchanged desktop gesture path");
 });

@@ -32,7 +32,8 @@ function hookPublication(publication, participant, expectedRoom) {
     }
   }
   // Always try to handle existing tracks, even if recently handled (for late joins)
-  if (publication.track && publication.isSubscribed) {
+  if (publication.track && publication.isSubscribed &&
+      !isUnwatchedScreenShare(publication, participant)) {
     const trackSid = getTrackSid(publication, publication.track, `${participant.identity}-${publication.source || publication.kind}`);
     const LK = getLiveKitClient();
     const source = publication.source || publication.track?.source;
@@ -64,6 +65,26 @@ function markResubscribeIntent(trackSid) {
       screenResubscribeIntent.delete(trackSid);
     }
   }, 6000);
+}
+
+async function startRoomAudioWithRecovery(roomRef) {
+  if (!roomRef || typeof roomRef.startAudio !== "function") return true;
+  try {
+    await roomRef.startAudio();
+    if (phoneAudioPlaybackRecovery && isPhoneSessionStabilityEnabled()) {
+      phoneAudioPlaybackRecovery.handlePlaybackStatus(
+        roomRef,
+        roomRef.canPlaybackAudio !== false
+      );
+    }
+    return roomRef.canPlaybackAudio !== false;
+  } catch (error) {
+    if (phoneAudioPlaybackRecovery && isPhoneSessionStabilityEnabled()) {
+      phoneAudioPlaybackRecovery.noteStartAudioFailure(roomRef, error);
+    }
+    debugLog("[audio-recovery] startAudio failed: " + (error?.message || error));
+    return false;
+  }
 }
 
 function unlockAudio() {
@@ -693,7 +714,7 @@ async function connectToRoom({
     newRoom = new LK.Room({
       adaptiveStream: false,
       dynacast: false,
-      autoSubscribe: true,
+      autoSubscribe: !isPhoneSessionStabilityEnabled(),
       videoCaptureDefaults: {
         resolution: performanceMode
           ? { width: 1280, height: 720, frameRate: 30 }
@@ -704,7 +725,7 @@ async function connectToRoom({
   }
   try {
     if (typeof newRoom.startAudio === "function") {
-      newRoom.startAudio().catch(() => {});
+      startRoomAudioWithRecovery(newRoom).catch(() => {});
     }
   } catch {}
   var androidFirefoxRecoveryMicWasEnabled = null;
@@ -822,6 +843,12 @@ async function connectToRoom({
   }
   if (LK.RoomEvent?.Disconnected) {
     newRoom.on(LK.RoomEvent.Disconnected, (reason) => {
+      // Exact-room managers ignore stale clears. Release a terminal source Room
+      // even when Android Firefox immediately replaces it, so failed recovery
+      // cannot retain a wake lock or stale media policy indefinitely.
+      phoneWakeLockManager?.clearRoom?.(newRoom);
+      phoneAudioPlaybackRecovery?.clearRoom?.(newRoom);
+      phoneScreenVideoBudget?.clearRoom?.(newRoom);
       if (androidFirefoxRoomDisconnectRecoveryEnabled &&
           newRoom._echoRecoveryDisconnect === true) {
         if (newRoom === room && typeof stopInboundScreenStatsMonitor === "function") {
@@ -859,6 +886,12 @@ async function connectToRoom({
       if (recoveryAccepted) {
         setStatus("Reconnecting Android Firefox session...", true);
       }
+    });
+  }
+  if (LK.RoomEvent?.AudioPlaybackStatusChanged) {
+    newRoom.on(LK.RoomEvent.AudioPlaybackStatusChanged, (canPlaybackAudio) => {
+      if (ignoreStaleRoomEvent("audio playback status")) return;
+      phoneAudioPlaybackRecovery?.handlePlaybackStatus?.(newRoom, canPlaybackAudio === true);
     });
   }
   if (LK.RoomEvent?.SignalReconnecting) {
@@ -966,6 +999,13 @@ async function connectToRoom({
     console.log('[TRACK-SUB] ' + (participant?.identity || '?') + ' kind=' + track.kind + ' source=' + (publication?.source || track?.source));
     // $screen companions publish as Camera for SFU optimization — patch to ScreenShare
     patchScreenCompanionSource(publication, track, participant);
+    if (isPhoneSessionStabilityEnabled() &&
+        !shouldSubscribeParticipantPublication(publication, participant, newRoom)) {
+      publication?.setSubscribed?.(false);
+      reconcilePhoneScreenVideoSubscriptions(newRoom);
+      debugLog("[phone-video-budget] ignored inactive screen video subscription");
+      return;
+    }
     if (participant && participant.identity.endsWith('$screen')) {
       debugLog('[screen-merge] $screen track received: ' + track.kind + ' ' + (publication?.source || ''));
     }
@@ -1018,15 +1058,16 @@ async function connectToRoom({
       setStatus(`Track subscription failed: ${detail}`, true);
       debugLog(`track subscription failed ${participant?.identity || "unknown"} ${detail}`);
       if (publication?.setSubscribed) {
-        // Don't retry subscription for unwatched screen shares
-        if (isUnwatchedScreenShare(publication, participant)) {
-          debugLog("[opt-in] skipping subscription retry for unwatched screen " + (participant?.identity || "unknown"));
+        // Do not revive a desktop-hidden or phone-budgeted screen video.
+        if (!shouldSubscribeParticipantPublication(publication, participant, newRoom)) {
+          debugLog("[subscription] skipping retry for inactive screen " + (participant?.identity || "unknown"));
           return;
         }
         publication.setSubscribed(false);
         setTimeout(() => {
           if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom) ||
-              !getParticipantPublications(participant).includes(publication)) return;
+              !getParticipantPublications(participant).includes(publication) ||
+              !shouldSubscribeParticipantPublication(publication, participant, newRoom)) return;
           publication.setSubscribed(true);
           if (publication?.track && participant) {
             handleTrackSubscribed(publication.track, publication, participant);
@@ -1063,6 +1104,17 @@ async function connectToRoom({
           var ssVol = (ssState && ssState.chimeVolume != null) ? ssState.chimeVolume : 0.5;
           playScreenShareChime(ssVol);
         }
+        if (isPhoneSessionStabilityEnabled()) {
+          setParticipantScreenWatchAvailable(_pubIdentity, true);
+          if (publication?.setSubscribed) {
+            publication.setSubscribed(
+              shouldSubscribeParticipantPublication(publication, participant, newRoom)
+            );
+          }
+          if (participant) hookPublication(publication, participant, newRoom);
+          reconcilePhoneScreenVideoSubscriptions(newRoom);
+          return;
+        }
         if (hiddenScreens.has(_pubIdentity)) {
           setParticipantScreenWatchAvailable(_pubIdentity, true);
           debugLog(`[opt-in] track published (screen, user-hidden) ${_pubIdentity} src=${pubSource}`);
@@ -1077,7 +1129,8 @@ async function connectToRoom({
         return;
       }
 
-      if (publication && publication.setSubscribed) {
+      if (publication && publication.setSubscribed &&
+          shouldSubscribeParticipantPublication(publication, participant, newRoom)) {
         publication.setSubscribed(true);
       }
       debugLog(`track published ${participant?.identity || "unknown"} src=${pubSource}`);
@@ -1138,6 +1191,12 @@ async function connectToRoom({
         identity = getParentIdentity(identity);
       }
       if (!identity) return;
+      var phoneScreenVideoEnded = isPhoneSessionStabilityEnabled() &&
+        source === LK.Track.Source.ScreenShare &&
+        (!publication.kind || publication.kind === LK?.Track?.Kind?.Video || publication.kind === "video");
+      if (phoneScreenVideoEnded) {
+        phoneScreenVideoBudget?.forget?.(publication, participant, newRoom);
+      }
 
       // Helper: get remaining publications for this participant
       var remoteP = null;
@@ -1224,6 +1283,9 @@ async function connectToRoom({
           setParticipantCameraStageAvailable(identity, false);
           debugLog("[unpublished] camera cleared for " + identity + " (no replacement publication)");
         }
+      }
+      if (phoneScreenVideoEnded) {
+        reconcilePhoneScreenVideoSubscriptions(newRoom);
       }
     });
   }
@@ -1385,6 +1447,9 @@ async function connectToRoom({
         return;
       }
       _pendingDisconnects.delete(key);
+      if (isPhoneSessionStabilityEnabled()) {
+        phoneScreenVideoBudget?.forgetParticipant?.(participant, newRoom);
+      }
       // Cancel any pending camera-clear timer — card is being fully removed
       cancelCameraClearTimer(key);
       debugLog(`[reconnect] grace period expired for ${key} — cleaning up`);
@@ -1428,6 +1493,9 @@ async function connectToRoom({
         setParticipantScreenWatchAvailable(disconnectedMediaIdentity, false);
       }
       participantState.delete(key);
+      if (isPhoneSessionStabilityEnabled()) {
+        reconcilePhoneScreenVideoSubscriptions(newRoom);
+      }
       if (disconnectedScreenGeneration.removed || disconnectedScreenAudio.removed) {
         debugLog(`[disconnect] removed screen media for ${key} as ${disconnectedMediaIdentity}`);
       }
@@ -1793,7 +1861,7 @@ async function connectToRoom({
     debugLog("[android-firefox-room-recovery] forcing TURN relay for connected-media recovery");
   }
   await newRoom.connect(sfuUrl, accessToken, {
-    autoSubscribe: true,
+    autoSubscribe: !isPhoneSessionStabilityEnabled(),
     rtcConfig: rtcConfig,
   });
   if (seq !== connectSequence) {
@@ -1803,6 +1871,9 @@ async function connectToRoom({
   }
 
   // New room is connected — NOW disconnect old room and swap
+  // Transfer phone wake-lock ownership before the old Room emits its terminal
+  // disconnect so a fast room switch does not briefly permit the screen to sleep.
+  phoneWakeLockManager?.setRoom?.(newRoom);
   if (hadOldRoom && oldRoom) {
     oldRoom._echoExpectedDisconnect = true;
     if (oldRoom._echoRecoveryDisconnect !== true) oldRoom.disconnect();
@@ -1812,6 +1883,9 @@ async function connectToRoom({
     watchedScreens.clear();
   }
   room = newRoom;
+  phoneScreenVideoBudget?.beginRoom?.(newRoom);
+  phoneAudioPlaybackRecovery?.setRoom?.(newRoom);
+  phoneWakeLockManager?.setRoom?.(newRoom);
   // Commit credentials only after the SFU connection and room swap succeed. A
   // failed or superseded switch must keep the old room's participant token so
   // heartbeat, Jam, chat, and native-presenter requests remain authenticated.
@@ -1837,9 +1911,7 @@ async function connectToRoom({
   // Recreate local participant card immediately so it's first in the list
   ensureParticipantCard({ identity: localIdentity, name }, true);
   startMediaReconciler();
-  try {
-    room.startAudio?.();
-  } catch {}
+  startRoomAudioWithRecovery(room).catch(() => {});
 
   // ── HIGH PRIORITY: Re-enable mic ASAP so users aren't muted after room switch ──
   // On first connect we need ensureDevicePermissions; on room switch we already have it.
@@ -1900,11 +1972,18 @@ async function connectToRoom({
       var effectiveIdentity = isScreenIdentity(participant.identity)
         ? getParentIdentity(participant.identity)
         : participant.identity;
-      // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
-      // The Stage-view action remains available if they want to hide it later.
-      startWatchingScreenIdentity(effectiveIdentity, "late-join");
+      if (isPhoneSessionStabilityEnabled()) {
+        setParticipantScreenWatchAvailable(effectiveIdentity, true);
+      } else {
+        // Auto-subscribe to existing screen shares — don't force opt-in for late joiners.
+        // The Stage-view action remains available if they want to hide it later.
+        startWatchingScreenIdentity(effectiveIdentity, "late-join");
+      }
     }
   });
+  if (isPhoneSessionStabilityEnabled()) {
+    reconcilePhoneScreenVideoSubscriptions(newRoom);
+  }
   // clearMedia() tears down old-Room lobby attachments. Refill only after the
   // destination Room is current and all of its existing participants attach.
   refreshActiveCameraLobbyForRoom(newRoom);
@@ -2145,6 +2224,10 @@ async function connect() {
     // This captures clicks, touches, keyboard - any user gesture enables all videos
     window._pausedVideos = new Set();
     const enableAllMedia = async () => {
+      if (isPhoneSessionStabilityEnabled() && phoneAudioPlaybackRecovery) {
+        await phoneAudioPlaybackRecovery.recover(room);
+        return;
+      }
       if (!window._pausedVideos || window._pausedVideos.size === 0) {
         // Still try room.startAudio() on any interaction even without paused media
         try { room?.startAudio?.(); } catch {}
@@ -2224,6 +2307,7 @@ async function connect() {
 
 async function disconnect() {
   if (!room) return;
+  const disconnectingRoom = room;
   androidFirefoxRoomDisconnectRecovery?.cancel(room);
   // Invalidate any in-flight connect/switch attempts (#67)
   connectSequence++;
@@ -2247,9 +2331,12 @@ async function disconnect() {
   _screenShareVideoTrack = null;
   _screenShareAudioTrack = null;
   disableNoiseCancellation();
-  room._echoExpectedDisconnect = true;
-  room.disconnect();
-  room = null;
+  phoneWakeLockManager?.clearRoom?.(disconnectingRoom);
+  phoneAudioPlaybackRecovery?.clearRoom?.(disconnectingRoom);
+  phoneScreenVideoBudget?.clearRoom?.(disconnectingRoom);
+  disconnectingRoom._echoExpectedDisconnect = true;
+  disconnectingRoom.disconnect();
+  if (room === disconnectingRoom) room = null;
   cleanupPrewarmedRooms(); // Clean up pre-warmed connections and token cache
   clearMedia();
   clearSoundboardState();

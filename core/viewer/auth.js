@@ -402,7 +402,11 @@ async function prewarmRooms() {
       try { existing.room.disconnect(); } catch (e) {}
     }
     try {
-      var warmRoom = new LK.Room({ adaptiveStream: false, dynacast: false, autoSubscribe: true });
+      var warmRoom = new LK.Room({
+        adaptiveStream: false,
+        dynacast: false,
+        autoSubscribe: !isPhoneSessionStabilityEnabled(),
+      });
       await warmRoom.prepareConnection(sfu, cached.token);
       prewarmedRooms.set(rid, { room: warmRoom, createdAt: Date.now() });
       debugLog("[fast-switch] pre-warmed connection for " + rid);
