@@ -25,6 +25,180 @@ function getParentIdentity(identity) {
   return identity;
 }
 
+function isPhoneScreenVideoBudgetEnabled() {
+  try {
+    return typeof isPhoneSessionStabilityEnabled === "function" &&
+      isPhoneSessionStabilityEnabled() === true &&
+      typeof phoneScreenVideoBudget === "object" &&
+      phoneScreenVideoBudget !== null;
+  } catch (_) {
+    return false;
+  }
+}
+
+function getPublicationMediaIdentity(participant) {
+  if (!participant || !participant.identity) return "";
+  return isScreenIdentity(participant.identity)
+    ? getParentIdentity(participant.identity)
+    : participant.identity;
+}
+
+function isRemoteScreenVideoPublication(publication, participant, expectedRoom) {
+  var LK = getLiveKitClient();
+  if (!LK || !publication || !participant) return false;
+  patchScreenCompanionSource(publication, publication.track, participant);
+  var source = publication.source || publication.track?.source;
+  var kind = publication.kind || publication.track?.kind;
+  if (source !== LK.Track.Source.ScreenShare || kind !== LK.Track.Kind.Video) return false;
+  var roomRef = expectedRoom || room;
+  var mediaIdentity = getPublicationMediaIdentity(participant);
+  return !!mediaIdentity && (!roomRef?.localParticipant ||
+    mediaIdentity !== roomRef.localParticipant.identity);
+}
+
+/**
+ * Authoritative subscription gate. The phone stability cohort keeps every
+ * audio publication subscribed and budgets only remote screen-share video.
+ * Outside that exact cohort, retain the legacy hiddenScreens behavior.
+ */
+function shouldSubscribeParticipantPublication(publication, participant, expectedRoom) {
+  var LK = getLiveKitClient();
+  if (!LK || !publication || !participant) return true;
+  patchScreenCompanionSource(publication, publication.track, participant);
+  var source = publication.source || publication.track?.source;
+  var kind = publication.kind || publication.track?.kind;
+  var isScreenVideo = source === LK.Track.Source.ScreenShare && kind === LK.Track.Kind.Video;
+  var isScreenAudio = source === LK.Track.Source.ScreenShareAudio ||
+    (source === LK.Track.Source.ScreenShare && kind === LK.Track.Kind.Audio);
+  var isScreenSource = source === LK.Track.Source.ScreenShare ||
+    source === LK.Track.Source.ScreenShareAudio;
+  if (!isScreenSource) return true;
+
+  var roomRef = expectedRoom || room;
+  var mediaIdentity = getPublicationMediaIdentity(participant);
+  if (roomRef?.localParticipant && mediaIdentity === roomRef.localParticipant.identity) return true;
+
+  if (isPhoneScreenVideoBudgetEnabled()) {
+    // Audio is deliberately outside the receive budget. A user may hide or
+    // switch the Stage video without interrupting either game or voice audio.
+    if (isScreenAudio || !isScreenVideo) return true;
+    try {
+      var currentEntry = phoneScreenVideoBudget.entries(roomRef)
+        .find(function(entry) { return entry.identity === mediaIdentity; });
+      // A late retry for a replaced publication must not overwrite the newer
+      // inventory entry and revive the old video. Reconcile owns replacements
+      // because it sees the complete current Room inventory at once.
+      if (currentEntry &&
+          (currentEntry.publication !== publication || currentEntry.participant !== participant)) {
+        return false;
+      }
+      if (!currentEntry) {
+        phoneScreenVideoBudget.observe?.(publication, participant, roomRef);
+      }
+      return phoneScreenVideoBudget.isSelected?.(publication, participant, roomRef) === true;
+    } catch (_) {
+      // Fail closed for the expensive video only. Other media remains live.
+      return false;
+    }
+  }
+
+  return !hiddenScreens.has(mediaIdentity);
+}
+
+function setParticipantPublicationSubscribed(publication, participant, subscribed, expectedRoom) {
+  if (!publication?.setSubscribed) return false;
+  if (subscribed) {
+    if (isPhoneScreenVideoBudgetEnabled()) {
+      if (!shouldSubscribeParticipantPublication(publication, participant, expectedRoom)) return false;
+    } else if (isUnwatchedScreenShare(publication, participant)) {
+      return false;
+    }
+  }
+  publication.setSubscribed(!!subscribed);
+  return true;
+}
+
+function syncPhoneScreenVideoCardControls() {
+  if (!isPhoneScreenVideoBudgetEnabled()) return;
+  participantCards.forEach(function(cardRef) {
+    cardRef?.syncScreenWatchControls?.();
+  });
+}
+
+function reconcilePhoneScreenVideoSubscriptions(expectedRoom) {
+  if (!isPhoneScreenVideoBudgetEnabled()) return false;
+  var roomRef = expectedRoom || room;
+  if (!roomRef || (room && roomRef !== room) || !roomRef.remoteParticipants) return false;
+
+  var liveScreenVideos = [];
+  roomRef.remoteParticipants.forEach(function(participant) {
+    getParticipantPublications(participant).forEach(function(publication) {
+      if (!isRemoteScreenVideoPublication(publication, participant, roomRef)) return;
+      liveScreenVideos.push({ publication: publication, participant: participant });
+    });
+  });
+  try {
+    phoneScreenVideoBudget.reconcile(liveScreenVideos, roomRef);
+  } catch (_) {
+    return false;
+  }
+
+  // Turn off the old video before turning on the selected one.
+  liveScreenVideos.forEach(function(entry) {
+    if (phoneScreenVideoBudget.isSelected(entry.publication, entry.participant, roomRef)) return;
+    if (entry.publication.isDesired !== false || entry.publication.isSubscribed === true) {
+      entry.publication.setSubscribed?.(false);
+    }
+  });
+
+  roomRef.remoteParticipants.forEach(function(participant) {
+    getParticipantPublications(participant).forEach(function(publication) {
+      if (!publication?.setSubscribed) return;
+      if (!shouldSubscribeParticipantPublication(publication, participant, roomRef)) return;
+      if (publication.isDesired !== true) publication.setSubscribed(true);
+    });
+  });
+  syncPhoneScreenVideoCardControls();
+  return true;
+}
+
+function selectPhoneScreenVideoIdentity(identity, expectedRoom) {
+  if (!isPhoneScreenVideoBudgetEnabled() || !identity) return false;
+  var roomRef = expectedRoom || room;
+  if (!roomRef || (room && roomRef !== room)) return false;
+  var mediaIdentity = isScreenIdentity(identity) ? getParentIdentity(identity) : identity;
+  var previousIdentity = null;
+  try {
+    previousIdentity = phoneScreenVideoBudget.selectedIdentity?.(roomRef) || null;
+    phoneScreenVideoBudget.selectIdentity?.(mediaIdentity, roomRef);
+    if (phoneScreenVideoBudget.selectedIdentity?.(roomRef) !== mediaIdentity) return false;
+  } catch (_) {
+    return false;
+  }
+  if (previousIdentity && previousIdentity !== mediaIdentity) {
+    clearScreenTracksForIdentity(previousIdentity, null);
+  }
+  reconcilePhoneScreenVideoSubscriptions(roomRef);
+  return true;
+}
+
+function hidePhoneScreenVideo(expectedRoom) {
+  if (!isPhoneScreenVideoBudgetEnabled()) return false;
+  var roomRef = expectedRoom || room;
+  if (!roomRef || (room && roomRef !== room)) return false;
+  var previousIdentity = null;
+  try {
+    previousIdentity = phoneScreenVideoBudget.selectedIdentity?.(roomRef) || null;
+    phoneScreenVideoBudget.hide?.(roomRef);
+    if (phoneScreenVideoBudget.selectedIdentity?.(roomRef) !== null) return false;
+  } catch (_) {
+    return false;
+  }
+  if (previousIdentity) clearScreenTracksForIdentity(previousIdentity, null);
+  reconcilePhoneScreenVideoSubscriptions(roomRef);
+  return true;
+}
+
 // _viewerVersion is now in state.js (loaded first, can find its own script tag)
 
 function getParticipantAudioCtx() {
@@ -69,7 +243,10 @@ function isUnwatchedScreenShare(publication, participant) {
   // Local user always watches their own screen
   if (room && room.localParticipant &&
       identity === room.localParticipant.identity) return false;
-  // If identity is in hiddenScreens, it's unwatched
+  if (isPhoneScreenVideoBudgetEnabled()) {
+    return !shouldSubscribeParticipantPublication(publication, participant, room);
+  }
+  // Preserve the established desktop viewer-local hide policy.
   return hiddenScreens.has(identity);
 }
 
@@ -352,8 +529,9 @@ function resubscribeParticipantTracks(participant) {
   const pubs = getParticipantPublications(participant);
   if (!pubs.length) return;
   pubs.forEach((pub) => {
-    if (pub?.setSubscribed && !isUnwatchedScreenShare(pub, participant)) pub.setSubscribed(true);
-    if (pub?.kind === getLiveKitClient()?.Track?.Kind?.Video) {
+    var subscribed = setParticipantPublicationSubscribed(pub, participant, true, room);
+    if ((!isPhoneScreenVideoBudgetEnabled() || subscribed) &&
+        pub?.kind === getLiveKitClient()?.Track?.Kind?.Video) {
       requestVideoKeyFrame(pub, pub.track);
     }
     hookPublication(pub, participant);
@@ -364,7 +542,7 @@ function attachParticipantTracks(participant) {
   const pubs = getParticipantPublications(participant);
   if (!pubs.length) return;
   pubs.forEach((pub) => {
-    if (pub?.setSubscribed && !isUnwatchedScreenShare(pub, participant)) pub.setSubscribed(true);
+    setParticipantPublicationSubscribed(pub, participant, true, room);
     hookPublication(pub, participant);
   });
 }
@@ -382,7 +560,7 @@ function reconcileParticipantMedia(participant) {
     patchScreenCompanionSource(pub, pub?.track, participant);
     // Opt-in: skip unwatched remote screen shares entirely
     if (isUnwatchedScreenShare(pub, participant)) return;
-    if (pub.setSubscribed) pub.setSubscribed(true);
+    setParticipantPublicationSubscribed(pub, participant, true, room);
     const track = pub.track;
     if (!track) return;
     const source = getTrackSource(pub, track);

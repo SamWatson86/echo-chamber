@@ -75,6 +75,8 @@ function createHarness() {
     ensureVideoSubscribed() { calls.push(["ensureSubscribed"]); },
     markResubscribeIntent(sid) { calls.push(["intent", sid]); },
     requestVideoKeyFrame() { calls.push(["keyframe"]); },
+    shouldSubscribeParticipantPublication() { return context.allowSubscription !== false; },
+    allowSubscription: true,
   };
   context.globalThis = context;
   vm.createContext(context);
@@ -188,6 +190,18 @@ test("a proven presentation stall reattaches only its stable sink, then performs
   harness.publication.isSubscribed = true;
   assert.equal(harness.api.inspect(25000), 0, "the same SID cannot schedule another reset");
   assert.equal(harness.timeouts.length, 1);
+});
+
+test("delayed Android Firefox recovery cannot revive a phone-budgeted screen video", () => {
+  const harness = createHarness();
+  harness.api.inspect(1000);
+  harness.api.inspect(9001);
+  harness.api.inspect(15002);
+  assert.deepEqual(harness.calls.filter((entry) => entry[0] === "subscribed"), [["subscribed", false]]);
+
+  harness.context.allowSubscription = false;
+  harness.timeouts[0].callback();
+  assert.deepEqual(harness.calls.filter((entry) => entry[0] === "subscribed"), [["subscribed", false]]);
 });
 
 test("a rejected same-node reattach cannot block the bounded SID reset", () => {

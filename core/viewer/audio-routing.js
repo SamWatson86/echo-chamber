@@ -2,6 +2,26 @@
    AUDIO ROUTING — Gain nodes, track subscription, and media reconciliation
    ========================================================= */
 
+function shouldSubscribePublicationForAudioRouting(publication, participant, expectedRoom) {
+  if (typeof isPhoneScreenVideoBudgetEnabled === "function" &&
+      isPhoneScreenVideoBudgetEnabled() &&
+      typeof shouldSubscribeParticipantPublication === "function") {
+    return shouldSubscribeParticipantPublication(publication, participant, expectedRoom);
+  }
+  return typeof isUnwatchedScreenShare !== "function" ||
+    !isUnwatchedScreenShare(publication, participant);
+}
+
+function subscribePublicationForAudioRouting(publication, participant, expectedRoom) {
+  if (typeof setParticipantPublicationSubscribed === "function") {
+    return setParticipantPublicationSubscribed(publication, participant, true, expectedRoom);
+  }
+  if (!publication?.setSubscribed ||
+      !shouldSubscribePublicationForAudioRouting(publication, participant, expectedRoom)) return false;
+  publication.setSubscribed(true);
+  return true;
+}
+
 function setRoomAudioMutedState(next) {
   roomAudioMuted = Boolean(next);
   if (toggleRoomAudioButton) {
@@ -99,7 +119,13 @@ function resetRemoteSubscriptions(reason) {
       if (pub.kind === LK?.Track?.Kind?.Video) {
         pub.setSubscribed(false);
         setTimeout(() => {
-          pub.setSubscribed(true);
+          if (typeof isPhoneScreenVideoBudgetEnabled === "function" &&
+              isPhoneScreenVideoBudgetEnabled()) {
+            if (!subscribePublicationForAudioRouting(pub, participant, room)) return;
+          } else {
+            // Preserve the established desktop reset path exactly.
+            pub.setSubscribed(true);
+          }
           requestVideoKeyFrame(pub, pub.track);
         }, 220);
       }
@@ -439,6 +465,15 @@ function handleTrackSubscribed(track, publication, participant) {
     debugLog("[camera-stage] ignored stale camera subscribe for " + effectiveParticipant.identity);
     return;
   }
+  if (track.kind === "video" && source === LK.Track.Source.ScreenShare &&
+      typeof isPhoneScreenVideoBudgetEnabled === "function" &&
+      isPhoneScreenVideoBudgetEnabled() &&
+      !shouldSubscribePublicationForAudioRouting(publication, participant, room)) {
+    publication?.setSubscribed?.(false);
+    setParticipantScreenWatchAvailable(effectiveParticipant.identity, true);
+    debugLog("[phone-screen-budget] rejected inactive screen video " + effectiveParticipant.identity);
+    return;
+  }
   const handleKey = track.kind === "video" ? `${effectiveParticipant.identity}-${source || track.kind}` : getTrackSid(publication, track, `${effectiveParticipant.identity}-${source || track.kind}`);
 
   // Check if recently handled, but also verify track is actually displayed
@@ -492,9 +527,7 @@ function handleTrackSubscribed(track, publication, participant) {
   } else {
     markHandled(handleKey);
   }
-  if (publication?.setSubscribed && !isUnwatchedScreenShare(publication, participant)) {
-    publication.setSubscribed(true);
-  }
+  subscribePublicationForAudioRouting(publication, participant, room);
   if (track.kind === "video") {
     requestVideoKeyFrame(publication, track);
     setTimeout(() => requestVideoKeyFrame(publication, track), 500);
@@ -802,7 +835,11 @@ function handleTrackSubscribed(track, publication, participant) {
     applyParticipantAudioVolumes(state);
     applySpeakerToMedia().catch(() => {});
     try {
-      room?.startAudio?.();
+      if (typeof startRoomAudioWithRecovery === "function") {
+        startRoomAudioWithRecovery(room).catch(() => {});
+      } else {
+        room?.startAudio?.();
+      }
     } catch {}
   }
 }

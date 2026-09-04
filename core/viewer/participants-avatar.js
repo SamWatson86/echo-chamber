@@ -381,10 +381,37 @@ function ensureParticipantCard(participant, isLocal = false) {
   }
 
   function syncScreenWatchControls() {
-    var screenHidden = hiddenScreens.has(key);
-    var actionText = screenHidden ? "Show on my Stage" : "Hide from my Stage";
-    var actionLabel = (screenHidden ? "Show" : "Hide") +
-      " the shared screen from " + participantDisplayName + " on my Stage";
+    var phoneVideoBudgetActive = !isLocal &&
+      typeof isPhoneScreenVideoBudgetEnabled === "function" &&
+      isPhoneScreenVideoBudgetEnabled();
+    var screenHidden;
+    var actionText;
+    var actionLabel;
+    if (phoneVideoBudgetActive) {
+      var mediaIdentity = typeof isScreenIdentity === "function" && isScreenIdentity(key)
+        ? getParentIdentity(key)
+        : key;
+      var selectedIdentity = null;
+      try { selectedIdentity = phoneScreenVideoBudget.selectedIdentity?.(room) || null; } catch (_) {}
+      var selected = selectedIdentity === mediaIdentity;
+      screenHidden = !selected;
+      actionText = selected
+        ? "Hide screen video"
+        : (selectedIdentity ? "Switch to this screen" : "Show screen video");
+      actionLabel = selected
+        ? "Hide the shared screen video from " + participantDisplayName +
+          "; shared audio stays connected"
+        : (selectedIdentity
+            ? "Switch Stage video to the shared screen from " + participantDisplayName +
+              "; shared audio stays connected"
+            : "Show the shared screen video from " + participantDisplayName +
+              "; shared audio stays connected");
+    } else {
+      screenHidden = hiddenScreens.has(key);
+      actionText = screenHidden ? "Show on my Stage" : "Hide from my Stage";
+      actionLabel = (screenHidden ? "Show" : "Hide") +
+        " the shared screen from " + participantDisplayName + " on my Stage";
+    }
 
     [watchToggleBtn, ovWatchClone, settingsWatchButton].forEach(function(button) {
       if (!button) return;
@@ -486,6 +513,21 @@ function ensureParticipantCard(participant, isLocal = false) {
       function getWatchSource(pub, remoteParticipant) {
         patchScreenCompanionSource(pub, pub?.track, remoteParticipant);
         return pub ? (pub.source || (pub.track ? pub.track.source : null)) : null;
+      }
+
+      if (typeof isPhoneScreenVideoBudgetEnabled === "function" &&
+          isPhoneScreenVideoBudgetEnabled()) {
+        var mediaIdentity = typeof isScreenIdentity === "function" && isScreenIdentity(identity)
+          ? getParentIdentity(identity)
+          : identity;
+        var selectedIdentity = null;
+        try { selectedIdentity = phoneScreenVideoBudget.selectedIdentity?.(room) || null; } catch (_) {}
+        if (selectedIdentity === mediaIdentity) {
+          hidePhoneScreenVideo(room);
+        } else {
+          selectPhoneScreenVideoIdentity(mediaIdentity, room);
+        }
+        return;
       }
 
       if (hiddenScreens.has(identity)) {
@@ -1395,6 +1437,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     settingsCameraStageButton,
     setScreenWatchAvailable,
     setCameraStageAvailable,
+    syncScreenWatchControls,
     syncCameraStageControls,
     setParticipantDisplayName
   });

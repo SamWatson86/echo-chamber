@@ -1,7 +1,7 @@
 (function(root) {
   "use strict";
 
-  var RECOVERY_SCRIPT = "android-firefox-presentation-recovery.js?v=0.6.35.1786648741";
+  var RECOVERY_SCRIPT = "android-firefox-presentation-recovery.js?v=0.6.37.phone.2";
   var TARGET_USER_AGENT = /Android[^)]*Mobile/i;
   var TARGET_FIREFOX = /Firefox\/\d/i;
   var FLAG_PARAM = "echoAndroidFirefoxPresentationRecovery";

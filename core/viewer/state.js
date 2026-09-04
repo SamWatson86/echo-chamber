@@ -207,6 +207,50 @@ const stagedCameraIdentities = new Set();
 const hiddenScreens = new Set();
 const watchedScreens = new Set(); // Identities the user explicitly opted in to watch
 
+// Mobile session stability is deliberately narrower than responsive layout.
+// Only real, non-native phone browsers enter this path; desktop, touch laptops,
+// tablets, and the Echo Windows shell retain the existing media behavior.
+function isPhoneSessionStabilityEnabled() {
+  return window.EchoPhonePresentation?.isPhoneBrowser?.({
+    navigator: window.navigator,
+    isNativeShell: window.__ECHO_NATIVE__ === true,
+  }) === true;
+}
+
+function updatePhoneMediaRecoveryPrompt(state) {
+  if (!isPhoneSessionStabilityEnabled() || !refreshVideosButton || !state) return;
+  refreshVideosButton.textContent = state.label || "Enable Videos";
+  refreshVideosButton.classList.toggle("hidden", state.visible !== true);
+}
+
+const phoneScreenVideoBudget = window.EchoPhonePresentation?.createPhoneScreenVideoBudget?.({
+  isEnabled: isPhoneSessionStabilityEnabled,
+}) || null;
+
+const phoneWakeLockManager = window.EchoPhonePresentation?.createPhoneWakeLockManager?.({
+  isEnabled: isPhoneSessionStabilityEnabled,
+  navigator: window.navigator,
+  document: window.document,
+  window: window,
+  log: (message) => {
+    if (typeof debugLog === "function") debugLog(message);
+  },
+}) || null;
+
+const phoneAudioPlaybackRecovery = window.EchoPhonePresentation?.createPhoneAudioPlaybackRecovery?.({
+  isEnabled: isPhoneSessionStabilityEnabled,
+  getCurrentRoom: () => room,
+  getAudioElements: () => Array.from(audioElBySid.values()),
+  getPendingElements: () => {
+    if (!(window._pausedVideos instanceof Set)) window._pausedVideos = new Set();
+    return window._pausedVideos;
+  },
+  onPromptChange: updatePhoneMediaRecoveryPrompt,
+  log: (message) => {
+    if (typeof debugLog === "function") debugLog(message);
+  },
+}) || null;
+
 // ── Chat state ──
 const chatHistory = [];
 let chatDataChannel = null;
