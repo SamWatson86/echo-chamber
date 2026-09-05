@@ -61,6 +61,9 @@ function setParticipantScreenWatchAvailable(identity, available) {
   if (cardRef && typeof cardRef.setScreenWatchAvailable === "function") {
     cardRef.setScreenWatchAvailable(available);
   }
+  if (typeof broadcastStreamActivity === "function" && typeof room !== "undefined" && room?.localParticipant?.identity === identity) {
+    broadcastStreamActivity();
+  }
 }
 
 function setParticipantCameraStageAvailable(identity, available) {
@@ -261,6 +264,11 @@ function ensureParticipantCard(participant, isLocal = false) {
   title.title = title.textContent;
   card.append(title);
 
+  const streamDescription = document.createElement("div");
+  streamDescription.className = "participant-stream-description";
+  streamDescription.hidden = true;
+  card.append(streamDescription);
+
   const publisherMicState = document.createElement("div");
   publisherMicState.className = "participant-mic-state";
   publisherMicState.hidden = true;
@@ -427,6 +435,7 @@ function ensureParticipantCard(participant, isLocal = false) {
 
     card.classList.toggle("is-screen-sharing", screenWatchAvailable);
     publisherScreenState.hidden = !screenWatchAvailable;
+    syncStreamDescription();
 
     syncLocalStageControlAvailability();
   }
@@ -434,6 +443,15 @@ function ensureParticipantCard(participant, isLocal = false) {
   function setScreenWatchAvailable(available) {
     screenWatchAvailable = !!available;
     syncScreenWatchControls();
+  }
+
+  function syncStreamDescription() {
+    var description = screenWatchAvailable
+      ? (typeof participantStreamActivityLabel === "function" ? participantStreamActivityLabel(key) : "Sharing screen")
+      : "";
+    streamDescription.textContent = description;
+    streamDescription.title = description;
+    streamDescription.hidden = !description;
   }
 
   function syncCameraStageControls() {
@@ -1436,6 +1454,8 @@ function ensureParticipantCard(participant, isLocal = false) {
     settingsWatchButton,
     settingsCameraStageButton,
     setScreenWatchAvailable,
+    syncStreamDescription,
+    streamDescription,
     setCameraStageAvailable,
     syncScreenWatchControls,
     syncCameraStageControls,

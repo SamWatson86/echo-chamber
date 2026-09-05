@@ -18,10 +18,15 @@
 
   function clearManagedTileSizing() {
     _managedTiles.forEach(function (tile) {
-      setStyleValue(tile, "width", "");
-      setStyleValue(tile, "height", "");
+      clearTileSizing(tile);
     });
     _managedTiles.clear();
+  }
+
+  function clearTileSizing(tile) {
+    ["width", "height", "position", "left", "top"].forEach(function (property) {
+      setStyleValue(tile, property, "");
+    });
   }
 
   function clearManagedGridSizing(grid) {
@@ -147,32 +152,29 @@
       return;
     }
 
-    var sourceAware = Array.isArray(layout.tileLayouts) &&
-      layout.tileLayouts.length === tiles.length &&
-      Array.isArray(layout.columnWidths) &&
-      Array.isArray(layout.rowHeights);
+    var sourceAware = layout.positioned && Array.isArray(layout.tileLayouts) &&
+      layout.tileLayouts.length === tiles.length;
     setStyleValue(
       grid,
       "gridTemplateColumns",
       sourceAware
-        ? layout.columnWidths.map(pixelTrack).join(" ")
+        ? "minmax(0, 1fr)"
         : "repeat(" + layout.columns + ", " + pixelTrack(layout.tileWidth) + ")"
     );
     setStyleValue(
       grid,
       "gridTemplateRows",
       sourceAware
-        ? layout.rowHeights.map(pixelTrack).join(" ")
+        ? "minmax(0, 1fr)"
         : "repeat(" + layout.rows + ", " + pixelTrack(layout.tileHeight) + ")"
     );
 
-    // The selected tracks are the canonical tile cells. Uniform sources fill
-    // those cells exactly; mixed sources use the policy's contained geometry.
+    // Uniform sources fill grid cells; mixed sources use centered justified
+    // rows without reparenting any live video or changing its subscription.
     var visibleSet = new Set(tiles);
     _managedTiles.forEach(function (tile) {
       if (!visibleSet.has(tile)) {
-        setStyleValue(tile, "width", "");
-        setStyleValue(tile, "height", "");
+        clearTileSizing(tile);
         _managedTiles.delete(tile);
       }
     });
@@ -180,6 +182,9 @@
       var tileLayout = sourceAware ? layout.tileLayouts[index] : null;
       setStyleValue(tile, "width", tileLayout ? pixelTrack(tileLayout.width) : "100%");
       setStyleValue(tile, "height", tileLayout ? pixelTrack(tileLayout.height) : "100%");
+      setStyleValue(tile, "position", tileLayout ? "absolute" : "");
+      setStyleValue(tile, "left", tileLayout ? pixelTrack((width - layout.totalWidth) / 2 + tileLayout.x) : "");
+      setStyleValue(tile, "top", tileLayout ? pixelTrack((height - layout.totalHeight) / 2 + tileLayout.y) : "");
       _managedTiles.add(tile);
     });
   }

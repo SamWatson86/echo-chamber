@@ -116,6 +116,7 @@ function buildCaptureSourceReport(source, captureRoute, publishProfile) {
 function setCaptureSourceReport(source, captureRoute, publishProfile) {
   var report = buildCaptureSourceReport(source, captureRoute, publishProfile);
   if (typeof window !== 'undefined') window._echoCaptureSourceReport = report;
+  if (typeof broadcastStreamActivity === 'function') broadcastStreamActivity();
   return report;
 }
 
@@ -268,7 +269,7 @@ async function _finalizeNativeCaptureStop(stopMessage) {
   window._echoNativeCaptureActive = false;
   window._echoNativeCaptureMode = null;
   window._echoNativeCaptureSource = null;
-  window._echoCaptureSourceReport = null;
+  setCaptureSourceReport(null);
   screenEnabled = false;
   _stopNativeCaptureStopListeners();
   _stopSourceVisibilityMonitor();
@@ -1308,7 +1309,7 @@ async function stopScreenShareManual() {
   _bweKickAttempted = false;
   _highPausedTicks = 0;
   _latestOutboundBwe = 0;
-  window._echoCaptureSourceReport = null;
+  setCaptureSourceReport(null);
   // Clean up publisher-side bitrate cap state
   _bitrateCaps.clear();
   _currentAppliedCap = null;
