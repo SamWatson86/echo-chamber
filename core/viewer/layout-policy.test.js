@@ -344,6 +344,17 @@ test("optimal grids choose expected arrangements for representative shapes", () 
   assert.deepEqual({ columns: portraitThree.columns, rows: portraitThree.rows }, { columns: 1, rows: 3 });
 });
 
+test("reordering a portrait behind wide sources does not reduce the other streams to tiny strips", () => {
+  const layout = chooseOptimalGrid({
+    width: 1340, height: 750, tileCount: 3, gap: 12,
+    aspectRatios: [32 / 9, 16 / 9, 9 / 16],
+  });
+  // The former row/column-count balance preferred ~70px-high wide streams
+  // above a ~670px portrait. This space fits all three at over 220px high.
+  assert.ok(layout.tileLayouts.every(tile => tile.height > 220));
+  assert.ok(layout.totalWidth <= 1340 && layout.totalHeight <= 750);
+});
+
 test("uniform per-tile aspect ratios preserve the original grid contract exactly", () => {
   const containers = [
     { width: 1920, height: 1080 },

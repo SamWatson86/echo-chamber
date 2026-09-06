@@ -1602,7 +1602,7 @@ for (const viewport of [
     expect(geometry.chat.right).toBeLessThanOrEqual(geometry.stage.right + 1);
     expect(geometry.chat.top).toBeGreaterThanOrEqual(geometry.stage.top - 1);
     expect(geometry.chat.bottom).toBeLessThanOrEqual(geometry.stage.bottom + 1);
-    expect(geometry.stage.bottom).toBeLessThanOrEqual(geometry.users.top + 1);
+    expect(intersectionArea(geometry.stage, geometry.users)).toBeLessThanOrEqual(1);
     for (const region of [geometry.stage, geometry.users]) {
       expect(region.left).toBeGreaterThanOrEqual(geometry.workspace.left - 1);
       expect(region.right).toBeLessThanOrEqual(geometry.workspace.right + 1);

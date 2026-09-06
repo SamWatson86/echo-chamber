@@ -16,13 +16,18 @@ function addTile(label, element) {
   return tile;
 }
 
-function addScreenTile(label, element, trackSid) {
+// Initial subscriptions and recovery replacements must use the same media
+// surface contract. object-fit alone cannot constrain an auto-sized video box.
+function prepareScreenVideo(tile, element) {
+  if (!tile || !element) return;
   configureVideoElement(element, true);
   element.classList.add("screen-video-surface");
   // Force contain so ultrawides and non-standard ratios are never stretched
   element.style.setProperty("object-fit", "contain", "important");
   element.style.width = "100%";
   element.style.height = "100%";
+  element.style.minWidth = "0";
+  element.style.minHeight = "0";
   element.style.background = "transparent";
   // MutationObserver: enforce object-fit:contain even if SDK re-sets inline styles
   if (!element._objectFitGuard) {
@@ -33,10 +38,40 @@ function addScreenTile(label, element, trackSid) {
     });
     element._objectFitGuard.observe(element, { attributes: true, attributeFilter: ["style"] });
   }
+  if (element._screenAspectHandler) {
+    element.removeEventListener("loadedmetadata", element._screenAspectHandler);
+    element.removeEventListener("resize", element._screenAspectHandler);
+  }
+  const tagAspect = () => {
+    // A delayed metadata event from a discarded video cannot resize its tile.
+    if (tile.querySelector("video") !== element) return;
+    const vw = element.videoWidth, vh = element.videoHeight;
+    if (vw && vh) {
+      const ratio = vw / vh;
+      const publishedRatio = ratio.toFixed(6);
+      const aspectChanged = tile.style.getPropertyValue("--screen-source-aspect-ratio") !== publishedRatio;
+      tile.classList.toggle("ultrawide", ratio > 2.0);
+      tile.classList.toggle("superwide", ratio > 2.8);
+      tile.classList.toggle("portrait", ratio < 1.0);
+      tile.dataset.aspectRatio = ratio.toFixed(2);
+      tile.style.setProperty("--screen-source-aspect-ratio", publishedRatio);
+      if (aspectChanged && typeof window._echoRecalcGrid === "function") {
+        window._echoRecalcGrid();
+      }
+    }
+  };
+  element._screenAspectHandler = tagAspect;
+  element.addEventListener("loadedmetadata", tagAspect);
+  element.addEventListener("resize", tagAspect);
+  tagAspect();
   ensureVideoPlays(element._lkTrack, element);
+}
+
+function addScreenTile(label, element, trackSid) {
   const tile = addTile(label, element);
   tile.dataset.mediaKind = "screen";
   tile.style.setProperty("--screen-source-aspect-ratio", (16 / 9).toFixed(6));
+  prepareScreenVideo(tile, element);
 
   // Poster overlay: hide uninitialized GPU garbage (green/black flash) until first real frame.
   // Uses a dark cover that fades out once the video has decoded data.
@@ -139,27 +174,6 @@ function addScreenTile(label, element, trackSid) {
   }
   if (element && element.tagName === "VIDEO") {
     attachVideoDiagnostics(element._lkTrack || null, element, overlay);
-    // Once video dimensions are known, tag the tile's aspect ratio class
-    const tagAspect = () => {
-      const vw = element.videoWidth, vh = element.videoHeight;
-      if (vw && vh) {
-        const ratio = vw / vh;
-        const publishedRatio = ratio.toFixed(6);
-        const aspectChanged = tile.style.getPropertyValue("--screen-source-aspect-ratio") !== publishedRatio;
-        tile.classList.toggle("ultrawide", ratio > 2.0);
-        tile.classList.toggle("superwide", ratio > 2.8);
-        tile.classList.toggle("portrait", ratio < 1.0);
-        tile.dataset.aspectRatio = ratio.toFixed(2);
-        tile.style.setProperty("--screen-source-aspect-ratio", publishedRatio);
-        if (aspectChanged && typeof window._echoRecalcGrid === "function") {
-          window._echoRecalcGrid();
-        }
-      }
-    };
-    element.addEventListener("loadedmetadata", tagAspect);
-    element.addEventListener("resize", tagAspect);
-    // Check immediately in case already loaded
-    tagAspect();
     // Diagnostic: log actual object-fit to debug stretching
     setTimeout(() => {
       const computed = window.getComputedStyle(element).objectFit;
@@ -607,6 +621,11 @@ function normalizeScreenMediaIdentity(identity) {
 
 function cleanupScreenVideoElement(video) {
   if (!video) return;
+  if (video._screenAspectHandler) {
+    video.removeEventListener("loadedmetadata", video._screenAspectHandler);
+    video.removeEventListener("resize", video._screenAspectHandler);
+    video._screenAspectHandler = null;
+  }
   video._playGeneration = (video._playGeneration || 0) + 1;
   if (video._monitorTimer) {
     clearInterval(video._monitorTimer);
