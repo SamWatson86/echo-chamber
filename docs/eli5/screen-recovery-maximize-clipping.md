@@ -63,6 +63,15 @@ Drag/keyboard coverage checks media continuity, cancellation (Escape, outside
 drop, resize, removal), arrivals, hidden shares, recovery, and isolation between
 two viewers.
 
+Clicking Zane's 1920x1080 share to enlarge it reproduced the recovery failure
+in the still-unpatched live viewer, alongside a second 1920x1080 share and a
+1920x804 ultrawide. Replaying those source proportions at 3440x1370 made the
+old recovery code produce a 1699px-tall video inside a 994px-tall focused tile.
+The shared initializer limits that same video to the tile's 992px content
+height and retains the entire picture. Before/after checks also cover 3283x737
+and 2376x1176. A dedicated regression clicks the landscape video through the
+production focus handler and resizes it across the supported test viewports.
+
 Does this need a desktop update: No. This is a server-served viewer correction.
 Capture resolution, FPS, bitrate, encoders, and subscription policy are unchanged;
 full native-resolution transmission is not enabled.

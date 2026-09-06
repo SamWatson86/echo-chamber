@@ -150,6 +150,21 @@ test("recovered shares reserve space for panels through short ultrawide resize t
   }
 });
 
+test("clicking a landscape share keeps the enlarged frame visible with mixed ultrawide neighbors", async ({ page }) => {
+  await page.setViewportSize({ width: 3440, height: 1370 });
+  await install(page, [16 / 9, 16 / 9, 1920 / 804]);
+  await recover(page);
+  await page.locator("#screen-grid > .tile").nth(1).locator("video").click();
+  await expect(page.locator("#screen-grid > .tile").nth(1)).toHaveClass(/is-focused/);
+  await settle(page);
+  await expectContainedShares(page, "Zane's enlarged landscape stream");
+  for (const viewport of [{ width: 3283, height: 737 }, ...viewports]) {
+    await page.setViewportSize(viewport);
+    await settle(page);
+    await expectContainedShares(page, `enlarged landscape at ${viewport.width}x${viewport.height}`);
+  }
+});
+
 for (const [name, aspect] of [["16:9", 16 / 9], ["16:10", 16 / 10], ["21:9", 21 / 9], ["32:9", 32 / 9], ["4:3", 4 / 3], ["portrait", 9 / 16]]) {
   test(`recovered ${name} share stays fully visible when maximizing and restoring`, async ({ page }) => {
     await page.setViewportSize(viewports[0]);
