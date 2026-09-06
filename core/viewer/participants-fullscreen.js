@@ -845,7 +845,6 @@ function replaceScreenVideoElement(tile, track, publication) {
   }
   const newEl = createAttachedVideoElement(track);
   if (!newEl) return;
-  configureVideoElement(newEl, true);
   if (oldVideo && oldVideo.parentElement) {
     cleanupScreenVideoElement(oldVideo);
     oldVideo.replaceWith(newEl);
@@ -854,10 +853,10 @@ function replaceScreenVideoElement(tile, track, publication) {
   } else {
     tile.appendChild(newEl);
   }
+  prepareScreenVideo(tile, newEl);
   if (overlay) {
     attachVideoDiagnostics(track, newEl, overlay);
   }
-  ensureVideoPlays(track, newEl);
   ensureVideoSubscribed(publication, newEl);
 }
 
