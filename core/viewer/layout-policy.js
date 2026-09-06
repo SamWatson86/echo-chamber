@@ -315,6 +315,12 @@
         y += rowHeights[row] + input.gap;
       });
       const tileArea = totalTileArea / input.tileCount;
+      // Balance the actual row heights for mixed sources. A square row/column
+      // count can still leave two tiny shares above one very tall portrait.
+      const rowBalance = Math.min(...rowHeights) / Math.max(...rowHeights);
+      const sourceQuality = GRID_SCORE_WEIGHTS.area +
+        GRID_SCORE_WEIGHTS.balance * rowBalance +
+        GRID_SCORE_WEIGHTS.occupancy * occupancy;
 
       return {
         valid: true,
@@ -337,7 +343,7 @@
         rowHeights,
         balance,
         occupancy,
-        score: tileArea * quality,
+        score: tileArea * sourceQuality,
         totalWidth,
         totalHeight,
         unusedWidth: Math.max(0, input.width - totalWidth),

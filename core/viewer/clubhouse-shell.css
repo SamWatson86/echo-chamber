@@ -616,6 +616,64 @@
   transition-duration: var(--club-motion-fast);
 }
 
+.tile-reorder-handle {
+  display: none;
+}
+
+:root[data-ui-shell="v2"] .tile-reorder-handle:not([hidden]) {
+  position: absolute;
+  top: 8px;
+  right: 54px;
+  z-index: 7;
+  width: 32px;
+  height: 40px;
+  min-width: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+  color: var(--club-text-muted);
+  background: rgba(5, 7, 10, 0.68);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+:root[data-ui-shell="v2"] .tile:has(> .tile-reorder-handle:not([hidden])) h3 {
+  max-width: max(0px, calc(100% - 100px));
+}
+
+:root[data-ui-shell="v2"] .tile.is-reordering {
+  opacity: 0.65;
+}
+
+:root[data-ui-shell="v2"] .tile.is-reorder-target {
+  outline: 3px solid var(--club-brass-bright);
+  outline-offset: -3px;
+}
+
+:root[data-ui-shell="v2"] .screens-grid.is-reordering .tile-reorder-handle {
+  cursor: grabbing;
+}
+
+.tile-order-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (pointer: coarse) {
+  :root[data-ui-shell="v2"] .tile-reorder-handle:not([hidden]) {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 :root[data-ui-shell="v2"] .tile-volume-wrap:focus-within:not(.hidden) {
   opacity: 1;
   pointer-events: auto;
@@ -1972,13 +2030,6 @@
   height: 100%;
 }
 
-:root[data-ui-shell="v2"][data-ui-mode="mini"] .room-layout:has(
-  #screen-grid[data-visible-tiles]:not([data-visible-tiles="0"]) > .tile[data-grid-visible]
-) > .utility-host[data-active-tool="people"] {
-  top: auto;
-  height: min(300px, 62%);
-}
-
 :root[data-ui-shell="v2"] .jam-panel.clubhouse-utility-tool .jam-source-local-card {
   min-width: 0;
   padding: 11px;
@@ -2229,14 +2280,15 @@
   }
 }
 
-/* When a Stage module and Active Users are both visible, they share the
-   workspace instead of allowing the responsive rail to cover module controls. */
-:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
+/* Visible shares and Stage modules share the workspace with open panels.
+   Reserve their space even when a short window selects lounge/compact/mini;
+   the grid observer then fits every stream to the unobstructed Stage. */
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--club-people-rail-size);
 }
 
-:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+:root[data-ui-shell="v2"][data-ui-mode="lounge"] .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) > .utility-host {
   position: relative;
   inset: auto;
   grid-column: 2;
@@ -2245,18 +2297,18 @@
   height: 100%;
 }
 
-:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
+:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) minmax(180px, 42%);
 }
 
-:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .room-main {
+:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) > .room-main {
   grid-column: 1;
   grid-row: 1;
 }
 
-:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+:root[data-ui-shell="v2"]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) > .utility-host {
   position: relative;
   inset: auto;
   grid-column: 1;
@@ -2265,18 +2317,18 @@
   height: 100%;
 }
 
-@media (orientation: landscape) and (max-height: 520px) {
-  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) {
-    grid-template-columns: minmax(0, 1fr) clamp(220px, 36vw, 300px);
+@media (orientation: landscape) and (max-height: 650px) {
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) {
+    grid-template-columns: minmax(0, 1fr) clamp(280px, 36vw, 300px);
     grid-template-rows: minmax(0, 1fr);
   }
 
-  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .room-main {
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) > .room-main {
     grid-column: 1;
     grid-row: 1;
   }
 
-  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host {
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) > .utility-host {
     grid-column: 2;
     grid-row: 1;
     position: relative;
@@ -2286,7 +2338,7 @@
     top: auto !important;
   }
 
-  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open):not(.utility-collapsed) > .utility-host > .room-sidebar {
+  :root[data-ui-shell="v2"][data-ui-short]:is([data-ui-mode="compact"], [data-ui-mode="mini"]) .room-layout:has(> .room-main.stage-module-open, > .room-main > :where(.screens-grid[data-visible-tiles]:not([data-visible-tiles="0"]))):not(.utility-collapsed) > .utility-host > .room-sidebar {
     height: 100%;
     max-height: none;
   }

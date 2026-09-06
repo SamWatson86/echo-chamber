@@ -10,6 +10,7 @@
   var _mutationObserver = null;
   var _rafPending = false;
   var _managedTiles = new Set();
+  var _tileOrder = null;
 
   function setStyleValue(element, property, value) {
     if (!element || element.style[property] === value) return;
@@ -40,7 +41,8 @@
   }
 
   function visibleTiles(grid) {
-    return directTiles(grid).filter(function (tile) {
+    var tiles = _tileOrder ? _tileOrder.getTiles() : directTiles(grid);
+    return tiles.filter(function (tile) {
       return tile.offsetParent !== null && getComputedStyle(tile).visibility !== "hidden";
     });
   }
@@ -107,6 +109,7 @@
     // Phase 2 must remain a live presentation-only variant. Rolling back to
     // legacy removes every inline grid decision made here.
     if (document.documentElement.dataset.uiShell !== "v2") {
+      if (_tileOrder) _tileOrder.getTiles();
       clearVisibleTileState(grid);
       clearManagedGridSizing(grid);
       return;
@@ -115,7 +118,10 @@
     // Stage modules visually replace (but never tear down) the screen grid.
     // Preserve the last visible-tile count and geometry while it is hidden so
     // mutations cannot publish a false zero-tile layout before Back to Stage.
-    if (grid.closest(".room-main.stage-module-open")) return;
+    if (grid.closest(".room-main.stage-module-open")) {
+      if (_tileOrder) _tileOrder.getTiles();
+      return;
+    }
 
     // Single-share immersion and focused mode have purpose-built CSS layouts.
     // Remove our multi-share inline geometry so those rules retain ownership.
@@ -201,6 +207,9 @@
   function initGridObserver() {
     var grid = document.getElementById("screen-grid");
     if (!grid || _resizeObserver) return;
+    if (window.EchoStageTileOrder) {
+      _tileOrder = window.EchoStageTileOrder.create({ grid: grid, onChange: scheduleUpdate });
+    }
 
     if (typeof ResizeObserver === "function") {
       _resizeObserver = new ResizeObserver(scheduleUpdate);

@@ -83,6 +83,11 @@ async function expectContainedShares(page, label) {
     };
     const within = (inner, outer) => inner.left >= outer.left - 1 && inner.top >= outer.top - 1 && inner.right <= outer.right + 1 && inner.bottom <= outer.bottom + 1;
     const gridBox = rect(grid);
+    const stageBox = rect(grid.closest(".room-main"));
+    const viewportBox = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    const utility = document.querySelector(".utility-host");
+    const utilityVisible = utility && utility.offsetParent && getComputedStyle(utility).visibility !== "hidden";
+    const intersects = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
     const tiles = [...grid.querySelectorAll(":scope > .tile")].filter(tile => tile.offsetParent);
     const boxes = tiles.map(rect);
     return tiles.map((tile, index) => {
@@ -91,6 +96,8 @@ async function expectContainedShares(page, label) {
       const originalIndex = window.recoveryLayoutTiles.indexOf(tile);
       return { index: originalIndex, tile: box, video: rect(video),
         videoInsideTile: within(rect(video), box), tileInsideGrid: within(box, gridBox),
+        stageInsideViewport: within(stageBox, viewportBox), gridInsideStage: within(gridBox, stageBox),
+        coveredByUtility: !!utilityVisible && intersects(box, rect(utility)),
         overlaps: boxes.slice(index + 1).some(other => Math.min(box.right, other.right) - Math.max(box.left, other.left) > 1 && Math.min(box.bottom, other.bottom) - Math.max(box.top, other.top) > 1),
         objectFit: getComputedStyle(video).objectFit,
         aspectError: Math.abs(Number(tile.style.getPropertyValue("--screen-source-aspect-ratio")) - video.videoWidth / video.videoHeight),
@@ -102,6 +109,8 @@ async function expectContainedShares(page, label) {
   for (const result of measurements) {
     expect(result.videoInsideTile, `${label}: video escaped tile ${JSON.stringify(result)}`).toBe(true);
     expect(result.tileInsideGrid, `${label}: tile escaped Stage`).toBe(true);
+    expect(result.stageInsideViewport && result.gridInsideStage, `${label}: Stage escaped visible workspace`).toBe(true);
+    expect(result.coveredByUtility, `${label}: open panel covers stream ${JSON.stringify(result)}`).toBe(false);
     expect(result.overlaps, `${label}: shares overlap`).toBe(false);
     expect(result.video.width, label).toBeGreaterThan(0);
     expect(result.video.height, label).toBeGreaterThan(0);
@@ -110,6 +119,36 @@ async function expectContainedShares(page, label) {
     expect(result.trackPreserved && result.trackLive, `${label}: live track retained`).toBe(true);
   }
 }
+
+test("recovered shares reserve space for panels through short ultrawide resize transitions", async ({ page }) => {
+  // Sam's 3283x737 window retained lounge mode after a shorter window drag.
+  // Starting directly at 737px classifies as theater and misses the overlap.
+  await page.setViewportSize({ width: 3283, height: 650 });
+  await install(page, [16 / 9, 9 / 16, 32 / 9]);
+  await recover(page);
+  await page.setViewportSize({ width: 3283, height: 737 });
+  await settle(page);
+  await expect(page.locator("html")).toHaveAttribute("data-ui-mode", "lounge");
+  await expectContainedShares(page, "Sam's short ultrawide window");
+
+  for (const viewport of [
+    { width: 3283, height: 800 }, { width: 3283, height: 737 },
+    { width: 3283, height: 650 }, { width: 1750, height: 737 },
+    { width: 1280, height: 650 }, { width: 1024, height: 700 },
+    { width: 900, height: 540 }, { width: 640, height: 480 },
+    { width: 390, height: 844 }, { width: 3283, height: 737 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await settle(page);
+    await expectContainedShares(page, `open Users at ${viewport.width}x${viewport.height}`);
+    await page.locator("#shell-toggle-utility").click();
+    await settle(page);
+    await expectContainedShares(page, "Users hidden");
+    await page.locator("#shell-toggle-utility").click();
+    await settle(page);
+    await expectContainedShares(page, "Users restored");
+  }
+});
 
 for (const [name, aspect] of [["16:9", 16 / 9], ["16:10", 16 / 10], ["21:9", 21 / 9], ["32:9", 32 / 9], ["4:3", 4 / 3], ["portrait", 9 / 16]]) {
   test(`recovered ${name} share stays fully visible when maximizing and restoring`, async ({ page }) => {
