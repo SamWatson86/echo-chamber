@@ -286,12 +286,33 @@ function applyParticipantAudioVolumes(state) {
 
 // Screen audio and video are separate LiveKit publications and can subscribe in
 // either order. Keep the Stage control derived from the already-attached audio
-// state so a video tile created after its audio does not stay at the disabled,
-// default-volume state until the viewer reconnects.
+// state so a video tile created after its audio does not stay disabled. Local
+// previews never play outgoing audio; their status comes from publication state.
 function syncScreenAudioVolumeControl(identity, tile) {
   var state = participantState.get(identity);
   var screenTile = tile || screenTileByIdentity.get(identity);
-  if (!state || !screenTile?._volWrap) return;
+  if (!screenTile?._volWrap) return;
+  if (identity === room?.localParticipant?.identity) {
+    var publications = getParticipantPublications(room.localParticipant).filter(function(publication) {
+      var track = publication?.track;
+      return getTrackSource(publication, track) === "screen_share_audio" &&
+        (publication.kind || track?.kind) === "audio" &&
+        track?.mediaStreamTrack?.readyState === "live";
+    });
+    var hasUnmutedAudio = publications.some(function(publication) {
+      var track = publication.track;
+      return !publication.isMuted && !track.isMuted &&
+        track.mediaStreamTrack.enabled !== false && !track.mediaStreamTrack.muted;
+    });
+    screenTile._volWrap.classList.toggle("hidden", false);
+    screenTile._volWrap.setAttribute("aria-label", "Your stream audio");
+    screenTile._volButton?.setAttribute("aria-label", "Your stream audio");
+    if (screenTile._volSlider) screenTile._volSlider.disabled = true;
+    if (screenTile._volStatus) screenTile._volStatus.textContent = hasUnmutedAudio
+      ? "Audio shared" : publications.length ? "Audio muted" : "No audio shared";
+    return;
+  }
+  if (!state) return;
   var hasAttachedAudio = Array.from(state.screenAudioEls || []).some(function(element) {
     return element?.isConnected;
   });

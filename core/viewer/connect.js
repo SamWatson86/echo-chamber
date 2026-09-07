@@ -323,6 +323,7 @@ function updatePublisherMicrophoneState(publication, participant, published) {
 }
 
 function reconcileLocalPublishIndicators(reason) {
+  if (room?.localParticipant) syncScreenAudioVolumeControl(room.localParticipant.identity);
   if (!publishStateReconcile || !room || !room.localParticipant) return;
   // Skip reconciliation while a toggle is in progress — the toggle sets
   // micEnabled/camEnabled from authoritative state when each toggle finishes.
@@ -1550,6 +1551,9 @@ async function connectToRoom({
       if (!participant) return;
       if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
       const source = publication?.source;
+      if (source === LK.Track.Source.ScreenShareAudio && participant === newRoom.localParticipant) {
+        syncScreenAudioVolumeControl(participant.identity);
+      }
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
         if (state) {
@@ -1590,6 +1594,9 @@ async function connectToRoom({
       if (!participant) return;
       if (!isCurrentRoomParticipantGeneration(participant.identity, participant, newRoom)) return;
       const source = publication?.source;
+      if (source === LK.Track.Source.ScreenShareAudio && participant === newRoom.localParticipant) {
+        syncScreenAudioVolumeControl(participant.identity);
+      }
       if (publication?.kind === LK.Track.Kind.Audio && source === LK.Track.Source.Microphone) {
         const state = participantState.get(participant.identity);
         if (state) {

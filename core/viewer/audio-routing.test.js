@@ -16,7 +16,7 @@ function loadAudioRoutingHarness() {
   const audioElBySid = new Map();
   const participantState = new Map();
   const participantCards = new Map();
-  const localParticipant = { identity: "phone-1" };
+  const localParticipant = { identity: "phone-1", trackPublications: new Map() };
   const room = {
     localParticipant,
     remoteParticipants: new Map(),
@@ -80,7 +80,10 @@ function loadAudioRoutingHarness() {
       };
     },
     getTrackSource(publication, track) {
-      return publication.source || track.source || null;
+      return publication?.source || track?.source || null;
+    },
+    getParticipantPublications(participant) {
+      return Array.from(participant?.trackPublications?.values() || []);
     },
     getTrackSid(publication, track, fallback) {
       return publication.trackSid || track.sid || fallback;
@@ -113,8 +116,10 @@ function loadAudioRoutingHarness() {
         dataset: { trackSid },
         style: {},
         classList: createClassList(),
-        _volWrap: { classList: createClassList(["hidden"]) },
+        _volWrap: { classList: createClassList(["hidden"]), setAttribute(name, value) { this[name] = value; } },
+        _volButton: { setAttribute(name, value) { this[name] = value; } },
         _volSlider: { value: "1" },
+        _volStatus: { textContent: "No stream audio" },
         querySelector(selector) { return selector === "video" ? video : null; },
       };
       createdScreenTiles.push(tile);
@@ -154,6 +159,144 @@ function createParticipantAudioState(overrides) {
     screenAnalyser: null,
   }, overrides);
 }
+
+function localPreviewHarness() {
+  const harness = loadAudioRoutingHarness();
+  const local = harness.room.localParticipant;
+  const state = createParticipantAudioState();
+  harness.participantState.set(local.identity, state);
+  const tile = harness.context.addScreenTile("Your screen", {}, "local-video");
+  harness.context.screenTileByIdentity.set(local.identity, tile);
+  const publication = {
+    trackSid: "local-audio", source: "screen_share_audio", kind: "audio", isMuted: false,
+    track: { kind: "audio", mediaStreamTrack: { readyState: "live", enabled: true, muted: false },
+      attach() { assert.fail("own stream audio must never attach for playback"); } },
+  };
+  local.trackPublications.set(publication.trackSid, publication);
+  return { ...harness, local, state, tile, publication,
+    sync() { harness.context.syncScreenAudioVolumeControl(local.identity); } };
+}
+
+test("own preview reports outgoing screen audio without self-playback or a volume slider", () => {
+  const h = localPreviewHarness();
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "Audio shared");
+  assert.equal(h.tile._volSlider.disabled, true);
+  assert.equal(h.tile._volWrap.classList.contains("hidden"), false);
+  assert.equal(h.tile._volButton["aria-label"], "Your stream audio");
+  assert.equal(h.tile._volWrap["aria-label"], "Your stream audio");
+  assert.equal(h.state.screenAudioEls.size, 0);
+  assert.equal(h.audioBucketEl.children.length, 0);
+  assert.equal(h.room.startAudioCalls, 0);
+  // Local publication truth does not depend on receiver/card audio state.
+  h.participantState.delete(h.local.identity);
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "Audio shared");
+});
+
+test("own audio status distinguishes muted, ended, absent, and microphone-only publications", () => {
+  const h = localPreviewHarness();
+  for (const target of [h.publication, h.publication.track]) {
+    target.isMuted = true;
+    h.sync();
+    assert.equal(h.tile._volStatus.textContent, "Audio muted");
+    target.isMuted = false;
+  }
+  h.publication.track.mediaStreamTrack.enabled = false;
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "Audio muted");
+  h.publication.track.mediaStreamTrack.enabled = true;
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "Audio shared");
+  h.publication.track.mediaStreamTrack.readyState = "ended";
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "No audio shared");
+  h.local.trackPublications.clear();
+  h.local.trackPublications.set("microphone", { ...h.publication, source: "microphone",
+    track: { kind: "audio", mediaStreamTrack: { readyState: "live" } } });
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "No audio shared");
+  h.local.trackPublications.set("pending-audio", { source: "screen_share_audio", kind: "audio" });
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "No audio shared");
+});
+
+test("own preview reads only the current room's publisher, never retained or remote audio", () => {
+  const h = localPreviewHarness();
+  h.sync();
+  h.context.room = { localParticipant: { identity: h.local.identity, trackPublications: new Map() },
+    remoteParticipants: new Map([["remote", { trackPublications: h.local.trackPublications }]]) };
+  h.state.screenAudioEls.add({ isConnected: true });
+  h.context.window._nativeAudioActive = true;
+  h.sync();
+  assert.equal(h.tile._volStatus.textContent, "No audio shared");
+  assert.equal(h.tile._volSlider.disabled, true);
+});
+
+test("publication events, mute events, and reconnect reconciliation refresh own audio status", () => {
+  const h = localPreviewHarness();
+  const context = h.context;
+  const handlers = new Map();
+  const LK = context.getLiveKitClient();
+  LK.RoomEvent = Object.fromEntries(["LocalTrackPublished", "LocalTrackUnpublished", "TrackMuted", "TrackUnmuted"].map(name => [name, name]));
+  Object.assign(context, {
+    LK, newRoom: h.room, name: "You", document: { addEventListener() {} },
+    connectBtn: { addEventListener() {} }, disconnectBtn: { addEventListener() {} },
+    disconnectTopBtn: { addEventListener() {} },
+    publishStateReconcile: null, _micToggling: true, _camToggling: true,
+    ignoreStaleRoomEvent() { return context.room !== h.room; },
+    isCurrentRoomParticipantGeneration(identity, participant, expectedRoom) {
+      return context.room === expectedRoom && expectedRoom.localParticipant === participant;
+    },
+    updatePublisherMicrophoneState() {},
+  });
+  h.room.on = (event, handler) => handlers.set(event, handler);
+  const source = fs.readFileSync(path.join(__dirname, "connect.js"), "utf8");
+  vm.runInContext(source, context, { filename: "connect.js" });
+  // Register the production handlers without opening a network connection.
+  for (const [start, end] of [
+    ['  if (LK.RoomEvent?.TrackMuted)', '  if (LK.RoomEvent?.ActiveSpeakers)'],
+    ['  if (LK.RoomEvent?.LocalTrackPublished)', '  // Fetch ICE server config'],
+  ]) {
+    const from = source.indexOf(start), to = source.indexOf(end, from);
+    assert.ok(from >= 0 && to > from);
+    vm.runInContext(source.slice(from, to), context, { filename: "connect-events.js" });
+  }
+  handlers.get("LocalTrackPublished")(h.publication);
+  assert.equal(h.tile._volStatus.textContent, "Audio shared");
+  h.publication.isMuted = true;
+  handlers.get("TrackMuted")(h.publication, h.local);
+  assert.equal(h.tile._volStatus.textContent, "Audio muted");
+  h.publication.isMuted = false;
+  handlers.get("TrackUnmuted")(h.publication, h.local);
+  assert.equal(h.tile._volStatus.textContent, "Audio shared");
+  h.local.trackPublications.clear();
+  handlers.get("LocalTrackUnpublished")(h.publication);
+  assert.equal(h.tile._volStatus.textContent, "No audio shared");
+  // Audio already published when the local video preview is first created.
+  h.local.trackPublications.set(h.publication.trackSid, h.publication);
+  handlers.get("LocalTrackPublished")({ source: "screen_share", trackSid: "new-video",
+    track: { kind: "video", attach() { return {}; } } });
+  const tile = context.screenTileByIdentity.get(h.local.identity);
+  assert.equal(tile._volStatus.textContent, "Audio shared");
+  h.publication.track.mediaStreamTrack.readyState = "ended";
+  context.reconcileLocalPublishIndicators("reconnected");
+  assert.equal(tile._volStatus.textContent, "No audio shared");
+  // A late old publication event must preserve a live replacement's status.
+  const replacement = { ...h.publication, trackSid: "replacement-audio",
+    track: { kind: "audio", mediaStreamTrack: { readyState: "live" } } };
+  h.local.trackPublications.clear();
+  h.local.trackPublications.set(replacement.trackSid, replacement);
+  handlers.get("LocalTrackUnpublished")(h.publication);
+  assert.equal(tile._volStatus.textContent, "Audio shared");
+  context.room = { localParticipant: { identity: h.local.identity, trackPublications: new Map() } };
+  context.reconcileLocalPublishIndicators("post-connect");
+  for (const event of Object.values(LK.RoomEvent)) {
+    handlers.get(event)(h.publication, h.local);
+    assert.equal(tile._volStatus.textContent, "No audio shared");
+  }
+  assert.equal(h.audioBucketEl.children.length, 0);
+});
 
 test("first remote microphone attachment stamps and indexes the exact audio SID", () => {
   const harness = loadAudioRoutingHarness();

@@ -23,8 +23,12 @@ What changed:
 - A compact speaker control sits at the top right of every screen tile beside
   fullscreen. Hover, keyboard focus, or a touch tap reveals a small volume
   slider. Moving away hides it unless a control retains keyboard focus; Escape
-  dismisses it. Clicking the video does not open it. A publisher without an
+  dismisses it. Clicking the video does not open it. A remote stream without an
   attached audio track shows `No stream audio` instead of a disappearing control.
+  Your own preview stays silent and has no playback slider. Its corner reports
+  `Audio shared`, `Audio muted`, or `No audio shared` from your current live
+  screen-audio publications, including after reconnecting. Microphone audio does
+  not count. `Audio shared` confirms publication, not another listener's audibility.
   Narrow portrait thumbnails stack volume below fullscreen. Rearrange handles
   hide when the controls cannot fit, and control positions update without
   animating through overlapping positions during resize.
