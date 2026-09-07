@@ -54,6 +54,7 @@ function createHarness(options = {}) {
       style: {},
       appendChild() {},
       addEventListener() {},
+      setAttribute() {},
       querySelector(selector) {
         return selector === ".stale-countdown" ? countdown : { addEventListener() {} };
       },
@@ -95,6 +96,7 @@ function createHarness(options = {}) {
     AbortSignal,
     URL,
     console,
+    sessionStorage: { getItem() { return null; }, setItem() {} },
     currentAccessToken: options.token || "participant-old",
     adminToken: "admin",
     currentRoomName: "main",
@@ -297,6 +299,77 @@ test("a heartbeat 5xx is retry-only and cannot claim an update", async () => {
   harness.context.stopHeartbeat();
 });
 
+function restartNotice(now = Date.now()) {
+  return { state: "restarting", id: "fa7ff560-8ac3-4dd0-8828-77d8d5261f31", started_at: now, expires_at: now + 120000 };
+}
+
+test("an explicit restart notice is visible and spoken once, with no forced reload", () => {
+  const h = createHarness();
+  const spoken = [];
+  h.context.SpeechSynthesisUtterance = function(text) { this.text = text; };
+  h.context.window.speechSynthesis = { speak(message) { spoken.push(message.text); } };
+  const notice = restartNotice();
+  h.context.acceptServerRestartNotice(notice, Date.now());
+  h.context.acceptServerRestartNotice(notice, Date.now());
+  assert.match(h.elements.get("server-restart-banner").textContent, /The server is restarting/);
+  assert.deepEqual(spoken, ["The server is restarting"]);
+  assert.equal(h.elements.has("stale-banner"), false);
+  assert.equal(h.reloads(), 0);
+  h.context.acceptServerRestartNotice({ state: "ready" }, Date.now());
+  assert.equal(h.elements.has("server-restart-banner"), false);
+});
+
+test("expired or malformed deployment notices cannot announce a restart", () => {
+  const h = createHarness();
+  const now = Date.now();
+  for (const data of [null, {}, { stale: true }, { ...restartNotice(now), id: "not-an-id" },
+    restartNotice(now - 120001), restartNotice(now + 60000),
+    { ...restartNotice(now), expires_at: now + 86400000 },
+    { ...restartNotice(now), started_at: String(now) }]) {
+    h.context.acceptServerRestartNotice(data, now);
+    assert.equal(h.elements.has("server-restart-banner"), false);
+  }
+});
+
+test("restart polling ignores HTTP failures, survives an outage, and expires abandoned notices", async () => {
+  const h = createHarness({ responses: [response(503, restartNotice()), response(200, restartNotice())] });
+  await h.context.checkServerRestartNotice();
+  assert.equal(h.elements.has("server-restart-banner"), false);
+  await h.context.checkServerRestartNotice();
+  assert.equal(h.elements.has("server-restart-banner"), true);
+  await h.context.checkServerRestartNotice(); // transport failure while the server is stopped
+  assert.equal(h.elements.has("server-restart-banner"), true);
+  h.context._serverNoticeExpiresAt = Date.now() - 1;
+  await h.context.checkServerRestartNotice();
+  assert.equal(h.elements.has("server-restart-banner"), false);
+  assert.equal(h.fetchCalls[0].init.cache, "no-store");
+  assert.equal(h.reloads(), 0);
+});
+
+test("a reply from a server that has been replaced cannot announce a restart", async () => {
+  let finish;
+  const h = createHarness({ fetch: () => new Promise(resolve => { finish = resolve; }) });
+  const pending = h.context.checkServerRestartNotice();
+  h.context.getControlUrl = () => "https://other.test";
+  finish(response(200, restartNotice()));
+  await pending;
+  assert.equal(h.elements.has("server-restart-banner"), false);
+});
+
+test("restart polling is single-flight and update recovery replaces the maintenance banner", async () => {
+  let finish;
+  let calls = 0;
+  const h = createHarness({ fetch: () => { calls++; return new Promise(resolve => { finish = resolve; }); } });
+  const pending = h.context.checkServerRestartNotice();
+  await h.context.checkServerRestartNotice();
+  assert.equal(calls, 1);
+  finish(response(200, restartNotice()));
+  await pending;
+  h.context.showStaleBanner();
+  assert.equal(h.elements.has("server-restart-banner"), false);
+  assert.equal(h.elements.has("stale-banner"), true);
+});
+
 test("only an authenticated stale true heartbeat starts the update reload", async () => {
   const harness = createHarness({ responses: [response(200, { stale: true })] });
 
@@ -308,8 +381,7 @@ test("only an authenticated stale true heartbeat starts the update reload", asyn
   assert.match(banner.innerHTML, /Echo was updated — reconnecting/);
   assert.equal(harness.elements.has("session-expired-banner"), false);
   assert.equal(harness.reloads(), 0);
-  assert.equal(source.includes("The server is restarting"), false);
-  assert.equal(source.includes("SpeechSynthesisUtterance"), false);
+  assert.equal(harness.elements.has("server-restart-banner"), false);
   assert.equal(source.includes("playStaleJazz"), false);
   harness.context.stopHeartbeat();
 });

@@ -9,6 +9,10 @@ param(
     [ValidateRange(0, 30000)]
     [int]$RetryDelayMilliseconds = 1000,
 
+    # Controlled stop/promote callers announce before the final preflight.
+    # Routine Restart announces automatically. Read-only Preflight stays read-only.
+    [switch]$AnnounceRestart,
+
     # Loads the functions for isolated tests without reading or mutating the
     # live EchoCoreHost service. Production never passes this switch.
     [switch]$NoMain
@@ -21,6 +25,7 @@ if (!(Test-Path -LiteralPath $productionNetworkLib -PathType Leaf)) {
     throw "Required production network guard library is missing: $productionNetworkLib"
 }
 . $productionNetworkLib
+. (Join-Path $PSScriptRoot 'restart-notice-lib.ps1')
 
 $canonicalHostConfigPath = "C:\ProgramData\Echo Chamber\echo-core-host.json"
 
@@ -676,11 +681,36 @@ function Invoke-EchoCoreHostNetworkGuard {
 }
 
 if (!$NoMain) {
-    $result = Invoke-EchoCoreHostNetworkGuard `
-        -RequestedAction $Action `
-        -ConfigPath $canonicalHostConfigPath `
-        -Attempts $VerificationAttempts `
-        -DelayMilliseconds $RetryDelayMilliseconds
+    if ($AnnounceRestart -and $Action -ne 'Preflight') {
+        throw '-AnnounceRestart is only valid with Preflight; Restart announces automatically.'
+    }
+    $noticeDirectory = $null
+    try {
+        if ($Action -eq 'Restart' -or $AnnounceRestart) {
+            $noticeConfig = Get-EchoCoreHostProductionConfiguration -ConfigPath $canonicalHostConfigPath
+            $noticeDirectory = Get-EchoRestartNoticeDirectory $noticeConfig.EnvironmentFilePath
+            Set-EchoRestartNotice -ViewerDirectory $noticeDirectory -State Restarting
+            Write-Host 'The server is restarting. Allowing 12 seconds for connected viewers to receive the notice.'
+            Start-Sleep -Seconds 12
+        }
+        # Revalidate after the notice interval, immediately before any stop/start.
+        $result = Invoke-EchoCoreHostNetworkGuard `
+            -RequestedAction $Action `
+            -ConfigPath $canonicalHostConfigPath `
+            -Attempts $VerificationAttempts `
+            -DelayMilliseconds $RetryDelayMilliseconds
+        if ($Action -eq 'Start' -or $Action -eq 'Restart') {
+            $noticeDirectory = Get-EchoRestartNoticeDirectory $result.EnvironmentFilePath
+            Set-EchoRestartNotice -ViewerDirectory $noticeDirectory -State Ready
+        }
+    }
+    catch {
+        if ($noticeDirectory) {
+            try { Set-EchoRestartNotice -ViewerDirectory $noticeDirectory -State Ready }
+            catch { Write-Warning 'Could not clear the restart notice; it expires automatically after two minutes.' }
+        }
+        throw
+    }
 
     if ($Action -eq "Preflight") {
         Write-Host "EchoCoreHost production network preflight passed: CORE_BIND=$($result.Bind) CORE_PORT=$($result.Port) env=$($result.EnvironmentFilePath)"

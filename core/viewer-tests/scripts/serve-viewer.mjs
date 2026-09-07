@@ -215,9 +215,11 @@ function resolveStaticFile(requestUrl) {
     return previewFixture;
   }
   const isAdminRequest = pathname === "/admin" || pathname.startsWith("/admin/");
+  const isViewerRequest = pathname === "/viewer" || pathname.startsWith("/viewer/");
   const root = isAdminRequest ? adminRoot : viewerRoot;
   let relativePath = isAdminRequest
     ? pathname.slice("/admin".length).replace(/^\/+/, "")
+    : isViewerRequest ? pathname.slice("/viewer".length).replace(/^\/+/, "") || "index.html"
     : pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   if (isAdminRequest && (!relativePath || pathname.endsWith("/"))) {
     relativePath = path.join(relativePath, "index.html");

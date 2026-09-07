@@ -8,6 +8,79 @@ var _updateDismissed = false;
 var _heartbeatAbort = null; // AbortController for in-flight heartbeat — prevents ghost presence (#50)
 var _heartbeatResumeHandler = null;
 
+// Planned restarts are announced by the deployment guard. A failed heartbeat,
+// expired session, or dropped network connection cannot create this notice.
+var _serverNoticeTimer = null;
+var _serverNoticePending = false;
+var _serverNoticeExpiresAt = 0;
+var _serverNoticeBaseUrl = "";
+var _serverNoticeSpokenId = "";
+
+function hideServerRestartNotice() {
+  document.getElementById("server-restart-banner")?.remove();
+  _serverNoticeExpiresAt = 0;
+}
+
+function acceptServerRestartNotice(data, now) {
+  if (data?.state === "ready") {
+    hideServerRestartNotice();
+    return;
+  }
+  if (data?.state !== "restarting" || typeof data.id !== "string" ||
+      !/^[a-f0-9-]{36}$/i.test(data.id) ||
+      !Number.isFinite(data.started_at) || !Number.isFinite(data.expires_at) ||
+      data.started_at > now + 30000 || data.expires_at <= now ||
+      data.expires_at <= data.started_at || data.expires_at - data.started_at > 180000) return;
+  _serverNoticeExpiresAt = data.expires_at;
+  if (!document.getElementById("server-restart-banner")) {
+    var banner = document.createElement("div");
+    banner.id = "server-restart-banner";
+    banner.className = "stale-banner";
+    banner.setAttribute("role", "alert");
+    banner.textContent = "The server is restarting. Echo will reconnect when it is ready.";
+    document.body.appendChild(banner);
+  }
+  if (_serverNoticeSpokenId === data.id) return;
+  _serverNoticeSpokenId = data.id;
+  try {
+    if (sessionStorage.getItem("echo-restart-announced") === data.id) return;
+    sessionStorage.setItem("echo-restart-announced", data.id);
+    if (window.speechSynthesis && typeof SpeechSynthesisUtterance === "function") {
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance("The server is restarting"));
+    }
+  } catch (_) { /* The visible notice remains available when speech/storage is blocked. */ }
+}
+
+async function checkServerRestartNotice() {
+  var baseUrl = getControlUrl();
+  if (_serverNoticeBaseUrl !== baseUrl) {
+    _serverNoticeBaseUrl = baseUrl;
+    hideServerRestartNotice();
+  }
+  if (_serverNoticeExpiresAt && Date.now() >= _serverNoticeExpiresAt) hideServerRestartNotice();
+  if (!baseUrl || _serverNoticePending) return;
+  _serverNoticePending = true;
+  try {
+    var response = await fetch(baseUrl + "/viewer/restart-notice.json", {
+      cache: "no-store", signal: AbortSignal.timeout(4000),
+    });
+    if (!response.ok) return;
+    var data = await response.json();
+    if (getControlUrl() === baseUrl) acceptServerRestartNotice(data, Date.now());
+  } catch (_) { /* Keep a confirmed notice through the outage until its expiry. */ }
+  finally { _serverNoticePending = false; }
+}
+
+function startServerNoticePolling() {
+  if (_serverNoticeTimer) return;
+  checkServerRestartNotice();
+  _serverNoticeTimer = setInterval(checkServerRestartNotice, 4000);
+  window.addEventListener("online", checkServerRestartNotice);
+  document.addEventListener("visibilitychange", function() {
+    if (!document.hidden) checkServerRestartNotice();
+  });
+}
+
 // ─── Who's Online polling (pre-connect) ───
 async function fetchOnlineUsers(controlUrl) {
   try {
@@ -275,6 +348,7 @@ function showUpdateBanner(version) {
 var _staleReloadTimer = null;
 
 function showStaleBanner() {
+  hideServerRestartNotice();
   if (document.getElementById("stale-banner")) return;
   var banner = document.createElement("div");
   banner.id = "stale-banner";
