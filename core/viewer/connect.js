@@ -1309,12 +1309,15 @@ async function connectToRoom({
     ensureParticipantCard(participant);
     debugLog(`participant connected ${participant.identity} (reconnecting=${_isReconnecting})`);
     var replacedScreenGeneration = clearScreenParticipantGeneration(participant, newRoom, "replaced");
-    var replacedScreenAudio = clearScreenAudioParticipantGeneration(participant, newRoom, "replaced");
-    if (replacedScreenGeneration.removed || replacedScreenAudio.removed) {
+    var replacedAudio = clearParticipantAudioGeneration(participant, newRoom, "replaced");
+    if (replacedAudio.removed) {
+      debugLog("[audio-generation] retired " + replacedAudio.removed + " replaced audio attachment(s) for " + participant.identity);
+    }
+    if (replacedScreenGeneration.removed || replacedAudio.screenRemoved) {
       // Preserve viewer-local hide/watch intent. Only the old participant's
       // media attachments are removed; a replacement publication stays usable.
       setParticipantScreenWatchAvailable(
-        replacedScreenGeneration.mediaIdentity || replacedScreenAudio.mediaIdentity,
+        replacedScreenGeneration.mediaIdentity || replacedAudio.mediaIdentity,
         hasParticipantScreenPublication(participant)
       );
       debugLog("[screen-generation] cleared replaced participant media for " + participant.identity);
@@ -1432,6 +1435,14 @@ async function connectToRoom({
     if (!isCurrentCameraDisconnectGeneration(key, participant, newRoom)) {
       debugLog(`[reconnect] ignored stale participant disconnect for ${key}`);
       return;
+    }
+    // LiveKit removes departed participants from its registry before emitting
+    // track-unsubscribe events, so the live-generation guard may skip them.
+    // Stop exact-generation audio now; only the participant card gets a grace
+    // period. Otherwise old boost graphs survive deletion of their controls.
+    var disconnectedAudio = clearParticipantAudioGeneration(participant, newRoom, "exact");
+    if (disconnectedAudio.removed) {
+      debugLog("[audio-generation] retired " + disconnectedAudio.removed + " disconnected audio attachment(s) for " + key);
     }
     debugLog(`participant disconnected ${participant.identity} (reconnecting=${_isReconnecting})`);
 
