@@ -12,6 +12,11 @@ async function installNativePublisher(page) {
     await window.EchoLayoutTestScenario.install({ participants: 2, cameras: 0, screenShares: 1, screenOwners: [1] });
     currentRoomName = 'main';
     const local = room.localParticipant;
+    // The generic layout fixture supplies dummy receiver audio for every share.
+    // A real publisher has no local playback elements.
+    const audioState = participantState.get(local.identity);
+    audioState.screenAudioEls.clear();
+    audioState.screenGainNodes.clear();
     const video = Array.from(local.trackPublications.values()).find(publication => publication.kind === 'video');
     local.trackPublications.clear();
     room.remoteParticipants.set(local.identity + '$screen', {
@@ -22,8 +27,19 @@ async function installNativePublisher(page) {
     window.nativeTestMessages = [];
     window.nativeTestPublished = [];
     local.publishData = data => { window.nativeTestMessages.push(JSON.parse(new TextDecoder().decode(data))); };
-    local.publishTrack = async (track, options) => { window.nativeTestPublished.push({ track, options }); };
-    local.unpublishTrack = async () => {};
+    local.publishTrack = async (track, options) => {
+      window.nativeTestPublished.push({ track, options });
+      const publication = { trackSid: 'native-test-audio', kind: 'audio', source: options.source, track };
+      local.trackPublications.set(publication.trackSid, publication);
+      reconcileLocalPublishIndicators('local-track-published');
+      return publication;
+    };
+    local.unpublishTrack = async track => {
+      for (const [sid, publication] of local.trackPublications) {
+        if (publication.track === track) local.trackPublications.delete(sid);
+      }
+      reconcileLocalPublishIndicators('local-track-unpublished');
+    };
     hasTauriIPC = () => true;
     const listeners = new Map();
     tauriListen = async (name, callback) => { listeners.set(name, callback); return () => listeners.delete(name); };
@@ -60,6 +76,12 @@ test('a real viewer reload restores game activity and non-silent outgoing audio'
   await page.locator('#screen-grid video').click();
   await page.evaluate(() => recoverNativeScreenShare(room));
   await expect(page.locator('.user-card.is-local .participant-stream-description')).toHaveText('Playing Fixture game');
+  const tile = page.locator('#screen-grid > .tile');
+  await tile.getByRole('button', { name: 'Your stream audio', exact: true }).hover();
+  await expect(tile.locator('.tile-volume-status')).toHaveText('Audio shared');
+  await expect(tile.locator('.tile-volume-slider')).toBeDisabled();
+  await expect(tile.locator('.tile-volume-slider')).toBeHidden();
+  expect(await page.evaluate(() => participantState.get(room.localParticipant.identity).screenAudioEls.size)).toBe(0);
   expect(await page.evaluate(() => ({
     active: _nativeAudioActive,
     tracks: window.nativeTestPublished.map(item => ({ source: item.options.source, state: item.track.mediaStreamTrack.readyState })),
@@ -80,5 +102,6 @@ test('a real viewer reload restores game activity and non-silent outgoing audio'
   });
   await expect.poll(() => page.evaluate(() => window.nativeTestAudioLevel())).toBeGreaterThan(0.1);
   await page.evaluate(() => stopNativeAudioCapture());
+  await expect(tile.locator('.tile-volume-status')).toHaveText('No audio shared');
   expect(errors).toEqual([]);
 });

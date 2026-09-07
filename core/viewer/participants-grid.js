@@ -201,6 +201,7 @@ function addScreenTile(label, element, trackSid) {
   volWrap.appendChild(volPopover);
   tile.appendChild(volWrap);
   tile._volWrap = volWrap;
+  tile._volButton = volButton;
   tile._volSlider = volSlider;
   tile._volStatus = volStatus;
 

@@ -145,6 +145,58 @@ test("a silent stream explains missing audio and enables its slider when audio a
   await expect(tile.locator('.tile-volume-status')).toHaveText('42%');
 });
 
+test("own preview shows publication status while remote streams retain playback volume", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await install(page, { screenOwners: [1, 2] });
+  await page.evaluate(() => {
+    // Replace the layout fixture's dummy receiver state with a real self-preview.
+    const state = participantState.get(room.localParticipant.identity);
+    state.screenAudioEls.clear();
+    state.screenGainNodes.clear();
+    reconcileLocalPublishIndicators('post-connect');
+  });
+  const own = page.locator('#screen-grid > .tile[data-identity="layout-fixture-1"]');
+  const remote = page.locator('#screen-grid > .tile[data-identity="layout-fixture-2"]');
+  await own.getByRole('button', { name: 'Your stream audio', exact: true }).hover();
+  await expect(own.locator('.tile-volume-status')).toHaveText('No audio shared');
+  await expect(own.locator('.tile-volume-slider')).toBeHidden();
+  await page.evaluate(() => {
+    room.localParticipant.trackPublications.set('own-audio', {
+      kind: 'audio', source: 'screen_share_audio', isMuted: false,
+      track: { kind: 'audio', mediaStreamTrack: { readyState: 'live', enabled: true } },
+    });
+    reconcileLocalPublishIndicators('local-track-published');
+  });
+  await expect(own.locator('.tile-volume-status')).toHaveText('Audio shared');
+  await page.screenshot({ path: testInfo.outputPath('own-stream-audio-status.png') });
+  await page.evaluate(() => {
+    room.localParticipant.trackPublications.get('own-audio').isMuted = true;
+    syncScreenAudioVolumeControl(room.localParticipant.identity);
+    const audio = document.createElement('audio');
+    document.body.appendChild(audio);
+    const state = participantState.get('layout-fixture-2');
+    state.screenAudioEls.add(audio);
+    state.screenVolume = 0.42;
+    syncScreenAudioVolumeControl('layout-fixture-2');
+  });
+  await expect(own.locator('.tile-volume-status')).toHaveText('Audio muted');
+  await expect(own.locator('.tile-volume-slider')).toBeDisabled();
+  await remote.locator('.tile-volume-button').focus();
+  const slider = remote.locator('.tile-volume-slider');
+  await expect(slider).toBeVisible();
+  await expect(slider).toHaveValue('0.42');
+  await slider.focus();
+  await slider.press('ArrowRight');
+  await expect(remote.locator('.tile-volume-status')).toHaveText('43%');
+  await page.evaluate(() => {
+    room.localParticipant.trackPublications.delete('own-audio');
+    reconcileLocalPublishIndicators('local-track-unpublished');
+  });
+  expect(await page.evaluate(() => participantState.get(room.localParticipant.identity).screenAudioEls.size)).toBe(0);
+  await own.locator('.tile-volume-button').hover();
+  await expect(own.locator('.tile-volume-status')).toHaveText('No audio shared');
+});
+
 test("mixed shares reflow across window sizes without replacing media or distorting its aspect", async ({ page }) => {
   await page.setViewportSize({ width: 3440, height: 1370 });
   await install(page, { participants: 6, screenShares: 6, shareAspects: [1916 / 802, 16 / 9, 9 / 16, 32 / 9, 4 / 3, 16 / 10] });
