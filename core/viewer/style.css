@@ -731,6 +731,7 @@ button:disabled {
   justify-content: flex-end;
   align-items: center;
   z-index: 8;
+  transition-property: opacity, background-color;
   pointer-events: none;
 }
 .tile-volume-button {
@@ -743,6 +744,7 @@ button:disabled {
   place-items: center;
   color: var(--text);
   background: rgba(5, 7, 10, 0.8);
+  transition-property: background-color, border-color, color, box-shadow;
   pointer-events: auto;
 }
 .tile-volume-popover:not([hidden]) {
@@ -766,6 +768,23 @@ button:disabled {
 }
 .tile-volume-slider:disabled {
   display: none;
+}
+/* Controls must fit the actual tile, including narrow portrait thumbnails. */
+@container screen-tile (max-width: 131px) {
+  .tile-reorder-handle { display: none !important; }
+}
+@container screen-tile (max-width: 93px) {
+  .tile-volume-wrap { top: 54px; }
+  .tile-volume-button { margin-right: 0; }
+}
+@media (pointer: coarse) {
+  @container screen-tile (max-width: 155px) {
+    .tile-reorder-handle { display: none !important; }
+  }
+  @container screen-tile (max-width: 105px) {
+    .tile-volume-wrap { top: 58px; }
+    .tile-volume-button { margin-right: 0; }
+  }
 }
 .tile-volume-slider {
   box-sizing: border-box;
@@ -1036,6 +1055,7 @@ video {
   align-self: center;
   position: relative;
   isolation: isolate;
+  container: screen-tile / inline-size;
   /* Geometry changes together on resize/focus; animating the old tile box
      leaves its bottom controls behind while the video changes size. */
   transition-property: border-color, box-shadow, opacity;

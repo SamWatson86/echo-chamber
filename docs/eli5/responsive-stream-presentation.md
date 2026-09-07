@@ -25,6 +25,9 @@ What changed:
   slider. Moving away hides it unless a control retains keyboard focus; Escape
   dismisses it. Clicking the video does not open it. A publisher without an
   attached audio track shows `No stream audio` instead of a disappearing control.
+  Narrow portrait thumbnails stack volume below fullscreen. Rearrange handles
+  hide when the controls cannot fit, and control positions update without
+  animating through overlapping positions during resize.
 - People & Tools shows `Playing <selected game title>`, `Sharing <selected
   window title>`, or a generic desktop/browser/screen description below the
   name. The text supports avatar and camera cards, truncates long titles, and
