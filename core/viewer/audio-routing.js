@@ -234,7 +234,7 @@ function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) 
     if (mediaState.screenAnalyser?.cleanup) mediaState.screenAnalyser.cleanup();
     mediaState.screenAnalyser = null;
     var tile = screenTileByIdentity.get(mediaIdentity);
-    if (tile?._volWrap) tile._volWrap.classList.add("hidden");
+    syncScreenAudioVolumeControl(mediaIdentity, tile);
   }
   return result;
 }
@@ -286,7 +286,7 @@ function applyParticipantAudioVolumes(state) {
 
 // Screen audio and video are separate LiveKit publications and can subscribe in
 // either order. Keep the Stage control derived from the already-attached audio
-// state so a video tile created after its audio does not stay at the hidden,
+// state so a video tile created after its audio does not stay at the disabled,
 // default-volume state until the viewer reconnects.
 function syncScreenAudioVolumeControl(identity, tile) {
   var state = participantState.get(identity);
@@ -295,7 +295,12 @@ function syncScreenAudioVolumeControl(identity, tile) {
   var hasAttachedAudio = Array.from(state.screenAudioEls || []).some(function(element) {
     return element?.isConnected;
   });
-  screenTile._volWrap.classList.toggle("hidden", !hasAttachedAudio);
+  // Keep the corner discoverable when a publisher has no audio track. A
+  // disabled slider with an explicit status is more useful than a missing UI.
+  screenTile._volWrap.classList.toggle("hidden", false);
+  if (screenTile._volSlider) screenTile._volSlider.disabled = !hasAttachedAudio;
+  if (screenTile._volStatus) screenTile._volStatus.textContent = hasAttachedAudio
+    ? Math.round(state.screenVolume * 100) + "%" : "No stream audio";
   if (hasAttachedAudio && screenTile._volSlider) {
     screenTile._volSlider.value = state.screenVolume;
   }

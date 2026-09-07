@@ -292,10 +292,12 @@ function setPublishButtonsEnabled(enabled) {
 function renderPublishButtons() {
   micBtn.textContent = micEnabled ? "Disable Mic" : "Enable Mic";
   camBtn.textContent = camEnabled ? "Disable Camera" : "Enable Camera";
-  screenBtn.textContent = screenEnabled ? "Stop Sharing" : "Share Screen";
+  screenBtn.textContent = window._echoNativeShareNeedsRestart ? "Restart Share" : (screenEnabled ? "Stop Sharing" : "Share Screen");
   micBtn.title = micEnabled ? "Disable microphone" : "Enable microphone";
   camBtn.title = camEnabled ? "Disable camera" : "Enable camera";
-  screenBtn.title = screenEnabled ? "Stop sharing screen" : "Share screen";
+  screenBtn.title = window._echoNativeShareNeedsRestart
+    ? "Select the shared game again to restore its title and audio"
+    : (screenEnabled ? "Stop sharing screen" : "Share screen");
   micBtn.setAttribute("aria-pressed", micEnabled ? "true" : "false");
   camBtn.setAttribute("aria-pressed", camEnabled ? "true" : "false");
   screenBtn.setAttribute("aria-pressed", screenEnabled ? "true" : "false");
@@ -1933,6 +1935,9 @@ async function connectToRoom({
   var dashBtn = document.getElementById("open-admin-dash");
   if (dashBtn) dashBtn.classList.remove("hidden");
   reconcileLocalPublishIndicators("post-connect");
+  recoverNativeScreenShare(newRoom).catch(function(error) {
+    debugLog('[screen-share] recovery failed: ' + (error.message || error));
+  });
   if (restoreMicAfterConnect) {
     // Room switch: mic was already on, re-enable immediately without permission dance
     micEnabled = false; // reset so toggleMicOn proceeds

@@ -585,7 +585,7 @@
   right: auto;
   z-index: 6;
   width: max-content;
-  max-width: calc(100% - 60px);
+  max-width: max(0px, calc(100% - 100px));
   min-width: 0;
   padding: 5px 9px;
   overflow: hidden;
@@ -623,7 +623,7 @@
 :root[data-ui-shell="v2"] .tile-reorder-handle:not([hidden]) {
   position: absolute;
   top: 8px;
-  right: 54px;
+  right: 92px;
   z-index: 7;
   width: 32px;
   height: 40px;
@@ -640,7 +640,7 @@
 }
 
 :root[data-ui-shell="v2"] .tile:has(> .tile-reorder-handle:not([hidden])) h3 {
-  max-width: max(0px, calc(100% - 100px));
+  max-width: max(0px, calc(100% - 140px));
 }
 
 :root[data-ui-shell="v2"] .tile.is-reordering {
@@ -668,15 +668,21 @@
 }
 
 @media (pointer: coarse) {
+  .tile-volume-button { width: 44px; height: 44px; }
+  .tile-volume-wrap { height: 44px; }
   :root[data-ui-shell="v2"] .tile-reorder-handle:not([hidden]) {
+    right: 104px;
     width: 44px;
     height: 44px;
+  }
+  :root[data-ui-shell="v2"] .tile:has(> .tile-reorder-handle:not([hidden])) h3 {
+    max-width: max(0px, calc(100% - 164px));
   }
 }
 
 :root[data-ui-shell="v2"] .tile-volume-wrap:focus-within:not(.hidden) {
   opacity: 1;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 /* Utility rail: People and Chat share the same visual slot. */

@@ -1207,6 +1207,7 @@ function ensureParticipantCard(participant, isLocal = false) {
   if (screenSlider) {
     screenSlider.addEventListener("input", () => {
       state.screenVolume = Number(screenSlider.value);
+      syncScreenAudioVolumeControl(key);
       if (screenPct) screenPct.textContent = Math.round(state.screenVolume * 100) + "%";
       if (screenPct) screenPct.classList.toggle("boosted", state.screenVolume > 1);
       // Sync popup slider
@@ -1259,6 +1260,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     settingsScreenSlider.addEventListener("input", function() {
       var val = Number(settingsScreenSlider.value);
       state.screenVolume = val;
+      syncScreenAudioVolumeControl(key);
       if (screenSlider) screenSlider.value = val;
       if (popScreenSlider) popScreenSlider.value = val;
       var pctText = Math.round(val * 100) + "%";
@@ -1301,6 +1303,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     popScreenSlider.addEventListener("input", function() {
       var val = Number(popScreenSlider.value);
       state.screenVolume = val;
+      syncScreenAudioVolumeControl(key);
       if (screenSlider) screenSlider.value = val;
       var pctText = Math.round(val * 100) + "%";
       if (popScreenPct) { popScreenPct.textContent = pctText; popScreenPct.classList.toggle("boosted", val > 1); }
@@ -1450,6 +1453,7 @@ function ensureParticipantCard(participant, isLocal = false) {
     settingsScreenMute,
     settingsMicSlider,
     settingsScreenSlider,
+    settingsScreenPct,
     settingsChimeSlider,
     settingsWatchButton,
     settingsCameraStageButton,

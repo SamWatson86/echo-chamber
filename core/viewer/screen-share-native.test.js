@@ -162,6 +162,166 @@ function installNativeAudioRuntime(context, published, lifecycle) {
   return state;
 }
 
+function loadNativeShareRecovery(savedOverrides = {}) {
+  const harness = loadScreenShareNative();
+  const { context, calls } = harness;
+  const source = { id: 4242, pid: 5678, sourceType: "game", title: "Original title", exeName: "game.exe" };
+  const saved = { version: 1, source, mode: "wgc", identity: "Sam", roomName: "main",
+    startedAt: Date.now() - 100000, ...savedOverrides };
+  const storage = new Map([[context.NATIVE_SHARE_SESSION_KEY, JSON.stringify(saved)]]);
+  context.window.sessionStorage = {
+    getItem: key => storage.get(key) || null,
+    setItem: (key, value) => storage.set(key, value),
+    removeItem: key => storage.delete(key),
+  };
+  const published = [];
+  installNativeAudioRuntime(context, published);
+  context.hasTauriIPC = () => true;
+  context._startQualityWarnListener = () => {};
+  context.tauriInvoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "get_capture_health") return { capture_active: true, capture_mode: "WGC", seconds_since_capture_started: 100 };
+    if (command === "list_screen_sources") return [{ id: 4242, pid: 5678, source_type: "game", title: "Current game title", exe_name: "game.exe" }];
+    return null;
+  };
+  return { ...harness, source, storage, published };
+}
+
+test("viewer reload restores the exact native game title and audio without restarting video", async () => {
+  const { context, calls, published } = loadNativeShareRecovery();
+  await context.recoverNativeScreenShare(context.room);
+  assert.equal(context.window._echoNativeCaptureActive, true);
+  assert.equal(context.window._echoNativeShareNeedsRestart, false);
+  assert.equal(context.screenEnabled, true);
+  assert.equal(context.getCaptureSourceReportSnapshot().source_title, "Current game title");
+  assert.equal(published.length, 1);
+  assert.equal(published[0].options.source, "screen_share_audio");
+  assert.equal(calls.find(call => call.command === "start_audio_capture").args.pid, 5678);
+  assert.equal(calls.some(call => call.command === "start_screen_share"), false);
+  await context.recoverNativeScreenShare(context.room);
+  assert.equal(published.length, 1);
+});
+
+test("fresh native share retains source provenance only for the current capture generation", async () => {
+  const { context, source, storage } = loadNativeShareRecovery();
+  storage.clear();
+  context.window._echoNativeCaptureActive = true;
+  await context.rememberNativeShareSession(source, "wgc", context._nativeShareRecoveryGeneration);
+  const saved = JSON.parse(storage.get(context.NATIVE_SHARE_SESSION_KEY));
+  assert.equal(saved.source.pid, 5678);
+  assert.equal(saved.roomName, "main");
+  assert.ok(Math.abs(saved.startedAt - (Date.now() - 100000)) < 1000);
+  context.clearNativeShareSession();
+  await context.rememberNativeShareSession(source, "wgc", context._nativeShareRecoveryGeneration - 1);
+  assert.equal(storage.size, 0);
+});
+
+test("pre-fix orphaned shares remain stoppable and request source selection instead of guessing audio", async () => {
+  const { context, storage, published } = loadNativeShareRecovery();
+  storage.clear();
+  await context.recoverNativeScreenShare(context.room);
+  assert.equal(context.window._echoNativeShareNeedsRestart, true);
+  assert.equal(context.window._echoNativeCaptureActive, true);
+  assert.equal(context.screenEnabled, true);
+  assert.equal(published.length, 0);
+  assert.equal(context.getCaptureSourceReportSnapshot(), null);
+});
+
+test("recovery rejects a stale capture, another room, identity, or reused window process", async () => {
+  for (const overrides of [{ startedAt: Date.now() - 500000 }, { roomName: "other-room" }, { identity: "Other" },
+    { source: { id: 4242, pid: 9999, sourceType: "game", exeName: "game.exe" } }]) {
+    const { context, published } = loadNativeShareRecovery(overrides);
+    await context.recoverNativeScreenShare(context.room);
+    assert.equal(context.window._echoNativeShareNeedsRestart, true);
+    assert.equal(published.length, 0);
+    assert.equal(context.getCaptureSourceReportSnapshot(), null);
+  }
+});
+
+test("inactive native capture clears the previous session without creating a ghost share", async () => {
+  const { context, storage, published } = loadNativeShareRecovery();
+  context.tauriInvoke = async () => null;
+  await context.recoverNativeScreenShare(context.room);
+  assert.equal(context.screenEnabled, false);
+  assert.equal(storage.size, 0);
+  assert.equal(published.length, 0);
+});
+
+test("superseded stop-listener registration disposes its pending listener", async () => {
+  const { context } = loadNativeShareRecovery();
+  let release;
+  const registered = new Promise(resolve => { release = resolve; });
+  let disposed = 0;
+  context.tauriListen = async () => { await registered; return () => { disposed++; }; };
+  const registering = context._startNativeCaptureStopListeners(context._nativeShareRecoveryGeneration);
+  context._nativeShareRecoveryGeneration++;
+  release();
+  await registering;
+  assert.equal(disposed, 1);
+  assert.equal(context._nativeCaptureStopUnlisten, null);
+});
+
+test("canceling source selection during Restart Share leaves the stopped share off", async () => {
+  const { context } = loadNativeShareRecovery();
+  context.micEnabled = false;
+  context.togglePg13Button = null;
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'media-controls.js'), 'utf8'), context);
+  context.window._echoNativeShareNeedsRestart = true;
+  context.window._echoNativeCaptureActive = true;
+  context.screenEnabled = true;
+  context.screenBtn = {};
+  context.switchingRoom = false;
+  context.ensureParticipantCard = () => ({});
+  context.showCapturePicker = async () => null;
+  context.setStatus = message => assert.fail(message);
+  await context.toggleScreen();
+  assert.equal(context.screenEnabled, false);
+  assert.equal(context.window._echoNativeShareNeedsRestart, false);
+  assert.equal(context.window._echoNativeCaptureActive, false);
+  assert.equal(context.screenBtn.disabled, false);
+});
+
+test("stopping while reload recovery lists sources cannot restart audio or resurrect the share", async () => {
+  const { context, published, storage } = loadNativeShareRecovery();
+  const invoke = context.tauriInvoke;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let listing;
+  const entered = new Promise(resolve => { listing = resolve; });
+  context.tauriInvoke = async (command, args) => {
+    if (command === "list_screen_sources") { listing(); await gate; }
+    return invoke(command, args);
+  };
+  const recovering = context.recoverNativeScreenShare(context.room);
+  await entered;
+  await context._finalizeNativeCaptureStop(null);
+  release();
+  await recovering;
+  assert.equal(context.screenEnabled, false);
+  assert.equal(context.window._echoNativeCaptureActive, false);
+  assert.equal(storage.size, 0);
+  assert.equal(published.length, 0);
+});
+
+test("an audio start cannot publish into a room joined while native IPC was pending", async () => {
+  const { context, published } = loadNativeShareRecovery();
+  const invoke = context.tauriInvoke;
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  context.tauriInvoke = async (command, args) => {
+    if (command === "start_audio_capture") { started(); await gate; }
+    return invoke(command, args);
+  };
+  const starting = context.startNativeAudioCapture(5678);
+  await entered;
+  context.room = { localParticipant: { publishTrack() { assert.fail("published into the new room"); } } };
+  release();
+  await assert.rejects(starting, { code: "ECHO_NATIVE_AUDIO_CANCELLED" });
+  assert.equal(published.length, 0);
+  assert.equal(context._nativeAudioActive, false);
+});
+
 test("game auto capture does not silently fallback to desktop duplication on WGC-supported Windows", async () => {
   const { context, calls } = loadScreenShareNative();
   context.tauriInvoke = async (command, args) => {

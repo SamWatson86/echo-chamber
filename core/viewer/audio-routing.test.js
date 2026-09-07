@@ -266,7 +266,7 @@ test("screen audio subscribed before video exposes the later Stage volume contro
   assert.equal(state.screenAudioEls.has(audioElement), true);
 });
 
-test("removing the last screen audio track hides its Stage volume control", () => {
+test("removing the last screen audio track disables its discoverable Stage volume control", () => {
   const harness = loadAudioRoutingHarness();
   const participant = {
     identity: "desktop-1",
@@ -289,6 +289,7 @@ test("removing the last screen audio track hides its Stage volume control", () =
       },
     },
     _volSlider: { value: 0.42 },
+    _volStatus: { textContent: "42%" },
   };
   const track = {
     sid: "screen-audio-publication",
@@ -314,5 +315,7 @@ test("removing the last screen audio track hides its Stage volume control", () =
 
   assert.equal(state.screenAudioEls.size, 0);
   assert.equal(harness.audioElBySid.has(publication.trackSid), false);
-  assert.equal(tile._volWrap.classList.hidden, true);
+  assert.equal(tile._volWrap.classList.hidden, false);
+  assert.equal(tile._volSlider.disabled, true);
+  assert.equal(tile._volStatus.textContent, "No stream audio");
 });

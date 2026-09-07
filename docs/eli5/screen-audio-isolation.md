@@ -31,7 +31,8 @@ after the same cleanup. Native command generations and a shared gate fence
 starts and stops across both ordinary operation and viewer reloads; the viewer
 also gives each JavaScript pipeline its own generation and ordered IPC queue.
 Listener controls derive from attached screen-audio state in either arrival
-order, hide again when the last audio track leaves, and reapply saved volume and
+order, disable the slider with `No stream audio` when the last track leaves,
+and reapply saved volume and
 mute state through one authoritative Stage path.
 
 **How we know it works:** Regression tests prove browsers never publish display

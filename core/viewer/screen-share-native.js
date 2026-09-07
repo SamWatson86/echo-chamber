@@ -125,6 +125,104 @@ function getCaptureSourceReportSnapshot() {
   return window._echoCaptureSourceReport || null;
 }
 
+// Native video outlives the WebView during an update. Keep its exact source in
+// this window's session, then validate the capture age and process before
+// rebuilding the JavaScript-owned audio publication. Never infer a game PID.
+var _nativeShareRecoveryGeneration = 0;
+var NATIVE_SHARE_SESSION_KEY = 'echo.native-share-session.v1';
+
+function clearNativeShareSession() {
+  try { window.sessionStorage.removeItem(NATIVE_SHARE_SESSION_KEY); } catch (_) {}
+  window._echoNativeShareNeedsRestart = false;
+}
+
+async function rememberNativeShareSession(source, mode, generation) {
+  var ownerRoom = room;
+  try {
+    var health = await tauriInvoke('get_capture_health');
+    if (generation !== _nativeShareRecoveryGeneration || room !== ownerRoom ||
+        !window._echoNativeCaptureActive || !health?.capture_active ||
+        !Number.isFinite(health.seconds_since_capture_started)) return;
+    window.sessionStorage.setItem(NATIVE_SHARE_SESSION_KEY, JSON.stringify({
+      version: 1, identity: ownerRoom.localParticipant.identity, roomName: currentRoomName,
+      source: source, mode: mode,
+      startedAt: Date.now() - health.seconds_since_capture_started * 1000,
+    }));
+  } catch (error) {
+    debugLog('[screen-share] could not retain reload recovery state: ' + (error.message || error));
+  }
+}
+
+async function recoverNativeScreenShare(expectedRoom) {
+  if (!window.__ECHO_NATIVE__ || !expectedRoom || room !== expectedRoom ||
+      window._echoNativeCaptureActive) return;
+  var generation = ++_nativeShareRecoveryGeneration;
+  var isCurrent = function() {
+    return room === expectedRoom && generation === _nativeShareRecoveryGeneration;
+  };
+  try {
+    var health = await tauriInvoke('get_capture_health');
+    if (!isCurrent()) return;
+    if (!health?.capture_active) { clearNativeShareSession(); return; }
+    await _startNativeCaptureStopListeners(generation);
+    if (!isCurrent()) return;
+    health = await tauriInvoke('get_capture_health');
+    if (!isCurrent()) return;
+    if (!health?.capture_active) {
+      _stopNativeCaptureStopListeners();
+      clearNativeShareSession();
+      return;
+    }
+    window._echoNativeCaptureActive = true;
+    window._echoNativeCaptureMode = health.capture_mode === 'DXGI-DD' ? 'desktop-dd' : 'wgc';
+    screenEnabled = true;
+    // Old viewers did not retain a source. Keep Stop/Restart available even
+    // when an existing video cannot safely have its audio restored.
+    window._echoNativeShareNeedsRestart = true;
+    renderPublishButtons();
+    var saved = null;
+    try { saved = JSON.parse(window.sessionStorage.getItem(NATIVE_SHARE_SESSION_KEY)); } catch (_) {}
+    var ageMatches = saved && Number.isFinite(saved.startedAt) &&
+      Number.isFinite(health.seconds_since_capture_started) &&
+      Math.abs(Date.now() - saved.startedAt - health.seconds_since_capture_started * 1000) < 4000;
+    if (!saved || saved.version !== 1 || !ageMatches ||
+        saved.identity !== expectedRoom.localParticipant.identity || saved.roomName !== currentRoomName ||
+        !saved.source || !['wgc', 'desktop-dd', 'wgc-monitor', 'wgc-game-monitor'].includes(saved.mode) ||
+        (saved.mode === 'desktop-dd') !== (health.capture_mode === 'DXGI-DD')) {
+      throw new Error('Select Restart Share to restore the game title and audio.');
+    }
+    var sources = await tauriInvoke('list_screen_sources');
+    if (!isCurrent()) return;
+    var selected = sources?.find(function(source) {
+      return String(source.id) === String(saved.source.id) && source.pid === saved.source.pid &&
+        source.source_type === saved.source.sourceType &&
+        (source.exe_name || '').toLowerCase() === (saved.source.exeName || saved.source.exe_name || '').toLowerCase();
+    });
+    if (!selected) throw new Error('The shared source changed. Select Restart Share to restore audio.');
+    window._echoNativeCaptureMode = saved.mode;
+    var source = Object.assign({}, saved.source, { title: selected.title });
+    setCaptureSourceReport(source, saved.mode, source.sourceType === 'game' ? 'game' : 'desktop');
+    _startSourceVisibilityMonitor(source);
+    try { _startQualityWarnListener(); } catch (error) {
+      debugLog('[screen-share] quality warning listener failed: ' + (error.message || error));
+    }
+    var request = nativeAudioCaptureRequestForSource(source);
+    if (request) await startNativeAudioCapture(request.pid, {
+      system: request.mode === 'system', systemExcludeEcho: request.mode === 'system-exclude-echo',
+    });
+    if (!isCurrent()) return;
+    window._echoNativeShareNeedsRestart = false;
+    renderPublishButtons();
+    debugLog('[screen-share] restored source and audio after viewer reload');
+  } catch (error) {
+    if (!isCurrent() || error?.code === 'ECHO_NATIVE_AUDIO_CANCELLED') return;
+    debugLog('[screen-share] reload recovery: ' + (error.message || error));
+    if (window._echoNativeCaptureActive) {
+      showToast('Screen sharing needs attention: ' + (error.message || error), 10000);
+    }
+  }
+}
+
 function _isBattlefield6NativeGameSource(source) {
   if (!source || source.sourceType !== 'game') return false;
 
@@ -265,6 +363,8 @@ function _stopNativeCaptureStopListeners() {
 }
 
 async function _finalizeNativeCaptureStop(stopMessage) {
+  ++_nativeShareRecoveryGeneration;
+  clearNativeShareSession();
   var wasActive = !!(window._echoNativeCaptureActive || window._echoNativeCaptureMode || screenEnabled);
   window._echoNativeCaptureActive = false;
   window._echoNativeCaptureMode = null;
@@ -356,7 +456,7 @@ async function _removeNativeScreenCompanion(identity, roomName) {
   }
 }
 
-async function _startNativeCaptureStopListeners() {
+async function _startNativeCaptureStopListeners(generation) {
   _stopNativeCaptureStopListeners();
   if (typeof tauriListen !== 'function') return;
 
@@ -378,6 +478,10 @@ async function _startNativeCaptureStopListeners() {
         };
       }(eventName));
       unlisteners.push(unlisten);
+      if (generation !== undefined && generation !== _nativeShareRecoveryGeneration) {
+        unlisteners.forEach(function(dispose) { try { dispose(); } catch (_) {} });
+        return;
+      }
     }
   } catch (err) {
     unlisteners.forEach(function(unlisten) {
@@ -395,6 +499,7 @@ async function _startNativeCaptureStopListeners() {
 }
 
 async function startScreenShareManual() {
+  var shareGeneration = ++_nativeShareRecoveryGeneration;
   const LK = getLiveKitClient();
 
   // ── Native client path: custom picker → Tauri IPC ──
@@ -414,13 +519,13 @@ async function startScreenShareManual() {
         isNativeClient = false;
       } else {
         showToast('Screen source picker failed: ' + (pickerErr.message || pickerErr), 8000);
-        return;
+        return false;
       }
     }
   }
 
   if (isNativeClient) {
-    if (!source) return;
+    if (!source) return false;
 
     // Detect OS build number for WGC availability (24H2+ = build 26100+)
     // If the IPC command doesn't exist (older client binary), assume WGC is supported
@@ -437,7 +542,7 @@ async function startScreenShareManual() {
   if (isNativeClient) {
     // Step 1: get control URL
     var controlUrl = _echoServerUrl;
-    if (!controlUrl) { showToast('No server URL configured', 8000); return; }
+    if (!controlUrl) { showToast('No server URL configured', 8000); return false; }
 
     // Step 2: get $screen token using existing auth flow
     var screenToken = null;
@@ -457,16 +562,17 @@ async function startScreenShareManual() {
       );
     } catch (err) {
       showToast('Token fetch failed: ' + (err.message || err), 8000);
-      return;
+      return false;
     }
 
-    if (!screenToken) { showToast('No token received from server', 8000); return; }
+    if (!screenToken) { showToast('No token received from server', 8000); return false; }
 
     try {
-      await _startNativeCaptureStopListeners();
+      await _startNativeCaptureStopListeners(shareGeneration);
     } catch (listenErr) {
       debugLog('[screen-share] native stop listener registration failed: ' + (listenErr.message || listenErr));
     }
+    if (shareGeneration !== _nativeShareRecoveryGeneration) return false;
 
     // Step 3: start capture
     try {
@@ -567,6 +673,8 @@ async function startScreenShareManual() {
       }
       screenEnabled = true;
       window._echoNativeCaptureActive = true;
+      clearNativeShareSession();
+      rememberNativeShareSession(source, window._echoNativeCaptureMode, shareGeneration);
       var nativePublishProfile = source.sourceType === 'game' ? 'game' : 'desktop';
       setCaptureSourceReport(source, window._echoNativeCaptureMode, nativePublishProfile);
       _startSourceVisibilityMonitor(source);
@@ -613,8 +721,9 @@ async function startScreenShareManual() {
     } catch (err) {
       showToast('Capture failed: ' + (err.message || err), 8000);
       _stopNativeCaptureStopListeners();
+      return false;
     }
-    return;
+    return true;
   }
 
   // ── Browser path (getDisplayMedia) ──
@@ -1259,6 +1368,8 @@ async function startScreenShareManual() {
 }
 
 async function stopScreenShareManual() {
+  ++_nativeShareRecoveryGeneration;
+  clearNativeShareSession();
   // ── Native capture stop path ──
   if (window._echoNativeCaptureActive || window._echoNativeCaptureMode) {
     var stopCommand = window._echoNativeCaptureMode === 'desktop-dd'
@@ -1589,8 +1700,8 @@ function _queueNativeAudioRustStop() {
 async function _unpublishNativeAudioOperationTrack(operation) {
   if (!operation || !operation.track) return;
   try {
-    if (room && room.localParticipant && typeof room.localParticipant.unpublishTrack === "function") {
-      await room.localParticipant.unpublishTrack(operation.track, true);
+    if (operation.participant && typeof operation.participant.unpublishTrack === "function") {
+      await operation.participant.unpublishTrack(operation.track, true);
     }
   } catch (e) {
     debugLog("[native-audio] unpublish cleanup error: " + e);
@@ -1659,6 +1770,7 @@ function _nativeAudioOperationFromCurrentGlobals() {
   }
   var operation = {
     generation: _nativeAudioGeneration,
+    participant: room?.localParticipant,
     context: _nativeAudioCtx,
     worklet: _nativeAudioWorklet,
     destination: _nativeAudioDest,
@@ -1679,7 +1791,7 @@ async function _resetNativeAudioCaptureForStart(generation) {
 async function _ensureNativeAudioOperationCurrent(operation) {
   if (operation && !operation.cancelled &&
       _nativeAudioGeneration === operation.generation &&
-      _nativeAudioOperation === operation) {
+      _nativeAudioOperation === operation && room?.localParticipant === operation.participant) {
     return;
   }
   await _cleanupNativeAudioOperation(operation, { retryTrackCleanup: true });
@@ -1688,8 +1800,10 @@ async function _ensureNativeAudioOperationCurrent(operation) {
 
 async function startNativeAudioCapture(pid, opts) {
   opts = opts || {};
+  var participant = room?.localParticipant;
   var generation = ++_nativeAudioGeneration;
   await _resetNativeAudioCaptureForStart(generation);
+  if (!participant || room?.localParticipant !== participant) throw _nativeAudioCancelledError();
 
   if (!hasTauriIPC()) throw new Error("Tauri IPC not available");
 
@@ -1709,6 +1823,7 @@ async function startNativeAudioCapture(pid, opts) {
   var trackName = nativeAudioTrackNameForOptions(opts);
   var operation = {
     generation: generation,
+    participant: participant,
     context: null,
     worklet: null,
     destination: null,
@@ -1887,7 +2002,7 @@ async function startNativeAudioCapture(pid, opts) {
   };
   await _ensureNativeAudioOperationCurrent(operation);
   operation.publishAttempted = true;
-  await room.localParticipant.publishTrack(operation.track, publishOpts);
+  await operation.participant.publishTrack(operation.track, publishOpts);
   operation.publishResolved = true;
   await _ensureNativeAudioOperationCurrent(operation);
   debugLog("[native-audio] published to LiveKit as " + trackName);
