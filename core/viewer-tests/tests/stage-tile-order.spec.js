@@ -118,9 +118,13 @@ test("keyboard order survives mixed-source resizing, focus, and panel toggles", 
 });
 
 for (const hasTouch of [false, true]) {
-test.describe(hasTouch ? 'touch controls' : 'mouse controls', () => {
-test.use({ hasTouch });
-test("narrow portrait tiles keep volume inside and hide rearrange controls that cannot fit", async ({ page }) => {
+  test.describe(hasTouch ? 'touch controls' : 'mouse controls', () => {
+    test.use({ hasTouch });
+    test("narrow portrait tiles keep volume inside and hide rearrange controls that cannot fit", checkNarrowControls);
+  });
+}
+
+async function checkNarrowControls({ page }) {
   await install(page, [9 / 16, 16 / 9, 32 / 9]);
   const override = await page.addStyleTag({ content: '/* exact tile sizes */' });
   for (const width of [120, 80, 160, 240]) {
@@ -145,10 +149,11 @@ test("narrow portrait tiles keep volume inside and hide rearrange controls that 
         kind: button.className, box: button.getBoundingClientRect().toJSON(),
       })),
     })))).toBe(true);
+    await first.locator('.tile-volume-button').hover();
+    await expect(first.locator('.tile-volume-popover')).toBeVisible();
+    expect(await first.locator('.tile-volume-status').evaluate(status => status.scrollWidth <= status.clientWidth)).toBe(true);
   }
   await expectStableMedia(page);
-});
-});
 }
 
 test("new shares append while hidden shares and recovery retain their chosen order", async ({ page }) => {
