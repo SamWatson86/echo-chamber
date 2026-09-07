@@ -160,6 +160,140 @@ function createParticipantAudioState(overrides) {
   }, overrides);
 }
 
+function installParticipantAudioLifecycle(harness) {
+  const { context, room } = harness;
+  const handlers = new Map();
+  const timers = [];
+  Object.assign(context, {
+    LK: { RoomEvent: { ParticipantConnected: "joined", ParticipantDisconnected: "left" } },
+    newRoom: room,
+    _pendingDisconnects: new Map(),
+    _isReconnecting: false,
+    _isRoomSwitch: false,
+    cameraStageTileByIdentity: new Map(),
+    ignoreStaleRoomEvent() { return context.room !== room; },
+    normalizeScreenMediaIdentity(identity) { return identity?.replace(/\$screen$/, ""); },
+    isNativePresenterIdentity() { return false; },
+    clearScreenParticipantGeneration() { return { removed: false }; },
+    hasParticipantScreenPublication() { return false; },
+    hasCameraStageGenerationMismatch() { return false; },
+    cancelCameraClearTimer() {},
+    updateAvatarVideo() {},
+    removeCameraStageTile() {},
+    setParticipantCameraStageAvailable() {},
+    playChimeForParticipant() {},
+    scheduleReconcileWaves() {},
+    setTimeout(callback, delay) { const timer = { callback, delay }; timers.push(timer); return timer; },
+  });
+  room.on = (event, callback) => handlers.set(event, callback);
+  // Exercise the shipped generation predicates and room event callbacks,
+  // without opening a signaling connection or running unrelated call setup.
+  const grid = fs.readFileSync(path.join(__dirname, "participants-grid.js"), "utf8");
+  vm.runInContext(grid.slice(grid.indexOf("function getCameraStageParticipant("),
+    grid.indexOf("function hasCameraStageGenerationMismatch(")), context);
+  const connect = fs.readFileSync(path.join(__dirname, "connect.js"), "utf8");
+  for (const event of ["ParticipantConnected", "ParticipantDisconnected"]) {
+    const start = connect.indexOf("  newRoom.on(LK.RoomEvent." + event + ",");
+    assert.ok(start >= 0);
+    const end = connect.indexOf("\n  });", start);
+    vm.runInContext(connect.slice(start, end + "\n  });".length), context);
+  }
+  return { handlers, timers };
+}
+
+function attachLifecycleAudio(harness, participant, sid, source = "microphone") {
+  const state = harness.participantState.get(participant.identity);
+  const screen = source === "screen_share_audio";
+  const element = {
+    _echoRoom: harness.room, _echoParticipant: participant,
+    _echoMediaIdentity: participant.identity, _echoTrackSid: sid, _echoMediaSource: source,
+    srcObject: {}, isConnected: true, volume: 0,
+    pause() { this.paused = true; },
+    remove() { this.isConnected = false; },
+    _lkTrack: { detach(target) { element.detached = target === element; } },
+  };
+  const nodes = {
+    source: { disconnect() { this.disconnected = true; } },
+    gain: { gain: { value: 2.8 }, disconnect() { this.disconnected = true; } },
+  };
+  state[screen ? "screenAudioEls" : "micAudioEls"].add(element);
+  state[screen ? "screenGainNodes" : "micGainNodes"].set(element, nodes);
+  state[screen ? "screenAudioSid" : "micSid"] = sid;
+  harness.audioElBySid.set(sid, element);
+  return { element, nodes };
+}
+
+test("participant disconnect retires boosted voice before the card grace period or rejoin", () => {
+  const h = loadAudioRoutingHarness();
+  const lifecycle = installParticipantAudioLifecycle(h);
+  const old = { identity: "jeff", trackPublications: new Map() };
+  const state = createParticipantAudioState({ micVolume: 2.8 });
+  let analyserCleanup = 0;
+  state.micAnalyser = { cleanup() { analyserCleanup += 1; } };
+  h.participantState.set(old.identity, state);
+  const audio = attachLifecycleAudio(h, old, "old-mic");
+  // LiveKit removes the participant from its registry before disconnect events;
+  // TrackUnsubscribed is therefore rejected by the live-generation guard.
+  lifecycle.handlers.get("left")(old);
+  assert.equal(lifecycle.timers.find(timer => timer.delay === 8000) != null, true);
+  assert.equal(h.participantState.get(old.identity), state, "the card still has its grace period");
+  assert.equal(state.micAudioEls.size, 0);
+  assert.equal(state.micGainNodes.size, 0);
+  assert.equal(h.audioElBySid.size, 0);
+  assert.equal(audio.nodes.gain.disconnected, true);
+  assert.equal(audio.nodes.source.disconnected, true);
+  assert.equal(audio.element.detached, true);
+  assert.equal(audio.element.paused, true);
+  assert.equal(audio.element.srcObject, null);
+  assert.equal(audio.element.isConnected, false);
+  assert.equal(state.micSid, null);
+  assert.equal(analyserCleanup, 1);
+});
+
+test("rejoin cleans old voice and shared audio even when replacement audio reuses their SIDs", () => {
+  const h = loadAudioRoutingHarness();
+  const lifecycle = installParticipantAudioLifecycle(h);
+  const old = { identity: "jeff", trackPublications: new Map() };
+  const replacement = { ...old };
+  const state = createParticipantAudioState({ micVolume: 0 });
+  h.participantState.set(old.identity, state);
+  const stale = [attachLifecycleAudio(h, old, "mic"), attachLifecycleAudio(h, old, "screen", "screen_share_audio")];
+  const current = [attachLifecycleAudio(h, replacement, "mic"), attachLifecycleAudio(h, replacement, "screen", "screen_share_audio")];
+  h.room.remoteParticipants.set(old.identity, replacement);
+  lifecycle.handlers.get("joined")(replacement);
+  assert.equal(state.micAudioEls.size, 1);
+  assert.equal(state.screenAudioEls.size, 1);
+  for (let i = 0; i < stale.length; i++) {
+    assert.equal(stale[i].nodes.gain.disconnected, true);
+    assert.equal(stale[i].element.isConnected, false);
+    assert.equal(current[i].element.isConnected, true);
+    assert.equal(h.audioElBySid.get(current[i].element._echoTrackSid), current[i].element);
+  }
+  // Late old-generation events must not remove or mute the new participant.
+  lifecycle.handlers.get("left")(old);
+  lifecycle.handlers.get("joined")(old);
+  assert.equal(state.micAudioEls.has(current[0].element), true);
+  for (const volume of [0, 0.25, 1, 3]) {
+    state.micVolume = volume;
+    h.context.applyParticipantAudioVolumes(state);
+    assert.equal(current[0].nodes.gain.gain.value, volume);
+  }
+});
+
+test("old-room disconnect callbacks leave current voice playback alone", () => {
+  const h = loadAudioRoutingHarness();
+  const lifecycle = installParticipantAudioLifecycle(h);
+  const participant = { identity: "jeff", trackPublications: new Map() };
+  const state = createParticipantAudioState();
+  h.participantState.set(participant.identity, state);
+  const audio = attachLifecycleAudio(h, participant, "mic");
+  h.context.room = { remoteParticipants: new Map([[participant.identity, participant]]) };
+  lifecycle.handlers.get("left")(participant);
+  assert.equal(state.micAudioEls.size, 1);
+  assert.equal(audio.element.isConnected, true);
+  assert.equal(lifecycle.timers.length, 0);
+});
+
 function localPreviewHarness() {
   const harness = loadAudioRoutingHarness();
   const local = harness.room.localParticipant;

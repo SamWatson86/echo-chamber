@@ -78,10 +78,10 @@ test('viewer update notes remain unread across reloads until dismissed, then sta
   await page.evaluate(() => localStorage.setItem('echo-changelog-seen', 'v0.6.37'));
   const popup = page.locator('.whats-new-overlay:not(.updates-overlay)');
   await expect(popup).toBeVisible();
-  await expect(popup.getByRole('heading')).toHaveText('Better Screen Sharing & Update Notices');
-  await expect(popup).toContainText('top-right speaker');
+  await expect(popup.getByRole('heading')).toHaveText('Voice Volume After Rejoining');
+  await expect(popup).toContainText('old audio playback connections');
   expect(await page.evaluate(() => localStorage.getItem('echo-changelog-seen'))).toBe('v0.6.37');
-  await page.screenshot({ path: testInfo.outputPath('screen-sharing-update-notes.png') });
+  await page.screenshot({ path: testInfo.outputPath('voice-volume-update-notes.png') });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(popup).toBeVisible();
   await popup.getByRole('button', { name: 'Got it' }).click();
@@ -92,6 +92,7 @@ test('viewer update notes remain unread across reloads until dismissed, then sta
   await page.waitForTimeout(2800);
   await expect(popup).toHaveCount(0);
   await page.evaluate(() => showUpdatesPanel());
+  await expect(page.locator('.updates-overlay')).toContainText('Voice Volume After Rejoining');
   await expect(page.locator('.updates-overlay')).toContainText('Better Screen Sharing & Update Notices');
   await expect(page.locator('.updates-overlay')).toContainText('Screen Audio Isolation');
 });

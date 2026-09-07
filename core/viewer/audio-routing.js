@@ -179,8 +179,14 @@ function cleanupGainNode(state, audioEl, isScreen) {
 }
 
 function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) {
+  return clearParticipantAudioGeneration(participant, expectedRoom, mode, true);
+}
+
+// Retire playout by publisher object, not just identity/SID: reconnects can
+// reuse both while the old HTML element and boost graph still exist.
+function clearParticipantAudioGeneration(participant, expectedRoom, mode, screenOnly) {
   var mediaIdentity = normalizeScreenMediaIdentity(participant?.identity);
-  var result = { mediaIdentity: mediaIdentity, removed: 0 };
+  var result = { mediaIdentity: mediaIdentity, removed: 0, screenRemoved: 0, micRemoved: 0 };
   if (!participant || !expectedRoom || room !== expectedRoom) return result;
   var removeReplacement = mode === "replaced";
   var screenAudioSource = getLiveKitClient()?.Track?.Source?.ScreenShareAudio;
@@ -188,7 +194,7 @@ function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) 
   var queuedElements = new Set();
   function queueRemoval(element, trackSid) {
     if (!element || queuedElements.has(element)) return;
-    if (element._echoMediaSource !== screenAudioSource) return;
+    if (screenOnly && element._echoMediaSource !== screenAudioSource) return;
     if (element._echoRoom !== expectedRoom ||
         element._echoParticipant?.identity !== participant.identity) return;
     if (removeReplacement
@@ -204,6 +210,9 @@ function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) 
   // before ParticipantConnected runs. The participant state still owns the
   // old element, so sweep it as well to prevent stale audio playout.
   participantState.forEach(function(state) {
+    if (!screenOnly) state?.micAudioEls?.forEach(function(element) {
+      queueRemoval(element, element._echoTrackSid);
+    });
     state?.screenAudioEls?.forEach(function(element) {
       queueRemoval(element, element._echoTrackSid);
     });
@@ -212,14 +221,17 @@ function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) 
     var trackSid = entry[0];
     var element = entry[1];
     var state = participantState.get(element._echoMediaIdentity || mediaIdentity);
+    var isScreen = element._echoMediaSource === screenAudioSource;
+    var elementsKey = isScreen ? "screenAudioEls" : "micAudioEls";
+    var sidKey = isScreen ? "screenAudioSid" : "micSid";
     if (state) {
-      cleanupGainNode(state, element, true);
-      state.screenAudioEls.delete(element);
-      if (state.screenAudioSid === trackSid) {
-        var sameSidRemains = Array.from(state.screenAudioEls).some(function(candidate) {
+      cleanupGainNode(state, element, isScreen);
+      state[elementsKey]?.delete(element);
+      if (state[sidKey] === trackSid) {
+        var sameSidRemains = Array.from(state[elementsKey] || []).some(function(candidate) {
           return candidate?._echoTrackSid === trackSid;
         });
-        if (!sameSidRemains) state.screenAudioSid = null;
+        if (!sameSidRemains) state[sidKey] = null;
       }
     }
     try { element._lkTrack?.detach?.(element); } catch (_) {}
@@ -228,9 +240,19 @@ function clearScreenAudioParticipantGeneration(participant, expectedRoom, mode) 
     element.remove();
     if (audioElBySid.get(trackSid) === element) audioElBySid.delete(trackSid);
     result.removed += 1;
+    if (isScreen) result.screenRemoved += 1;
+    else result.micRemoved += 1;
   });
   var mediaState = participantState.get(mediaIdentity);
-  if (mediaState && mediaState.screenAudioEls.size === 0) {
+  if (mediaState && result.micRemoved && mediaState.micAudioEls?.size === 0) {
+    if (mediaState.micAnalyser?.cleanup) mediaState.micAnalyser.cleanup();
+    mediaState.micAnalyser = null;
+    mediaState.micMuted = true;
+    mediaState.micActive = false;
+    mediaState.micLevel = 0;
+    updateActiveSpeakerUi();
+  }
+  if (mediaState && mediaState.screenAudioEls?.size === 0 && (screenOnly || result.screenRemoved)) {
     if (mediaState.screenAnalyser?.cleanup) mediaState.screenAnalyser.cleanup();
     mediaState.screenAnalyser = null;
     var tile = screenTileByIdentity.get(mediaIdentity);

@@ -8,6 +8,13 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-09-07",
+    title: "Voice Volume After Rejoining",
+    notes: [
+      "Voice volume and mute controls keep working when someone leaves and rejoins. Echo now removes their old audio playback connections, including boosted audio, so a previous connection cannot keep playing outside the current controls."
+    ]
+  },
+  {
     version: "2026-09-06",
     title: "Better Screen Sharing & Update Notices",
     notes: [
