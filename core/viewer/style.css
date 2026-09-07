@@ -1056,10 +1056,15 @@ video {
   align-self: center;
   position: relative;
   isolation: isolate;
-  container: screen-tile / inline-size;
   /* Geometry changes together on resize/focus; animating the old tile box
      leaves its bottom controls behind while the video changes size. */
   transition-property: border-color, box-shadow, opacity;
+}
+
+/* The current shell supplies explicit tile geometry. Keep the legacy shell's
+   intrinsic sizing independent of the responsive control container. */
+:root[data-ui-shell="v2"] .screens-grid .tile {
+  container: screen-tile / inline-size;
 }
 
 .screens-grid .tile::after {
