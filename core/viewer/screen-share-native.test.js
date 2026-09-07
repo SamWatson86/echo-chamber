@@ -216,6 +216,22 @@ test("fresh native share retains source provenance only for the current capture 
   assert.equal(storage.size, 0);
 });
 
+test("same-page room reconnection restores audio when native video is already marked active", async () => {
+  const { context, published } = loadNativeShareRecovery();
+  await context.recoverNativeScreenShare(context.room);
+  await context.stopNativeAudioCapture();
+  assert.equal(context.window._echoNativeCaptureActive, true);
+  const rejoined = [];
+  context.room = { localParticipant: { identity: 'Sam', name: 'Sam',
+    publishTrack: async (track, options) => rejoined.push({ track, options }), unpublishTrack: async () => {},
+  } };
+  await context.recoverNativeScreenShare(context.room);
+  assert.equal(published.length, 1);
+  assert.equal(rejoined.length, 1);
+  assert.equal(context._nativeAudioActive, true);
+  assert.equal(context.window._echoNativeShareNeedsRestart, false);
+});
+
 test("pre-fix orphaned shares remain stoppable and request source selection instead of guessing audio", async () => {
   const { context, storage, published } = loadNativeShareRecovery();
   storage.clear();

@@ -155,7 +155,8 @@ async function rememberNativeShareSession(source, mode, generation) {
 
 async function recoverNativeScreenShare(expectedRoom) {
   if (!window.__ECHO_NATIVE__ || !expectedRoom || room !== expectedRoom ||
-      window._echoNativeCaptureActive) return;
+      (window._echoNativeCaptureActive && _nativeAudioOperation?.participant === expectedRoom.localParticipant &&
+        !_nativeAudioOperation.cancelled)) return;
   var generation = ++_nativeShareRecoveryGeneration;
   var isCurrent = function() {
     return room === expectedRoom && generation === _nativeShareRecoveryGeneration;
