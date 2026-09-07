@@ -8,6 +8,17 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-09-06",
+    title: "Better Screen Sharing & Update Notices",
+    notes: [
+      "Screen shares fit the available space as you resize Echo, including ultrawide streams, focused views, and fullscreen.",
+      "Move stream tiles around the Stage to put your preferred stream in the larger spot or group friends together.",
+      "People & Tools now shows the selected game or app below each streamer's name.",
+      "Game audio and titles recover after a viewer reload. Hover over the top-right speaker for a compact volume slider; your own silent preview shows whether audio is shared.",
+      "Planned server restarts show a notice and announce the restart once. Update notes appear after viewer updates too, and stay unread until you dismiss them."
+    ]
+  },
+  {
     version: "v0.6.37",
     title: "Screen Audio Isolation",
     notes: [
@@ -524,8 +535,16 @@ var ECHO_CHANGELOG = [
   }
 ];
 
-// The latest changelog stamp — bump this whenever you add a new entry
-var CHANGELOG_LATEST = ECHO_CHANGELOG[0].version;
+// Release notes have their own content identity, independent of the installer.
+function getChangelogStamp(entry) {
+  var content = JSON.stringify([entry.version, entry.title, entry.notes]);
+  var hash = 2166136261;
+  for (var i = 0; i < content.length; i++) {
+    hash = Math.imul(hash ^ content.charCodeAt(i), 16777619);
+  }
+  return entry.version + ":" + (hash >>> 0).toString(16);
+}
+var CHANGELOG_LATEST = getChangelogStamp(ECHO_CHANGELOG[0]);
 
 var _changelogSeenKey = "echo-changelog-seen";
 
@@ -545,22 +564,39 @@ var _changelogSeenKey = "echo-changelog-seen";
 
     // Show the latest entry as a popup
     var latest = ECHO_CHANGELOG[0];
-    showWhatsNew(latest.version, latest.title, latest.notes);
-    _markChangelogSeen();
+    var displayedStamp = CHANGELOG_LATEST;
+    showWhatsNew(latest.version, latest.title, latest.notes, function() {
+      _markChangelogSeen(displayedStamp);
+    });
   }, 2500);
 })();
 
-function _markChangelogSeen() {
+function _markChangelogSeen(stamp) {
+  var seenStamp = stamp || CHANGELOG_LATEST;
   if (typeof echoSet === "function") {
-    echoSet(_changelogSeenKey, CHANGELOG_LATEST);
+    echoSet(_changelogSeenKey, seenStamp);
   } else {
-    localStorage.setItem(_changelogSeenKey, CHANGELOG_LATEST);
+    localStorage.setItem(_changelogSeenKey, seenStamp);
   }
+  var badge = document.getElementById("updates-badge");
+  if (badge && seenStamp === CHANGELOG_LATEST) badge.classList.add("hidden");
 }
 
-function showWhatsNew(version, title, notes) {
+function showWhatsNew(version, title, notes, onDismiss) {
+  if (document.querySelector(".whats-new-overlay")) return;
   var overlay = document.createElement("div");
   overlay.className = "whats-new-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Updates: " + title);
+  var dismissed = false;
+  function dismiss() {
+    if (dismissed) return;
+    dismissed = true;
+    if (onDismiss) onDismiss();
+    overlay.classList.add("whats-new-closing");
+    setTimeout(function() { overlay.remove(); }, 300);
+  }
 
   var panel = document.createElement("div");
   panel.className = "whats-new-panel";
@@ -583,10 +619,7 @@ function showWhatsNew(version, title, notes) {
   var btn = document.createElement("button");
   btn.className = "whats-new-close";
   btn.textContent = "Got it";
-  btn.addEventListener("click", function() {
-    overlay.classList.add("whats-new-closing");
-    setTimeout(function() { overlay.remove(); }, 300);
-  });
+  btn.addEventListener("click", dismiss);
   footer.appendChild(btn);
 
   panel.appendChild(header);
@@ -596,8 +629,7 @@ function showWhatsNew(version, title, notes) {
 
   overlay.addEventListener("click", function(e) {
     if (e.target === overlay) {
-      overlay.classList.add("whats-new-closing");
-      setTimeout(function() { overlay.remove(); }, 300);
+      dismiss();
     }
   });
 

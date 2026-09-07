@@ -78,12 +78,13 @@ curl.exe -sk https://127.0.0.1:9443/api/version
 ```
 
 For a controlled promotion that requires an outage, run `Preflight` immediately
-before the stop. After the reviewed artifact/config swap, use the wrapper to
+before the stop with `-AnnounceRestart`. It first publishes the restart notice,
+waits 12 seconds for viewers, then revalidates the production environment. After the reviewed artifact/config swap, use the wrapper to
 start and verify production as one operation:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File `
-  .\core\deploy\echo-core-host-network-guard.ps1 -Action Preflight
+  .\core\deploy\echo-core-host-network-guard.ps1 -Action Preflight -AnnounceRestart
 Stop-Service EchoCoreHost
 # Perform the reviewed, backed-up release mutation while Echo is stopped.
 powershell -NoProfile -ExecutionPolicy Bypass -File `
@@ -91,7 +92,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 ```
 
 For a routine restart, use `-Action Restart`; it validates before mutation and
-verifies the new service/control PIDs and ingress afterward. These server-side
+announces automatically, then verifies the new service/control PIDs and ingress afterward.
+`Start` and `Restart` clear the notice after verification. Plain `Preflight` and
+`Verify` remain read-only. The notice lives at the active viewer runtime's
+`restart-notice.json`, expires after two minutes if a deployment is abandoned,
+and does not change the viewer cache stamp. Viewer polling displays the notice
+and attempts one spoken announcement per restart. An unplanned crash or power
+loss cannot provide an advance announcement. If a caller cancels after an
+announced preflight, clear the notice with `Set-EchoRestartNotice -State Ready`
+from `restart-notice-lib.ps1`, using the active environment's viewer directory.
+
+Every user-facing viewer release must add an entry to `core/viewer/changelog.js`
+describing the changes, including viewer-only releases that keep the same
+Windows app version. Its popup uses the note content as its identity and marks
+notes read only when dismissed or opened in Updates history. Verify the new
+entry before promotion; copying changed assets alone does not write release notes.
+
+These server-side
 assertions prove the process is not localhost-only, but they do not replace the
 separate-device LAN check or a genuine off-LAN check. Obtain both before the
 release is declared live.

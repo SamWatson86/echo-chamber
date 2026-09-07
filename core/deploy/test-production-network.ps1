@@ -12,6 +12,7 @@ if (!(Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
 $testScripts = @(
     (Join-Path $PSScriptRoot "test-production-network-lib.ps1"),
     (Join-Path $PSScriptRoot "test-echo-core-host-network-guard.ps1"),
+    (Join-Path $PSScriptRoot "test-restart-notice-lib.ps1"),
     (Join-Path $PSScriptRoot "test-viewer-runtime-lib.ps1")
 )
 

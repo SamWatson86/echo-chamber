@@ -931,6 +931,7 @@ if (openJamButton) openJamButton.addEventListener("click", function() { openJamP
 
 // Start Who's Online polling on page load (only while not connected)
 startOnlineUsersPolling();
+startServerNoticePolling();
 
 // Admin login UI and auto-restore — must run after the modal/badge/panel
 // HTML at the end of <body> has been parsed. app.js is loaded mid-body, so

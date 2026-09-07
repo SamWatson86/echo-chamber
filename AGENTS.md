@@ -58,6 +58,7 @@ product development is centered in `core/`.
 ## Quality Expectations
 
 - Any user-facing behavior change should include verification evidence.
+- Before a user-facing viewer release, add the changes to `core/viewer/changelog.js`, including viewer-only releases with no new installer version.
 - Add or update regression coverage when touching state/race-prone paths.
 - Update docs when behavior or boundaries change.
 
