@@ -673,12 +673,17 @@ async function toggleScreen() {
   debugLog("[toggleScreen] screenEnabled=" + screenEnabled + " desired=" + desired + " _nativeScreenShareActive=" + (typeof _nativeScreenShareActive !== "undefined" ? _nativeScreenShareActive : "undef"));
   screenBtn.disabled = true;
   try {
-    if (desired) {
-      await startScreenShareManual();
+    const repairingShare = !!window._echoNativeShareNeedsRestart;
+    let started;
+    if (repairingShare) {
+      await stopScreenShareManual();
+      started = await startScreenShareManual();
+    } else if (desired) {
+      started = await startScreenShareManual();
     } else {
       await stopScreenShareManual();
     }
-    screenEnabled = desired;
+    screenEnabled = typeof started === 'boolean' ? started : (repairingShare || desired);
     renderPublishButtons();
     if (room?.localParticipant) {
       const cardRef = ensureParticipantCard(room.localParticipant, true);
@@ -706,8 +711,8 @@ async function restartScreenShare() {
     screenEnabled = false;
     renderPublishButtons();
     await new Promise((resolve) => setTimeout(resolve, 500));
-    await startScreenShareManual();
-    screenEnabled = true;
+    const started = await startScreenShareManual();
+    screenEnabled = started !== false;
     renderPublishButtons();
   } catch (err) {
     setStatus(err.message || "Screen restart failed", true);

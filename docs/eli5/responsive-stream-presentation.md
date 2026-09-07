@@ -20,11 +20,14 @@ What changed:
   rescales on window resize, drawer changes, visibility changes, and source-size
   changes. Each row has a common height and fixed gaps. Existing uniform-source,
   focused, solo, and fullscreen behavior keeps its own sizing rules.
-- The volume strip is explicitly anchored to the bottom of every screen tile.
-  It appears when hovering the bottom strip or focusing its controls, including
-  tapping the strip on touch devices. Moving away hides it unless a volume
-  control still has keyboard focus. Escape releases that focus. Clicking the
-  image or its fullscreen control does not reveal the volume strip.
+- A compact speaker control sits at the top right of every screen tile beside
+  fullscreen. Hover, keyboard focus, or a touch tap reveals a small volume
+  slider. Moving away hides it unless a control retains keyboard focus; Escape
+  dismisses it. Clicking the video does not open it. A publisher without an
+  attached audio track shows `No stream audio` instead of a disappearing control.
+  Narrow portrait thumbnails stack volume below fullscreen. Rearrange handles
+  hide when the controls cannot fit, and control positions update without
+  animating through overlapping positions during resize.
 - People & Tools shows `Playing <selected game title>`, `Sharing <selected
   window title>`, or a generic desktop/browser/screen description below the
   name. The text supports avatar and camera cards, truncates long titles, and
@@ -62,6 +65,39 @@ Receivers bind messages to the authenticated sending participant object and
 match the current screen publication SID before rendering. Native `$screen`
 tracks use the parent participant's description. Data arriving before its
 publication is held in a bounded map; unrelated or replaced publications cannot
-inherit the label. The source is never persisted to local storage. New joiners
+inherit the label. Remote descriptions are never persisted. New joiners
 receive a targeted reliable update; connection/reconnection also sends a
 `stream-activity-query` version 1 to request the current descriptions.
+
+## Native share recovery after a viewer reload
+
+The Windows capture pipeline and its `$screen` video participant can survive a
+viewer reload or server restart. The old viewer forgot its selected source and
+lost the JavaScript-owned audio publication. That left working video, generic
+`Sharing screen` descriptions, and no game audio or visible volume control.
+
+The publishing window now retains its own selected source in `sessionStorage`
+with its participant identity, room, capture mode, and capture start time. On
+rejoin it checks native capture health, capture age, and the exact live source
+handle, PID, type, and executable before restoring the description and the
+existing process-audio pipeline. It does not restart or resize native video.
+Audio operations stay bound to the participant that started them, so a delayed
+start or cleanup cannot publish into a newly joined room. Stop clears the saved
+session and cancels pending recovery. Source details are not shared with other
+participants beyond the existing bounded type/title activity message.
+
+Already orphaned streams from older viewers need one fresh source selection.
+Echo shows `Restart Share` when it cannot validate a retained source, rather than
+guessing which process to record. Missing session storage, a changed process,
+or a different capture session also requires selection. Monitor shares still
+describe the desktop; selecting a game/window supplies its title. This recovery
+uses existing Windows IPC and needs only a server-served viewer update.
+
+Recovery verification includes a real browser reload with retained session
+storage and real Web Audio processing. Simulated native PCM reaches the restored
+outgoing audio track while the game activity message is restored and no native
+video-start command is issued. Native IPC is stubbed in that test; a live
+publisher/receiver check remains necessary to confirm Windows capture and
+audibility on a user's machine. Unit tests also cover source/room/capture
+mismatches, Stop during recovery, pending listener disposal, canceled source
+selection, and room replacement during audio startup.

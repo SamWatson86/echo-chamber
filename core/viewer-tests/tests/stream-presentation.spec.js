@@ -19,7 +19,7 @@ async function install(page, options = {}) {
   await page.goto("/?echo-ui-shell-v2=1", { waitUntil: "domcontentloaded" });
   await page.addScriptTag({ path: fixturePath });
   await page.evaluate(options => window.EchoLayoutTestScenario.install({
-    participants: 3, cameras: 0, screenShares: 2, shareAspects: [1916 / 802, 16 / 9], ...options,
+    participants: 3, cameras: 0, screenShares: 2, screenOwners: [2, 3], shareAspects: [1916 / 802, 16 / 9], ...options,
   }), options);
   await settle(page);
 }
@@ -28,78 +28,121 @@ async function settle(page) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
-async function assertFooter(page, index = 0) {
+async function attachAudio(page) {
+  await page.evaluate(() => {
+    document.querySelectorAll('#screen-grid > .tile').forEach(tile => {
+      const audio = document.createElement('audio');
+      document.body.appendChild(audio);
+      const state = participantState.get(tile.dataset.identity);
+      state.screenAudioEls.add(audio);
+      state.screenVolume = 0.42;
+      syncScreenAudioVolumeControl(tile.dataset.identity, tile);
+    });
+  });
+}
+
+async function assertCorner(page, index = 0) {
   const result = await page.locator("#screen-grid > .tile").nth(index).evaluate(tile => {
     const control = tile.querySelector(".tile-volume-wrap");
-    const input = control.querySelector("input");
+    const button = control.querySelector("button");
     const box = tile.getBoundingClientRect();
-    const footer = control.getBoundingClientRect();
-    const slider = input.getBoundingClientRect();
-    return { bottomGap: box.bottom - footer.bottom, footerHeight: footer.height,
-      footerInTile: footer.left >= box.left && footer.right <= box.right,
-      sliderInFooter: slider.top >= footer.top && slider.bottom <= footer.bottom,
+    const corner = button.getBoundingClientRect();
+    const fullscreen = tile.querySelector('.tile-fullscreen-btn').getBoundingClientRect();
+    const popup = control.querySelector('.tile-volume-popover');
+    const popupRect = popup.getBoundingClientRect();
+    return { topGap: corner.top - box.top, width: corner.width,
+      inTile: corner.left >= box.left && corner.right <= box.right,
+      clearFullscreen: corner.right <= fullscreen.left,
+      popupInTile: popup.hidden || (popupRect.left >= box.left && popupRect.right <= box.right && popupRect.top >= box.top && popupRect.bottom <= box.bottom),
       fit: getComputedStyle(tile.querySelector("video")).objectFit };
   });
-  expect(result.bottomGap).toBeGreaterThanOrEqual(-1);
-  expect(result.bottomGap).toBeLessThanOrEqual(2);
-  expect(result.footerHeight).toBeLessThanOrEqual(44);
-  expect(result.footerInTile).toBe(true);
-  expect(result.sliderInFooter).toBe(true);
+  expect(result.topGap).toBeGreaterThanOrEqual(7);
+  expect(result.topGap).toBeLessThanOrEqual(18);
+  expect(result.width).toBeLessThanOrEqual(44);
+  expect(result.inTile).toBe(true);
+  expect(result.clearFullscreen).toBe(true);
+  expect(result.popupInTile).toBe(true);
   expect(result.fit).toBe("contain");
 }
 
-test("volume stays at the bottom and only reveals at its controls in grid, focus, and fullscreen", async ({ page }) => {
+test("compact volume opens only at the top-right control in grid, focus, and fullscreen", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 3440, height: 1370 });
   await install(page);
   const tiles = page.locator("#screen-grid > .tile");
-  await tiles.evaluateAll(elements => elements.forEach(tile => tile.querySelector(".tile-volume-wrap").classList.remove("hidden")));
-  const footer = tiles.first().locator(".tile-volume-wrap");
+  await attachAudio(page);
+  const button = tiles.first().locator(".tile-volume-button");
+  const popup = tiles.first().locator(".tile-volume-popover");
   const video = tiles.first().locator("video");
   await video.hover();
-  await expect(footer).toHaveCSS("opacity", "0");
+  await expect(popup).toBeHidden();
   await video.click();
   await expect(tiles.first()).toHaveClass(/is-focused/);
   await settle(page);
-  await expect(footer).toHaveCSS("opacity", "0");
-  await assertFooter(page);
-  await footer.hover();
-  await expect(footer).toHaveCSS("opacity", "1");
+  await expect(popup).toBeHidden();
+  await assertCorner(page);
+  await button.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup.locator('input')).toHaveValue('0.42');
+  await assertCorner(page);
+  await page.screenshot({ path: testInfo.outputPath('ultrawide-corner-volume.png') });
+  await popup.locator('input').hover();
+  await expect(popup).toBeVisible();
   await page.mouse.move(0, 0);
-  await expect(footer).toHaveCSS("opacity", "0");
-  await footer.focus();
-  await expect(footer).toHaveCSS("opacity", "1");
-  await footer.press("Escape");
-  await expect(footer).toHaveCSS("opacity", "0");
+  await expect(popup).toBeHidden();
+  await button.focus();
+  await expect(popup).toBeVisible();
+  await button.press('Tab');
+  await expect(popup.locator('input')).toBeFocused();
+  await popup.locator('input').press('ArrowRight');
+  await expect(popup.locator('input')).toHaveValue('0.43');
+  await expect(popup.locator('.tile-volume-status')).toHaveText('43%');
+  await popup.locator('input').press("Escape");
+  await expect(popup).toBeHidden();
+  await expect(tiles.first()).toHaveClass(/is-focused/);
 
   for (const viewport of [{ width: 1366, height: 768 }, { width: 1920, height: 1080 }]) {
     await page.setViewportSize(viewport);
     await settle(page);
-    await assertFooter(page, 0);
-    await assertFooter(page, 1);
+    await assertCorner(page, 0);
+    await assertCorner(page, 1);
   }
   await tiles.first().locator(".tile-fullscreen-btn").click();
   await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(true);
-  await assertFooter(page);
+  await button.hover();
+  await expect(popup).toBeVisible();
+  await assertCorner(page);
   await page.evaluate(() => document.exitFullscreen());
   await settle(page);
-  await assertFooter(page);
+  await assertCorner(page);
 });
 
-test("touch can open the bottom volume controls without focusing or resizing the share", async ({ browser }) => {
+test("touch opens compact volume without focusing or resizing the share", async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 900, height: 700 }, hasTouch: true });
   const page = await context.newPage();
   try {
     await page.route("**/api/**", route => route.fulfill({ contentType: "application/json", body: "[]" }));
     await install(page, { screenShares: 1 });
     const tile = page.locator("#screen-grid > .tile");
-    const footer = tile.locator(".tile-volume-wrap");
-    await footer.evaluate(element => element.classList.remove("hidden"));
-    await expect(footer).toHaveCSS("opacity", "0");
-    await footer.tap({ position: { x: 4, y: 20 } });
-    await expect(footer).toHaveCSS("opacity", "1");
+    await attachAudio(page);
+    const popup = tile.locator(".tile-volume-popover");
+    await expect(popup).toBeHidden();
+    await tile.locator('.tile-volume-button').tap();
+    await expect(popup).toBeVisible();
     await expect(tile).not.toHaveClass(/is-focused/);
-    await assertFooter(page);
+    await assertCorner(page);
   } finally { await context.close(); }
+});
+
+test("a silent stream explains missing audio and enables its slider when audio arrives", async ({ page }) => {
+  await install(page, { screenShares: 1 });
+  const tile = page.locator('#screen-grid > .tile');
+  await tile.locator('.tile-volume-button').hover();
+  await expect(tile.locator('.tile-volume-status')).toHaveText('No stream audio');
+  await expect(tile.locator('input')).toBeDisabled();
+  await attachAudio(page);
+  await expect(tile.locator('input')).toBeEnabled();
+  await expect(tile.locator('input')).toHaveValue('0.42');
+  await expect(tile.locator('.tile-volume-status')).toHaveText('42%');
 });
 
 test("mixed shares reflow across window sizes without replacing media or distorting its aspect", async ({ page }) => {

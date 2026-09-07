@@ -1691,17 +1691,23 @@ test("legacy rollback keeps Settings nonmodal and restores a visible legacy cont
 
 test("screen volume becomes visible and interactive on keyboard focus", async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 });
-  await openPhaseOneViewer(page, { participants: 2, cameras: 0, screenShares: 1 });
+  await openPhaseOneViewer(page, { participants: 2, cameras: 0, screenShares: 1, screenOwners: [2] });
   await page.locator("#shell-toggle-utility").click();
   await expect.poll(() => page.locator('.room-main[data-ui-region="primary-stage"]').evaluate((element) => element.inert)).toBe(false);
   const tile = page.locator("#screen-grid > .tile").first();
   const wrap = tile.locator(".tile-volume-wrap");
   const slider = wrap.locator("input[type=range]");
-  await wrap.evaluate((element) => element.classList.remove("hidden"));
-  await slider.focus();
+  await tile.evaluate((element) => {
+    const audio = document.createElement('audio');
+    document.body.appendChild(audio);
+    participantState.get(element.dataset.identity).screenAudioEls.add(audio);
+    syncScreenAudioVolumeControl(element.dataset.identity, element);
+  });
+  await wrap.locator('button').focus();
+  await wrap.locator('button').press('Tab');
   await expect(slider).toBeFocused();
   await expect.poll(() => wrap.evaluate((element) => Number.parseFloat(getComputedStyle(element).opacity))).toBeGreaterThanOrEqual(0.99);
-  await expect.poll(() => wrap.evaluate((element) => getComputedStyle(element).pointerEvents)).not.toBe("none");
+  await expect.poll(() => slider.evaluate((element) => getComputedStyle(element).pointerEvents)).not.toBe("none");
   expect(await tile.evaluate((element) => element.matches(":focus-within"))).toBe(true);
 });
 

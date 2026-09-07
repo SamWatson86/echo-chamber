@@ -99,8 +99,8 @@ test("keyboard order survives mixed-source resizing, focus, and panel toggles", 
       });
     });
     expect(geometry.every(g => g.contained && g.fit === "contain")).toBe(true);
-    const controls = await page.locator(".tile-reorder-handle:visible").evaluateAll(handles => handles.map(handle => {
-      const h = handle.getBoundingClientRect(), t = handle.parentElement.getBoundingClientRect();
+    const controls = await page.locator(".tile-reorder-handle:visible, .tile-volume-button:visible").evaluateAll(handles => handles.map(handle => {
+      const h = handle.getBoundingClientRect(), t = handle.closest('.tile').getBoundingClientRect();
       return h.left >= t.left && h.right <= t.right && h.top >= t.top && h.bottom <= t.bottom;
     }));
     expect(controls.every(Boolean)).toBe(true);
@@ -116,6 +116,45 @@ test("keyboard order survives mixed-source resizing, focus, and panel toggles", 
   expect(await order(page)).toEqual(expected);
   await expectStableMedia(page);
 });
+
+for (const hasTouch of [false, true]) {
+  test.describe(hasTouch ? 'touch controls' : 'mouse controls', () => {
+    test.use({ hasTouch });
+    test("narrow portrait tiles keep volume inside and hide rearrange controls that cannot fit", checkNarrowControls);
+  });
+}
+
+async function checkNarrowControls({ page }) {
+  await install(page, [9 / 16, 16 / 9, 32 / 9]);
+  const override = await page.addStyleTag({ content: '/* exact tile sizes */' });
+  for (const width of [120, 80, 160, 240]) {
+    // Isolate exact tile widths so this regression is independent of the host
+    // fonts and the layout algorithm's choice of row arrangement.
+    await override.evaluate((style, width) => {
+      style.textContent = `#screen-grid > .tile:first-child { width: ${width}px !important; height: 300px !important; }`;
+    }, width);
+    await settle(page);
+    const first = tile(page, 0);
+    if (width < 132) await expect(first.locator('.tile-reorder-handle')).toBeHidden();
+    const contained = await first.evaluate(tile => {
+      const t = tile.getBoundingClientRect();
+      const buttons = [...tile.querySelectorAll('.tile-volume-button, .tile-fullscreen-btn')].map(button => button.getBoundingClientRect());
+      return buttons.every(b => b.left >= t.left && b.right <= t.right && b.top >= t.top && b.bottom <= t.bottom) &&
+        (buttons[0].right <= buttons[1].left || buttons[1].right <= buttons[0].left ||
+          buttons[0].top >= buttons[1].bottom || buttons[1].top >= buttons[0].bottom);
+    });
+    expect(contained, JSON.stringify(await first.evaluate(tile => ({
+      tile: tile.getBoundingClientRect().toJSON(), container: getComputedStyle(tile).container,
+      controls: [...tile.querySelectorAll('.tile-volume-button, .tile-fullscreen-btn')].map(button => ({
+        kind: button.className, box: button.getBoundingClientRect().toJSON(),
+      })),
+    })))).toBe(true);
+    await first.locator('.tile-volume-button').hover();
+    await expect(first.locator('.tile-volume-popover')).toBeVisible();
+    expect(await first.locator('.tile-volume-status').evaluate(status => status.scrollWidth <= status.clientWidth)).toBe(true);
+  }
+  await expectStableMedia(page);
+}
 
 test("new shares append while hidden shares and recovery retain their chosen order", async ({ page }) => {
   await install(page);

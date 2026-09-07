@@ -116,21 +116,44 @@ function addScreenTile(label, element, trackSid) {
   });
   tile.appendChild(fsBtn);
 
-  // Bottom-only controls: reveal on footer hover, keyboard focus, or touch.
+  // A compact corner control: hover, keyboard focus, and tap reveal the slider.
   var volWrap = document.createElement("div");
-  volWrap.className = "tile-volume-wrap hidden";
-  volWrap.tabIndex = 0;
+  volWrap.className = "tile-volume-wrap";
   volWrap.setAttribute("role", "group");
   volWrap.setAttribute("aria-label", "Screen volume for " + label);
   volWrap.addEventListener("click", function(event) { event.stopPropagation(); });
   volWrap.addEventListener("pointerdown", function(event) {
     event.stopPropagation();
-    if (event.target === volWrap) volWrap.focus({ preventScroll: true });
   });
+  var volButton = document.createElement("button");
+  volButton.type = "button";
+  volButton.className = "tile-volume-button";
+  volButton.setAttribute("aria-label", "Screen volume for " + label);
+  volButton.setAttribute("aria-expanded", "false");
+  volButton.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Zm4 3a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  var volPopover = document.createElement("div");
+  volPopover.className = "tile-volume-popover";
+  volPopover.hidden = true;
+  function showVolume(open) {
+    volPopover.hidden = !open;
+    volButton.setAttribute("aria-expanded", String(open));
+  }
+  volWrap.addEventListener("pointerenter", function(event) {
+    if (event.pointerType !== "touch") showVolume(true);
+  });
+  volWrap.addEventListener("pointerleave", function() {
+    if (!volWrap.contains(document.activeElement)) showVolume(false);
+  });
+  volWrap.addEventListener("focusin", function() { showVolume(true); });
+  volWrap.addEventListener("focusout", function(event) {
+    if (!volWrap.contains(event.relatedTarget)) showVolume(false);
+  });
+  volButton.addEventListener("click", function() { showVolume(true); });
   volWrap.addEventListener("keydown", function(event) {
     if (event.key !== "Escape") return;
     event.stopPropagation();
     if (volWrap.contains(document.activeElement)) document.activeElement.blur();
+    showVolume(false);
   });
   var volSlider = document.createElement("input");
   volSlider.type = "range";
@@ -141,6 +164,10 @@ function addScreenTile(label, element, trackSid) {
   volSlider.value = "1";
   volSlider.title = "Screen volume";
   volSlider.setAttribute("aria-label", "Screen volume for " + label);
+  volSlider.disabled = true;
+  var volStatus = document.createElement("span");
+  volStatus.className = "tile-volume-status";
+  volStatus.textContent = "No stream audio";
   volSlider.addEventListener("click", function(e) { e.stopPropagation(); });
   volSlider.addEventListener("pointerdown", function(e) { e.stopPropagation(); });
   volSlider.addEventListener("input", function(e) {
@@ -150,6 +177,7 @@ function addScreenTile(label, element, trackSid) {
     var state = participantState.get(identity);
     if (!state) return;
     state.screenVolume = Number(volSlider.value);
+    volStatus.textContent = Math.round(state.screenVolume * 100) + "%";
     applyParticipantAudioVolumes(state);
     saveParticipantVolume(identity, state.micVolume, state.screenVolume, state.chimeVolume);
     // Sync the participant card slider
@@ -162,11 +190,19 @@ function addScreenTile(label, element, trackSid) {
       cardRef.popScreenSlider.value = state.screenVolume;
       if (cardRef.popScreenPct) cardRef.popScreenPct.textContent = Math.round(state.screenVolume * 100) + "%";
     }
+    if (cardRef?.settingsScreenSlider) {
+      cardRef.settingsScreenSlider.value = state.screenVolume;
+      if (cardRef.settingsScreenPct) cardRef.settingsScreenPct.textContent = Math.round(state.screenVolume * 100) + "%";
+    }
   });
-  volWrap.appendChild(volSlider);
+  volPopover.appendChild(volSlider);
+  volPopover.appendChild(volStatus);
+  volWrap.appendChild(volButton);
+  volWrap.appendChild(volPopover);
   tile.appendChild(volWrap);
   tile._volWrap = volWrap;
   tile._volSlider = volSlider;
+  tile._volStatus = volStatus;
 
   if (trackSid) {
     tile.dataset.trackSid = trackSid;
