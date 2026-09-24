@@ -174,6 +174,95 @@ test("Start Jam is disabled while the server is already starting one", () => {
   assert.equal(contract.canStart, false);
 });
 
+test("an active Jam exposes Spotify startup failure while keeping recovery controls and clears it on recovery", () => {
+  const state = {
+    jam_protocol_version: 3,
+    source_enabled: true,
+    source_availability_known: true,
+    source_ready: true,
+    spotify_connected: true,
+    playback_stop_supported: true,
+    active: true,
+    source_status: "ready",
+    spotify_is_playing: false,
+    last_error: "  Spotify accepted the song but playback could not be confirmed. Check Spotify on the host PC.  ",
+  };
+  const failed = evaluateJamContract(state);
+  assert.equal(failed.sourceMessage, state.last_error.trim());
+  assert.equal(failed.sourceTone, "error");
+  assert.equal(failed.sourceReady, true);
+  assert.equal(failed.canJoin, true);
+  assert.equal(failed.canControl, true);
+  assert.equal(failed.canStopPlayback, true);
+  assert.equal(failed.canStart, false);
+
+  const recovered = evaluateJamContract({ ...state, source_status: "live", spotify_is_playing: true, last_error: null });
+  assert.equal(recovered.sourceMessage, "Host source audio is live");
+  assert.equal(recovered.sourceTone, "ready");
+  assert.equal(recovered.canControl, true);
+  assert.equal(recovered.canJoin, true);
+
+  const silent = evaluateJamContract({ ...state, source_status: "silent" });
+  assert.equal(silent.sourceMessage, state.last_error.trim());
+  assert.equal(silent.sourceTone, "error");
+
+  const unresolved = evaluateJamContract({ ...state, source_status: "live", spotify_is_playing: true });
+  assert.equal(unresolved.sourceMessage, state.last_error.trim());
+  assert.equal(unresolved.sourceTone, "error");
+});
+
+test("source failures and setup guidance take precedence over an active Jam playback error", () => {
+  const state = {
+    jam_protocol_version: 3,
+    source_enabled: true,
+    source_availability_known: true,
+    source_ready: true,
+    spotify_connected: true,
+    active: true,
+    last_error: "Spotify did not start playback",
+  };
+  for (const source_status of ["offline", "error", "failed", "stalled"]) {
+    const failed = evaluateJamContract({ ...state, source_status, source_error: "Capture source disconnected" });
+    assert.equal(failed.sourceMessage, "Capture source disconnected", source_status);
+    assert.equal(failed.sourceTone, "error", source_status);
+    assert.equal(failed.canControl, source_status === "stalled", source_status);
+  }
+  for (const [source_status, expected] of [
+    ["disabled", "Echo Jam is disabled on the Spotify PC"],
+    ["negotiating", "Echo is preparing Spotify control on the source PC…"],
+    ["configured", "Host source is configured — waiting for capture"],
+    ["starting", "Host source is starting…"],
+  ]) {
+    assert.equal(evaluateJamContract({ ...state, source_status }).sourceMessage, expected, source_status);
+  }
+  assert.equal(evaluateJamContract({ ...state, source_status: "ready", source_availability_known: false }).sourceMessage,
+    "Checking Spotify control on the source PC…");
+});
+
+test("inactive, incompatible, and reconciling Jams do not display a stale playback error", () => {
+  const state = {
+    jam_protocol_version: 3,
+    source_enabled: true,
+    source_availability_known: true,
+    spotify_connected: true,
+    active: true,
+    source_status: "ready",
+    last_error: "Old playback failure",
+  };
+  const inactive = evaluateJamContract({ ...state, active: false });
+  assert.equal(inactive.sourceMessage, "Host source is online");
+  assert.equal(inactive.canStart, true);
+  const pending = evaluateJamContract({ ...state, skip_reconciliation_pending: true });
+  assert.equal(pending.sourceMessage, "Host source is online");
+  assert.equal(pending.canControl, false);
+  const incompatible = evaluateJamContract({ ...state, jam_protocol_version: 2 });
+  assert.equal(incompatible.sourceMessage, "Host source is online");
+  assert.equal(incompatible.canControl, false);
+  for (const last_error of [null, "   ", { message: "Invalid error shape" }]) {
+    assert.equal(evaluateJamContract({ ...state, last_error }).sourceMessage, "Host source is online");
+  }
+});
+
 test("Start Jam fails closed until source availability is known and enabled", () => {
   const base = {
     jam_protocol_version: 3,

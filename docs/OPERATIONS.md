@@ -234,6 +234,25 @@ source-side restart cooldown that survives source WebSocket reconnects. If it
 still fails, confirm the Store Spotify app is open and signed into the same
 Premium account before restarting anything manually.
 
+When a queue add starts the first song from idle (single song, playlist, or
+Song Radio), Echo sends the song once and confirms the configured device is
+actually playing it before handing Spotify the next queued song. Spotify's
+Player endpoints acknowledge commands before playback is necessarily ready and
+do not guarantee execution order. Echo makes up to eight playback reads, 500 ms
+apart, under the existing 15-second source-safety deadline. If the exact song is
+selected but paused and Spotify permits resuming, Echo sends one device-targeted
+Resume and requires a later playing observation. It never resumes an empty
+player, transfers unrelated playback, or resends the song URI during recovery.
+
+If that start remains unconfirmed, Echo preserves the first occurrence as
+unresolved and later songs as pending, and exposes the failure through
+`/api/jam/state.last_error` in the Jam panel. No further queue delivery occurs
+while acceptance is unresolved. Check Spotify on the source PC; if it remains
+wedged, end and restart the Jam after recovering Spotify. Queue-add receipts
+still acknowledge admission to Echo's queue, not guaranteed audible playback.
+This is a server/viewer change and requires no Windows desktop update. A live
+idle-start check is still necessary to validate a particular Spotify app build.
+
 Echo exposes one global shared Jam at a time. Any authenticated Echo user can
 start it, join it, search, add songs, skip, and use **Stop Music** from Echo's Jam panel. Those users
 do not need Spotify accounts and should add their songs through Echo, not through
