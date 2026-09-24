@@ -119,8 +119,8 @@ race fences are unchanged. A durable Stop-admission fence also rejects any
 track or playlist request that began before **Stop Music** or **Clear All**, even if a later
 request resumes the preserved queue before the older playlist finishes
 loading. If Spotify changes the public response contract,
-Echo fails closed with a **Retry 50-song chunk** action and keeps **Open in
-Spotify** available; it never substitutes guessed titles or IDs. Spotify apps
+Echo fails closed with a **Retry 50-song chunk** action; the playlist title
+remains a Spotify link. It never substitutes guessed titles or IDs. Spotify apps
 in Extended Quota Mode are not subject to the supported-endpoint 2026
 Development Mode restriction. See Spotify's
 [migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
@@ -158,7 +158,10 @@ without clearing songs added afterward.
 
 Clicking a song title in Search, Echo Favorites, a playlist, Play History, the
 Queue, Now Playing, or the Jam banner opens a song menu with **Song Radio** and
-**Open in Spotify**. Song Radio resolves Spotify's generated playlist for that
+**Open in Spotify**. The menu uses an opaque background independent of panel
+transparency. Saved song cards also offer a direct **Song Radio** button, which
+opens the same browser without adding songs until the user chooses to queue them.
+Song Radio resolves Spotify's generated playlist for that
 seed and opens it in the existing playlist browser. Echo preserves Spotify's
 order and offers at most the first 250 positions, with unavailable songs skipped
 and reported. A shorter radio stays shorter; Echo never fabricates filler or
@@ -182,8 +185,9 @@ requests. Snapshot comparisons remain exact throughout browsing and queueing.
 The resolver shares Echo's Spotify request/cooldown gate. Invalid IDs return
 400, unavailable radio returns 404, rate limits return 429 with `Retry-After`
 when supplied, and changed/malformed upstream contracts return 502. The viewer
-keeps **Open in Spotify** available on failure. Spotify can change this public
-web-player contract independently of Echo, just as with public playlist loading.
+keeps the seed title's song menu and **Retry Song Radio** available on failure.
+Spotify can change this public web-player contract independently of Echo, just
+as with public playlist loading.
 
 Radio browsing loads 50 positions at a time. Adding the radio uses the existing
 playlist-selection endpoint for positions below 250, preserving server-side
@@ -201,8 +205,9 @@ Echo Favorites are deliberately distinct from Spotify's own Liked Songs and
 followed-playlist state. Viewer labels and controls say **Echo Favorites** so a
 local Echo action is never presented as a Spotify Like action.
 
-Library track cards expose distinct **Open in Spotify** and **Add to queue**
-actions. Library and Search playlist cards expose **Open in Spotify** and
+Library track cards expose distinct **Song Radio** and **Add to queue**
+actions. Standalone **Open in Spotify** buttons are omitted throughout Jam;
+that action remains in song-title menus. Library and Search playlist cards expose
 **Choose songs**; choosing songs opens Echo's playlist detail, where an allowed
 playlist can be selected song-by-song or added in full.
 

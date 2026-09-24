@@ -1503,15 +1503,18 @@ function openJamSongMenu(item, opener) {
   actions[0].focus();
 }
 
-function jamCreateSpotifyAction(item) {
-  var link = jamCreateSpotifyLink(
-    item,
-    "Open in Spotify",
-    "jam-secondary-btn jam-spotify-link jam-spotify-action",
-    true
-  );
-  link.setAttribute("aria-label", "Open " + item.name + " in Spotify");
-  return link;
+function jamCreateSongRadioAction(item) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "jam-secondary-btn jam-radio-action";
+  button.textContent = "Song Radio";
+  button.setAttribute("aria-label", "Song Radio for " + item.name);
+  button.title = "Browse up to the first 250 songs from Spotify's Song Radio";
+  button.onclick = function(event) {
+    event.stopPropagation();
+    openJamSongRadio(item, event.currentTarget);
+  };
+  return button;
 }
 
 async function openSpotifyItem(raw, event) {
@@ -1781,7 +1784,7 @@ function jamCreateCatalogCard(item, context) {
   favorite.onclick = function() { toggleJamFavorite(item); };
   actions.appendChild(favorite);
 
-  if (explicitActions) actions.appendChild(jamCreateSpotifyAction(item));
+  if (explicitActions && item.kind === "track") actions.appendChild(jamCreateSongRadioAction(item));
 
   if (item.kind === "track" && context === "library") {
     var libraryAdd = document.createElement("button");
@@ -2291,7 +2294,6 @@ async function openJamSongRadio(rawTrack, opener) {
     title.id = "jam-playlist-detail-title";
     title.appendChild(jamCreateSpotifyLink(track, track.name + " Radio", "jam-spotify-link"));
     summary.appendChild(title);
-    summary.appendChild(jamCreateSpotifyAction(track));
   }
   ["jam-playlist-favorite", "jam-playlist-add-all", "jam-playlist-add-selected"].forEach(function(id) {
     var button = document.getElementById(id);
@@ -2558,7 +2560,7 @@ function renderJamPlaylistItems() {
     title.textContent = "Echo couldn't load this playlist's next 50 songs";
     blocked.appendChild(title);
     var explanation = document.createElement("p");
-    explanation.textContent = "Spotify's normal playlist endpoint blocked this playlist, and Echo's bounded public-catalog fallback did not complete. Retry this 50-song chunk or open the playlist in Spotify.";
+    explanation.textContent = "Spotify's normal playlist endpoint blocked this playlist, and Echo's bounded public-catalog fallback did not complete. Retry this 50-song chunk.";
     blocked.appendChild(explanation);
     var retry = document.createElement("button");
     retry.type = "button";
@@ -2573,7 +2575,6 @@ function renderJamPlaylistItems() {
       fetchJamPlaylistItems(retryOffset, retryOffset > 0);
     });
     blocked.appendChild(retry);
-    blocked.appendChild(jamCreateSpotifyAction(_jamPlaylist));
     container.appendChild(blocked);
     var blockedLoadMore = document.getElementById("jam-playlist-load-more");
     if (blockedLoadMore) blockedLoadMore.hidden = true;

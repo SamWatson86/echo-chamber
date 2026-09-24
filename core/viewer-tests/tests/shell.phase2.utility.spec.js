@@ -3118,7 +3118,7 @@ test("interrupted single-song adds retry with the same request id without a seco
   })).toBe(0);
 });
 
-test("Library cards expose explicit Spotify and queue or song-selection actions", async ({ page }) => {
+test("Library cards expose Song Radio and queue or song-selection actions", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 });
   const model = apiModels.get(page);
   await openPhaseTwoViewer(page);
@@ -3127,20 +3127,16 @@ test("Library cards expose explicit Spotify and queue or song-selection actions"
 
   const trackCard = page.locator("#jam-library-list .jam-catalog-track").filter({ hasText: "Shared Favorite" });
   await expect(trackCard).toHaveCount(1);
-  const trackSpotify = trackCard.getByRole("link", { name: "Open Shared Favorite in Spotify", exact: true });
-  await expect(trackSpotify).toHaveText("Open in Spotify");
-  await expect(trackSpotify).toHaveAttribute("href", `https://open.spotify.com/track/${trackId}`);
+  await expect(trackCard.getByRole("button", { name: "Song Radio for Shared Favorite", exact: true })).toHaveText("Song Radio");
+  await expect(trackCard.locator(".jam-spotify-action")).toHaveCount(0);
   await page.evaluate(() => {
     window.__jamSpotifyOpens = [];
     window.open = (url) => { window.__jamSpotifyOpens.push(url); return { opener: null }; };
   });
-  await trackSpotify.click();
-  await expect.poll(() => page.evaluate(() => window.__jamSpotifyOpens.length)).toBe(1);
   await trackCard.getByRole("button", { name: "Song actions for Shared Favorite", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Song Radio", exact: true })).toBeVisible();
   await page.getByRole("menuitem", { name: "Open in Spotify", exact: true }).click();
   expect(await page.evaluate(() => window.__jamSpotifyOpens)).toEqual([
-    `https://open.spotify.com/track/${trackId}`,
     `https://open.spotify.com/track/${trackId}`,
   ]);
   const addTrack = trackCard.getByRole("button", { name: "Add Shared Favorite by Fixture Artist to queue", exact: true });
@@ -3160,8 +3156,8 @@ test("Library cards expose explicit Spotify and queue or song-selection actions"
   const playlistArtwork = libraryPlaylist.locator("img.jam-result-art");
   await expect(playlistArtwork).toHaveAttribute("src", "https://i.scdn.co/image/playlist-fixture");
   await expect.poll(() => playlistArtwork.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
-  await expect(libraryPlaylist.getByRole("link", { name: "Open Fixture Road Trip in Spotify", exact: true }))
-    .toHaveText("Open in Spotify");
+  await expect(libraryPlaylist.locator(".jam-spotify-action, .jam-radio-action")).toHaveCount(0);
+  await expect(libraryPlaylist.locator(".jam-result-name")).toHaveAttribute("href", `https://open.spotify.com/playlist/${playlistId}`);
   const chooseLibrarySongs = libraryPlaylist.getByRole("button", { name: "Choose songs from Fixture Road Trip", exact: true });
   await expect(chooseLibrarySongs).toHaveText("Choose songs");
   await chooseLibrarySongs.click();
@@ -3175,8 +3171,8 @@ test("Library cards expose explicit Spotify and queue or song-selection actions"
   await page.locator("#jam-search-input").fill("road trip");
   const searchPlaylist = page.locator("#jam-results .jam-catalog-playlist").filter({ hasText: "Fixture Road Trip" });
   await expect(searchPlaylist).toHaveCount(1);
-  await expect(searchPlaylist.getByRole("link", { name: "Open Fixture Road Trip in Spotify", exact: true }))
-    .toHaveText("Open in Spotify");
+  await expect(searchPlaylist.locator(".jam-spotify-action, .jam-radio-action")).toHaveCount(0);
+  await expect(searchPlaylist.locator(".jam-result-name")).toHaveAttribute("href", `https://open.spotify.com/playlist/${playlistId}`);
   const chooseSearchSongs = searchPlaylist.getByRole("button", { name: "Choose songs from Fixture Road Trip", exact: true });
   await expect(chooseSearchSongs).toHaveText("Choose songs");
   await chooseSearchSongs.click();
@@ -3915,7 +3911,8 @@ test("a failed bounded public-catalog fallback renders retry guidance without qu
   await expect(page.locator("#jam-playlist-items")).not.toHaveAttribute("role", "list");
   await expect(blocked).toContainText("Echo couldn't load this playlist's next 50 songs");
   await expect(blocked).toContainText("bounded public-catalog fallback did not complete");
-  await expect(blocked.getByRole("link", { name: "Open Fixture Road Trip in Spotify", exact: true }))
+  await expect(blocked.locator(".jam-spotify-action")).toHaveCount(0);
+  await expect(page.locator("#jam-playlist-summary h3 .jam-spotify-link"))
     .toHaveAttribute("href", `https://open.spotify.com/playlist/${playlistId}`);
   await expect(page.locator("#jam-playlist-items .jam-catalog-item")).toHaveCount(0);
   await expect(page.locator("#jam-playlist-add-all")).toBeDisabled();
