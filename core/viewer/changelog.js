@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-09-24",
+    title: "Clearer Song Radio Controls",
+    notes: [
+      "Song menus now have a solid background so their options stay readable at any panel transparency setting.",
+      "Song Radio replaces the standalone Open in Spotify button on saved songs. Playlist cards keep Choose songs, and song-title menus still offer Song Radio and Open in Spotify."
+    ]
+  },
+  {
     version: "2026-09-23",
     title: "Song Radio & Queue Cleanup",
     notes: [
