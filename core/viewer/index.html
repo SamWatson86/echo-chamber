@@ -657,6 +657,7 @@
               <div class="jam-detail-actions">
                 <button id="jam-playlist-favorite" type="button" class="jam-secondary-btn" aria-pressed="false">Save to Echo</button>
                 <button id="jam-playlist-add-all" type="button" class="jam-primary-btn">Add entire playlist</button>
+                <button id="jam-radio-retry" type="button" class="jam-secondary-btn" hidden>Retry Song Radio</button>
               </div>
               <div class="jam-playlist-selection" role="group" aria-label="Selected playlist songs">
                 <span id="jam-playlist-selection-count" role="status" aria-live="polite">0 songs selected</span>
@@ -674,8 +675,12 @@
                   <div class="jam-queue-title">Queue</div>
                   <div id="jam-queue-selection-count" class="jam-queue-selection-count" role="status" aria-live="polite">0 songs selected</div>
                 </div>
-                <button id="jam-queue-remove-selected" type="button" class="jam-secondary-btn jam-queue-remove-selected" aria-describedby="jam-queue-selection-count" disabled>Remove selected</button>
+                <div class="jam-queue-actions">
+                  <button id="jam-queue-remove-selected" type="button" class="jam-secondary-btn jam-queue-remove-selected" aria-describedby="jam-queue-selection-count" disabled>Remove selected</button>
+                  <button id="jam-queue-clear-all" type="button" class="jam-secondary-btn jam-queue-clear-all" aria-describedby="jam-queue-clear-note" disabled>Clear All</button>
+                </div>
               </div>
+              <p id="jam-queue-clear-note" class="jam-queue-clear-note">Clear All removes waiting songs. Songs already controlled by Spotify remain.</p>
               <div id="jam-queue-status" class="jam-view-status" role="status" aria-live="polite"></div>
               <div id="jam-queue-list" class="jam-queue-list" role="list" aria-label="Jam queue">
                 <div class="jam-queue-empty" role="listitem">Queue is empty</div>

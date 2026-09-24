@@ -6,7 +6,8 @@ use crate::jam_session::{
     spotify_library_scopes_authorized, spotify_rate_limit_error, spotify_retry_after_seconds,
 };
 use crate::spotify_public_catalog::{
-    fetch_public_playlist_chunk, PublicCatalogError, PublicPlaylistPositionOutcome,
+    fetch_public_playlist_chunk, fetch_public_playlist_summary,
+    fetch_public_song_radio_playlist_id, PublicCatalogError, PublicPlaylistPositionOutcome,
 };
 use crate::AppState;
 
@@ -37,6 +38,7 @@ const MAX_PLAYLIST_ITEMS_LIMIT: usize = 50;
 const SPOTIFY_PLAYLIST_ITEMS_LIMIT: usize = 50;
 const MAX_PLAYLIST_ITEMS_OFFSET: usize = 100_000;
 pub(crate) const MAX_PLAYLIST_QUEUE_TRACKS: usize = 1_000;
+const MAX_SONG_RADIO_TRACKS: usize = 250;
 const MAX_CATALOG_OFFSET: usize = 1_000;
 const MAX_FAVORITES_LIMIT: usize = 200;
 const PLAYLIST_ARTWORK_CACHE_MAX_ENTRIES: usize = 512;
@@ -923,6 +925,85 @@ pub(crate) struct CatalogPlaylist {
     pub(crate) favorite_contributor_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct SongRadioResponse {
+    schema_version: u16,
+    seed_track_id: String,
+    max_tracks: usize,
+    playlist: CatalogPlaylist,
+}
+
+/// Resolve Spotify's own Song Radio playlist. Browsing and enqueueing its
+/// first 250 positions use the existing snapshot-checked playlist contract.
+pub(crate) async fn jam_song_radio(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(track_id): Path<String>,
+) -> Result<Json<SongRadioResponse>, JamApiError> {
+    let actor = ensure_jam_actor(&state, &headers).map_err(|status| JamApiError {
+        status,
+        code: "actor_required",
+        message: "A current Echo participant token is required".to_string(),
+        retry_after: None,
+    })?;
+    if !valid_spotify_id(&track_id) {
+        return Err(JamApiError::bad_request("invalid Spotify track ID"));
+    }
+    let playlist_id = {
+        let _permit = state
+            .spotify_request_limit
+            .acquire()
+            .await
+            .map_err(|_| JamApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "song_radio_unavailable",
+                message: "Spotify request gate is unavailable".to_string(),
+                retry_after: None,
+            })?;
+        if let Some((status, message)) = spotify_rate_limit_error(&state) {
+            return Err(JamApiError {
+                status,
+                code: "spotify_rate_limited",
+                message,
+                retry_after: spotify_retry_after_seconds(&state),
+            });
+        }
+        fetch_public_song_radio_playlist_id(&state.http_client, &track_id)
+            .await
+            .map_err(|error| {
+                if error.code == "spotify_rate_limited" {
+                    remember_spotify_rate_limit_seconds(
+                        &state,
+                        error.retry_after_seconds.unwrap_or(5),
+                    );
+                }
+                song_radio_catalog_error(error)
+            })?
+    };
+    let summary = fetch_public_playlist_summary_guarded(&state, &playlist_id).await?;
+    Ok(Json(SongRadioResponse {
+        schema_version: CATALOG_SCHEMA_VERSION,
+        seed_track_id: track_id,
+        max_tracks: MAX_SONG_RADIO_TRACKS,
+        playlist: favorite_playlist(&state, &actor.actor_id, summary),
+    }))
+}
+
+fn song_radio_catalog_error(error: PublicCatalogError) -> JamApiError {
+    let status = match error.code {
+        "invalid_spotify_track_id" => StatusCode::BAD_REQUEST,
+        "spotify_rate_limited" => StatusCode::TOO_MANY_REQUESTS,
+        "spotify_song_radio_unavailable" => StatusCode::NOT_FOUND,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    JamApiError {
+        status,
+        code: error.code,
+        message: error.message,
+        retry_after: error.retry_after_seconds.map(|seconds| seconds.to_string()),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum CatalogItem {
@@ -1168,13 +1249,61 @@ pub(crate) async fn fetch_playlist_summary(
         return Err(JamApiError::bad_request("invalid Spotify playlist ID"));
     }
     let url = format!("https://api.spotify.com/v1/playlists/{playlist_id}");
-    let data = spotify_json_request(state, reqwest::Method::GET, &url, None).await?;
+    let data = match spotify_json_request(state, reqwest::Method::GET, &url, None).await {
+        Ok(data) => data,
+        Err(error) if public_playlist_fallback_allowed(error.status) => {
+            return fetch_public_playlist_summary_guarded(state, playlist_id).await;
+        }
+        Err(error) => return Err(error),
+    };
     let summary = normalize_playlist(&data).map_err(|reason| JamApiError {
         status: StatusCode::BAD_GATEWAY,
         code: "spotify_invalid_playlist",
         message: format!("Spotify playlist was malformed: {reason}"),
         retry_after: None,
     })?;
+    state.jam_favorites.remember_playlist_artwork(
+        &summary.spotify_id,
+        summary.artwork_url.as_deref(),
+        now_ts_ms(),
+    );
+    Ok(summary)
+}
+
+fn public_playlist_fallback_allowed(status: StatusCode) -> bool {
+    matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
+}
+
+async fn fetch_public_playlist_summary_guarded(
+    state: &AppState,
+    playlist_id: &str,
+) -> Result<FavoriteSummary, JamApiError> {
+    let _permit = state
+        .spotify_request_limit
+        .acquire()
+        .await
+        .map_err(|_| JamApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "playlist_catalog_unavailable",
+            message: "Spotify request gate is unavailable".to_string(),
+            retry_after: None,
+        })?;
+    if let Some((status, message)) = spotify_rate_limit_error(state) {
+        return Err(JamApiError {
+            status,
+            code: "spotify_rate_limited",
+            message,
+            retry_after: spotify_retry_after_seconds(state),
+        });
+    }
+    let summary = fetch_public_playlist_summary(&state.http_client, playlist_id)
+        .await
+        .map_err(|error| {
+            if error.code == "spotify_rate_limited" {
+                remember_spotify_rate_limit_seconds(state, error.retry_after_seconds.unwrap_or(5));
+            }
+            public_catalog_error(error)
+        })?;
     state.jam_favorites.remember_playlist_artwork(
         &summary.spotify_id,
         summary.artwork_url.as_deref(),
@@ -1502,7 +1631,7 @@ async fn fetch_playlist_items_page(
 }
 
 fn map_playlist_items_error(error: JamApiError) -> JamApiError {
-    if error.status == StatusCode::FORBIDDEN {
+    if public_playlist_fallback_allowed(error.status) {
         JamApiError {
             status: StatusCode::FORBIDDEN,
             code: "playlist_items_forbidden",
@@ -2429,6 +2558,47 @@ pub(crate) async fn jam_favorites_import_spotify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_playlist_fallback_only_handles_access_restrictions() {
+        assert!(public_playlist_fallback_allowed(StatusCode::FORBIDDEN));
+        assert!(public_playlist_fallback_allowed(StatusCode::NOT_FOUND));
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(!public_playlist_fallback_allowed(status));
+        }
+    }
+
+    #[test]
+    fn song_radio_errors_preserve_retry_after_and_distinguish_unavailable() {
+        for (code, expected_status) in [
+            ("invalid_spotify_track_id", StatusCode::BAD_REQUEST),
+            ("spotify_song_radio_unavailable", StatusCode::NOT_FOUND),
+            ("spotify_public_contract_outdated", StatusCode::BAD_GATEWAY),
+            ("spotify_rate_limited", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            let error = song_radio_catalog_error(PublicCatalogError {
+                code,
+                message: "A safe catalog error".to_string(),
+                retry_after_seconds: (code == "spotify_rate_limited").then_some(23),
+            });
+            assert_eq!(error.status, expected_status);
+            assert_eq!(error.code, code);
+            let response = error.into_response();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .map(|value| value.to_str().unwrap()),
+                (code == "spotify_rate_limited").then_some("23")
+            );
+        }
+    }
 
     const ID_A: &str = "0VjIjW4GlUZAMYd2vXMi3b";
     const ID_B: &str = "3n3Ppam7vgaVa1iaRUc9Lp";

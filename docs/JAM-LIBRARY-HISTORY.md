@@ -100,8 +100,8 @@ Unavailable/local skips are reported and never enter the queue.
 
 Spotify Development Mode restricts the supported playlist-item endpoint to
 playlists the connected account owns or collaborates on. Search and Echo
-favoriting still work for other public playlist metadata. When that one known
-restriction occurs, Echo makes a user-triggered, read-only public-catalog
+favoriting still work for other public playlist metadata. When Spotify rejects
+playlist access with 403 or 404, Echo makes a user-triggered, read-only public-catalog
 request for exactly 50 ordered positions and stores the normalized result in
 the private `jam-library/playlist-items-cache-v2.json` file. There is no
 background crawl, no export endpoint, and no account/browser cookie is read.
@@ -116,7 +116,7 @@ legal compliance.
 Bulk and selected-song queueing continue through the normal server-side
 `PlaylistExpansion` path, so snapshot checks, provenance, idempotency, and Jam
 race fences are unchanged. A durable Stop-admission fence also rejects any
-track or playlist request that began before **Stop Music**, even if a later
+track or playlist request that began before **Stop Music** or **Clear All**, even if a later
 request resumes the preserved queue before the older playlist finishes
 loading. If Spotify changes the public response contract,
 Echo fails closed with a **Retry 50-song chunk** action and keeps **Open in
@@ -130,6 +130,66 @@ Echo never claims it can delete an item already handed to Spotify. Removing a
 pending Echo queue entry prevents that occurrence from being handed to Spotify;
 removing a favorite changes the shared library only and never changes playback
 or an existing Jam queue.
+
+### Clear All
+
+The Queue tab's **Clear All** removes every pending, removable Echo occurrence
+in one atomic operation, including duplicate songs. It preserves current
+playback and truthfully retains entries already committed to Spotify or whose
+delivery is uncertain. Spotify exposes no queue-delete operation; the viewer
+reports the retained count and keeps those locked rows visible. Clear All does
+not call Spotify, skip tracks, or claim Spotify's queue is empty.
+
+`POST /api/jam/queue/clear` accepts `generation`, `request_id`, and
+`expected_queue_revision`. It uses the same participant authorization and
+generation/revision checks as individual removal, returns an idempotent receipt,
+and fences catalog requests admitted before the clear so they cannot refill
+the queue afterward. A stale revision returns HTTP 409 without removing songs;
+the viewer refreshes and requires a new explicit action.
+
+The receipt contains `ok`, `generation`, `queue_revision`, `removed_entry_ids`,
+`removed_count`, `retained_entry_ids`, `retained_count`, and `complete`. When
+entries remain, `retained_reason` is `spotify_controlled` and `complete` is
+false. Malformed request IDs return 400; stale generations and conflicting
+request-ID reuse return 409. Retrying the same request replays its receipt
+without clearing songs added afterward.
+
+## Song Radio
+
+Clicking a song title in Search, Echo Favorites, a playlist, Play History, the
+Queue, Now Playing, or the Jam banner opens a song menu with **Song Radio** and
+**Open in Spotify**. Song Radio resolves Spotify's generated playlist for that
+seed and opens it in the existing playlist browser. Echo preserves Spotify's
+order and offers at most the first 250 positions, with unavailable songs skipped
+and reported. A shorter radio stays shorter; Echo never fabricates filler or
+substitutes a search result for a radio playlist.
+
+`GET /api/jam/tracks/:id/radio` requires a current Echo participant token and a
+22-character Spotify track ID. It returns `{schema_version: 1, seed_track_id,
+max_tracks: 250, playlist}`, where `playlist` has the same normalized metadata
+and snapshot as other catalog playlists. Discovery uses the read-only seed-to-
+playlist resolver used by Spotify's web player, with a short-lived anonymous
+token in process memory. It does not read account cookies or change playback.
+Radio may differ from a listener's personally tailored radio in Spotify.
+
+Generated radio metadata uses Spotify's public `fetchPlaylist` response,
+including its real `revisionId` as the playlist snapshot. Ordinary playlist
+metadata also falls back to that reader on an official 403/404. Playlist-item
+403/404 responses use the existing public chunk reader; authentication, rate
+limit, and transient server failures do not trigger fallback or duplicate
+requests. Snapshot comparisons remain exact throughout browsing and queueing.
+
+The resolver shares Echo's Spotify request/cooldown gate. Invalid IDs return
+400, unavailable radio returns 404, rate limits return 429 with `Retry-After`
+when supplied, and changed/malformed upstream contracts return 502. The viewer
+keeps **Open in Spotify** available on failure. Spotify can change this public
+web-player contract independently of Echo, just as with public playlist loading.
+
+Radio browsing loads 50 positions at a time. Adding the radio uses the existing
+playlist-selection endpoint for positions below 250, preserving server-side
+snapshot validation, duplicate occurrences, skipped-item reporting, batch
+provenance, confirmation over 25 playable songs, and idempotency. Navigating
+away or opening another radio invalidates earlier lookup responses.
 
 ## Shared Echo favorites
 
@@ -228,7 +288,8 @@ records.
 
 ## Spotify links
 
-Track titles link to the track and playlist provenance links to the playlist.
+Track titles open the song menu, which includes the track's **Open in Spotify**
+link; playlist provenance links directly to the playlist.
 The viewer opens links on the local user's machine, never on the control host.
 Canonical HTTPS Spotify URLs are the compatibility fallback. Updated Windows
 clients may use strictly validated `spotify:track` and `spotify:playlist` deep
@@ -265,3 +326,5 @@ server-served viewer are server changes. Guaranteed native Spotify deep links
 add a Windows desktop-binary change. Old clients remain compatible through the
 HTTPS fallback. Echo Pulse is server-served viewer code and does not require a
 desktop update. Jam source/audio protocol version 3 is unchanged.
+Song Radio and Clear All require a control-server and viewer deploy only;
+neither requires a Windows desktop update.

@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-09-23",
+    title: "Song Radio & Queue Cleanup",
+    notes: [
+      "Click a song title anywhere in Jam to open Song Radio or Open in Spotify. Browse Spotify's generated radio playlist and add up to its first 250 songs, or select individual songs.",
+      "The Queue tab now has Clear All to remove all waiting songs at once. Songs already handed to Spotify stay visible with an explanation, and current playback continues."
+    ]
+  },
+  {
     version: "2026-09-07",
     title: "Voice Volume After Rejoining",
     notes: [
