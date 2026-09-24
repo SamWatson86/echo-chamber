@@ -9,6 +9,14 @@
 var ECHO_CHANGELOG = [
   {
     version: "2026-09-24",
+    title: "Jam Playback Startup",
+    notes: [
+      "Jam now waits for Spotify to start the first song before sending the next queued song, including Song Radio and playlists. If Spotify selects the song but leaves it paused, Echo tries Resume once.",
+      "Spotify startup failures now appear in Jam. If playback cannot be confirmed, Echo preserves the queue instead of sending more songs."
+    ]
+  },
+  {
+    version: "2026-09-24",
     title: "Clearer Song Radio Controls",
     notes: [
       "Song menus now have a solid background so their options stay readable at any panel transparency setting.",

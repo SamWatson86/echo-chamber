@@ -176,6 +176,7 @@
     const playlistSelectionSupported = input.playlist_selection_supported === true;
     const skipReconciliationPending = input.skip_reconciliation_pending === true;
     const sourceError = typeof input.source_error === "string" ? input.source_error.trim() : "";
+    const lastError = typeof input.last_error === "string" ? input.last_error.trim() : "";
 
     let sourceTone = "waiting";
     let sourceMessage = "Host source status is unavailable";
@@ -217,6 +218,15 @@
     } else if (sourceError) {
       sourceTone = "error";
       sourceMessage = sourceError;
+    }
+
+    // A connected capture source does not prove Spotify started playback.
+    // Show the server's playback failure without changing recovery permissions
+    // or replacing source setup/failure and Skip reconciliation guidance.
+    if (compatible && active && sourceReady && !sourceError && !skipReconciliationPending &&
+        (sourceTone === "ready" || sourceStatus === "silent") && lastError) {
+      sourceTone = "error";
+      sourceMessage = lastError;
     }
 
     const compatibilityMessage = compatible

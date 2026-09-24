@@ -35,6 +35,8 @@ const SPOTIFY_CONNECT_REGISTRATION_POLL_ATTEMPTS: usize = 4;
 const SPOTIFY_CONNECT_REPAIR_DEADLINE: Duration = Duration::from_secs(15);
 const SOURCE_START_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 const SPOTIFY_COMMITTED_QUEUE_FRONTIER: usize = 2;
+const SPOTIFY_TRACK_START_POLL_ATTEMPTS: usize = 8;
+const SPOTIFY_TRACK_START_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_QUEUE_REMOVAL_ENTRIES: usize = 1_000;
 const SPOTIFY_LIBRARY_SCOPES: [&str; 3] = [
     "user-library-read",
@@ -3122,6 +3124,12 @@ fn mark_observed_queue_stopped(jam: &mut JamState) -> bool {
     true
 }
 
+fn playback_error_can_clear(jam: &JamState, uncertain_skip_pending: bool) -> bool {
+    // Late audio does not resolve an ambiguous queue occurrence. Keep its
+    // recovery guidance visible while later queue delivery remains blocked.
+    !uncertain_skip_pending && !queue_has_commit_unknown(&jam.queue)
+}
+
 fn retire_stale_frontier_for_queue_placement(
     jam: &mut JamState,
     observation: &SpotifyPlacementObservation,
@@ -3342,7 +3350,7 @@ pub(crate) async fn jam_state(
                         if np.is_playing {
                             jam.audio_expected_since
                                 .get_or_insert_with(std::time::Instant::now);
-                            if !uncertain_skip_pending {
+                            if playback_error_can_clear(&jam, uncertain_skip_pending) {
                                 jam.last_error = None;
                             }
                         } else {
@@ -3740,11 +3748,20 @@ struct SpotifyPlacementObservation {
     bound_device: bool,
     is_playing: bool,
     current_uri: Option<String>,
+    original_uri: Option<String>,
+    resume_disallowed: bool,
     progress_ms: u64,
     duration_ms: u64,
 }
 
 impl SpotifyPlacementObservation {
+    fn matches_track(&self, uri: &str) -> bool {
+        self.current_uri
+            .as_ref()
+            .is_some_and(|current| !current.trim().is_empty())
+            && (self.current_uri.as_deref() == Some(uri) || self.original_uri.as_deref() == Some(uri))
+    }
+
     fn should_queue(&self) -> bool {
         self.playback_present && self.bound_device && self.is_playing
     }
@@ -3789,6 +3806,10 @@ async fn spotify_queue_placement_observation(
             .as_str()
             .filter(|uri| !uri.trim().is_empty())
             .map(str::to_string),
+        original_uri: playback["item"]["linked_from"]["uri"]
+            .as_str()
+            .map(str::to_string),
+        resume_disallowed: playback["actions"]["disallows"]["resuming"].as_bool() == Some(true),
         progress_ms: playback["progress_ms"].as_u64().unwrap_or(0),
         duration_ms: playback["item"]["duration_ms"].as_u64().unwrap_or(0),
     })
@@ -3798,6 +3819,85 @@ async fn spotify_queue_placement_observation(
 enum SpotifyTrackPlacement {
     StartedCurrent,
     QueuedNext,
+}
+
+fn unconfirmed_spotify_start(status: StatusCode, detail: &str) -> QueueCommitError {
+    QueueCommitError {
+        status,
+        message: format!(
+            "Spotify accepted the song but playback could not be confirmed: {detail}. The queue is preserved but delivery is blocked. Check Spotify on the host PC, then end and restart the Jam"
+        ),
+        // The URI command was accepted. Never replay it or promote a successor
+        // on the assumption that it failed; Spotify may execute it later.
+        acceptance_ambiguous: true,
+        intended_placement: Some(SpotifyTrackPlacement::StartedCurrent),
+    }
+}
+
+async fn start_spotify_track_confirmed<
+    Start, StartFuture, Observe, ObserveFuture, Resume, ResumeFuture,
+>(
+    spotify_uri: &str,
+    start: Start,
+    mut observe: Observe,
+    mut resume: Resume,
+    attempts: usize,
+    interval: Duration,
+) -> Result<(), QueueCommitError>
+where
+    Start: FnOnce() -> StartFuture,
+    StartFuture: Future<Output = Result<(), QueueCommitError>>,
+    Observe: FnMut() -> ObserveFuture,
+    ObserveFuture: Future<Output = Result<SpotifyPlacementObservation, (StatusCode, String)>>,
+    Resume: FnMut() -> ResumeFuture,
+    ResumeFuture: Future<Output = Result<(), (StatusCode, String)>>,
+{
+    start().await?;
+    let mut resumed = false;
+    let mut resume_error = None;
+    let mut detail = "Spotify did not start the requested song";
+    for attempt in 0..attempts {
+        let observation = observe()
+            .await
+            .map_err(|(status, message)| unconfirmed_spotify_start(status, &message))?;
+        detail = "Spotify did not start the requested song";
+        if observation.playback_present {
+            if !observation.bound_device {
+                // A read can still describe the pre-start device/context while
+                // Spotify applies the command. Observe only; never overwrite it.
+                detail = "playback is on another Spotify device";
+            } else if observation.matches_track(spotify_uri) {
+                if observation.is_playing {
+                    return Ok(());
+                }
+                // Resume only a positively observed selection of this song.
+                // An empty player is not proof that our URI command installed
+                // its context; resuming it could start unrelated personal music.
+                if !resumed && !observation.resume_disallowed && attempt + 1 < attempts {
+                    resumed = true;
+                    if let Err((status, message)) = resume().await {
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            return Err(unconfirmed_spotify_start(status, &message));
+                        }
+                        // The original start can finish between the paused read
+                        // and Resume, making Resume fail despite live playback.
+                        // Consume this attempt and confirm through reads only.
+                        resume_error = Some((status, message));
+                    }
+                }
+            } else if observation.current_uri.is_some() {
+                detail = "Spotify is still on a different song";
+            }
+        }
+        if attempt + 1 < attempts && !interval.is_zero() {
+            tokio::time::sleep(interval).await;
+        }
+    }
+    let (status, detail) = resume_error
+        .as_ref()
+        .map(|(status, message)| (*status, message.as_str()))
+        .unwrap_or((StatusCode::SERVICE_UNAVAILABLE, detail));
+    Err(unconfirmed_spotify_start(status, detail))
 }
 
 impl SpotifyTrackPlacement {
@@ -3849,20 +3949,37 @@ async fn place_spotify_track(
             urlencoded(&device.id)
         );
         let play_body = serde_json::json!({ "uris": [spotify_uri] });
-        let response = spotify_api_request(state, reqwest::Method::PUT, &play_url, Some(play_body))
-            .await
-            .map_err(|(status, message)| {
-                queue_mutation_request_error(status, message, placement)
-            })?;
-        if !response.status().is_success() {
-            return Err(spotify_queue_mutation_response_error(
-                response,
-                "Start Spotify track",
-                placement,
-            )
-            .await);
-        }
-        info!("Track started on configured Spotify device: {spotify_uri}");
+        // Spotify acknowledges receipt before the desktop necessarily starts.
+        // Its Player commands are not ordered, so do not queue the next song
+        // until fresh playback state confirms this first song. The caller's
+        // single source-safety deadline covers start, reads and the one resume.
+        start_spotify_track_confirmed(
+            spotify_uri,
+            || async {
+                let response = spotify_api_request(
+                    state, reqwest::Method::PUT, &play_url, Some(play_body),
+                )
+                .await
+                .map_err(|(status, message)| {
+                    queue_mutation_request_error(status, message, placement)
+                })?;
+                if !response.status().is_success() {
+                    return Err(spotify_queue_mutation_response_error(
+                        response,
+                        "Start Spotify track",
+                        placement,
+                    )
+                    .await);
+                }
+                Ok(())
+            },
+            || spotify_queue_placement_observation(state, device),
+            || resume_spotify_playback_on_device(state, device),
+            SPOTIFY_TRACK_START_POLL_ATTEMPTS,
+            SPOTIFY_TRACK_START_POLL_INTERVAL,
+        )
+        .await?;
+        info!("Track playback confirmed on configured Spotify device: {spotify_uri}");
     }
     Ok(placement)
 }
@@ -6098,6 +6215,10 @@ async fn jam_audio_ws_handler(mut socket: WebSocket, state: AppState, generation
 }
 
 #[cfg(test)]
+#[path = "jam_session/start_tests.rs"]
+mod start_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -7279,6 +7400,7 @@ mod tests {
             current_uri: Some(finished_uri.to_string()),
             progress_ms: 120_000,
             duration_ms: 120_000,
+            ..SpotifyPlacementObservation::default()
         };
         let mut jam = JamState {
             active: true,
@@ -7322,6 +7444,7 @@ mod tests {
             current_uri: Some(paused_uri.to_string()),
             progress_ms: 119_000,
             duration_ms: 120_000,
+            ..SpotifyPlacementObservation::default()
         };
         let mut jam = JamState {
             active: true,
@@ -7368,6 +7491,7 @@ mod tests {
             current_uri: Some(stopped_uri.to_string()),
             progress_ms: 120_000,
             duration_ms: 120_000,
+            ..SpotifyPlacementObservation::default()
         };
         let mut jam = JamState {
             active: true,
