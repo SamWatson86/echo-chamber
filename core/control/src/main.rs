@@ -891,6 +891,7 @@ async fn main() {
         .route("/api/jam/search", post(jam_search))
         .route("/api/jam/catalog/search", post(jam_catalog_search))
         .route("/api/jam/playlists/:id/items", get(jam_playlist_items))
+        .route("/api/jam/tracks/:id/radio", get(jam_song_radio))
         .route("/api/jam/favorites", get(jam_favorites_list))
         .route("/api/jam/history", get(jam_history_list))
         .route(
@@ -903,6 +904,7 @@ async fn main() {
         )
         .route("/api/jam/queue", post(jam_queue_add))
         .route("/api/jam/queue/remove", post(jam_queue_remove))
+        .route("/api/jam/queue/clear", post(jam_queue_clear))
         .route("/api/jam/queue/playlist", post(jam_queue_playlist))
         .route(
             "/api/jam/queue/playlist/selection",

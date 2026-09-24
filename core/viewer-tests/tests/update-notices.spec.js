@@ -75,15 +75,23 @@ test('ordinary outages and expired deployment markers never announce a restart',
 
 test('viewer update notes remain unread across reloads until dismissed, then stay in Updates history', async ({ page }, testInfo) => {
   await page.goto('/?echo-ui-shell-v2=1', { waitUntil: 'domcontentloaded' });
-  await page.evaluate(() => localStorage.setItem('echo-changelog-seen', 'v0.6.37'));
+  const release = await page.evaluate(() => {
+    const latest = ECHO_CHANGELOG[0];
+    const previous = ECHO_CHANGELOG[1];
+    const previousStamp = getChangelogStamp(previous);
+    localStorage.setItem('echo-changelog-seen', previousStamp);
+    return { title: latest.title, notes: latest.notes, previousTitle: previous.title, previousStamp };
+  });
   const popup = page.locator('.whats-new-overlay:not(.updates-overlay)');
   await expect(popup).toBeVisible();
-  await expect(popup.getByRole('heading')).toHaveText('Voice Volume After Rejoining');
-  await expect(popup).toContainText('old audio playback connections');
-  expect(await page.evaluate(() => localStorage.getItem('echo-changelog-seen'))).toBe('v0.6.37');
-  await page.screenshot({ path: testInfo.outputPath('voice-volume-update-notes.png') });
+  await expect(popup.getByRole('heading')).toHaveText(release.title);
+  for (const note of release.notes) await expect(popup).toContainText(note);
+  expect(await page.evaluate(() => localStorage.getItem('echo-changelog-seen'))).toBe(release.previousStamp);
+  await page.screenshot({ path: testInfo.outputPath('viewer-update-notes.png') });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(popup).toBeVisible();
+  await expect(popup.getByRole('heading')).toHaveText(release.title);
+  expect(await page.evaluate(() => localStorage.getItem('echo-changelog-seen'))).toBe(release.previousStamp);
   await popup.getByRole('button', { name: 'Got it' }).click();
   await expect(popup).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('echo-changelog-seen') === CHANGELOG_LATEST)).toBe(true);
@@ -92,7 +100,8 @@ test('viewer update notes remain unread across reloads until dismissed, then sta
   await page.waitForTimeout(2800);
   await expect(popup).toHaveCount(0);
   await page.evaluate(() => showUpdatesPanel());
-  await expect(page.locator('.updates-overlay')).toContainText('Voice Volume After Rejoining');
+  await expect(page.locator('.updates-overlay')).toContainText(release.title);
+  await expect(page.locator('.updates-overlay')).toContainText(release.previousTitle);
   await expect(page.locator('.updates-overlay')).toContainText('Better Screen Sharing & Update Notices');
   await expect(page.locator('.updates-overlay')).toContainText('Screen Audio Isolation');
 });

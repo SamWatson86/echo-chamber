@@ -3130,6 +3130,19 @@ test("Library cards expose explicit Spotify and queue or song-selection actions"
   const trackSpotify = trackCard.getByRole("link", { name: "Open Shared Favorite in Spotify", exact: true });
   await expect(trackSpotify).toHaveText("Open in Spotify");
   await expect(trackSpotify).toHaveAttribute("href", `https://open.spotify.com/track/${trackId}`);
+  await page.evaluate(() => {
+    window.__jamSpotifyOpens = [];
+    window.open = (url) => { window.__jamSpotifyOpens.push(url); return { opener: null }; };
+  });
+  await trackSpotify.click();
+  await expect.poll(() => page.evaluate(() => window.__jamSpotifyOpens.length)).toBe(1);
+  await trackCard.getByRole("button", { name: "Song actions for Shared Favorite", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Song Radio", exact: true })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Open in Spotify", exact: true }).click();
+  expect(await page.evaluate(() => window.__jamSpotifyOpens)).toEqual([
+    `https://open.spotify.com/track/${trackId}`,
+    `https://open.spotify.com/track/${trackId}`,
+  ]);
   const addTrack = trackCard.getByRole("button", { name: "Add Shared Favorite by Fixture Artist to queue", exact: true });
   await expect(addTrack).toHaveText("Add to queue");
   await addTrack.click();

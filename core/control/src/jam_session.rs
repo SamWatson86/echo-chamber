@@ -90,10 +90,11 @@ pub(crate) struct JamState {
     pub(crate) track_queue_receipts: HashMap<String, TrackQueueReceipt>,
     pub(crate) playlist_queue_receipts: HashMap<String, PlaylistQueueReceipt>,
     pub(crate) queue_removal_receipts: HashMap<String, QueueRemovalReceipt>,
+    pub(crate) queue_clear_receipts: HashMap<String, QueueClearReceipt>,
     pub(crate) queue_control_epoch: u64,
-    // Monotonic admission fence for any transition into a stopped queue. Unlike
+    // Monotonic admission fence for Stop Music and Clear All. Unlike
     // `queue_control_stopped`, this is not cleared when a later explicit add
-    // resumes playback, so work admitted before Stop cannot reappear afterward.
+    // resumes playback, so work admitted before either action cannot reappear.
     pub(crate) queue_stop_epoch: u64,
     pub(crate) queue_control_stopped: bool,
     pub(crate) uncertain_skip: Option<UncertainSkipBoundary>,
@@ -385,6 +386,46 @@ fn queue_removal_receipt_response(
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct QueueClearReceipt {
+    actor_id: String,
+    generation: u64,
+    expected_queue_revision: u64,
+    created_at_ms: u64,
+    response: JamQueueClearResponse,
+}
+
+fn insert_queue_clear_receipt(jam: &mut JamState, request_id: String, receipt: QueueClearReceipt) {
+    if jam.queue_clear_receipts.len() >= 128 {
+        let oldest = jam
+            .queue_clear_receipts
+            .iter()
+            .min_by_key(|(_, receipt)| receipt.created_at_ms)
+            .map(|(request_id, _)| request_id.clone());
+        if let Some(oldest) = oldest {
+            jam.queue_clear_receipts.remove(&oldest);
+        }
+    }
+    jam.queue_clear_receipts.insert(request_id, receipt);
+}
+
+fn clear_pending_queue_entries(jam: &mut JamState) -> Vec<String> {
+    let mut removed_entry_ids = Vec::new();
+    jam.queue.retain(|entry| {
+        if entry.delivery_state.is_removable() && entry.can_remove {
+            removed_entry_ids.push(entry.track.queue_entry_id.clone());
+            false
+        } else {
+            true
+        }
+    });
+    // Queue/catalog fetches are admitted before taking jam_queue_lifecycle.
+    // Fence those older requests even when the visible queue was already empty.
+    jam.queue_stop_epoch = jam.queue_stop_epoch.wrapping_add(1);
+    jam.queue_revision = jam.queue_revision.wrapping_add(1);
+    removed_entry_ids
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NowPlayingInfo {
     #[serde(default)]
@@ -469,6 +510,26 @@ pub(crate) struct JamQueueRemoveResponse {
     queue_revision: u64,
     removed_entry_ids: Vec<String>,
     removed_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct JamQueueClearRequest {
+    generation: u64,
+    request_id: String,
+    expected_queue_revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JamQueueClearResponse {
+    ok: bool,
+    generation: u64,
+    queue_revision: u64,
+    removed_entry_ids: Vec<String>,
+    removed_count: usize,
+    retained_entry_ids: Vec<String>,
+    retained_count: usize,
+    complete: bool,
+    retained_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1544,6 +1605,7 @@ pub(crate) fn clear_active_jam_state(jam: &mut JamState) {
     jam.track_queue_receipts.clear();
     jam.playlist_queue_receipts.clear();
     jam.queue_removal_receipts.clear();
+    jam.queue_clear_receipts.clear();
     jam.last_history_spotify_id = None;
     jam.last_history_was_echo = false;
     jam.listeners.clear();
@@ -3459,6 +3521,7 @@ pub(crate) async fn jam_state(
         "queue_revision": queue_revision,
         "history_revision": history_revision,
         "queue_removal_supported": true,
+        "queue_clear_supported": true,
         "track_queue_request_id_supported": true,
         "now_playing": now_playing,
         "listeners": listeners,
@@ -4632,7 +4695,7 @@ pub(crate) async fn jam_queue_add(
             return Err(playlist_queue_error_response(
                 StatusCode::CONFLICT,
                 "queue_interrupted",
-                "Track enqueue was interrupted by Stop Music",
+                "Track enqueue was interrupted by Stop Music or Clear All",
             ));
         }
         if bound_spotify_device(&jam, generation).is_none() {
@@ -4833,6 +4896,109 @@ pub(crate) async fn jam_queue_remove(
         },
     );
     Ok(Json(response))
+}
+
+fn clear_queue_for_actor(
+    jam: &mut JamState,
+    actor_id: &str,
+    payload: &JamQueueClearRequest,
+) -> Result<JamQueueClearResponse, Response> {
+    if let Some(receipt) = jam.queue_clear_receipts.get(&payload.request_id) {
+        if receipt.actor_id == actor_id
+            && receipt.generation == payload.generation
+            && receipt.expected_queue_revision == payload.expected_queue_revision
+        {
+            return Ok(receipt.response.clone());
+        }
+        return Err(queue_removal_conflict_response(
+            "request_id_conflict",
+            "request_id was already used for a different Clear All operation",
+            jam.queue_revision,
+        ));
+    }
+    if !active_generation_matches(jam, payload.generation) {
+        return Err(queue_removal_conflict_response(
+            "generation_changed",
+            "Jam generation changed",
+            jam.queue_revision,
+        ));
+    }
+    if jam.queue_revision != payload.expected_queue_revision {
+        return Err(queue_removal_conflict_response(
+            "queue_changed",
+            "The Jam queue changed; refresh it before clearing songs",
+            jam.queue_revision,
+        ));
+    }
+
+    let removed_entry_ids = clear_pending_queue_entries(jam);
+    // Spotify's supported API has no remove/clear playback queue operation.
+    // Retain the entire committed/unknown frontier so current playback,
+    // duplicate occurrence provenance, and uncertain outcomes stay truthful.
+    let retained_entry_ids = jam
+        .queue
+        .iter()
+        .map(|entry| entry.track.queue_entry_id.clone())
+        .collect::<Vec<_>>();
+    let response = JamQueueClearResponse {
+        ok: true,
+        generation: payload.generation,
+        queue_revision: jam.queue_revision,
+        removed_count: removed_entry_ids.len(),
+        removed_entry_ids,
+        retained_count: retained_entry_ids.len(),
+        complete: retained_entry_ids.is_empty(),
+        retained_reason: (!retained_entry_ids.is_empty()).then_some("spotify_controlled"),
+        retained_entry_ids,
+    };
+    insert_queue_clear_receipt(
+        jam,
+        payload.request_id.clone(),
+        QueueClearReceipt {
+            actor_id: actor_id.to_string(),
+            generation: payload.generation,
+            expected_queue_revision: payload.expected_queue_revision,
+            created_at_ms: now_ts_ms(),
+            response: response.clone(),
+        },
+    );
+    Ok(response)
+}
+
+pub(crate) async fn jam_queue_clear(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<JamQueueClearRequest>,
+) -> Result<Json<JamQueueClearResponse>, Response> {
+    ensure_admin(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(status, "unauthorized", "Authentication required")
+    })?;
+    let actor = ensure_jam_actor(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(
+            status,
+            "actor_required",
+            "A current Echo participant token is required",
+        )
+    })?;
+    if !playlist_queue_request_id_valid(&payload.request_id) {
+        return Err(playlist_queue_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_id",
+            "request_id must be 8-128 ASCII letters, digits, dashes, or underscores",
+        ));
+    }
+    let _queue_lifecycle = state.jam_queue_lifecycle.lock().await;
+    // A frontier delivery may hold the queue lock across network requests.
+    // Do not let a participant revoked while waiting clear another user's queue.
+    ensure_jam_actor(&state, &headers).map_err(|status| {
+        playlist_queue_error_response(
+            status,
+            "actor_required",
+            "A current Echo participant token is required",
+        )
+    })?;
+    let mut jam = state.jam.lock().unwrap_or_else(|error| error.into_inner());
+    clear_queue_for_actor(&mut jam, &actor.actor_id, &payload).map(Json)
 }
 
 fn playlist_queue_error_response(
@@ -5105,7 +5271,7 @@ async fn jam_queue_playlist_impl(
             return Err(playlist_queue_error_response(
                 StatusCode::CONFLICT,
                 "queue_interrupted",
-                "Playlist enqueue was interrupted by Stop Music",
+                "Playlist enqueue was interrupted by Stop Music or Clear All",
             ));
         }
         if bound_spotify_device(&jam, generation).is_none() {
@@ -8147,6 +8313,224 @@ mod tests {
         );
         assert_eq!(jam.queue.len(), 2);
         assert_eq!(jam.queue_revision, 4);
+    }
+
+    #[test]
+    fn clear_all_removes_duplicate_pending_occurrences_and_preserves_spotify_frontier() {
+        let mut unknown = committed_queue_entry("unknown");
+        unknown.delivery_state = QueueDeliveryState::CommitUnknown;
+        unknown.current_match_state = QueueCurrentMatchState::AwaitingTransition;
+        let committed = committed_queue_entry("current");
+        let retained_ids = vec![
+            committed.track.queue_entry_id.clone(),
+            unknown.track.queue_entry_id.clone(),
+        ];
+        let mut jam = JamState {
+            active: true,
+            generation: 7,
+            queue_revision: 9,
+            queue_stop_epoch: 12,
+            queue_control_epoch: 15,
+            spotify_is_playing: true,
+            now_playing: Some(now_playing(true)),
+            queue: vec![
+                committed,
+                unknown,
+                pending_queue_entry_with_id("same", "qe_duplicate_one"),
+                pending_queue_entry_with_id("same", "qe_duplicate_two"),
+            ],
+            ..JamState::default()
+        };
+        let response = clear_queue_for_actor(
+            &mut jam,
+            "actor",
+            &JamQueueClearRequest {
+                generation: 7,
+                request_id: "clear_request_1".to_string(),
+                expected_queue_revision: 9,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(response.removed_count, 2);
+        assert_eq!(
+            response.removed_entry_ids,
+            vec!["qe_duplicate_one", "qe_duplicate_two"]
+        );
+        assert_eq!(response.retained_entry_ids, retained_ids);
+        assert_eq!(response.retained_count, 2);
+        assert!(!response.complete);
+        assert_eq!(response.retained_reason, Some("spotify_controlled"));
+        assert_eq!(jam.queue.len(), 2);
+        assert_eq!(
+            jam.queue[1].delivery_state,
+            QueueDeliveryState::CommitUnknown
+        );
+        assert_eq!(
+            jam.queue[1].current_match_state,
+            QueueCurrentMatchState::AwaitingTransition
+        );
+        assert_eq!(jam.queue_revision, 10);
+        assert_eq!(jam.queue_stop_epoch, 13);
+        assert_eq!(jam.queue_control_epoch, 15);
+        assert!(jam.spotify_is_playing);
+        assert!(!jam.queue_control_stopped);
+        let current = jam.now_playing.as_ref().unwrap();
+        assert_eq!(current.name, "Current track");
+        assert_eq!(current.progress_ms, 15_000);
+        assert!(current.is_playing);
+        assert!(queue_has_commit_unknown(&jam.queue));
+    }
+
+    #[test]
+    fn clear_all_has_no_selection_limit_and_fences_even_an_empty_queue() {
+        let mut jam = JamState {
+            active: true,
+            generation: 7,
+            queue_stop_epoch: 12,
+            queue: (0..MAX_QUEUE_REMOVAL_ENTRIES + 1)
+                .map(|index| pending_queue_entry_with_id("same", &format!("qe_pending_{index}")))
+                .collect(),
+            ..JamState::default()
+        };
+        let response = clear_queue_for_actor(
+            &mut jam,
+            "actor",
+            &JamQueueClearRequest {
+                generation: 7,
+                request_id: "clear_request_many".to_string(),
+                expected_queue_revision: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(response.removed_count, MAX_QUEUE_REMOVAL_ENTRIES + 1);
+        assert!(response.complete);
+        assert_eq!(response.retained_reason, None);
+        assert!(jam.queue.is_empty());
+
+        let empty_admission = jam.queue_stop_epoch;
+        let empty_response = clear_queue_for_actor(
+            &mut jam,
+            "actor",
+            &JamQueueClearRequest {
+                generation: 7,
+                request_id: "clear_request_empty".to_string(),
+                expected_queue_revision: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(empty_response.removed_count, 0);
+        assert!(empty_response.complete);
+        assert!(enqueue_admission_cancelled_by_stop(
+            empty_admission,
+            jam.queue_stop_epoch
+        ));
+        // A later add resumes playback without reviving any fetch admitted before Clear All.
+        let new_admission = jam.queue_stop_epoch;
+        jam.queue_control_stopped = false;
+        jam.spotify_is_playing = true;
+        assert!(enqueue_admission_cancelled_by_stop(
+            empty_admission,
+            jam.queue_stop_epoch
+        ));
+        assert!(!enqueue_admission_cancelled_by_stop(
+            new_admission,
+            jam.queue_stop_epoch
+        ));
+    }
+
+    #[test]
+    fn clear_all_generation_and_revision_conflicts_are_atomic() {
+        let mut jam = JamState {
+            active: true,
+            generation: 7,
+            queue_revision: 9,
+            queue_stop_epoch: 12,
+            queue: vec![pending_queue_entry_with_id("one", "qe_pending_one")],
+            ..JamState::default()
+        };
+        for (generation, expected_queue_revision) in [(6, 9), (7, 8)] {
+            let error = clear_queue_for_actor(
+                &mut jam,
+                "actor",
+                &JamQueueClearRequest {
+                    generation,
+                    request_id: "clear_request_conflict".to_string(),
+                    expected_queue_revision,
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.status(), StatusCode::CONFLICT);
+            assert_eq!(jam.queue.len(), 1);
+            assert_eq!(jam.queue_revision, 9);
+            assert_eq!(jam.queue_stop_epoch, 12);
+            assert!(jam.queue_clear_receipts.is_empty());
+        }
+    }
+
+    #[test]
+    fn clear_all_retry_preserves_later_adds_and_requires_the_original_actor_and_request() {
+        let mut jam = JamState {
+            active: true,
+            generation: 7,
+            queue_revision: 9,
+            queue: vec![pending_queue_entry_with_id("one", "qe_pending_one")],
+            ..JamState::default()
+        };
+        let mut payload = JamQueueClearRequest {
+            generation: 7,
+            request_id: "clear_request_retry".to_string(),
+            expected_queue_revision: 9,
+        };
+        let original = clear_queue_for_actor(&mut jam, "actor", &payload).unwrap();
+        jam.queue
+            .push(pending_queue_entry_with_id("later", "qe_pending_later"));
+        jam.queue_revision += 1;
+        let retry = clear_queue_for_actor(&mut jam, "actor", &payload).unwrap();
+        assert_eq!(retry.removed_entry_ids, original.removed_entry_ids);
+        assert_eq!(retry.queue_revision, original.queue_revision);
+        assert_eq!(jam.queue_revision, 11);
+        assert_eq!(jam.queue_stop_epoch, 1);
+        assert_eq!(jam.queue[0].track.queue_entry_id, "qe_pending_later");
+
+        assert!(clear_queue_for_actor(&mut jam, "other-actor", &payload).is_err());
+        payload.generation = 8;
+        assert!(clear_queue_for_actor(&mut jam, "actor", &payload).is_err());
+        payload.generation = 7;
+        payload.expected_queue_revision = 11;
+        assert!(clear_queue_for_actor(&mut jam, "actor", &payload).is_err());
+        assert_eq!(jam.queue.len(), 1);
+        assert_eq!(jam.queue_stop_epoch, 1);
+    }
+
+    #[test]
+    fn clear_all_receipts_are_bounded_and_discarded_when_the_jam_ends() {
+        let mut jam = JamState {
+            active: true,
+            generation: 7,
+            ..JamState::default()
+        };
+        for index in 0..129 {
+            clear_queue_for_actor(
+                &mut jam,
+                "actor",
+                &JamQueueClearRequest {
+                    generation: 7,
+                    request_id: format!("clear_request_{index}"),
+                    expected_queue_revision: index,
+                },
+            )
+            .unwrap();
+            jam.queue_clear_receipts
+                .get_mut(&format!("clear_request_{index}"))
+                .unwrap()
+                .created_at_ms = index;
+        }
+        assert_eq!(jam.queue_clear_receipts.len(), 128);
+        assert!(!jam.queue_clear_receipts.contains_key("clear_request_0"));
+        assert!(jam.queue_clear_receipts.contains_key("clear_request_128"));
+        clear_active_jam_state(&mut jam);
+        assert!(jam.queue_clear_receipts.is_empty());
     }
 
     #[test]

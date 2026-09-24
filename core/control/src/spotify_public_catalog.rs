@@ -15,6 +15,7 @@ pub(crate) const MAX_PUBLIC_PLAYLIST_POSITIONS: usize = 1_000;
 const SERVER_TIME_URL: &str = "https://open.spotify.com/api/server-time";
 const TOKEN_URL: &str = "https://open.spotify.com/api/token";
 const PARTNER_QUERY_URL: &str = "https://api-partner.spotify.com/pathfinder/v2/query";
+const SONG_RADIO_URL: &str = "https://spclient.wg.spotify.com/inspiredby-mix/v2/seed_to_playlist";
 const TOKEN_PRODUCT_TYPE: &str = "web-player";
 const TOKEN_REASON: &str = "init";
 const TOTP_VERSION: &str = "61";
@@ -22,6 +23,9 @@ const TOTP_SOURCE_SECRET: &str = ",7/*F(\"rLJ2oxaKL^f+E1xvP@N";
 const PLAYLIST_QUERY_OPERATION: &str = "queryPlaylist";
 const PLAYLIST_QUERY_HASH: &str =
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8";
+const PLAYLIST_METADATA_OPERATION: &str = "fetchPlaylist";
+const PLAYLIST_METADATA_HASH: &str =
+    "86dde7b9d9356e2369414647cf6950cfed96e778e129cfdfc99aea6c1613b3b0";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const TOKEN_EXPIRY_MARGIN_MS: u64 = 60_000;
 const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
@@ -104,6 +108,137 @@ fn anonymous_token_cache() -> &'static Mutex<Option<AnonymousToken>> {
     ANONYMOUS_TOKEN.get_or_init(|| Mutex::new(None))
 }
 
+/// Resolve the same generated playlist that Spotify opens for "Go to song radio".
+/// This uses only the in-memory anonymous public-catalog token, not a member's account.
+pub(crate) async fn fetch_public_song_radio_playlist_id(
+    client: &reqwest::Client,
+    track_id: &str,
+) -> Result<String, PublicCatalogError> {
+    if !valid_spotify_id(track_id) {
+        return Err(PublicCatalogError::new(
+            "invalid_spotify_track_id",
+            "invalid Spotify track ID",
+        ));
+    }
+    let access_token = anonymous_access_token(client).await?;
+    let response = client
+        .get(format!("{SONG_RADIO_URL}/spotify:track:{track_id}"))
+        .query(&[("response-format", "json")])
+        .timeout(REQUEST_TIMEOUT)
+        .header(ACCEPT, "application/json")
+        .header(USER_AGENT, USER_AGENT_VALUE)
+        .header(ORIGIN, "https://open.spotify.com")
+        .header(REFERER, "https://open.spotify.com/")
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|_| {
+            PublicCatalogError::new(
+                "spotify_public_transport",
+                "Spotify's Song Radio service could not be reached",
+            )
+        })?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        invalidate_anonymous_token(&access_token).await;
+    }
+    validate_song_radio_status(status, retry_after_seconds(&response))?;
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| song_radio_contract_outdated())?;
+    normalize_song_radio_response(&body)
+}
+
+fn song_radio_contract_outdated() -> PublicCatalogError {
+    PublicCatalogError::new(
+        "spotify_public_contract_outdated",
+        "Spotify changed its Song Radio response; Echo needs an update before retrying",
+    )
+}
+
+fn song_radio_unavailable() -> PublicCatalogError {
+    PublicCatalogError::new(
+        "spotify_song_radio_unavailable",
+        "Spotify has no publicly available Song Radio for this song",
+    )
+}
+
+fn validate_song_radio_status(
+    status: reqwest::StatusCode,
+    retry_after: Option<u64>,
+) -> Result<(), PublicCatalogError> {
+    match status {
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Err(PublicCatalogError {
+            code: "spotify_rate_limited",
+            message: "Spotify temporarily rate-limited the Song Radio request".to_string(),
+            retry_after_seconds: retry_after,
+        }),
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND => {
+            Err(song_radio_unavailable())
+        }
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED => {
+            Err(song_radio_contract_outdated())
+        }
+        status if status.is_success() => Ok(()),
+        _ => Err(PublicCatalogError::new(
+            "spotify_public_upstream",
+            "Spotify's Song Radio service returned an error",
+        )),
+    }
+}
+
+fn normalize_song_radio_response(body: &serde_json::Value) -> Result<String, PublicCatalogError> {
+    let total = body
+        .get("total")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(song_radio_contract_outdated)?;
+    let items = body
+        .get("mediaItems")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(song_radio_contract_outdated)?;
+    if total == 0 && items.is_empty() {
+        return Err(song_radio_unavailable());
+    }
+    if total == 0 || items.is_empty() || items.len() as u64 > total {
+        return Err(song_radio_contract_outdated());
+    }
+    // Match Spotify's own choice: the first result is the generated radio playlist.
+    items[0]
+        .get("uri")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|uri| uri.strip_prefix("spotify:playlist:"))
+        .filter(|id| valid_spotify_id(id))
+        .map(str::to_string)
+        .ok_or_else(song_radio_contract_outdated)
+}
+
+/// Read public metadata with Spotify's real playlist revision for consistency checks.
+/// The desktop web-player query includes revisionId, unlike the track-chunk query.
+pub(crate) async fn fetch_public_playlist_summary(
+    client: &reqwest::Client,
+    playlist_id: &str,
+) -> Result<FavoriteSummary, PublicCatalogError> {
+    validate_chunk_request(playlist_id, 0)?;
+    let request_body = serde_json::json!({
+        "variables": {
+            "uri": format!("spotify:playlist:{playlist_id}"),
+            "limit": 0,
+            "offset": 0,
+            "enableWatchFeedEntrypoint": false,
+            "includeEpisodeContentRatingsV2": false,
+        },
+        "operationName": PLAYLIST_METADATA_OPERATION,
+        "extensions": {"persistedQuery": {
+            "version": 1,
+            "sha256Hash": PLAYLIST_METADATA_HASH,
+        }},
+    });
+    let body = request_public_playlist_query(client, &request_body).await?;
+    normalize_public_playlist_summary(playlist_id, &body)
+}
+
 /// Fetch exactly one user-requested, ordered 50-position public-playlist chunk.
 ///
 /// The anonymous access token is retained only in process memory. This function
@@ -114,7 +249,6 @@ pub(crate) async fn fetch_public_playlist_chunk(
     offset: usize,
 ) -> Result<PublicPlaylistChunk, PublicCatalogError> {
     validate_chunk_request(playlist_id, offset)?;
-    let access_token = anonymous_access_token(client).await?;
     let request_body = PlaylistQueryRequest {
         variables: PlaylistQueryVariables {
             uri: format!("spotify:playlist:{playlist_id}"),
@@ -129,7 +263,15 @@ pub(crate) async fn fetch_public_playlist_chunk(
             },
         },
     };
+    let body = request_public_playlist_query(client, &request_body).await?;
+    normalize_playlist_query_response(playlist_id, offset, &body)
+}
 
+async fn request_public_playlist_query(
+    client: &reqwest::Client,
+    request_body: &impl Serialize,
+) -> Result<serde_json::Value, PublicCatalogError> {
+    let access_token = anonymous_access_token(client).await?;
     let response = client
         .post(PARTNER_QUERY_URL)
         .timeout(REQUEST_TIMEOUT)
@@ -138,7 +280,7 @@ pub(crate) async fn fetch_public_playlist_chunk(
         .header(ORIGIN, "https://open.spotify.com")
         .header(REFERER, "https://open.spotify.com/")
         .bearer_auth(&access_token)
-        .json(&request_body)
+        .json(request_body)
         .send()
         .await
         .map_err(|_| {
@@ -179,11 +321,10 @@ pub(crate) async fn fetch_public_playlist_chunk(
         ));
     }
 
-    let body = response
+    response
         .json::<serde_json::Value>()
         .await
-        .map_err(|_| PublicCatalogError::contract_outdated())?;
-    normalize_playlist_query_response(playlist_id, offset, &body)
+        .map_err(|_| PublicCatalogError::contract_outdated())
 }
 
 fn validate_chunk_request(playlist_id: &str, offset: usize) -> Result<(), PublicCatalogError> {
@@ -370,11 +511,9 @@ fn totp_at_ms(timestamp_ms: u64) -> String {
     format!("{:06}", (binary & 0x7fff_ffff) % 1_000_000)
 }
 
-fn normalize_playlist_query_response(
-    playlist_id: &str,
-    offset: usize,
+fn public_playlist_from_response(
     body: &serde_json::Value,
-) -> Result<PublicPlaylistChunk, PublicCatalogError> {
+) -> Result<&serde_json::Value, PublicCatalogError> {
     if graphql_reports_persisted_query_failure(body) {
         return Err(PublicCatalogError::contract_outdated());
     }
@@ -400,6 +539,68 @@ fn normalize_playlist_query_response(
         }
         _ => {}
     }
+    Ok(playlist)
+}
+
+fn normalize_public_playlist_summary(
+    playlist_id: &str,
+    body: &serde_json::Value,
+) -> Result<FavoriteSummary, PublicCatalogError> {
+    let playlist = public_playlist_from_response(body)?;
+    let spotify_uri = format!("spotify:playlist:{playlist_id}");
+    if playlist
+        .get("__typename")
+        .and_then(serde_json::Value::as_str)
+        != Some("Playlist")
+        || playlist.get("uri").and_then(serde_json::Value::as_str) != Some(spotify_uri.as_str())
+    {
+        return Err(PublicCatalogError::contract_outdated());
+    }
+    let name =
+        trimmed_string(playlist.get("name")).ok_or_else(PublicCatalogError::contract_outdated)?;
+    let revision = trimmed_string(playlist.get("revisionId"))
+        .ok_or_else(PublicCatalogError::contract_outdated)?;
+    let total_count = playlist
+        .get("content")
+        .and_then(|content| content.get("totalCount"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(PublicCatalogError::contract_outdated)?;
+    let owner = playlist
+        .get("ownerV2")
+        .and_then(|owner| owner.get("data"))
+        .and_then(|owner| trimmed_string(owner.get("name")));
+    let artwork_url = playlist
+        .get("images")
+        .and_then(|images| images.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|image| image.get("sources"))
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .find_map(|source| trimmed_string(source.get("url")));
+    Ok(FavoriteSummary {
+        spotify_uri,
+        spotify_url: format!("https://open.spotify.com/playlist/{playlist_id}"),
+        spotify_id: playlist_id.to_string(),
+        name,
+        artist: None,
+        owner,
+        description: trimmed_string(playlist.get("description")),
+        artwork_url,
+        duration_ms: None,
+        track_count: Some(total_count),
+        snapshot_id: Some(revision),
+        explicit: None,
+    })
+}
+
+fn normalize_playlist_query_response(
+    playlist_id: &str,
+    offset: usize,
+    body: &serde_json::Value,
+) -> Result<PublicPlaylistChunk, PublicCatalogError> {
+    let playlist = public_playlist_from_response(body)?;
     let content = playlist
         .get("content")
         .and_then(serde_json::Value::as_object)
@@ -675,6 +876,211 @@ mod tests {
         assert_eq!(totp_at_ms(30_000), "332823");
         assert_eq!(totp_at_ms(1_700_000_000_000), "371599");
         assert_eq!(totp_at_ms(1_753_891_200_000), "659962");
+    }
+
+    #[test]
+    fn song_radio_response_uses_spotifys_first_generated_playlist() {
+        // Observed from Spotify's public Song Radio resolver on 2026-09-23.
+        let body = json!({
+            "total": 1,
+            "mediaItems": [{"uri": "spotify:playlist:37i9dQZF1E8R1dl0mqoKFX"}]
+        });
+        assert_eq!(
+            normalize_song_radio_response(&body).unwrap(),
+            "37i9dQZF1E8R1dl0mqoKFX"
+        );
+
+        let several_results = json!({
+            "total": 2,
+            "mediaItems": [
+                {"uri": "spotify:playlist:37i9dQZF1E8R1dl0mqoKFX"},
+                {"uri": "spotify:playlist:37i9dQZF1E8UXBoz02kGID"}
+            ]
+        });
+        assert_eq!(
+            normalize_song_radio_response(&several_results).unwrap(),
+            "37i9dQZF1E8R1dl0mqoKFX"
+        );
+    }
+
+    #[test]
+    fn song_radio_missing_and_malformed_responses_are_distinct() {
+        assert_eq!(
+            normalize_song_radio_response(&json!({"total": 0, "mediaItems": []}))
+                .unwrap_err()
+                .code,
+            "spotify_song_radio_unavailable"
+        );
+        for body in [
+            json!({}),
+            json!({"total": 1, "mediaItems": []}),
+            json!({"total": 1, "mediaItems": [{}]}),
+            json!({"total": 1, "mediaItems": [{"uri": "spotify:track:7qiZfU4dY1lWllzX7mPBI3"}]}),
+            json!({"total": 1, "mediaItems": [{"uri": "spotify:playlist:invalid"}]}),
+            json!({"total": 1, "mediaItems": [{"uri": "https://example.com/playlist"}]}),
+            json!({"total": 0, "mediaItems": [{"uri": "spotify:playlist:37i9dQZF1E8R1dl0mqoKFX"}]}),
+        ] {
+            assert_eq!(
+                normalize_song_radio_response(&body).unwrap_err().code,
+                "spotify_public_contract_outdated",
+                "unexpected result for {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn song_radio_http_failures_keep_stable_codes_and_retry_after() {
+        let rate_limited =
+            validate_song_radio_status(reqwest::StatusCode::TOO_MANY_REQUESTS, Some(17))
+                .unwrap_err();
+        assert_eq!(rate_limited.code, "spotify_rate_limited");
+        assert_eq!(rate_limited.retry_after_seconds, Some(17));
+        for status in [
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+        ] {
+            assert_eq!(
+                validate_song_radio_status(status, None).unwrap_err().code,
+                "spotify_song_radio_unavailable"
+            );
+        }
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+        ] {
+            assert_eq!(
+                validate_song_radio_status(status, None).unwrap_err().code,
+                "spotify_public_contract_outdated"
+            );
+        }
+        assert_eq!(
+            validate_song_radio_status(reqwest::StatusCode::BAD_GATEWAY, None)
+                .unwrap_err()
+                .code,
+            "spotify_public_upstream"
+        );
+        assert!(validate_song_radio_status(reqwest::StatusCode::OK, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn song_radio_rejects_invalid_seed_before_requesting_a_token() {
+        let client = reqwest::Client::new();
+        for id in [
+            "",
+            "spotify:track:7qiZfU4dY1lWllzX7mPBI3",
+            "../../../invalid",
+        ] {
+            assert_eq!(
+                fetch_public_song_radio_playlist_id(&client, id)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "invalid_spotify_track_id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only live Spotify contract check; requires internet access"]
+    async fn live_song_radio_resolves_and_loads_public_tracks_anonymously() {
+        let client = reqwest::Client::new();
+        let playlist_id = fetch_public_song_radio_playlist_id(&client, "7qiZfU4dY1lWllzX7mPBI3")
+            .await
+            .expect("Spotify should resolve public Song Radio");
+        let summary = fetch_public_playlist_summary(&client, &playlist_id)
+            .await
+            .expect("Spotify should expose radio metadata with a real revision");
+        let chunk = fetch_public_playlist_chunk(&client, &playlist_id, 0)
+            .await
+            .expect("Spotify should expose the generated radio playlist");
+        let latest_summary = fetch_public_playlist_summary(&client, &playlist_id)
+            .await
+            .expect("Spotify should retain the revision while reading radio tracks");
+        assert_eq!(chunk.playlist_id, playlist_id);
+        assert_eq!(summary.spotify_id, playlist_id);
+        assert_eq!(summary.track_count, Some(chunk.total_count));
+        assert_eq!(summary.snapshot_id, latest_summary.snapshot_id);
+        assert!(summary
+            .snapshot_id
+            .is_some_and(|revision| !revision.is_empty()));
+        assert!(chunk.total_count > 0);
+        assert!(chunk.positions.iter().any(|position| matches!(
+            position.outcome,
+            PublicPlaylistPositionOutcome::Track { .. }
+        )));
+    }
+
+    fn public_playlist_metadata() -> serde_json::Value {
+        json!({"data": {"playlistV2": {
+            "__typename": "Playlist",
+            "uri": "spotify:playlist:37i9dQZF1E8R1dl0mqoKFX",
+            "name": "Shape of You Radio",
+            "description": "With Ed Sheeran, Shawn Mendes, Maroon 5 and more",
+            "revisionId": "AAAAAFIQs1hIvu+FdbSbeNbBwOrCziTz",
+            "content": {"totalCount": 50},
+            "ownerV2": {"data": {"name": "Spotify"}},
+            "images": {"items": [{"sources": [{"url": "https://pickasso.spotifycdn.com/image/radio"}]}]}
+        }}})
+    }
+
+    #[test]
+    fn public_playlist_metadata_retains_spotify_revision_and_display_fields() {
+        let summary = normalize_public_playlist_summary(
+            "37i9dQZF1E8R1dl0mqoKFX",
+            &public_playlist_metadata(),
+        )
+        .unwrap();
+        assert_eq!(summary.name, "Shape of You Radio");
+        assert_eq!(summary.owner.as_deref(), Some("Spotify"));
+        assert_eq!(summary.track_count, Some(50));
+        assert_eq!(
+            summary.snapshot_id.as_deref(),
+            Some("AAAAAFIQs1hIvu+FdbSbeNbBwOrCziTz")
+        );
+        assert_eq!(
+            summary.artwork_url.as_deref(),
+            Some("https://pickasso.spotifycdn.com/image/radio")
+        );
+        assert_eq!(
+            summary.spotify_url,
+            "https://open.spotify.com/playlist/37i9dQZF1E8R1dl0mqoKFX"
+        );
+    }
+
+    #[test]
+    fn public_playlist_metadata_requires_identity_revision_name_and_count() {
+        for (field, value) in [
+            ("uri", json!("spotify:playlist:37i9dQZF1E8UXBoz02kGID")),
+            ("__typename", json!("OtherEntity")),
+            ("name", json!(" ")),
+            ("revisionId", json!(null)),
+            ("revisionId", json!("")),
+            ("content", json!({"totalCount": "50"})),
+        ] {
+            let mut body = public_playlist_metadata();
+            body["data"]["playlistV2"][field] = value;
+            assert_eq!(
+                normalize_public_playlist_summary("37i9dQZF1E8R1dl0mqoKFX", &body)
+                    .unwrap_err()
+                    .code,
+                "spotify_public_contract_outdated",
+                "unexpected result for {field}"
+            );
+        }
+        for (kind, code) in [
+            ("NotFound", "spotify_public_playlist_not_found"),
+            ("GenericError", "spotify_public_playlist_unavailable"),
+        ] {
+            assert_eq!(
+                normalize_public_playlist_summary(
+                    "37i9dQZF1E8R1dl0mqoKFX",
+                    &json!({"data": {"playlistV2": {"__typename": kind}}})
+                )
+                .unwrap_err()
+                .code,
+                code
+            );
+        }
     }
 
     #[test]
