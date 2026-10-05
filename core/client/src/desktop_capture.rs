@@ -16,7 +16,7 @@
 
 use livekit::track::TrackSource;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri::Emitter;
@@ -53,6 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
 use crate::capture_pipeline::{CapturePublisher, PublishProfile};
+use crate::capture_session::CaptureSessions;
 use crate::file_debug_log;
 
 // ── GPU HDR→SDR Conversion Pipeline (shared module) ──
@@ -61,13 +62,14 @@ use crate::gpu_converter::GpuConverter;
 
 // ── Global State ──
 
-struct DesktopShareHandle {
-    running: Arc<AtomicBool>,
+fn global_state() -> &'static CaptureSessions {
+    static STATE: OnceLock<CaptureSessions> = OnceLock::new();
+    STATE.get_or_init(CaptureSessions::default)
 }
 
-fn global_state() -> &'static Mutex<Option<DesktopShareHandle>> {
-    static STATE: OnceLock<Mutex<Option<DesktopShareHandle>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
+/// True until every native capture worker has confirmed resource cleanup.
+pub fn has_pending_capture() -> bool {
+    global_state().has_pending_capture()
 }
 
 fn should_emit_frame_count_stats(frame_count: u64, last_stats_frame_count: &mut u64) -> bool {
@@ -206,16 +208,8 @@ pub async fn start(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop();
-
-    let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(DesktopShareHandle {
-            running: running.clone(),
-        });
-    }
+    let session = global_state().start();
+    let running = session.running.clone();
 
     // Get game PID for audio capture
     let target_pid = unsafe {
@@ -229,6 +223,8 @@ pub async fn start(
 
     let r2 = running.clone();
     let health_clone = Arc::clone(&health);
+    let publisher_stopped = session.publisher_stopped.clone();
+    let app_events = app.clone();
     tokio::spawn(async move {
         // Run DXGI capture on a blocking thread — it uses COM and blocking waits
         let result = tokio::task::spawn_blocking(move || {
@@ -241,36 +237,49 @@ pub async fn start(
                 hwnd,
                 fullscreen,
                 health_clone,
+                publisher_stopped,
             )
         })
         .await
-        .map_err(|e| format!("spawn_blocking: {e}"))?;
+        .map_err(|e| format!("spawn_blocking: {e}"))
+        .and_then(|result| result);
 
-        if let Err(e) = result {
+        if let Err(e) = &result {
             eprintln!("[desktop-capture] error: {e}");
             file_debug_log::append(&format!("[desktop-capture] task error: {}", e));
         }
 
-        let mut state = global_state().lock().unwrap();
-        *state = None;
-        Ok::<(), String>(())
+        let latest = global_state().finish(&session, result);
+        if latest {
+            health.set_active(false, CaptureMode::None, EncoderType::None, 0);
+            if !session.stop_requested() && session.cleanup_confirmed() {
+                let _ = app_events.emit("desktop-capture-stopped", ());
+            }
+        }
     });
 
     Ok(())
 }
 
 /// Stop the current desktop capture.
-pub fn stop() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
-        handle.running.store(false, Ordering::SeqCst);
-        eprintln!("[desktop-capture] stop requested");
-    }
+pub async fn stop() -> Result<(), String> {
+    let sessions = global_state().request_stop();
+    tokio::task::spawn_blocking(move || {
+        let mut result = Ok(());
+        for session in sessions {
+            if let Err(error) = session.wait() {
+                result = Err(error);
+            }
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("Desktop capture shutdown: {error}"))?
 }
 
 /// Returns true if a desktop capture is currently running.
 pub fn is_running() -> bool {
-    global_state().lock().unwrap().is_some()
+    global_state().is_running()
 }
 
 // ── DXGI Desktop Duplication Setup ──
@@ -680,6 +689,7 @@ fn capture_loop_blocking(
     hwnd: u64,
     fullscreen: bool,
     health: Arc<CaptureHealthState>,
+    publisher_stopped: Arc<AtomicBool>,
 ) -> Result<(), String> {
     eprintln!("[desktop-capture] initializing DXGI Desktop Duplication...");
     file_debug_log::append(&format!(
@@ -860,7 +870,12 @@ fn capture_loop_blocking(
         "desktop-capture",
         TrackSource::Screenshare,
         true,
+        running.clone(),
+        publisher_stopped,
     )?;
+    if !running.load(Ordering::SeqCst) {
+        return publisher.shutdown_blocking(&rt);
+    }
 
     health.set_active(
         true,
@@ -1353,8 +1368,6 @@ fn capture_loop_blocking(
         }
     }
 
-    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
-
     running.store(false, Ordering::SeqCst);
     eprintln!(
         "[desktop-capture] shutting down, {} frames captured",
@@ -1373,7 +1386,7 @@ fn capture_loop_blocking(
         eprintln!("[anti-mpo] overlay window destroyed");
     }
 
-    publisher.shutdown_blocking(&rt);
+    publisher.shutdown_blocking(&rt)?;
     eprintln!("[desktop-capture] SFU room closed");
 
     Ok(())

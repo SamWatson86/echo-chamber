@@ -27,6 +27,8 @@ mod audio_output_stub;
 mod capture_health;
 #[cfg(target_os = "windows")]
 mod capture_pipeline;
+#[cfg(any(target_os = "windows", test))]
+mod capture_session;
 #[cfg(target_os = "windows")]
 mod desktop_capture;
 #[cfg(target_os = "windows")]
@@ -710,8 +712,8 @@ async fn start_screen_share(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn stop_screen_share() {
-    screen_capture::stop_share();
+async fn stop_screen_share() -> Result<(), String> {
+    screen_capture::stop_share().await
 }
 
 #[cfg(target_os = "windows")]
@@ -776,8 +778,8 @@ async fn start_screen_share_monitor(
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn stop_desktop_capture() {
-    desktop_capture::stop();
+async fn stop_desktop_capture() -> Result<(), String> {
+    desktop_capture::stop().await
 }
 
 #[cfg(target_os = "windows")]
@@ -785,7 +787,11 @@ fn stop_desktop_capture() {
 fn get_capture_health(
     state: tauri::State<Arc<CaptureHealthState>>,
 ) -> Option<CaptureHealthSnapshot> {
-    let snap = state.snapshot();
+    let mut snap = state.snapshot();
+    // Session ownership is authoritative during startup, replacement, and
+    // pending/failed teardown. A late stats update must not hide a live share.
+    snap.capture_active = screen_capture::has_pending_capture()
+        || desktop_capture::has_pending_capture();
     if !snap.capture_active {
         None
     } else {

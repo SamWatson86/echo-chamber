@@ -1438,11 +1438,22 @@ async function connectToRoom({
     }
     // LiveKit removes departed participants from its registry before emitting
     // track-unsubscribe events, so the live-generation guard may skip them.
-    // Stop exact-generation audio now; only the participant card gets a grace
-    // period. Otherwise old boost graphs survive deletion of their controls.
+    // Retire exact-generation media now. A stopped companion must not leave its
+    // last screen frame visible throughout the participant-card grace period.
     var disconnectedAudio = clearParticipantAudioGeneration(participant, newRoom, "exact");
     if (disconnectedAudio.removed) {
       debugLog("[audio-generation] retired " + disconnectedAudio.removed + " disconnected audio attachment(s) for " + key);
+    }
+    var endedScreenGeneration = clearScreenParticipantGeneration(participant, newRoom, "exact");
+    if (endedScreenGeneration.removed) {
+      var endedScreenIdentity = endedScreenGeneration.mediaIdentity;
+      if (!hasRegisteredScreenGenerationForIdentity(endedScreenIdentity)) {
+        hiddenScreens.delete(endedScreenIdentity);
+        watchedScreens.delete(endedScreenIdentity);
+        _pubBitrateControl.delete(endedScreenIdentity);
+        setParticipantScreenWatchAvailable(endedScreenIdentity, false);
+      }
+      debugLog(`[disconnect] retired screen media for ${key} before card cleanup`);
     }
     debugLog(`participant disconnected ${participant.identity} (reconnecting=${_isReconnecting})`);
 

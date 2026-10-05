@@ -14,13 +14,14 @@
 
 use livekit::track::TrackSource;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
 use crate::capture_pipeline::{
     CapturePublisher, PublishProfile, StaticFrameHeartbeat, STATIC_FRAME_HEARTBEAT_INTERVAL,
 };
+use crate::capture_session::{CaptureSession, CaptureSessions};
 use crate::file_debug_log;
 
 // ── Types ──
@@ -64,10 +65,6 @@ impl CaptureWindowStatus {
 }
 
 // ── Global State ──
-
-struct ShareHandle {
-    running: Arc<AtomicBool>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WindowBounds {
@@ -232,9 +229,28 @@ fn window_is_above(
     search.candidate_above_source
 }
 
-fn global_state() -> &'static Mutex<Option<ShareHandle>> {
-    static STATE: OnceLock<Mutex<Option<ShareHandle>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
+fn global_state() -> &'static CaptureSessions {
+    static STATE: OnceLock<CaptureSessions> = OnceLock::new();
+    STATE.get_or_init(CaptureSessions::default)
+}
+
+/// True until every native capture worker has confirmed resource cleanup.
+pub fn has_pending_capture() -> bool {
+    global_state().has_pending_capture()
+}
+
+// The SDK returns handler errors after joining the capture thread. These are
+// capture failures, but the OS session has already been dropped and is stopped.
+fn wgc_stop_joined<E>(
+    result: &Result<(), windows_capture::capture::CaptureControlError<E>>,
+) -> bool {
+    use windows_capture::capture::CaptureControlError;
+    matches!(
+        result,
+        Ok(())
+            | Err(CaptureControlError::GraphicsCaptureApiError(_))
+            | Err(CaptureControlError::FailedToJoinThread)
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -524,50 +540,53 @@ pub async fn start_share(
     // picker was rendered. Revalidate the live window before interrupting an
     // existing share or spawning a new capture task.
     validate_capture_window(source_id)?;
-    stop_share();
-
-    let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            running: running.clone(),
-        });
-    }
+    let session = global_state().start();
 
     let app2 = app.clone();
-    let r2 = running.clone();
     tokio::spawn(async move {
-        if let Err(e) = share_loop(
+        let result = share_loop(
             source_id,
             &sfu_url,
             &token,
             publish_profile,
             &app2,
-            &r2,
-            health,
+            &session,
+            health.clone(),
         )
-        .await
-        {
-            eprintln!("[screen-capture] error: {}", e);
-            let _ = app2.emit("screen-capture-error", format!("{}", e));
+        .await;
+        let latest = global_state().finish(&session, result.clone());
+        if latest {
+            health.set_active(false, CaptureMode::None, EncoderType::None, 0);
         }
-        let _ = app2.emit("screen-capture-stopped", ());
+        if let Err(e) = &result {
+            eprintln!("[screen-capture] error: {}", e);
+            if latest {
+                let _ = app2.emit("screen-capture-error", format!("{}", e));
+            }
+        }
+        if latest && !session.stop_requested() && session.cleanup_confirmed() {
+            let _ = app2.emit("screen-capture-stopped", ());
+        }
         eprintln!("[screen-capture] task exited");
-        let mut state = global_state().lock().unwrap();
-        *state = None;
     });
 
     Ok(())
 }
 
 /// Stop the current screen share.
-pub fn stop_share() {
-    let mut state = global_state().lock().unwrap();
-    if let Some(handle) = state.take() {
-        handle.running.store(false, Ordering::SeqCst);
-        eprintln!("[screen-capture] stop requested");
-    }
+pub async fn stop_share() -> Result<(), String> {
+    let sessions = global_state().request_stop();
+    tokio::task::spawn_blocking(move || {
+        let mut result = Ok(());
+        for session in sessions {
+            if let Err(error) = session.wait() {
+                result = Err(error);
+            }
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("Screen capture shutdown: {error}"))?
 }
 
 // ── Thumbnail Generation ──
@@ -843,9 +862,10 @@ async fn share_loop(
     token: &str,
     publish_profile: PublishProfile,
     app: &AppHandle,
-    running: &Arc<AtomicBool>,
+    session: &Arc<CaptureSession>,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
+    let running = &session.running;
     // 1. Connect to SFU and publish track via shared pipeline
     let publish_settings = wgc_publish_settings(publish_profile);
     let mut publisher = CapturePublisher::connect_and_publish(
@@ -857,8 +877,13 @@ async fn share_loop(
         "screen-capture",
         publish_settings.track_source,
         publish_settings.is_screencast,
+        running.clone(),
+        session.publisher_stopped.clone(),
     )
     .await?;
+    if !running.load(Ordering::SeqCst) {
+        return publisher.shutdown().await;
+    }
 
     // Resolve HWND -> PID for WASAPI audio auto-start
     let target_pid = unsafe {
@@ -884,8 +909,9 @@ async fn share_loop(
     // Channel sends 1080p BGRA frames (8MB each, GPU-downscaled from 4K)
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
+    let capture_stopped = session.capture_stopped.clone();
 
-    std::thread::spawn(move || {
+    let capture_task = tokio::task::spawn_blocking(move || {
         use crate::gpu_converter::GpuConverter;
         use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
         use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -1051,17 +1077,23 @@ async fn share_loop(
             MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
-            (frame_tx, capture_running),
+            (frame_tx, capture_running.clone()),
         );
 
         eprintln!("[screen-capture] WGC starting for HWND {}", source_id);
-        match Handler::start_free_threaded(settings) {
-            Ok(ctrl) => {
-                let _ = ctrl.wait();
-            }
-            Err(e) => eprintln!("[screen-capture] WGC start error: {:?}", e),
+        let ctrl = Handler::start_free_threaded(settings)
+            .map_err(|error| format!("WGC start: {error:?}"))?;
+        capture_stopped.store(false, Ordering::SeqCst);
+        // Static windows need not produce another callback. Stop the capture
+        // control explicitly so End Sharing also releases an idle OS session.
+        while capture_running.load(Ordering::SeqCst) && !ctrl.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        let stop_result = ctrl.stop();
+        capture_stopped.store(wgc_stop_joined(&stop_result), Ordering::SeqCst);
+        stop_result.map_err(|error| format!("WGC stop: {error:?}"))?;
         eprintln!("[screen-capture] WGC thread exiting");
+        Ok::<(), String>(())
     });
 
     // 3. Frame loop: receive BGRA -> push to SFU via CapturePublisher
@@ -1188,9 +1220,13 @@ async fn share_loop(
         "[screen-capture] shutting down, {} frames captured",
         publisher.frame_count()
     );
-    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
-    publisher.shutdown().await;
-    Ok(())
+    // Always close the SFU connection even if the capture thread reports an
+    // error; only acknowledge Stop after both resources have been released.
+    let shutdown_result = publisher.shutdown().await;
+    let capture_result = capture_task
+        .await
+        .map_err(|error| format!("WGC task: {error}"))?;
+    shutdown_result.and(capture_result)
 }
 
 // ── Public API: Monitor capture (full screen) ──
@@ -1207,28 +1243,26 @@ pub async fn start_share_monitor(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    stop_share();
-
-    let running = Arc::new(AtomicBool::new(true));
-
-    {
-        let mut state = global_state().lock().unwrap();
-        *state = Some(ShareHandle {
-            running: running.clone(),
-        });
-    }
+    let session = global_state().start();
 
     let app2 = app.clone();
-    let r2 = running.clone();
     tokio::spawn(async move {
-        if let Err(e) = share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &r2, health).await {
-            eprintln!("[screen-capture-monitor] error: {}", e);
-            let _ = app2.emit("screen-capture-error", format!("{}", e));
+        let result =
+            share_loop_monitor(hmonitor, &sfu_url, &token, &app2, &session, health.clone()).await;
+        let latest = global_state().finish(&session, result.clone());
+        if latest {
+            health.set_active(false, CaptureMode::None, EncoderType::None, 0);
         }
-        let _ = app2.emit("screen-capture-stopped", ());
+        if let Err(e) = &result {
+            eprintln!("[screen-capture-monitor] error: {}", e);
+            if latest {
+                let _ = app2.emit("screen-capture-error", format!("{}", e));
+            }
+        }
+        if latest && !session.stop_requested() && session.cleanup_confirmed() {
+            let _ = app2.emit("screen-capture-stopped", ());
+        }
         eprintln!("[screen-capture-monitor] task exited");
-        let mut state = global_state().lock().unwrap();
-        *state = None;
     });
 
     Ok(())
@@ -1239,9 +1273,10 @@ async fn share_loop_monitor(
     sfu_url: &str,
     token: &str,
     app: &AppHandle,
-    running: &Arc<AtomicBool>,
+    session: &Arc<CaptureSession>,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
+    let running = &session.running;
     // 1. Connect to SFU and publish track via shared pipeline
     let publish_settings = wgc_monitor_publish_settings();
     let mut publisher = CapturePublisher::connect_and_publish(
@@ -1253,8 +1288,13 @@ async fn share_loop_monitor(
         "screen-capture-monitor",
         publish_settings.track_source,
         publish_settings.is_screencast,
+        running.clone(),
+        session.publisher_stopped.clone(),
     )
     .await?;
+    if !running.load(Ordering::SeqCst) {
+        return publisher.shutdown().await;
+    }
 
     eprintln!(
         "[screen-capture-monitor] starting WGC monitor capture for HMONITOR {}",
@@ -1271,8 +1311,9 @@ async fn share_loop_monitor(
 
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
+    let capture_stopped = session.capture_stopped.clone();
 
-    std::thread::spawn(move || {
+    let capture_task = tokio::task::spawn_blocking(move || {
         use crate::gpu_converter::GpuConverter;
         use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
         use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1415,20 +1456,26 @@ async fn share_loop_monitor(
             MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
             DirtyRegionSettings::Default,
             ColorFormat::Rgba16F,
-            (frame_tx, capture_running),
+            (frame_tx, capture_running.clone()),
         );
 
         eprintln!(
             "[screen-capture-monitor] WGC starting for HMONITOR {}",
             hmonitor
         );
-        match Handler::start_free_threaded(settings) {
-            Ok(ctrl) => {
-                let _ = ctrl.wait();
-            }
-            Err(e) => eprintln!("[screen-capture-monitor] WGC start error: {:?}", e),
+        let ctrl = Handler::start_free_threaded(settings)
+            .map_err(|error| format!("WGC start: {error:?}"))?;
+        capture_stopped.store(false, Ordering::SeqCst);
+        // Static windows need not produce another callback. Stop the capture
+        // control explicitly so End Sharing also releases an idle OS session.
+        while capture_running.load(Ordering::SeqCst) && !ctrl.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        let stop_result = ctrl.stop();
+        capture_stopped.store(wgc_stop_joined(&stop_result), Ordering::SeqCst);
+        stop_result.map_err(|error| format!("WGC stop: {error:?}"))?;
         eprintln!("[screen-capture-monitor] WGC thread exiting");
+        Ok::<(), String>(())
     });
 
     let mut drop_count: u64 = 0;
@@ -1552,14 +1599,35 @@ async fn share_loop_monitor(
         "[screen-capture-monitor] shutting down, {} frames captured",
         publisher.frame_count()
     );
-    health.set_active(false, CaptureMode::None, EncoderType::None, 0);
-    publisher.shutdown().await;
-    Ok(())
+    // Always close the SFU connection even if the capture thread reports an
+    // error; only acknowledge Stop after both resources have been released.
+    let shutdown_result = publisher.shutdown().await;
+    let capture_result = capture_task
+        .await
+        .map_err(|error| format!("WGC task: {error}"))?;
+    shutdown_result.and(capture_result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wgc_frame_error_after_join_still_confirms_os_capture_stopped() {
+        use windows_capture::capture::{CaptureControlError, GraphicsCaptureApiError};
+        let result = Err(CaptureControlError::GraphicsCaptureApiError(
+            GraphicsCaptureApiError::FrameHandlerError("GPU conversion failed"),
+        ));
+        assert!(wgc_stop_joined(&result));
+    }
+
+    #[test]
+    fn wgc_message_failure_does_not_confirm_os_capture_stopped() {
+        use windows_capture::capture::CaptureControlError;
+        let result: Result<(), CaptureControlError<&str>> =
+            Err(CaptureControlError::FailedToPostThreadMessage);
+        assert!(!wgc_stop_joined(&result));
+    }
 
     #[test]
     fn source_visibility_warning_flags_minimized_window() {

@@ -1033,6 +1033,128 @@ test("abrupt screen companion disconnect cleans media stored under its parent id
   assert.equal(state.screenAudioEls.size, 0);
 });
 
+function installScreenDisconnectLifecycle(harness) {
+  const { context } = harness;
+  const eventRoom = context.room;
+  let onDisconnect;
+  const watchAvailability = new Map();
+  Object.assign(context, {
+    LK: { RoomEvent: { ParticipantDisconnected: "left" } },
+    newRoom: eventRoom,
+    _pendingDisconnects: new Map(),
+    _pubBitrateControl: new Map(),
+    _isReconnecting: false,
+    _isRoomSwitch: false,
+    ignoreStaleRoomEvent() { return context.room !== eventRoom; },
+    setParticipantScreenWatchAvailable(identity, available) { watchAvailability.set(identity, available); },
+  });
+  eventRoom.on = (_event, callback) => { onDisconnect = callback; };
+  const connect = fs.readFileSync(path.join(__dirname, "connect.js"), "utf8");
+  const start = connect.indexOf("  newRoom.on(LK.RoomEvent.ParticipantDisconnected,");
+  const end = connect.indexOf("\n  });", start);
+  assert.ok(start >= 0 && end > start);
+  vm.runInContext(connect.slice(start, end + "\n  });".length), context);
+  return { onDisconnect, watchAvailability };
+}
+
+function attachDisconnectScreen(harness, participant, trackSid) {
+  const { context } = harness;
+  const identity = context.normalizeScreenMediaIdentity(participant.identity);
+  const track = Object.assign(makeTrack(trackSid), { kind: "video", source: "screen_share" });
+  const publication = { trackSid, source: "screen_share", kind: "video", track };
+  participant.publications = [publication];
+  const video = context.createAttachedVideoElement(track);
+  video.srcObject = {};
+  const tile = context.addScreenTile("Shared screen", video, trackSid);
+  tile.dataset.identity = identity;
+  context.registerScreenTrack(trackSid, publication, tile, identity, participant, track, context.room);
+  context.screenTileByIdentity.set(identity, tile);
+  context.watchedScreens.add(identity);
+  context.screenRecoveryAttempts.set(trackSid, 1);
+  context.screenResubscribeIntent.set(trackSid, 5000);
+  return { identity, track, publication, video, tile };
+}
+
+for (const suffix of ["", "$screen"]) {
+  test(`disconnect immediately blanks ${suffix ? "companion" : "browser"} screen before card grace`, () => {
+    const harness = loadScreenGenerationHarness(true);
+    const lifecycle = installScreenDisconnectLifecycle(harness);
+    const participant = { identity: "alex-2" + suffix };
+    const screen = attachDisconnectScreen(harness, participant, "ended-screen");
+    const card = { card: new FakeElement("div") };
+    harness.context.participantCards.set("alex-2", card);
+    harness.context._pubBitrateControl.set("alex-2", {});
+    // Match LiveKit's event order: the participant has already left the registry,
+    // so TrackUnsubscribed may have been rejected by the current-generation guard.
+    lifecycle.onDisconnect(participant);
+    assert.ok(harness.scheduled.some(timer => timer.delay === 8000));
+    assert.equal(harness.context.participantCards.get("alex-2"), card);
+    assert.equal(screen.video.paused, true);
+    assert.equal(screen.video.srcObject, null);
+    assert.deepEqual(screen.track.detachCalls, [screen.video]);
+    assert.equal(screen.tile.isConnected, false);
+    assert.equal(harness.screenTileByIdentity.has("alex-2"), false);
+    assert.equal(harness.screenTileBySid.has(screen.track.sid), false);
+    assert.equal(harness.screenTrackMeta.has(screen.track.sid), false);
+    assert.equal(harness.context.screenRecoveryAttempts.has(screen.track.sid), false);
+    assert.equal(harness.context.screenResubscribeIntent.has(screen.track.sid), false);
+    assert.equal(harness.context.watchedScreens.has("alex-2"), false);
+    assert.equal(harness.context._pubBitrateControl.has("alex-2"), false);
+    assert.equal(lifecycle.watchAvailability.get("alex-2"), false);
+  });
+}
+
+test("late companion disconnect cannot clear a replacement participant's screen", () => {
+  const harness = loadScreenGenerationHarness(true);
+  const lifecycle = installScreenDisconnectLifecycle(harness);
+  const oldParticipant = { identity: "alex-2$screen" };
+  const replacement = { identity: oldParticipant.identity };
+  const screen = attachDisconnectScreen(harness, replacement, "new-screen");
+  harness.context.room.remoteParticipants.set(replacement.identity, replacement);
+  lifecycle.onDisconnect(oldParticipant);
+  assert.equal(screen.tile.isConnected, true);
+  assert.ok(screen.video.srcObject);
+  assert.equal(screen.track.detachCalls.length, 0);
+  assert.equal(harness.screenTileByIdentity.get("alex-2"), screen.tile);
+  assert.equal(harness.context.watchedScreens.has("alex-2"), true);
+  assert.equal(lifecycle.watchAvailability.size, 0);
+  assert.equal(harness.context._pendingDisconnects.size, 0);
+});
+
+test("companion disconnect preserves an independently published replacement screen", () => {
+  const harness = loadScreenGenerationHarness(true);
+  const lifecycle = installScreenDisconnectLifecycle(harness);
+  const companion = { identity: "alex-2$screen" };
+  const ended = attachDisconnectScreen(harness, companion, "native-screen");
+  const parent = { identity: "alex-2" };
+  const current = attachDisconnectScreen(harness, parent, "browser-screen");
+  harness.context.room.remoteParticipants.set(parent.identity, parent);
+  lifecycle.onDisconnect(companion);
+  assert.equal(ended.video.srcObject, null);
+  assert.equal(ended.tile.isConnected, false);
+  assert.equal(current.tile.isConnected, true);
+  assert.ok(current.video.srcObject);
+  assert.equal(current.track.detachCalls.length, 0);
+  assert.equal(harness.screenTileByIdentity.get("alex-2"), current.tile);
+  assert.equal(harness.context.watchedScreens.has("alex-2"), true);
+  assert.equal(lifecycle.watchAvailability.size, 0);
+});
+
+test("old-room disconnect cannot clear the current room's screen", () => {
+  const harness = loadScreenGenerationHarness(true);
+  const lifecycle = installScreenDisconnectLifecycle(harness);
+  const participant = { identity: "alex-2$screen" };
+  const screen = attachDisconnectScreen(harness, participant, "current-screen");
+  harness.context.room = { remoteParticipants: new Map([[participant.identity, participant]]) };
+  lifecycle.onDisconnect(participant);
+  assert.equal(screen.tile.isConnected, true);
+  assert.ok(screen.video.srcObject);
+  assert.equal(screen.track.detachCalls.length, 0);
+  assert.equal(harness.screenTrackMeta.has(screen.track.sid), true);
+  assert.equal(lifecycle.watchAvailability.size, 0);
+  assert.equal(harness.context._pendingDisconnects.size, 0);
+});
+
 test("detached screen generations stop recursive video-layer and resubscribe timers", () => {
   const harness = loadScreenGenerationHarness();
   const identity = "alex-2";
