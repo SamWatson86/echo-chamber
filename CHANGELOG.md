@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.38
+
+- Screen Sharing Privacy: End Sharing waits for native capture and its publishing connection to close, cancels delayed starts, and reports unconfirmed shutdowns so they can be retried.
+- Native Capture: Replacing a share no longer loses the newer capture's stop handle, and idle Windows capture sessions stop without waiting for another frame.
+- Viewer Cleanup: Ending or leaving a share removes its screen publisher and clears the departed stream from viewers, including after a viewer reload.
+- Release: Windows desktop and control package versions are aligned at 0.6.38. Install the Windows app update to receive the native capture fixes.
+
 ## 0.6.37
 
 - Screen Audio: Battlefield 6 and entire-monitor sharing publish system audio only after the Windows app identifies Echo's exact WebView2 playback process tree and confirms the exclusion capture started.
