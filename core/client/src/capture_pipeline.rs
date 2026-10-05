@@ -6,6 +6,7 @@
 //! DXGI OutputDuplication, GPU shaders, anti-MPO) stays in its own module.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,8 @@ pub struct CapturePublisher {
     frame_count: u64,
     next_push_at: Option<Instant>,
     hardware_min_frame_interval: Duration,
+    running: Arc<AtomicBool>,
+    publisher_stopped: Arc<AtomicBool>,
 }
 
 fn should_push_frame_at_deadline(
@@ -196,6 +199,19 @@ async fn log_room_events(log_prefix: String, mut events: UnboundedReceiver<RoomE
     }
 }
 
+async fn close_capture_room(room: &Room) -> Result<(), String> {
+    match room.close().await {
+        Ok(()) => Ok(()),
+        // The server can remove the companion concurrently with local Stop.
+        Err(livekit::RoomError::AlreadyClosed)
+            if room.connection_state() == ConnectionState::Disconnected =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!("SFU room close: {error}")),
+    }
+}
+
 impl CapturePublisher {
     /// Connect to the SFU and publish a caller-selected video track.
     ///
@@ -210,6 +226,8 @@ impl CapturePublisher {
         log_prefix: &str,
         track_source: TrackSource,
         is_screencast: bool,
+        running: Arc<AtomicBool>,
+        publisher_stopped: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
         file_debug_log::append(&format!(
@@ -229,6 +247,7 @@ impl CapturePublisher {
         let (room, events) = Room::connect(sfu_url, token, RoomOptions::default())
             .await
             .map_err(|e| format!("SFU connect failed: {}", e))?;
+        publisher_stopped.store(false, Ordering::SeqCst);
         tokio::spawn(log_room_events(log_prefix.to_string(), events));
 
         eprintln!(
@@ -273,11 +292,21 @@ impl CapturePublisher {
             ..Default::default()
         };
 
-        let publication = room
+        let publication = match room
             .local_participant()
             .publish_track(LocalTrack::Video(track.clone()), publish_options)
             .await
-            .map_err(|e| format!("publish failed: {}", e))?;
+        {
+            Ok(publication) => publication,
+            Err(error) => {
+                track.disable();
+                let close_result = close_capture_room(&room).await;
+                publisher_stopped.store(close_result.is_ok(), Ordering::SeqCst);
+                return Err(format!(
+                    "publish failed: {error}; room close: {close_result:?}"
+                ));
+            }
+        };
 
         eprintln!(
             "[{}] track published sid={} source={:?}, waiting for negotiation...",
@@ -301,6 +330,8 @@ impl CapturePublisher {
             frame_count: 0,
             next_push_at: None,
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
+            running,
+            publisher_stopped,
         })
     }
 
@@ -318,6 +349,8 @@ impl CapturePublisher {
         log_prefix: &str,
         track_source: TrackSource,
         is_screencast: bool,
+        running: Arc<AtomicBool>,
+        publisher_stopped: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
         file_debug_log::append(&format!(
@@ -337,6 +370,7 @@ impl CapturePublisher {
         let (room, events) = rt
             .block_on(Room::connect(sfu_url, token, RoomOptions::default()))
             .map_err(|e| format!("SFU connect failed: {}", e))?;
+        publisher_stopped.store(false, Ordering::SeqCst);
         rt.spawn(log_room_events(log_prefix.to_string(), events));
 
         eprintln!(
@@ -379,12 +413,20 @@ impl CapturePublisher {
             ..Default::default()
         };
 
-        let publication = rt
-            .block_on(
-                room.local_participant()
-                    .publish_track(LocalTrack::Video(track.clone()), publish_options),
-            )
-            .map_err(|e| format!("publish failed: {}", e))?;
+        let publication = match rt.block_on(
+            room.local_participant()
+                .publish_track(LocalTrack::Video(track.clone()), publish_options),
+        ) {
+            Ok(publication) => publication,
+            Err(error) => {
+                track.disable();
+                let close_result = rt.block_on(close_capture_room(&room));
+                publisher_stopped.store(close_result.is_ok(), Ordering::SeqCst);
+                return Err(format!(
+                    "publish failed: {error}; room close: {close_result:?}"
+                ));
+            }
+        };
 
         eprintln!(
             "[{}] track published sid={} source={:?}, waiting for negotiation...",
@@ -408,6 +450,8 @@ impl CapturePublisher {
             frame_count: 0,
             next_push_at: None,
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
+            running,
+            publisher_stopped,
         })
     }
 
@@ -427,6 +471,9 @@ impl CapturePublisher {
         width: u32,
         height: u32,
     ) -> bool {
+        if !self.running.load(Ordering::SeqCst) {
+            return false;
+        }
         // Frame rate limiter — choose the interval based on whether we have
         // hardware (NVENC) or software (OpenH264) encoding. NVENC can handle
         // 240fps input because it's a dedicated ASIC. OpenH264 runs on CPU
@@ -464,6 +511,9 @@ impl CapturePublisher {
             buffer: i420,
             timestamp_us: self.start_time.elapsed().as_micros() as i64,
         };
+        if !self.running.load(Ordering::SeqCst) {
+            return false;
+        }
         self.source.capture_frame(&vf);
         self.frame_count += 1;
         true
@@ -757,13 +807,18 @@ impl CapturePublisher {
     }
 
     /// Close the SFU room connection.
-    pub async fn shutdown(self) {
-        self.room.close().await.ok();
+    pub async fn shutdown(self) -> Result<(), String> {
+        self.running.store(false, Ordering::SeqCst);
+        self.track.disable();
+        let result = close_capture_room(&self.room).await;
+        self.publisher_stopped
+            .store(result.is_ok(), Ordering::SeqCst);
+        result
     }
 
     /// Blocking variant of shutdown for use inside `spawn_blocking`.
-    pub fn shutdown_blocking(self, rt: &tokio::runtime::Handle) {
-        rt.block_on(self.room.close()).ok();
+    pub fn shutdown_blocking(self, rt: &tokio::runtime::Handle) -> Result<(), String> {
+        rt.block_on(self.shutdown())
     }
 }
 

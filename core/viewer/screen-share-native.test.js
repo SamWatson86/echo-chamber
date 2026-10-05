@@ -10,6 +10,13 @@ function loadScreenShareNative() {
   const context = {
     window: { __ECHO_NATIVE__: true },
     _nativeCaptureStopUnlisten: null,
+    _screenShareVideoTrack: null,
+    _screenShareAudioTrack: null,
+    _screenShareStatsInterval: null,
+    _bitrateCaps: new Map(),
+    _bitrateCapCleanupTimer: null,
+    _cameraReducedForScreenShare: false,
+    logEvent() {},
     screenEnabled: false,
     _echoServerUrl: "https://echo.example.test:9443",
     adminToken: "admin-token",
@@ -41,6 +48,7 @@ function loadScreenShareNative() {
       return null;
     },
     tauriListen: undefined,
+    hasTauriIPC: () => false,
     document: {
       body: { appendChild() {} },
       createElement() {
@@ -1306,6 +1314,300 @@ test("native stop clears local screen tile and removes the screen companion", as
   assert.match(fetches[0].url, /\/v1\/rooms\/main\/kick\/Sam%24screen$/);
   assert.equal(fetches[0].opts.method, "POST");
   assert.equal(fetches[0].opts.headers.Authorization, "Bearer admin-token");
+});
+
+test("End Sharing stops both native routes after viewer flags were lost on reload", async () => {
+  const { context, calls, fetches } = loadScreenShareNative();
+  await context.stopScreenShareManual();
+  assert.deepEqual(calls.filter(call => call.command.startsWith('stop_')).map(call => call.command),
+    ['stop_screen_share', 'stop_desktop_capture']);
+  assert.equal(fetches.length, 1);
+  assert.equal(context.screenEnabled, false);
+});
+
+test("failed native stop still attempts the other route and companion removal, and keeps retry available", async () => {
+  const { context, calls, fetches } = loadScreenShareNative();
+  context.window._echoNativeCaptureActive = true;
+  context.window._echoNativeCaptureMode = 'wgc';
+  context.screenEnabled = true;
+  context.tauriInvoke = async command => {
+    calls.push({ command });
+    if (command === 'stop_screen_share') throw new Error('native shutdown timed out');
+  };
+  await assert.rejects(context.stopScreenShareManual(), /could not be fully stopped/);
+  assert.equal(calls.some(call => call.command === 'stop_desktop_capture'), true);
+  assert.equal(fetches.length, 1);
+  assert.equal(context.screenEnabled, true);
+  assert.equal(context.window._echoNativeCaptureActive, true);
+  context.tauriInvoke = async () => {};
+  await context.stopScreenShareManual();
+  assert.equal(context.screenEnabled, false);
+});
+
+test("concurrent End Sharing requests wait for the same completed native shutdown", async () => {
+  const { context, calls } = loadScreenShareNative();
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  context.screenEnabled = true;
+  context.tauriInvoke = async command => { calls.push({ command }); await pending; };
+  const first = context.stopScreenShareManual();
+  const second = context.stopScreenShareManual();
+  assert.equal(first, second);
+  let completed = false;
+  first.then(() => { completed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(completed, false);
+  assert.equal(context.screenEnabled, true);
+  release();
+  await first;
+  assert.equal(context.screenEnabled, false);
+  assert.equal(calls.length, 2);
+});
+
+test("End Sharing cancels a pending native start without resurrecting video or audio", async () => {
+  const { context, calls } = loadScreenShareNative();
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const starting = new Promise(resolve => { entered = resolve; });
+  context.tauriInvoke = async command => {
+    calls.push({ command });
+    if (command === 'get_os_build_number') return 26100;
+    if (command === 'start_screen_share') { entered(); await gate; }
+  };
+  let audioStarts = 0;
+  context.startNativeAudioCapture = async () => { audioStarts++; };
+  const share = context.startScreenShareManual();
+  await starting;
+  const stop = context.stopScreenShareManual();
+  release();
+  assert.equal(await share, false);
+  await stop;
+  assert.equal(context.screenEnabled, false);
+  assert.equal(context.window._echoNativeCaptureActive, false);
+  assert.equal(audioStarts, 0);
+  assert.ok(calls.findIndex(call => call.command === 'stop_screen_share') >
+    calls.findIndex(call => call.command === 'start_screen_share'));
+});
+
+test("ending a share while the picker is open prevents a later selection from starting capture", async () => {
+  const { context, calls } = loadScreenShareNative();
+  let choose;
+  context.showCapturePicker = () => new Promise(resolve => { choose = resolve; });
+  const start = context.startScreenShareManual();
+  await context.stopScreenShareManual();
+  choose({ sourceType: 'game', id: 42 });
+  assert.equal(await start, false);
+  assert.equal(calls.some(call => call.command.startsWith('start_')), false);
+});
+
+test("disconnect during native startup revokes capture for the previous room", async () => {
+  const { context, calls } = loadScreenShareNative();
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const starting = new Promise(resolve => { entered = resolve; });
+  context.tauriInvoke = async command => {
+    calls.push({ command });
+    if (command === 'get_os_build_number') return 26100;
+    if (command === 'start_screen_share') { entered(); await gate; }
+  };
+  const share = context.startScreenShareManual();
+  await starting;
+  context.room = null;
+  release();
+  assert.equal(await share, false);
+  assert.equal(context.screenEnabled, false);
+  assert.equal(calls.some(call => call.command === 'stop_screen_share'), true);
+});
+
+test("recovery superseding a pending native start rolls back capture before returning cancelled", async () => {
+  for (const failStop of [false, true]) {
+    const { context, calls } = loadScreenShareNative();
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const starting = new Promise(resolve => { entered = resolve; });
+    context.tauriInvoke = async command => {
+      calls.push({ command });
+      if (command === 'get_os_build_number') return 26100;
+      if (command === 'start_screen_share') { entered(); await gate; }
+      if (command === 'get_capture_health') return { capture_active: false };
+      if (command === 'stop_screen_share' && failStop) throw new Error('IPC failure');
+    };
+    const share = context.startScreenShareManual();
+    await starting;
+    await context.recoverNativeScreenShare(context.room);
+    release();
+    if (failStop) {
+      await assert.rejects(share, /Canceled screen capture could not be stopped/);
+      assert.equal(context.screenEnabled, true);
+      assert.equal(context.window._echoNativeCaptureActive, true);
+    } else {
+      assert.equal(await share, false);
+      assert.equal(context.screenEnabled, false);
+    }
+    assert.equal(calls.some(call => call.command === 'stop_screen_share'), true);
+  }
+});
+
+test("native recovery cannot restart audio while End Sharing is awaiting IPC", async () => {
+  const { context, published } = loadNativeShareRecovery();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const invoke = context.tauriInvoke;
+  context.tauriInvoke = async (command, args) => {
+    if (command.startsWith('stop_')) await gate;
+    return invoke(command, args);
+  };
+  const stop = context.stopScreenShareManual();
+  await context.recoverNativeScreenShare(context.room);
+  assert.equal(published.length, 0);
+  release();
+  await stop;
+  assert.equal(context.screenEnabled, false);
+});
+
+test("browser source tracks stop immediately even when unpublish fails and audio cleanup is pending", async () => {
+  const { context } = loadScreenShareNative();
+  context.window.__ECHO_NATIVE__ = false;
+  const stopped = [];
+  context._screenShareVideoTrack = { mediaStreamTrack: { stop() { stopped.push('video'); } } };
+  context._screenShareAudioTrack = { mediaStreamTrack: { stop() { stopped.push('audio'); } } };
+  const unpublished = [];
+  context.room.localParticipant.unpublishTrack = async track => {
+    unpublished.push(track);
+    throw new Error('signaling unavailable');
+  };
+  let release;
+  context.stopNativeAudioCapture = () => new Promise(resolve => { release = resolve; });
+  const stop = context.stopScreenShareManual();
+  assert.deepEqual(stopped, ['video', 'audio']);
+  release();
+  await assert.rejects(stop, /could not be fully stopped/);
+  assert.equal(unpublished.length, 2);
+  assert.equal(context.screenEnabled, true);
+  assert.ok(context._screenShareVideoTrack);
+  assert.ok(context._screenShareAudioTrack);
+});
+
+test("native audio IPC failure is surfaced after stopping the published track and closing its context", async () => {
+  const { context } = loadScreenShareNative();
+  const published = [], lifecycle = [];
+  installNativeAudioRuntime(context, published, lifecycle);
+  context.hasTauriIPC = () => true;
+  context.tauriInvoke = async () => {};
+  await context.startNativeAudioCapture(5678);
+  const track = published[0].track;
+  let stopped = false;
+  track.mediaStreamTrack.stop = () => { stopped = true; };
+  context.tauriInvoke = async command => {
+    if (command === 'stop_audio_capture') throw new Error('audio stop IPC failed');
+  };
+  await assert.rejects(context.stopScreenShareManual(), /could not be fully stopped/);
+  assert.equal(stopped, true);
+  assert.equal(context._nativeAudioCtx, null);
+  assert.equal(context.screenEnabled, true);
+});
+
+test("browser picker completion after End Sharing stops the acquired source without publishing", async () => {
+  const { context } = loadScreenShareNative();
+  context.window.__ECHO_NATIVE__ = false;
+  let choose, stopped = 0;
+  context.navigator = { mediaDevices: { getDisplayMedia: () => new Promise(resolve => { choose = resolve; }) } };
+  const share = context.startScreenShareManual();
+  await context.stopScreenShareManual();
+  choose({ getTracks: () => [{ stop() { stopped++; } }] });
+  assert.equal(await share, false);
+  assert.equal(stopped, 1);
+});
+
+function installBrowserVideo(context, sender = null) {
+  const track = {
+    readyState: 'live',
+    getSettings: () => ({ width: 1920, height: 1080, frameRate: 30 }),
+    addEventListener() {},
+    stop() { this.readyState = 'ended'; },
+  };
+  const stream = { getTracks: () => [track], getVideoTracks: () => [track], getAudioTracks: () => [] };
+  context.window.__ECHO_NATIVE__ = false;
+  context.navigator = { platform: 'Win32', mediaDevices: { getDisplayMedia: async () => stream } };
+  context.prewarmedRooms = new Map();
+  context.getScreenSharePublishOptions = () => ({});
+  context.getLiveKitClient = () => ({
+    Track: { Source: { ScreenShare: 'screen_share' } },
+    LocalVideoTrack: class {
+      constructor(mediaStreamTrack) { this.mediaStreamTrack = mediaStreamTrack; this.sender = sender; }
+    },
+  });
+  context.room.localParticipant.unpublishTrack = async () => {};
+  return { track, stream };
+}
+
+test("overlapping browser start controls cannot acquire an untracked second capture", async () => {
+  const { context } = loadScreenShareNative();
+  const { track } = installBrowserVideo(context);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const publishing = new Promise(resolve => { entered = resolve; });
+  let publications = 0;
+  context.room.localParticipant.publishTrack = async () => { publications++; entered(); await gate; };
+  const first = context.startScreenShareManual();
+  await publishing;
+  const second = context.startScreenShareManual();
+  assert.equal(first, second);
+  await context.stopScreenShareManual();
+  assert.equal(track.readyState, 'ended');
+  assert.equal(context.screenEnabled, false);
+  release();
+  assert.equal(await first, false);
+  assert.equal(publications, 1);
+});
+
+test("stopping during browser sender setup cannot resurrect sharing or its stats timer", async () => {
+  const { context } = loadScreenShareNative();
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const configuring = new Promise(resolve => { entered = resolve; });
+  const { track, stream } = installBrowserVideo(context, {
+    getParameters: () => ({ encodings: [] }),
+    setParameters: async () => { entered(); await gate; },
+  });
+  context.shouldUseConservativeBrowserScreenShare = () => false;
+  context.room.localParticipant.publishTrack = async () => {};
+  context.document.createElement = type => type === 'canvas' ? {
+    style: {}, getContext: () => ({ drawImage() {} }), captureStream: () => stream, remove() {},
+  } : {
+    readyState: 0, style: {}, addEventListener() {}, play: async () => {}, pause() {},
+  };
+  context.MediaStream = class { getTracks() { return [track]; } };
+  context.Blob = class {};
+  context.URL = { createObjectURL: () => 'blob:test' };
+  context.Worker = class { postMessage() {} terminate() {} };
+  context.setTimeout = () => 0;
+  let timers = 0;
+  context.setInterval = () => { timers++; return 1; };
+  const share = context.startScreenShareManual();
+  await configuring;
+  await context.stopScreenShareManual();
+  release();
+  assert.equal(await share, false);
+  assert.equal(track.readyState, 'ended');
+  assert.equal(context.screenEnabled, false);
+  assert.equal(timers, 0);
+});
+
+test("a delayed native stopped event cannot clear an active replacement", async () => {
+  const { context } = loadScreenShareNative();
+  const listeners = new Map();
+  context.tauriListen = async (name, callback) => { listeners.set(name, callback); return () => {}; };
+  context.screenEnabled = true;
+  context.window._echoNativeCaptureActive = true;
+  context.tauriInvoke = async () => ({ capture_active: true });
+  await context._startNativeCaptureStopListeners(context._nativeShareRecoveryGeneration);
+  await listeners.get('screen-capture-stopped')();
+  assert.equal(context.screenEnabled, true);
+  assert.equal(context.window._echoNativeCaptureActive, true);
+  context.tauriInvoke = async () => ({ capture_active: false });
+  await listeners.get('screen-capture-stopped')();
+  assert.equal(context.screenEnabled, false);
 });
 
 test("native audio worklet downmixes multichannel WASAPI frames to stereo", () => {

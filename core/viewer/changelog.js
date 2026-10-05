@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-10-05",
+    title: "Screen Sharing Privacy",
+    notes: [
+      "End Sharing now waits for capture shutdown, cancels delayed starts, and reports failures so you can retry. Viewers immediately clear a departed stream.",
+      "The accompanying Windows app update fixes a capture shutdown race that could leave a replaced share running. Install the desktop update to receive the native fix."
+    ]
+  },
+  {
     version: "2026-09-24",
     title: "Jam Playback Startup",
     notes: [

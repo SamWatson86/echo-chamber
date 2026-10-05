@@ -130,6 +130,45 @@ function getCaptureSourceReportSnapshot() {
 // rebuilding the JavaScript-owned audio publication. Never infer a game PID.
 var _nativeShareRecoveryGeneration = 0;
 var NATIVE_SHARE_SESSION_KEY = 'echo.native-share-session.v1';
+var _nativeVideoIpcTail = Promise.resolve();
+var _screenShareStopPromise = null;
+var _screenShareStartPromise = null;
+
+function _queueNativeVideoIpc(action) {
+  var pending = _nativeVideoIpcTail.catch(function() {}).then(action);
+  _nativeVideoIpcTail = pending.catch(function() {});
+  return pending;
+}
+
+function _screenShareCancelledError() {
+  var error = new Error('Screen sharing was cancelled');
+  error.code = 'ECHO_SCREEN_SHARE_CANCELLED';
+  return error;
+}
+
+function _startNativeVideo(command, args, generation, ownerRoom) {
+  return _queueNativeVideoIpc(async function() {
+    if (generation !== _nativeShareRecoveryGeneration || room !== ownerRoom) throw _screenShareCancelledError();
+    await tauriInvoke(command, args);
+    if (generation !== _nativeShareRecoveryGeneration || room !== ownerRoom) {
+      // Recovery or another start can supersede this operation too. Roll back
+      // inside the queue, before any replacement is allowed to acquire capture.
+      try {
+        await tauriInvoke(command === 'start_desktop_capture' ? 'stop_desktop_capture' : 'stop_screen_share');
+      } catch (cause) {
+        window._echoNativeCaptureActive = true;
+        window._echoNativeCaptureMode = command === 'start_desktop_capture' ? 'desktop-dd' : 'wgc';
+        screenEnabled = true;
+        renderPublishButtons();
+        var error = new Error('Canceled screen capture could not be stopped. Try End Sharing again; if it still fails, close Echo.');
+        error.code = 'ECHO_SCREEN_SHARE_STOP_FAILED';
+        debugLog('[screen-share] canceled start cleanup failed: ' + cause);
+        throw error;
+      }
+      throw _screenShareCancelledError();
+    }
+  });
+}
 
 function clearNativeShareSession() {
   try { window.sessionStorage.removeItem(NATIVE_SHARE_SESSION_KEY); } catch (_) {}
@@ -154,7 +193,7 @@ async function rememberNativeShareSession(source, mode, generation) {
 }
 
 async function recoverNativeScreenShare(expectedRoom) {
-  if (!window.__ECHO_NATIVE__ || !expectedRoom || room !== expectedRoom ||
+  if (_screenShareStopPromise || !window.__ECHO_NATIVE__ || !expectedRoom || room !== expectedRoom ||
       (window._echoNativeCaptureActive && _nativeAudioOperation?.participant === expectedRoom.localParticipant &&
         !_nativeAudioOperation.cancelled)) return;
   var generation = ++_nativeShareRecoveryGeneration;
@@ -471,11 +510,19 @@ async function _startNativeCaptureStopListeners(generation) {
     for (var eventName in stopEvents) {
       if (!Object.prototype.hasOwnProperty.call(stopEvents, eventName)) continue;
       var unlisten = await tauriListen(eventName, function(name) {
-        return function() {
+        return async function() {
+          if (generation !== undefined && generation !== _nativeShareRecoveryGeneration) return;
           debugLog('[' + name + '] stopped by Rust');
-          _finalizeNativeCaptureStop(stopEvents[name]).catch(function(err) {
+          try {
+            // Native events may be queued until after a replacement starts.
+            // Recheck native ownership before clearing current controls/audio.
+            var health = await tauriInvoke('get_capture_health');
+            if ((generation !== undefined && generation !== _nativeShareRecoveryGeneration) ||
+                health?.capture_active) return;
+            await _finalizeNativeCaptureStop(stopEvents[name]);
+          } catch (err) {
             debugLog('[screen-share] native stop cleanup failed: ' + (err.message || err));
-          });
+          }
         };
       }(eventName));
       unlisteners.push(unlisten);
@@ -499,8 +546,18 @@ async function _startNativeCaptureStopListeners(generation) {
   };
 }
 
-async function startScreenShareManual() {
+function startScreenShareManual() {
+  if (_screenShareStartPromise) return _screenShareStartPromise;
+  _screenShareStartPromise = _startScreenShareManual().finally(function() {
+    _screenShareStartPromise = null;
+  });
+  return _screenShareStartPromise;
+}
+
+async function _startScreenShareManual() {
+  if (_screenShareStopPromise) await _screenShareStopPromise;
   var shareGeneration = ++_nativeShareRecoveryGeneration;
+  var shareRoom = room;
   const LK = getLiveKitClient();
 
   // ── Native client path: custom picker → Tauri IPC ──
@@ -527,6 +584,7 @@ async function startScreenShareManual() {
 
   if (isNativeClient) {
     if (!source) return false;
+    if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) return false;
 
     // Detect OS build number for WGC availability (24H2+ = build 26100+)
     // If the IPC command doesn't exist (older client binary), assume WGC is supported
@@ -541,6 +599,7 @@ async function startScreenShareManual() {
   }
 
   if (isNativeClient) {
+    if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) return false;
     // Step 1: get control URL
     var controlUrl = _echoServerUrl;
     if (!controlUrl) { showToast('No server URL configured', 8000); return false; }
@@ -573,7 +632,7 @@ async function startScreenShareManual() {
     } catch (listenErr) {
       debugLog('[screen-share] native stop listener registration failed: ' + (listenErr.message || listenErr));
     }
-    if (shareGeneration !== _nativeShareRecoveryGeneration) return false;
+    if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) return false;
 
     // Step 3: start capture
     try {
@@ -593,15 +652,16 @@ async function startScreenShareManual() {
         if (!captureStarted && gameCaptureMode !== 'desktop-dd' && wgcSupported) {
           try {
             debugLog('[wgc] trying WGC window capture for HWND ' + source.id + ' (build ' + osBuild + ')');
-            await tauriInvoke('start_screen_share', {
+            await _startNativeVideo('start_screen_share', {
               sourceId: source.id,
               sfuUrl: sfuUrl,
               token: screenToken,
               publishProfile: publishProfile,
-            });
+            }, shareGeneration, shareRoom);
             window._echoNativeCaptureMode = 'wgc';
             captureStarted = true;
           } catch (wgcErr) {
+            if (wgcErr.code === 'ECHO_SCREEN_SHARE_CANCELLED' || wgcErr.code === 'ECHO_SCREEN_SHARE_STOP_FAILED') throw wgcErr;
             wgcStartError = wgcErr.message || wgcErr;
             debugLog('[wgc] start failed: ' + wgcStartError);
           }
@@ -615,19 +675,20 @@ async function startScreenShareManual() {
             var ddResult = await tauriInvoke('check_desktop_capture_available');
             if (ddResult && ddResult[0]) {
               debugLog('[desktop-dd] available: ' + ddResult[1]);
-              await tauriInvoke('start_desktop_capture', {
+              await _startNativeVideo('start_desktop_capture', {
                 hwnd: source.id,
                 fullscreen: source.isMonitor || false,
                 sfuUrl: sfuUrl,
                 token: screenToken,
                 publishProfile: publishProfile,
-              });
+              }, shareGeneration, shareRoom);
               window._echoNativeCaptureMode = 'desktop-dd';
               captureStarted = true;
             } else {
               debugLog('[desktop-dd] not available: ' + (ddResult ? ddResult[1] : 'unknown'));
             }
           } catch (ddErr) {
+            if (ddErr.code === 'ECHO_SCREEN_SHARE_CANCELLED' || ddErr.code === 'ECHO_SCREEN_SHARE_STOP_FAILED') throw ddErr;
             debugLog('[desktop-dd] check/start failed: ' + (ddErr.message || ddErr));
           }
         }
@@ -649,24 +710,24 @@ async function startScreenShareManual() {
           debugLog('[monitor] using DXGI DD for monitor capture');
           var ddResult = await tauriInvoke('check_desktop_capture_available');
           if (ddResult && ddResult[0]) {
-            await tauriInvoke('start_desktop_capture', {
+            await _startNativeVideo('start_desktop_capture', {
               hwnd: source.id,
               fullscreen: true,
               sfuUrl: sfuUrl,
               token: screenToken,
               publishProfile: 'desktop',
-            });
+            }, shareGeneration, shareRoom);
             window._echoNativeCaptureMode = 'desktop-dd';
           } else {
             throw new Error('Desktop capture not available: ' + (ddResult ? ddResult[1] : 'unknown'));
           }
         } else if (wgcSupported) {
-          await tauriInvoke('start_screen_share', {
+          await _startNativeVideo('start_screen_share', {
             sourceId: source.id,
             sfuUrl: sfuUrl,
             token: screenToken,
             publishProfile: 'desktop',
-          });
+          }, shareGeneration, shareRoom);
           window._echoNativeCaptureMode = 'wgc';
         } else {
           throw new Error('Window capture requires Windows 11 24H2+ (current build: ' + osBuild + ')');
@@ -720,6 +781,8 @@ async function startScreenShareManual() {
       }
 
     } catch (err) {
+      if (err.code === 'ECHO_SCREEN_SHARE_CANCELLED') return false;
+      if (err.code === 'ECHO_SCREEN_SHARE_STOP_FAILED') throw err;
       showToast('Capture failed: ' + (err.message || err), 8000);
       _stopNativeCaptureStopListeners();
       return false;
@@ -740,6 +803,10 @@ async function startScreenShareManual() {
   });
   var gdmConstraints = buildBrowserDisplayMediaConstraints(conservativeBrowserShare);
   const stream = await navigator.mediaDevices.getDisplayMedia(gdmConstraints);
+  if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) {
+    stopBrowserCaptureStream(stream);
+    return false;
+  }
   var unexpectedBrowserAudioTracks = stopUnexpectedBrowserAudioTracks(stream);
   if (unexpectedBrowserAudioTracks > 0) {
     debugLog("Blocked " + unexpectedBrowserAudioTracks + " unexpected browser screen audio track(s)");
@@ -819,7 +886,7 @@ async function startScreenShareManual() {
     var _canvasFrameCount = 0;
     var _canvasDrawActive = false;
     function canvasDraw() {
-      if (!offVideo || !_canvasDrawActive) return;
+      if (!offVideo || !_canvasDrawActive || shareGeneration !== _nativeShareRecoveryGeneration) return;
       if (offVideo.readyState >= 2 && offVideo.videoWidth > 0) {
         // Fallback resize check (primary is the 'resize' event on offVideo)
         if (_canvasFrameCount > 0 && _canvasFrameCount % 30 === 0) {
@@ -859,7 +926,7 @@ async function startScreenShareManual() {
     ], { type: "application/javascript" });
     var worker = new Worker(URL.createObjectURL(workerBlob));
     worker.onmessage = function() {
-      if (!offVideo || !_canvasDrawActive) return;
+      if (!offVideo || !_canvasDrawActive || shareGeneration !== _nativeShareRecoveryGeneration) return;
       if (offVideo.readyState >= 2 && offVideo.videoWidth > 0) {
         ctx2d.drawImage(offVideo, 0, 0, canvasW, canvasH);
         _canvasFrameCount++;
@@ -868,7 +935,7 @@ async function startScreenShareManual() {
     window._canvasFrameWorker = worker;
     // Start drawing once video has data
     function startCanvasDraw() {
-      if (_canvasDrawActive) return;
+      if (_canvasDrawActive || shareGeneration !== _nativeShareRecoveryGeneration) return;
       _canvasDrawActive = true;
       debugLog("[canvas-pipe] starting draw loops — offVideo: " + offVideo.videoWidth + "x" + offVideo.videoHeight + " readyState=" + offVideo.readyState);
       // Start rAF loop
@@ -948,17 +1015,24 @@ async function startScreenShareManual() {
 
     // Create LiveKit LocalVideoTrack and publish
     _screenShareVideoTrack = new LK.LocalVideoTrack(publishMst, undefined, false);
+    var browserVideoTrack = _screenShareVideoTrack;
     try {
-      await room.localParticipant.publishTrack(_screenShareVideoTrack, {
+      await shareRoom.localParticipant.publishTrack(browserVideoTrack, {
         source: LK.Track.Source.ScreenShare,
         ...getScreenSharePublishOptions(canvasW, canvasH, conservativeBrowserShare),
       });
     } catch (publishError) {
-      if (conservativeBrowserShare) {
-        stopBrowserCaptureStream(stream);
-        _screenShareVideoTrack = null;
-      }
+      stopBrowserCaptureStream(stream);
+      publishMst.stop();
+      if (_screenShareVideoTrack === browserVideoTrack) _screenShareVideoTrack = null;
       throw publishError;
+    }
+    if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) {
+      stopBrowserCaptureStream(stream);
+      publishMst.stop();
+      await shareRoom.localParticipant.unpublishTrack(browserVideoTrack, true);
+      if (_screenShareVideoTrack === browserVideoTrack) _screenShareVideoTrack = null;
+      return false;
     }
 
     // Set initial sender parameters for simulcast screen share.
@@ -998,6 +1072,7 @@ async function startScreenShareManual() {
           }
         }
         await sender.setParameters(params);
+        if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) return false;
         const vp = sender.getParameters();
         debugLog("Screen share encodings AFTER override: " + JSON.stringify(vp.encodings));
       if (vp.encodings) {
@@ -1028,6 +1103,7 @@ async function startScreenShareManual() {
         debugLog("Screen share post-publish setParameters FAILED: " + e.message);
       }
     }
+    if (shareGeneration !== _nativeShareRecoveryGeneration || room !== shareRoom) return false;
 
     // Monitor capture track health — log if track ends/mutes unexpectedly
     if (publishMst) {
@@ -1356,43 +1432,55 @@ async function startScreenShareManual() {
 
     // Handle browser "Stop sharing" button
     videoMst.addEventListener("ended", () => {
+      if (shareGeneration !== _nativeShareRecoveryGeneration) return;
       debugLog("Screen share ended by browser stop button");
       logEvent("screen-share-stop", "browser stop button");
       stopScreenShareManual().catch(() => {});
-      screenEnabled = false;
-      renderPublishButtons();
     });
   }
 
   debugLog("Browser screen sharing is video-only; no display audio was published");
   showToast("Screen shared without computer audio. Use the Echo Windows app for safe game audio.", 6000);
+  return shareGeneration === _nativeShareRecoveryGeneration && room === shareRoom;
 }
 
-async function stopScreenShareManual() {
+function stopScreenShareManual() {
+  if (_screenShareStopPromise) return _screenShareStopPromise;
+  _screenShareStopPromise = _stopScreenShareManual().finally(function() {
+    _screenShareStopPromise = null;
+  });
+  return _screenShareStopPromise;
+}
+
+async function _stopScreenShareManual() {
   ++_nativeShareRecoveryGeneration;
   clearNativeShareSession();
+  var owner = room && room.localParticipant;
+  var roomName = currentRoomName || 'main';
+  // Revoke browser sources before awaiting any IPC or network operation.
+  [_screenShareVideoTrack, _screenShareAudioTrack].forEach(function(track) {
+    try { track?.mediaStreamTrack?.stop(); } catch (_) {}
+  });
+  if (window._canvasOffVideo) stopBrowserCaptureStream(window._canvasOffVideo.srcObject);
   // ── Native capture stop path ──
-  if (window._echoNativeCaptureActive || window._echoNativeCaptureMode) {
-    var stopCommand = window._echoNativeCaptureMode === 'desktop-dd'
-      ? 'stop_desktop_capture'
-      : 'stop_screen_share';
-    var localIdentity = room && room.localParticipant ? room.localParticipant.identity : null;
-    var roomName = currentRoomName || 'main';
+  // JavaScript flags are lost on reload and cannot prove native capture stopped.
+  var nativeStop = null;
+  if (window.__ECHO_NATIVE__ || window._echoNativeCaptureActive || window._echoNativeCaptureMode) {
     _stopNativeCaptureStopListeners();
-    try {
-      await tauriInvoke(stopCommand);
-    } catch (e) {
-      console.error('[screen-share] native stop error:', e);
-    }
-    _clearNativeScreenTilesForIdentity(localIdentity);
-    await _removeNativeScreenCompanion(localIdentity, roomName);
-    await _finalizeNativeCaptureStop(null);
-    return; // Don't fall through to browser path
+    nativeStop = _queueNativeVideoIpc(async function() {
+      var commands = ['stop_screen_share', 'stop_desktop_capture'];
+      var results = await Promise.allSettled(commands.map(function(command) { return tauriInvoke(command); }));
+      return results.filter(function(result, index) {
+        return result.status === 'rejected' &&
+          !(typeof isTauriCommandMissingError === 'function' &&
+            isTauriCommandMissingError(result.reason, commands[index]));
+      });
+    });
   }
 
   // ── Browser stop path ──
   // Stop native per-process audio capture if active
-  await stopNativeAudioCapture();
+  var audioStop = stopNativeAudioCapture().catch(function(error) { return error; });
   // Clean up canvas pipeline (Web Worker frame timer)
   if (window._canvasFrameWorker) {
     try { window._canvasFrameWorker.postMessage("stop"); window._canvasFrameWorker.terminate(); } catch {}
@@ -1437,21 +1525,40 @@ async function stopScreenShareManual() {
     restoreCameraQuality();
     debugLog("Adaptive: camera quality restored (screen share stopped)");
   }
-  try {
-    if (_screenShareVideoTrack) {
-      await room.localParticipant.unpublishTrack(_screenShareVideoTrack, true);
-      _screenShareVideoTrack.mediaStreamTrack?.stop();
-      _screenShareVideoTrack = null;
-    }
-    if (_screenShareAudioTrack) {
-      await room.localParticipant.unpublishTrack(_screenShareAudioTrack, true);
-      _screenShareAudioTrack.mediaStreamTrack?.stop();
-      _screenShareAudioTrack = null;
-    }
-  } catch (e) {
-    debugLog("stopScreenShareManual error: " + e.message);
+  var videoTrack = _screenShareVideoTrack;
+  var audioTrack = _screenShareAudioTrack;
+  var browserTracks = [videoTrack, audioTrack].filter(Boolean);
+  _screenShareVideoTrack = null;
+  _screenShareAudioTrack = null;
+  var unpublishes = Promise.allSettled(browserTracks.map(function(track) {
+    return Promise.resolve().then(function() { return owner?.unpublishTrack(track, true); });
+  }));
+  var nativeErrors = nativeStop ? await nativeStop : [];
+  // This server-side removal is defense in depth, never a substitute for
+  // stopping the local source (which could otherwise reconnect).
+  if (nativeStop) await _removeNativeScreenCompanion(owner?.identity, roomName);
+  var audioError = await audioStop;
+  var publicationResults = await unpublishes;
+  publicationResults.forEach(function(result, index) {
+    if (result.status !== 'rejected') return;
+    debugLog('[screen-share] unpublish failed after source stop: ' + result.reason);
+    // Retain stopped tracks for a retry; never leave a failed removal hidden.
+    if (browserTracks[index] === videoTrack) _screenShareVideoTrack = videoTrack;
+    if (browserTracks[index] === audioTrack) _screenShareAudioTrack = audioTrack;
+  });
+  if (nativeErrors.length || audioError || publicationResults.some(function(result) { return result.status === 'rejected'; })) {
+    debugLog('[screen-share] stop not confirmed: ' + (audioError || nativeErrors.map(function(result) { return result.reason; }).join('; ')));
+    screenEnabled = true; // Keep End Sharing available for retry.
+    renderPublishButtons();
+    throw new Error('Screen sharing could not be fully stopped. Try End Sharing again; if it still fails, close Echo.');
   }
-  // Native audio capture stopped in stopNativeAudioCapture() above
+  if (nativeStop) _clearNativeScreenTilesForIdentity(owner?.identity);
+  window._echoNativeCaptureActive = false;
+  window._echoNativeCaptureMode = null;
+  _stopSourceVisibilityMonitor();
+  _stopQualityWarnListener();
+  screenEnabled = false;
+  renderPublishButtons();
 }
 
 // ---------- Native per-process audio capture (Tauri client only) ----------
@@ -1695,21 +1802,22 @@ function _queueNativeAudioRustStop() {
   });
   return stopAttempt.catch(function(e) {
     debugLog("[native-audio] stop_audio_capture error: " + e);
+    throw e;
   });
 }
 
 async function _unpublishNativeAudioOperationTrack(operation) {
   if (!operation || !operation.track) return;
+  if (!operation.trackStopped) {
+    operation.trackStopped = true;
+    try { operation.track.mediaStreamTrack?.stop(); } catch (e) {}
+  }
   try {
     if (operation.participant && typeof operation.participant.unpublishTrack === "function") {
       await operation.participant.unpublishTrack(operation.track, true);
     }
   } catch (e) {
     debugLog("[native-audio] unpublish cleanup error: " + e);
-  }
-  if (!operation.trackStopped) {
-    operation.trackStopped = true;
-    try { operation.track.mediaStreamTrack?.stop(); } catch (e) {}
   }
 }
 
@@ -1756,12 +1864,14 @@ async function _cleanupNativeAudioOperation(operation, options) {
     })();
   }
 
-  await rustStop;
+  var stopError = null;
+  try { await rustStop; } catch (error) { stopError = error; }
   if (operation && operation.cleanupPromise) await operation.cleanupPromise;
   if (operation) {
     _drainNativeAudioUnlisteners(operation);
     if (options.retryTrackCleanup) await _unpublishNativeAudioOperationTrack(operation);
   }
+  if (stopError) throw stopError;
 }
 
 function _nativeAudioOperationFromCurrentGlobals() {
