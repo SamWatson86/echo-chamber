@@ -141,6 +141,32 @@ and Git SHA, `/health` is OK, and the host log's control path exactly matches
 the immutable `control_exe` path in the active host JSON. Do not use a stale
 hard-coded version or checkout path as release evidence.
 
+## Screen-share privacy
+
+A Windows native screen share is a separate LiveKit participant named
+`<owner identity>$screen`. An offline owner in the control dashboard is not proof
+that this publisher stopped. Check the authoritative SFU room roster and whether
+receiver decoded-frame counters are still advancing.
+
+From 0.6.39, the control plane polls actual SFU room membership every two seconds
+(after each completed pass), with a two-second timeout per request. It removes
+screen publishers whose parent is absent, and shares whose previously observed
+parent SID was replaced by a different connection. Browser heartbeat expiry does
+not trigger this removal. Each candidate is checked against a fresh roster and
+the same screen SID before removal. Failed reads skip cleanup and are retried;
+the interval is not a hard shutdown deadline during an SFU/control outage.
+
+The SFU removal API accepts identity rather than an atomic SID precondition.
+A final check/removal race remains possible, and the in-memory parent binding
+cannot recover ownership history from before control startup. This guard is a
+backstop; native and viewer stop paths remain responsible for immediate shutdown.
+Windows 0.6.39 also cancels capture on terminal publisher disconnect and app exit.
+
+For a confirmed live orphan, an authorized operator can remove only its exact
+`$screen` identity through `POST /v1/rooms/<room>/kick/<URL-encoded companion>`.
+Require successful removal of that primary target, then verify the authoritative
+SFU roster and receiver counters. Do not use a full-room reload as the first step.
+
 ## Restart and disconnect incident triage
 
 Gather evidence before restarting Echo. Record the current `EchoCoreHost`,

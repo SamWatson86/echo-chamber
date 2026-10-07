@@ -195,6 +195,221 @@ function loadNativeShareRecovery(savedOverrides = {}) {
   return { ...harness, source, storage, published };
 }
 
+function installRoomDisconnectLifecycle(harness) {
+  const { context, calls } = harness;
+  const lifecycle = [];
+  const eventRoom = context.room;
+  const handlers = new Map();
+  const noOp = () => {};
+  Object.assign(context, {
+    newRoom: eventRoom,
+    LK: { RoomEvent: { Disconnected: 'disconnected' }, DisconnectReason: {} },
+    phoneWakeLockManager: null,
+    phoneAudioPlaybackRecovery: null,
+    phoneScreenVideoBudget: null,
+    androidFirefoxRoomDisconnectRecovery: null,
+    androidFirefoxRoomDisconnectRecoveryEnabled: false,
+    ignoreStaleRoomEvent: () => context.room !== eventRoom,
+    describeDisconnectReason: () => 'server disconnected',
+    _isRoomSwitch: false,
+    connectSequence: 0,
+    recordActiveRoomDiagnostic: (_room, action) => action(),
+    captureAndroidFirefoxRecoveryMicIntent: () => false,
+    reconnectAndroidFirefoxRoom: noOp,
+    stopInboundScreenStatsMonitor: noOp,
+    sendLeaveNotification: () => lifecycle.push('leave'),
+    stopHeartbeat: noOp,
+    stopRoomStatusPolling: noOp,
+    _updateCheckTimer: null,
+    disableNoiseCancellation: noOp,
+    cleanupPrewarmedRooms: noOp,
+    clearMedia: () => lifecycle.push('clear-media'),
+    clearSoundboardState: noOp,
+    clearConnectedParticipantToken: noOp,
+    currentAccessToken: 'participant-token',
+    applyPg13Ui: noOp,
+    startOnlineUsersPolling: noOp,
+    setPublishButtonsEnabled: noOp,
+    _adminDashOpen: false,
+    syncDesiredMicToActual: noOp,
+    setDeviceStatus: noOp,
+    setStatus: (message) => lifecycle.push('status:' + message),
+    showToast: (message) => lifecycle.push('toast:' + message),
+    connectBtn: {}, disconnectBtn: {}, disconnectTopBtn: {},
+    roomListEl: { classList: { add: noOp } },
+    connectPanel: { classList: { remove: noOp } },
+  });
+  for (const name of ['openSoundboardButton', 'openCameraLobbyButton', 'openChatButton',
+    'bugReportBtn', 'openJamButton', 'togglePg13Button', 'toggleRoomAudioButton',
+    'openSettingsButton', 'deviceActionsEl', 'deviceActionsHome', 'deviceStatusEl',
+    'deviceStatusHome', 'settingsPanel']) context[name] = null;
+  context.document.querySelector = () => null;
+  context.tauriInvoke = async (command) => { calls.push({ command }); };
+  eventRoom.on = (name, callback) => handlers.set(name, callback);
+  eventRoom.disconnect = () => {
+    lifecycle.push('room-disconnect');
+    handlers.get('disconnected')?.(1);
+  };
+  const source = fs.readFileSync(path.join(__dirname, 'connect.js'), 'utf8').replace(/\r\n/g, '\n');
+  const helperStart = source.indexOf('async function stopSharingBeforeRoomDisconnect(');
+  // The fallback lets the regression harness execute the pre-fix disconnect too.
+  const start = helperStart >= 0 ? helperStart : source.indexOf('async function disconnect()');
+  const end = source.indexOf('// ── Connect/Disconnect button handlers', start);
+  vm.runInContext(source.slice(start, end), context, { filename: 'connect.js:disconnect' });
+  const handlerStart = source.indexOf('newRoom.on(LK.RoomEvent.Disconnected,');
+  const handlerEnd = source.indexOf('\n    });\n  }\n  if (LK.RoomEvent?.AudioPlaybackStatusChanged)', handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart);
+  vm.runInContext(source.slice(handlerStart, handlerEnd + '\n    });'.length), context,
+    { filename: 'connect.js:Disconnected' });
+  return { lifecycle, eventRoom, terminalDisconnect: () => handlers.get('disconnected')(1) };
+}
+
+test('Disconnect waits for both native stops before leaving and clearing the session', async () => {
+  const harness = loadScreenShareNative();
+  const { context, calls } = harness;
+  const { lifecycle } = installRoomDisconnectLifecycle(harness);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  context.tauriInvoke = async command => { calls.push({ command }); await gate; };
+  const pending = context.disconnect();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.map(call => call.command), ['stop_screen_share', 'stop_desktop_capture']);
+  assert.equal(lifecycle.includes('leave'), false);
+  assert.equal(lifecycle.includes('room-disconnect'), false);
+  release();
+  await pending;
+  assert.ok(lifecycle.indexOf('leave') < lifecycle.indexOf('room-disconnect'));
+  assert.equal(context.room, null);
+  assert.equal(context.screenEnabled, false);
+  assert.equal(calls.length, 2, 'expected disconnect must not stop a replacement or double-stop');
+});
+
+test('Disconnect cancels an in-flight native start before announcing leave', async () => {
+  const harness = loadScreenShareNative();
+  const { context, calls } = harness;
+  const { lifecycle } = installRoomDisconnectLifecycle(harness);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const starting = new Promise(resolve => { entered = resolve; });
+  context.tauriInvoke = async command => {
+    calls.push({ command });
+    if (command === 'get_os_build_number') return 26100;
+    if (command === 'start_screen_share') { entered(); await gate; }
+  };
+  let audioStarts = 0;
+  context.startNativeAudioCapture = async () => { audioStarts++; };
+  const share = context.startScreenShareManual();
+  await starting;
+  const leaving = context.disconnect();
+  assert.equal(lifecycle.includes('leave'), false);
+  release();
+  assert.equal(await share, false);
+  await leaving;
+  assert.equal(audioStarts, 0);
+  assert.equal(context.room, null);
+  assert.equal(context.window._echoNativeCaptureActive, false);
+  assert.ok(calls.some(call => call.command === 'stop_desktop_capture'));
+});
+
+test('failed native stop preserves the session and visible retry state on Disconnect', async () => {
+  const harness = loadScreenShareNative();
+  const { context } = harness;
+  const { lifecycle, eventRoom } = installRoomDisconnectLifecycle(harness);
+  context.tauriInvoke = async command => {
+    if (command === 'stop_screen_share') throw new Error('native stop failed');
+  };
+  await assert.rejects(context.disconnect(), /could not be fully stopped/);
+  assert.equal(context.room, eventRoom);
+  assert.equal(context.currentAccessToken, 'participant-token');
+  assert.equal(context.screenEnabled, true);
+  assert.equal(lifecycle.includes('leave'), false);
+  assert.equal(lifecycle.includes('clear-media'), false);
+  assert.ok(lifecycle.some(value => value.startsWith('status:Screen sharing could not')));
+});
+
+test('terminal parent disconnect stops native capture even when active flags were lost', async () => {
+  const harness = loadScreenShareNative();
+  const { context, calls } = harness;
+  const { terminalDisconnect } = installRoomDisconnectLifecycle(harness);
+  terminalDisconnect();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.map(call => call.command), ['stop_screen_share', 'stop_desktop_capture']);
+  assert.equal(context.screenEnabled, false);
+});
+
+test('terminal parent disconnect cancels pending native startup without publishing audio', async () => {
+  const harness = loadScreenShareNative();
+  const { context, calls } = harness;
+  const { terminalDisconnect } = installRoomDisconnectLifecycle(harness);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const starting = new Promise(resolve => { entered = resolve; });
+  context.tauriInvoke = async command => {
+    calls.push({ command });
+    if (command === 'get_os_build_number') return 26100;
+    if (command === 'start_screen_share') { entered(); await gate; }
+  };
+  let audioStarts = 0;
+  context.startNativeAudioCapture = async () => { audioStarts++; };
+  const share = context.startScreenShareManual();
+  await starting;
+  terminalDisconnect();
+  release();
+  assert.equal(await share, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(audioStarts, 0);
+  assert.equal(context.screenEnabled, false);
+  assert.ok(calls.some(call => call.command === 'stop_screen_share'));
+  assert.ok(calls.some(call => call.command === 'stop_desktop_capture'));
+});
+
+test('terminal disconnect reports unconfirmed native shutdown and keeps End Sharing available', async () => {
+  const harness = loadScreenShareNative();
+  const { context } = harness;
+  const { terminalDisconnect, lifecycle } = installRoomDisconnectLifecycle(harness);
+  context.tauriInvoke = async command => {
+    if (command === 'stop_desktop_capture') throw new Error('native stop failed');
+  };
+  terminalDisconnect();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.screenEnabled, true);
+  assert.ok(lifecycle.some(value => value.startsWith('status:Screen sharing could not')));
+});
+
+test('late old-Room terminal disconnect cannot stop a replacement share', async () => {
+  const harness = loadScreenShareNative();
+  const { context, calls } = harness;
+  const { terminalDisconnect } = installRoomDisconnectLifecycle(harness);
+  context.room = { localParticipant: { identity: 'Sam-new' } };
+  context.window._echoNativeCaptureActive = true;
+  context.screenEnabled = true;
+  const generation = context._nativeShareRecoveryGeneration;
+  terminalDisconnect();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 0);
+  assert.equal(context.screenEnabled, true);
+  assert.equal(context._nativeShareRecoveryGeneration, generation);
+});
+
+test('replacement Room during confirmed shutdown is not cleared by the old Disconnect continuation', async () => {
+  const harness = loadScreenShareNative();
+  const { context } = harness;
+  const { lifecycle } = installRoomDisconnectLifecycle(harness);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  context.tauriInvoke = async () => gate;
+  const leaving = context.disconnect();
+  await new Promise(resolve => setImmediate(resolve));
+  const replacement = { localParticipant: { identity: 'Sam-new' } };
+  context.room = replacement;
+  release();
+  await leaving;
+  assert.equal(context.room, replacement);
+  assert.equal(lifecycle.includes('leave'), false);
+  assert.equal(lifecycle.includes('clear-media'), false);
+  assert.equal(lifecycle.includes('room-disconnect'), false);
+});
+
 test("viewer reload restores the exact native game title and audio without restarting video", async () => {
   const { context, calls, published } = loadNativeShareRecovery();
   await context.recoverNativeScreenShare(context.room);

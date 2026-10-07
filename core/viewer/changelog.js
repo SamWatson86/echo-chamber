@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-10-06",
+    title: "Screen Sharing Disconnect Protection",
+    notes: [
+      "Disconnecting now stops screen sharing before leaving the room. Unexpected disconnects also cancel capture and pending starts.",
+      "The server now checks for screen publishers left behind after their owner disconnects and removes them.",
+      "Install Windows app 0.6.39 for capture to stop when its publishing connection ends, and for app exit to cancel capture and prevent queued shares from starting."
+    ]
+  },
+  {
     version: "2026-10-05",
     title: "Screen Sharing Privacy",
     notes: [

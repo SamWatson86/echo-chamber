@@ -171,7 +171,11 @@ impl StaticFrameHeartbeat {
     }
 }
 
-async fn log_room_events(log_prefix: String, mut events: UnboundedReceiver<RoomEvent>) {
+async fn monitor_room_events(
+    log_prefix: String,
+    mut events: UnboundedReceiver<RoomEvent>,
+    running: Arc<AtomicBool>,
+) {
     while let Some(event) = events.recv().await {
         match event {
             RoomEvent::LocalTrackPublished { publication, .. } => {
@@ -194,9 +198,24 @@ async fn log_room_events(log_prefix: String, mut events: UnboundedReceiver<RoomE
                 eprintln!("{}", line);
                 file_debug_log::append(&line);
             }
+            RoomEvent::Disconnected { reason } => {
+                running.store(false, Ordering::SeqCst);
+                let line = format!(
+                    "[{}] publisher disconnected ({:?}); stopping native capture",
+                    log_prefix, reason,
+                );
+                eprintln!("{}", line);
+                file_debug_log::append(&line);
+                break;
+            }
             _ => {}
         }
     }
+    // This flag belongs to the publisher's session, never the current global
+    // session. A late disconnect from an old room cannot stop its replacement.
+    // An ended event stream also fails closed: without a live publisher there
+    // is no reason to keep capturing the user's screen.
+    running.store(false, Ordering::SeqCst);
 }
 
 async fn close_capture_room(room: &Room) -> Result<(), String> {
@@ -248,7 +267,11 @@ impl CapturePublisher {
             .await
             .map_err(|e| format!("SFU connect failed: {}", e))?;
         publisher_stopped.store(false, Ordering::SeqCst);
-        tokio::spawn(log_room_events(log_prefix.to_string(), events));
+        tokio::spawn(monitor_room_events(
+            log_prefix.to_string(),
+            events,
+            running.clone(),
+        ));
 
         eprintln!(
             "[{}] connected as {}",
@@ -371,7 +394,11 @@ impl CapturePublisher {
             .block_on(Room::connect(sfu_url, token, RoomOptions::default()))
             .map_err(|e| format!("SFU connect failed: {}", e))?;
         publisher_stopped.store(false, Ordering::SeqCst);
-        rt.spawn(log_room_events(log_prefix.to_string(), events));
+        rt.spawn(monitor_room_events(
+            log_prefix.to_string(),
+            events,
+            running.clone(),
+        ));
 
         eprintln!(
             "[{}] connected as {}",
@@ -825,6 +852,70 @@ impl CapturePublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn publisher_disconnect_stops_capture_without_waiting_for_event_stream_close() {
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(RoomEvent::Disconnected {
+            reason: livekit::DisconnectReason::ParticipantRemoved,
+        })
+        .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_room_events("test".into(), rx, running.clone()),
+        )
+        .await
+        .expect("a terminal disconnect must stop capture while the sender is still alive");
+        assert!(!running.load(Ordering::SeqCst));
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn publisher_event_stream_ending_stops_capture() {
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(tx);
+
+        monitor_room_events("test".into(), rx, running.clone()).await;
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn temporary_publisher_reconnect_keeps_capture_running() {
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(RoomEvent::Reconnecting).unwrap();
+        tx.send(RoomEvent::Reconnected).unwrap();
+
+        let mut monitor = Box::pin(monitor_room_events("test".into(), rx, running.clone()));
+        // Poll until both queued events have been handled and the monitor waits
+        // for the next event; avoid a timing-dependent sleep in the test.
+        assert!(futures_util::poll!(&mut monitor).is_pending());
+        assert!(running.load(Ordering::SeqCst));
+
+        drop(tx);
+        monitor.await;
+        assert!(!running.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn previous_publisher_disconnect_does_not_stop_replacement_capture() {
+        let sessions = crate::capture_session::CaptureSessions::default();
+        let old = sessions.start().unwrap();
+        let current = sessions.start().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(RoomEvent::Disconnected {
+            reason: livekit::DisconnectReason::ParticipantRemoved,
+        })
+        .unwrap();
+
+        monitor_room_events("test".into(), rx, old.running.clone()).await;
+        assert!(!old.running.load(Ordering::SeqCst));
+        assert!(current.running.load(Ordering::SeqCst));
+        assert!(sessions.is_running());
+    }
 
     #[test]
     fn desktop_profile_uses_crisper_multi_publisher_budget() {

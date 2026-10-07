@@ -540,7 +540,7 @@ pub async fn start_share(
     // picker was rendered. Revalidate the live window before interrupting an
     // existing share or spawning a new capture task.
     validate_capture_window(source_id)?;
-    let session = global_state().start();
+    let session = global_state().start()?;
 
     let app2 = app.clone();
     tokio::spawn(async move {
@@ -573,7 +573,12 @@ pub async fn start_share(
     Ok(())
 }
 
-/// Stop the current screen share.
+/// Reject queued starts and cancel capture before unrelated app shutdown work.
+pub fn shutdown() {
+    global_state().shutdown();
+}
+
+/// Stop the current screen share and wait for its resources to be released.
 pub async fn stop_share() -> Result<(), String> {
     let sessions = global_state().request_stop();
     tokio::task::spawn_blocking(move || {
@@ -1243,7 +1248,7 @@ pub async fn start_share_monitor(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    let session = global_state().start();
+    let session = global_state().start()?;
 
     let app2 = app.clone();
     tokio::spawn(async move {

@@ -208,7 +208,7 @@ pub async fn start(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    let session = global_state().start();
+    let session = global_state().start()?;
     let running = session.running.clone();
 
     // Get game PID for audio capture
@@ -261,7 +261,12 @@ pub async fn start(
     Ok(())
 }
 
-/// Stop the current desktop capture.
+/// Reject queued starts and cancel capture before unrelated app shutdown work.
+pub fn shutdown() {
+    global_state().shutdown();
+}
+
+/// Stop the current desktop capture and wait for its resources to be released.
 pub async fn stop() -> Result<(), String> {
     let sessions = global_state().request_stop();
     tokio::task::spawn_blocking(move || {

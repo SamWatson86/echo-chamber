@@ -1172,6 +1172,10 @@ fn main() {
         .run(|app, event| {
             #[cfg(target_os = "windows")]
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Stop screen capture immediately even when Jam's graceful
+                // shutdown keeps the process alive after the window closes.
+                screen_capture::shutdown();
+                desktop_capture::shutdown();
                 if let Some(agent) = app.try_state::<jam_source::JamSourceAgent>() {
                     if !agent.shutdown_complete() {
                         api.prevent_exit();

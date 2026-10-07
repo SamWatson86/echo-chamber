@@ -879,6 +879,14 @@ async function connectToRoom({
       if (typeof stopInboundScreenStatsMonitor === "function") {
         stopInboundScreenStatsMonitor();
       }
+      // Native video owns a separate SFU connection. A terminal parent Room
+      // disconnect must revoke capture too, even if JavaScript lost its flags.
+      // Expected transitions already stop sharing, or belong to room replacement.
+      if (newRoom === room && newRoom._echoExpectedDisconnect !== true) {
+        stopSharingBeforeRoomDisconnect(newRoom).catch(function(error) {
+          debugLog("[disconnect] capture shutdown not confirmed: " + error.message);
+        });
+      }
       var recoveryAccepted = androidFirefoxRoomDisconnectRecovery?.handleDisconnected({
         room: newRoom,
         reason: reason,
@@ -2350,12 +2358,31 @@ async function connect() {
   }
 }
 
+async function stopSharingBeforeRoomDisconnect(ownerRoom) {
+  if (!ownerRoom || room !== ownerRoom) return false;
+  try {
+    // This cancels pending starts and waits for both native capture backends,
+    // native audio, browser sources, and publications to finish stopping.
+    await stopScreenShareManual();
+  } catch (error) {
+    if (room === ownerRoom) {
+      setStatus(error.message || "Screen sharing could not be fully stopped", true);
+      showToast(error.message || "Screen sharing could not be fully stopped", 8000);
+    }
+    throw error;
+  }
+  return room === ownerRoom;
+}
+
 async function disconnect() {
   if (!room) return;
   const disconnectingRoom = room;
   androidFirefoxRoomDisconnectRecovery?.cancel(room);
   // Invalidate any in-flight connect/switch attempts (#67)
   connectSequence++;
+  // Keep the session and retry controls until native capture actually stops.
+  // A replacement Room that arrives during shutdown owns its own UI/state.
+  if (!await stopSharingBeforeRoomDisconnect(disconnectingRoom)) return;
   sendLeaveNotification();
   stopHeartbeat();
   stopRoomStatusPolling();
@@ -2369,12 +2396,6 @@ async function disconnect() {
   if (window._canvasRafId) { cancelAnimationFrame(window._canvasRafId); window._canvasRafId = null; }
   if (window._canvasOffVideo) { window._canvasOffVideo.pause(); window._canvasOffVideo.srcObject = null; window._canvasOffVideo = null; }
   if (window._canvasPipeEl) { window._canvasPipeEl.remove(); window._canvasPipeEl = null; }
-  // Stop native WASAPI audio capture if active (#28)
-  if (typeof stopNativeAudioCapture === "function") await stopNativeAudioCapture();
-  _screenShareVideoTrack?.mediaStreamTrack?.stop();
-  _screenShareAudioTrack?.mediaStreamTrack?.stop();
-  _screenShareVideoTrack = null;
-  _screenShareAudioTrack = null;
   disableNoiseCancellation();
   phoneWakeLockManager?.clearRoom?.(disconnectingRoom);
   phoneAudioPlaybackRecovery?.clearRoom?.(disconnectingRoom);
@@ -2433,11 +2454,11 @@ connectBtn.addEventListener("click", () => {
 });
 
 disconnectBtn.addEventListener("click", () => {
-  disconnect();
+  disconnect().catch(() => {});
 });
 
 disconnectTopBtn.addEventListener("click", () => {
-  disconnect();
+  disconnect().catch(() => {});
 });
 
 // ── Settings panel build (chime upload, noise cancellation) ──
