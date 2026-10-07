@@ -13,7 +13,8 @@ The native publisher also ignored its own terminal disconnection, and the server
 did not reconcile orphaned screen connections.
 
 **What changed:** Explicit and unexpected viewer disconnects stop/cancel sharing.
-Native publishing disconnect and app exit cancel capture. A server guard checks
+Native publishing disconnect and app exit cancel capture; app exit also closes
+admission to queued capture starts before waiting for other shutdown work. A server guard checks
 actual SFU membership and removes screen publishers left behind by their owner.
 
 **How we know it works:** Regression tests exercise real viewer disconnect handlers,

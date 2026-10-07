@@ -208,7 +208,7 @@ pub async fn start(
     app: AppHandle,
     health: Arc<CaptureHealthState>,
 ) -> Result<(), String> {
-    let session = global_state().start();
+    let session = global_state().start()?;
     let running = session.running.clone();
 
     // Get game PID for audio capture
@@ -261,9 +261,9 @@ pub async fn start(
     Ok(())
 }
 
-/// Signal cancellation before the app waits for unrelated shutdown work.
-pub fn cancel() {
-    global_state().request_stop();
+/// Reject queued starts and cancel capture before unrelated app shutdown work.
+pub fn shutdown() {
+    global_state().shutdown();
 }
 
 /// Stop the current desktop capture and wait for its resources to be released.

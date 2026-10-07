@@ -903,8 +903,8 @@ mod tests {
     #[tokio::test]
     async fn previous_publisher_disconnect_does_not_stop_replacement_capture() {
         let sessions = crate::capture_session::CaptureSessions::default();
-        let old = sessions.start();
-        let current = sessions.start();
+        let old = sessions.start().unwrap();
+        let current = sessions.start().unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(RoomEvent::Disconnected {
             reason: livekit::DisconnectReason::ParticipantRemoved,

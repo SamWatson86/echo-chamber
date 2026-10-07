@@ -4,7 +4,7 @@
 
 - Screen Privacy: Disconnect now confirms native capture shutdown before leaving the room; unexpected room disconnects also cancel capture and delayed starts.
 - Server Protection: The control plane reconciles native screen publishers against their actual SFU parent connections and removes orphaned shares. Throttled browser heartbeats alone do not end a live share.
-- Native Capture: Losing the publishing connection stops its capture session, and exiting Echo signals capture cancellation before other shutdown work.
+- Native Capture: Losing the publishing connection stops its capture session. Exiting Echo cancels capture and rejects queued share starts before other shutdown work.
 - Release: Windows desktop and control versions are aligned at 0.6.39. Install the desktop update for the native disconnect and exit protections.
 
 ## 0.6.38
