@@ -13,6 +13,7 @@ mod jam_playlist_cache;
 mod jam_session;
 mod jam_source;
 mod rooms;
+mod screen_share_guard;
 pub mod sfu_proxy;
 mod soundboard;
 mod spotify_public_catalog;
@@ -681,6 +682,10 @@ async fn main() {
             }
         });
     }
+
+    // Independent native screen publishers may survive a browser disconnect.
+    // Fence their lifetime to the actual parent SFU connection.
+    screen_share_guard::spawn(&state);
 
     // Background task: clean up stale participants (no heartbeat for 20s)
     {

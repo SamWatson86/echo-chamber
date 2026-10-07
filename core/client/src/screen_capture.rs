@@ -573,7 +573,12 @@ pub async fn start_share(
     Ok(())
 }
 
-/// Stop the current screen share.
+/// Signal cancellation before the app waits for unrelated shutdown work.
+pub fn cancel_share() {
+    global_state().request_stop();
+}
+
+/// Stop the current screen share and wait for its resources to be released.
 pub async fn stop_share() -> Result<(), String> {
     let sessions = global_state().request_stop();
     tokio::task::spawn_blocking(move || {

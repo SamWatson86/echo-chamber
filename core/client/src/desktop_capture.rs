@@ -261,7 +261,12 @@ pub async fn start(
     Ok(())
 }
 
-/// Stop the current desktop capture.
+/// Signal cancellation before the app waits for unrelated shutdown work.
+pub fn cancel() {
+    global_state().request_stop();
+}
+
+/// Stop the current desktop capture and wait for its resources to be released.
 pub async fn stop() -> Result<(), String> {
     let sessions = global_state().request_stop();
     tokio::task::spawn_blocking(move || {

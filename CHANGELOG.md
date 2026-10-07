@@ -1,10 +1,17 @@
 # Changelog
 
+## 0.6.39
+
+- Screen Privacy: Disconnect now confirms native capture shutdown before leaving the room; unexpected room disconnects also cancel capture and delayed starts.
+- Server Protection: The control plane reconciles native screen publishers against their actual SFU parent connections and removes orphaned shares. Throttled browser heartbeats alone do not end a live share.
+- Native Capture: Losing the publishing connection stops its capture session, and exiting Echo signals capture cancellation before other shutdown work.
+- Release: Windows desktop and control versions are aligned at 0.6.39. Install the desktop update for the native disconnect and exit protections.
+
 ## 0.6.38
 
 - Screen Sharing Privacy: End Sharing waits for native capture and its publishing connection to close, cancels delayed starts, and reports unconfirmed shutdowns so they can be retried.
 - Native Capture: Replacing a share no longer loses the newer capture's stop handle, and idle Windows capture sessions stop without waiting for another frame.
-- Viewer Cleanup: Ending or leaving a share removes its screen publisher and clears the departed stream from viewers, including after a viewer reload.
+- Viewer Cleanup: Removing a screen publication clears the departed stream from viewers, including after a viewer reload. Room-disconnect capture teardown is addressed in 0.6.39.
 - Release: Windows desktop and control package versions are aligned at 0.6.38. Install the Windows app update to receive the native capture fixes.
 
 ## 0.6.37
