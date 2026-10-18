@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-10-18",
+    title: "Jam Playback Setup",
+    notes: [
+      "Jam prepares the first song in a dedicated one-song Spotify playlist when starting playback from idle, then confirms it is playing before sending the next queued song.",
+      "The Spotify host needs to reconnect once and allow playlist access. Jam shows a Reconnect Spotify prompt when that permission is missing; music already playing and its queue controls remain available.",
+      "This server and viewer update requires no Windows app update."
+    ]
+  },
+  {
     version: "2026-10-06",
     title: "Screen Sharing Disconnect Protection",
     notes: [

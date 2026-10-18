@@ -261,14 +261,66 @@ still fails, confirm the Store Spotify app is open and signed into the same
 Premium account before restarting anything manually.
 
 When a queue add starts the first song from idle (single song, playlist, or
-Song Radio), Echo sends the song once and confirms the configured device is
-actually playing it before handing Spotify the next queued song. Spotify's
-Player endpoints acknowledge commands before playback is necessarily ready and
-do not guarantee execution order. Echo makes up to eight playback reads, 500 ms
-apart, under the existing 15-second source-safety deadline. If the exact song is
-selected but paused and Spotify permits resuming, Echo sends one device-targeted
-Resume and requires a later playing observation. It never resumes an empty
-player, transfers unrelated playback, or resends the song URI during recovery.
+Song Radio), Echo prepares a dedicated **Echo Jam Playback** helper playlist
+containing only that song, then starts that playlist on the configured device.
+In plain terms, Spotify gets a one-song playlist to open instead of a bare song
+command. This gives the desktop player a playback context without introducing
+the rest of the song's album ahead of Echo's queue. The helper is created with
+`public: false` to keep it off the Spotify profile; that is not a guarantee that
+someone with its link cannot access it. It is an implementation detail and does
+not replace the songs or their original playlist attribution in Echo's queue.
+The helper is reused across Jams and reconnects of the same account, with
+ownership and an exact Echo marker checked before reuse. Removing the album
+tail does not disable Spotify Autoplay or repeat: those remain host preferences.
+Turn off Spotify Autoplay on the source PC if playback should end when the
+requested music runs out.
+Do not repurpose the helper or edit its description. A missing or changed marker
+stops preparation before any playlist contents are replaced; reconnecting keeps
+the saved helper identity and does not repair its metadata. An operator must
+restore the exact saved marker before that helper can be used again.
+An unconfirmed helper creation is recovered only by its saved marker and owner.
+If bounded discovery cannot find it, Echo does not create a duplicate. Reconnect
+does not discard that creation record; operator inspection is needed before
+repairing it.
+
+The Spotify account on the source PC needs to reconnect once through Jam's
+**Reconnect Spotify** button and grant the new `playlist-modify-private` scope.
+The helper also requires `playlist-read-private`, already requested for Library
+access.
+Use the same Premium account already signed into the source desktop app.
+`/api/jam/state.spotify_start_authorized` reports whether that permission is
+present. The viewer shows setup guidance only for an explicit `false`; older
+servers that omit the field keep their existing behavior. Missing permission
+does not disable joining, Stop Music, or queueing behind music already playing.
+Existing read-only Spotify Library permissions still have their own setup flow.
+If the new startup permission is declined, OAuth completion returns HTTP 403
+with code `spotify_start_scope_required`. Echo rejects that candidate token
+before replacing the previously working Spotify connection.
+If setup or helper preparation fails before a playback command is sent, the
+first song stays pending and removable. Correct the issue, then reconnect or
+explicitly add music to permit another preparation attempt; automatic delivery
+does not keep repeating the failed setup. This clears only the preparation
+failure. It never resolves a `commit_unknown` occurrence or bypasses a Stop
+Music fence. Reconnecting Spotify does not resume a stopped Jam; the existing
+explicit queue-add resume behavior still applies after Stop Music.
+
+Helper verification has a known market-availability limitation: Spotify may
+return a replacement track URI when reading the playlist back. If Echo cannot
+prove that URI represents the requested song, it fails closed before sending
+any playback command. The current development API does not provide
+`linked_from` for that proof. The song remains pending and removable, with an
+actionable error in Jam; remove it or choose a playable version rather than
+assuming the replacement will start. A different URI is not silently accepted
+as the requested track.
+
+Echo confirms the configured device is actually playing the requested song
+before handing Spotify the next queued song. Spotify's Player endpoints
+acknowledge commands before playback is necessarily ready and do not guarantee
+execution order. Echo makes up to eight playback reads, 500 ms apart, under the
+existing source-safety deadline. If the exact song is selected but paused and
+Spotify permits resuming, Echo sends one device-targeted Resume and requires a
+later playing observation. It never blindly resumes an empty player or retries
+an ambiguous start command.
 
 If that start remains unconfirmed, Echo preserves the first occurrence as
 unresolved and later songs as pending, and exposes the failure through
@@ -276,8 +328,18 @@ unresolved and later songs as pending, and exposes the failure through
 while acceptance is unresolved. Check Spotify on the source PC; if it remains
 wedged, end and restart the Jam after recovering Spotify. Queue-add receipts
 still acknowledge admission to Echo's queue, not guaranteed audible playback.
-This is a server/viewer change and requires no Windows desktop update. A live
-idle-start check is still necessary to validate a particular Spotify app build.
+This is a server/viewer change and requires no Windows desktop update.
+
+Live evidence on Windows on October 18, 2026: the previously failing empty
+Spotify player started successfully when given an album playback context. That
+probe supports using a context to start playback, but an album would also bring
+its remaining songs, so the implementation uses the one-song helper instead.
+The actual helper-playlist workflow still requires a final live OAuth smoke:
+reauthorize the source account, confirm `spotify_start_authorized: true`, start
+from an idle player, and verify the requested song plays on the configured
+device before the next Echo queue entry is delivered. Verify both a single-song
+add and a Song Radio or playlist add, with no album tail inserted. Unit or
+mocked-browser passes do not substitute for that Spotify integration check.
 
 Echo exposes one global shared Jam at a time. Any authenticated Echo user can
 start it, join it, search, add songs, skip, and use **Stop Music** from Echo's Jam panel. Those users

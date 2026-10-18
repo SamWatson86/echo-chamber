@@ -172,6 +172,10 @@
     const starting = input.starting === true;
     const spotifyConnected = input.spotify_connected === true;
     const spotifyIsPlaying = input.spotify_is_playing === true;
+    // Older servers omit this field. It is setup guidance, not a blanket
+    // control gate: an already-playing Spotify queue can still accept songs.
+    const spotifyStartAuthorizationRequired = compatible && spotifyConnected &&
+      input.spotify_start_authorized === false;
     const playbackStopSupported = input.playback_stop_supported === true;
     const playlistSelectionSupported = input.playlist_selection_supported === true;
     const skipReconciliationPending = input.skip_reconciliation_pending === true;
@@ -244,6 +248,7 @@
       starting,
       spotifyConnected,
       spotifyIsPlaying,
+      spotifyStartAuthorizationRequired,
       playbackStopSupported,
       playlistSelectionSupported,
       skipReconciliationPending,

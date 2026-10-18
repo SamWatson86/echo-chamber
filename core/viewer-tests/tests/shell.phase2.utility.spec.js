@@ -3351,6 +3351,56 @@ test("disconnected Spotify Library presents only the connect action", async ({ p
   await expect(page.locator("#jam-import-spotify")).toBeHidden();
 });
 
+test("Jam idle-start setup reuses Spotify reconnect without blocking current playback controls", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const model = apiModels.get(page);
+  model.state.spotify_start_authorized = false;
+  const authUrl = "https://accounts.spotify.com/authorize?fixture=jam-start";
+  let initBody = null;
+  await page.route("**/api/jam/spotify-init", async (route) => {
+    initBody = route.request().postDataJSON();
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ auth_url: authUrl }) });
+  });
+  await page.route("**/api/jam/spotify-poll*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+  await openPhaseTwoViewer(page);
+  await openJam(page);
+  await page.evaluate(() => {
+    window.__jamSpotifySetupOpens = [];
+    window.open = (url) => { window.__jamSpotifySetupOpens.push(url); return { opener: null }; };
+  });
+
+  const guidance = page.locator("#jam-spotify-start-guidance");
+  const reconnect = page.locator("#jam-connect-spotify");
+  await expect(guidance).toBeVisible();
+  await expect(guidance).toContainText("same Premium account as the source PC");
+  await expect(reconnect).toHaveText("Reconnect Spotify");
+  await expect(reconnect).toHaveAttribute("aria-describedby", "jam-spotify-start-guidance");
+  await expect(page.locator("#jam-skip-btn")).toBeEnabled();
+  await expect(page.locator("#jam-stop-music-btn")).toBeEnabled();
+  await expect(page.locator("#jam-join-btn")).toBeEnabled();
+  await page.screenshot({ path: testInfo.outputPath("jam-reconnect-390.png"), fullPage: true });
+  await searchJam(page);
+  await expect(page.locator(".jam-result-add").first()).toBeEnabled();
+  expect(await guidance.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+  await reconnect.click();
+  await expect.poll(() => page.evaluate(() => window.__jamSpotifySetupOpens)).toEqual([authUrl]);
+  expect(initBody).toMatchObject({ state: expect.any(String), verifier: expect.any(String), challenge: expect.any(String) });
+  await page.evaluate(() => { clearInterval(_spotifyPollTimer); _spotifyPollTimer = null; });
+
+  model.state.spotify_start_authorized = true;
+  await page.evaluate(async () => { await fetchJamState(); });
+  await expect(guidance).toBeHidden();
+  await expect(reconnect).toHaveText("Refresh Spotify Access");
+  await expect(reconnect).not.toHaveAttribute("aria-describedby");
+  delete model.state.spotify_start_authorized;
+  await page.evaluate(async () => { await fetchJamState(); });
+  await expect(guidance).toBeHidden();
+  await expect(page.locator("#jam-skip-btn")).toBeEnabled();
+});
+
 test("stale Spotify authorization presents only the library-access action", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   const model = apiModels.get(page);

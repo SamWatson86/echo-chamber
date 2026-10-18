@@ -174,6 +174,41 @@ test("Start Jam is disabled while the server is already starting one", () => {
   assert.equal(contract.canStart, false);
 });
 
+test("missing Spotify start permission prompts reconnection without disabling working Jam controls", () => {
+  const state = {
+    jam_protocol_version: 3,
+    source_enabled: true,
+    source_availability_known: true,
+    source_status: "live",
+    spotify_connected: true,
+    spotify_is_playing: true,
+    spotify_start_authorized: false,
+    playback_stop_supported: true,
+    active: true,
+  };
+  const contract = evaluateJamContract(state);
+  assert.equal(contract.spotifyStartAuthorizationRequired, true);
+  assert.equal(contract.canControl, true);
+  assert.equal(contract.canJoin, true);
+  assert.equal(contract.canStopPlayback, true);
+  assert.equal(contract.canConfigure, true);
+  assert.equal(contract.sourceMessage, "Host source audio is live");
+  assert.equal(evaluateJamContract({ ...state, active: false }).canStart, true);
+  const sourceFailure = evaluateJamContract({ ...state, source_status: "error", source_error: "Capture failed" });
+  assert.equal(sourceFailure.sourceMessage, "Capture failed");
+  assert.equal(sourceFailure.canControl, false);
+});
+
+test("Spotify start guidance clears after reconnect and tolerates older server responses", () => {
+  const state = { jam_protocol_version: 3, spotify_connected: true };
+  for (const spotify_start_authorized of [true, undefined, null, "false"]) {
+    assert.equal(evaluateJamContract({ ...state, spotify_start_authorized }).spotifyStartAuthorizationRequired, false);
+  }
+  assert.equal(evaluateJamContract({ ...state, spotify_start_authorized: false }).spotifyStartAuthorizationRequired, true);
+  assert.equal(evaluateJamContract({ ...state, spotify_connected: false, spotify_start_authorized: false }).spotifyStartAuthorizationRequired, false);
+  assert.equal(evaluateJamContract({ ...state, jam_protocol_version: 2, spotify_start_authorized: false }).spotifyStartAuthorizationRequired, false);
+});
+
 test("an active Jam exposes Spotify startup failure while keeping recovery controls and clears it on recovery", () => {
   const state = {
     jam_protocol_version: 3,
