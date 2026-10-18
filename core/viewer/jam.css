@@ -122,6 +122,16 @@
   background: #1ed760;
 }
 
+.jam-spotify-start-guidance {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--warning, #fbbf24);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* --- Source-PC Local Control --- */
 .jam-source-local-card {
   display: grid;

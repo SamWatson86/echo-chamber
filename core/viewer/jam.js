@@ -567,6 +567,7 @@ function applyJamContractToControls() {
     button.setAttribute("aria-description", description);
   });
 
+  renderJamSpotifySetup();
   renderJamLibrarySetup();
   renderJamPlaylistSelectionControls();
   renderJamQueueRemovalControls((_jamState && _jamState.queue) || []);
@@ -580,6 +581,34 @@ function jamSpotifyLibraryAccessState() {
   if (_jamState.spotify_library_authorized === true) return "authorized";
   if (_jamState.spotify_library_authorized === false) return "required";
   return "unknown";
+}
+
+function renderJamSpotifySetup() {
+  var contract = _jamContract || evaluateJamServerContract(_jamState);
+  var reconnectRequired = contract.spotifyStartAuthorizationRequired === true;
+  var guidance = document.getElementById("jam-spotify-start-guidance");
+  if (guidance) {
+    guidance.hidden = !reconnectRequired;
+    var message = reconnectRequired
+      ? "The Spotify host needs to reconnect once before Echo can start a song from idle. Choose Reconnect Spotify and use the same Premium account as the source PC. Allow playlist access so Echo can prepare the first song. Music already playing can keep going."
+      : "";
+    if (guidance.textContent !== message) guidance.textContent = message;
+  }
+  var connectBtn = document.getElementById("jam-connect-spotify");
+  if (connectBtn) {
+    connectBtn.style.display = "";
+    connectBtn.textContent = reconnectRequired
+      ? "Reconnect Spotify"
+      : contract.spotifyConnected ? "Refresh Spotify Access" : "Connect Spotify";
+    connectBtn.title = reconnectRequired
+      ? "The Spotify host must reconnect once to allow Jam to start playback from idle"
+      : contract.spotifyConnected
+        ? "Reauthorize the host Spotify account to refresh playback, playlist, and library permissions"
+        : "Connect Spotify";
+    connectBtn.disabled = !contract.compatible;
+    if (reconnectRequired) connectBtn.setAttribute("aria-describedby", "jam-spotify-start-guidance");
+    else connectBtn.removeAttribute("aria-describedby");
+  }
 }
 
 function renderJamLibrarySetup() {
@@ -3397,16 +3426,7 @@ function renderJamPanel() {
     statusEl.className = "jam-spotify-status " + (_jamState.spotify_connected ? "connected" : "");
   }
 
-  // Connect button visibility
-  var connectBtn = document.getElementById("jam-connect-spotify");
-  if (connectBtn) {
-    connectBtn.style.display = "";
-    connectBtn.textContent = _jamState.spotify_connected ? "Refresh Spotify Access" : "Connect Spotify";
-    connectBtn.title = _jamState.spotify_connected
-      ? "Reauthorize Spotify to refresh playlist and library permissions"
-      : "Connect Spotify";
-    connectBtn.disabled = !contract.compatible;
-  }
+  renderJamSpotifySetup();
 
   // Host controls visibility (show if spotify is connected)
   var hostControls = document.getElementById("jam-host-controls");
