@@ -265,13 +265,20 @@ Song Radio), Echo prepares a dedicated **Echo Jam Playback** helper playlist
 containing only that song, then starts that playlist on the configured device.
 In plain terms, Spotify gets a one-song playlist to open instead of a bare song
 command. This gives the desktop player a playback context without introducing
-the rest of the song's album ahead of Echo's queue. The helper is created with
-`public: false` to keep it off the Spotify profile; that is not a guarantee that
-someone with its link cannot access it. It is an implementation detail and does
-not replace the songs or their original playlist attribution in Echo's queue.
-The helper is reused across Jams and reconnects of the same account, with
-ownership and an exact Echo marker checked before reuse. Removing the album
-tail does not disable Spotify Autoplay or repeat: those remain host preferences.
+the rest of the song's album ahead of Echo's queue. Echo requests `public: false`
+when creating the helper to keep it off the Spotify profile; that is not a
+guarantee that someone with its link cannot access it. Spotify can subsequently
+return `public: true`, even after a create or settings update requested `false`.
+That field is not dependable proof of profile membership, helper identity, or
+tampering, so Echo does not use it to accept or reject the helper. Echo does not
+automatically toggle visibility with a PUT or request another permission to
+correct that readback.
+The helper is an implementation detail and does not replace the songs or their
+original playlist attribution in Echo's queue. Reuse across Jams and reconnects
+still requires the saved exact playlist ID, the same owner account, the exact
+random Echo management marker, and a noncollaborative playlist. Removing the
+album tail does not disable Spotify Autoplay or repeat: those remain host
+preferences.
 Turn off Spotify Autoplay on the source PC if playback should end when the
 requested music runs out.
 Do not repurpose the helper or edit its description. A missing or changed marker
@@ -334,8 +341,11 @@ Live evidence on Windows on October 18, 2026: the previously failing empty
 Spotify player started successfully when given an album playback context. That
 probe supports using a context to start playback, but an album would also bring
 its remaining songs, so the implementation uses the one-song helper instead.
-The actual helper-playlist workflow still requires a final live OAuth smoke:
-reauthorize the source account, confirm `spotify_start_authorized: true`, start
+A subsequent live helper attempt stopped before playback because Spotify's
+`public: true` readback triggered Echo's helper-settings error despite the
+`public: false` creation request. The fix removes that visibility-field gate;
+the actual helper-playlist workflow remains under verification. The final live
+smoke must confirm `spotify_start_authorized: true` (reconnect if needed), start
 from an idle player, and verify the requested song plays on the configured
 device before the next Echo queue entry is delivered. Verify both a single-song
 add and a Song Radio or playlist add, with no album tail inserted. Unit or

@@ -9,6 +9,14 @@
 var ECHO_CHANGELOG = [
   {
     version: "2026-10-18",
+    title: "Jam Playback Startup Fix",
+    notes: [
+      "Fixed a helper-playlist settings check that could keep the first Jam song from starting even when Echo's playlist was intact.",
+      "This server update requires no Windows app update or additional Spotify permissions."
+    ]
+  },
+  {
+    version: "2026-10-18",
     title: "Jam Playback Setup",
     notes: [
       "Jam prepares the first song in a dedicated one-song Spotify playlist when starting playback from idle, then confirms it is playing before sending the next queued song.",
