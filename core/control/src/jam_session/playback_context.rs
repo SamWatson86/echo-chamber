@@ -51,8 +51,10 @@ impl SpotifyPlaybackContext {
     }
 
     fn owns_playlist(&self, playlist: &Value) -> bool {
+        // Spotify can report `public: true` after accepting public:false. That
+        // visibility field is not an ownership/identity signal; the saved ID,
+        // owner and management marker are verified before replacing any items.
         playlist["owner"]["id"].as_str() == Some(self.owner_id.as_str())
-            && playlist["public"].as_bool() == Some(false)
             && playlist["collaborative"].as_bool() == Some(false)
             && playlist["id"].as_str().is_some_and(valid_spotify_id)
     }

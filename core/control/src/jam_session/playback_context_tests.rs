@@ -20,6 +20,16 @@ fn playlist(context: &SpotifyPlaybackContext) -> Value {
     json!({"id": PLAYLIST, "name": HELPER_NAME, "owner": {"id": "owner"},
         "public": false, "collaborative": false, "description": context.description()})
 }
+fn playlist_with_visibility(context: &SpotifyPlaybackContext, visibility: Option<Value>) -> Value {
+    let mut metadata = playlist(context);
+    match visibility {
+        Some(value) => metadata["public"] = value,
+        None => {
+            metadata.as_object_mut().unwrap().remove("public");
+        }
+    }
+    metadata
+}
 fn items() -> Value {
     json!({"total":1, "next":null, "items":[{"item":{"uri":SEED,"type":"track","is_playable":true}}]})
 }
@@ -220,6 +230,86 @@ async fn reuses_saved_owned_helper_without_creating_a_playlist() {
 }
 
 #[tokio::test]
+async fn creates_helper_with_unreliable_visibility_but_still_requests_public_false() {
+    for visibility in [Some(json!(true)), Some(Value::Null), None] {
+        let mut saved = context();
+        saved.playlist_id = None;
+        saved.create_attempted = false;
+        let metadata = playlist_with_visibility(&saved, visibility);
+        let mut steps = existing_steps(metadata.clone(), items());
+        steps.insert(
+            1,
+            Step(Method::POST, "/me/playlists", Reply::Value(metadata)),
+        );
+        let harness = Harness::new(Some(saved), steps);
+        assert_eq!(
+            harness.prepare().await.unwrap(),
+            format!("spotify:playlist:{PLAYLIST}")
+        );
+        assert_eq!(harness.bodies.borrow()[0]["public"], false);
+        assert_eq!(harness.bodies.borrow()[0]["collaborative"], false);
+        assert_eq!(harness.bodies.borrow()[1], json!({"uris":[SEED]}));
+        harness.finished();
+    }
+}
+
+#[tokio::test]
+async fn reuses_saved_helper_when_visibility_is_true_null_or_absent() {
+    for visibility in [Some(json!(true)), Some(Value::Null), None] {
+        let saved = context();
+        let metadata = playlist_with_visibility(&saved, visibility);
+        let harness = Harness::new(Some(saved.clone()), existing_steps(metadata, items()));
+        assert_eq!(
+            harness.prepare().await.unwrap(),
+            format!("spotify:playlist:{PLAYLIST}")
+        );
+        assert_eq!(harness.bodies.borrow().as_slice(), [json!({"uris":[SEED]})]);
+        assert_eq!(harness.saved.borrow().as_ref(), Some(&saved));
+        harness.finished();
+    }
+}
+
+#[tokio::test]
+async fn recovers_created_helper_by_exact_marker_regardless_of_visibility() {
+    for visibility in [Some(json!(true)), Some(Value::Null), None] {
+        let mut saved = context();
+        saved.playlist_id = None;
+        let metadata = playlist_with_visibility(&saved, visibility);
+        let mut steps = existing_steps(metadata.clone(), items());
+        steps.insert(
+            1,
+            Step(
+                Method::GET,
+                "/me/playlists?limit=50&offset=0",
+                Reply::Value(json!({"items":[metadata],"next":null})),
+            ),
+        );
+        let harness = Harness::new(Some(saved), steps);
+        assert_eq!(
+            harness.prepare().await.unwrap(),
+            format!("spotify:playlist:{PLAYLIST}")
+        );
+        assert_eq!(
+            harness
+                .saved
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .playlist_id
+                .as_deref(),
+            Some(PLAYLIST)
+        );
+        assert_eq!(harness.bodies.borrow().as_slice(), [json!({"uris":[SEED]})]);
+        assert!(!harness
+            .events
+            .borrow()
+            .iter()
+            .any(|event| event.starts_with("POST")));
+        harness.finished();
+    }
+}
+
+#[tokio::test]
 async fn start_waits_for_single_seed_readback_and_timeout_leaves_create_fenced() {
     let saved = context();
     let (waiting, reached) = tokio::sync::oneshot::channel();
@@ -412,20 +502,13 @@ async fn definite_create_rejection_can_retry_but_private_storage_failure_never_c
 }
 
 #[tokio::test]
-async fn rejects_changed_account_owner_visibility_collaboration_or_marker_before_replace() {
-    for field in [
-        "account",
-        "owner",
-        "public",
-        "collaborative",
-        "description",
-        "id",
-    ] {
+async fn rejects_changed_account_owner_collaboration_or_marker_before_replace() {
+    for field in ["account", "owner", "collaborative", "description", "id"] {
         let saved = context();
         let mut meta = playlist(&saved);
         match field {
             "owner" => meta["owner"]["id"] = json!("different"),
-            "public" | "collaborative" => meta[field] = json!(true),
+            "collaborative" => meta[field] = json!(true),
             "description" => meta[field] = Value::Null,
             "id" => meta[field] = json!("zyxwvutsrqponmlkjihgfe"),
             _ => (),
