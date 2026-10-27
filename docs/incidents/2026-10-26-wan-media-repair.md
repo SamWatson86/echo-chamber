@@ -9,7 +9,8 @@
   verified backups and an announced, guarded service restart.
 - How we know it works: production network tests, service ownership, wildcard
   listener, health/version endpoints, and fresh media startup logs passed.
-  Separate-device LAN and off-LAN audio verification remain pending.
+  Sam also confirmed a cellular room join with working audio after the repair.
+  Separate-device LAN verification remains pending.
 - Does this need a desktop update: no; server runtime configuration only.
 - What could still go wrong: port forwarding or endpoint media problems could
   remain; another WAN change can cause the same drift.
@@ -60,10 +61,11 @@ The reviewed elevated helper transcript is at
 - The two active files now contain zero occurrences of the previous address
   and respectively two and one occurrences of the current address.
 
-The guard's server-to-own-LAN probe is only local evidence. Another-device
-LAN verification and a fresh cellular room join with audio are pending Sam's
-confirmation. Startup STUN discovery alone does not prove a remote participant
-completed ICE. No remote client was reloaded and SAM-PC was not accessed.
+Sam subsequently confirmed "Cellular room and audio work" in this repair chat,
+after being instructed to disable phone Wi-Fi and join a room. This supplies
+the genuine off-LAN media check. Another-device LAN access and screen-share
+playback remain unverified. The guard's server-to-own-LAN probe is only local
+evidence. No remote client was reloaded and SAM-PC was not accessed.
 
 For rollback, use the operations runbook's tested, announced preflight/stop/
 guarded-start procedure and these exact backups. Restoring the previous
