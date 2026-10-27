@@ -141,6 +141,33 @@ and Git SHA, `/health` is OK, and the host log's control path exactly matches
 the immutable `control_exe` path in the active host JSON. Do not use a stale
 hard-coded version or checkout path as release evidence.
 
+## Media recovery after a public IPv4 change
+
+If HTTPS/signaling works but joining a room fails with "could not establish pc
+connection", compare the fresh LiveKit ICE candidates and TURN startup address
+with the current WAN IPv4. Updating public DNS alone does not update media
+addresses held in configuration or running processes.
+
+Rediscover `sfu_config` and `control_env_file` from the canonical host JSON;
+they can live outside the checkout and immutable release. Inspect only the
+needed properties because the host JSON and environment contain credentials.
+Compare WAN discovery with public DNS using an explicit resolver (the server's
+hosts file can override normal hostname checks). Inspect `rtc.ips.includes`,
+`rtc.turn_servers[].host`, and `TURN_PUBLIC_IP` for stale addresses. Preserve the
+LAN `node_ip`, credentials, ports, and production control bind.
+
+Back up and hash-check the active files, run the Echo preflight and network
+tests, then use the announced guard `Preflight` immediately before the
+controlled stop. Apply only the reviewed address changes and start through the
+guard. Confirm fresh LiveKit external-IP/candidate evidence and TURN startup
+logs, then require another-device LAN access and an off-LAN room join with
+working audio. Local health and DNS agreement alone do not prove media works.
+If media still fails, verify the existing forwarded ports against the active
+configuration: TCP 9443/7881, UDP 3478, and the configured UDP media/relay range.
+
+The October 26 repair evidence and backup paths are recorded in
+[`incidents/2026-10-26-wan-media-repair.md`](incidents/2026-10-26-wan-media-repair.md).
+
 ## Screen-share privacy
 
 A Windows native screen share is a separate LiveKit participant named
