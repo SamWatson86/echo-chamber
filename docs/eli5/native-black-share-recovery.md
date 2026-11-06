@@ -40,6 +40,11 @@ regression failed against the prior source and passed against the patched
 source. A local `0.6.39-local.encoder.1` build was installed for live validation;
 this is not a published desktop release.
 
+On November 6, Sam confirmed that the local update worked and everyone was able
+to share during the subsequent session. The production desktop release is
+prepared as 0.6.40, with normal updater behavior restored by the stable version.
+The initial encoder failure's exact trigger remains unconfirmed.
+
 Run Cargo from `core/` so its Windows static CRT configuration is loaded:
 
 ```powershell
