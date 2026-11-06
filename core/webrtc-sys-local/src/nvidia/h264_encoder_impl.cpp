@@ -21,6 +21,7 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/time_utils.h"
+#include "livekit/codec_debug_log.h"
 #include "system_wrappers/include/metrics.h"
 #include "third_party/libyuv/include/libyuv/convert.h"
 #include "third_party/libyuv/include/libyuv/scale.h"
@@ -202,6 +203,8 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
 
   const CUresult result = cuCtxSetCurrent(cu_context_);
   if (result != CUDA_SUCCESS) {
+    livekit_ffi::AppendCodecDebug("[NVENC] InitEncode cuCtxSetCurrent failed code=" +
+                                 std::to_string(static_cast<int>(result)));
     return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
   }
 
@@ -219,6 +222,7 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   } catch (const NVENCException& e) {
     // todo: If Encoder initialization fails, need to notify for Managed side.
     RTC_LOG(LS_ERROR) << "Failed Initialize NvEncoder " << e.what();
+    livekit_ffi::AppendCodecDebug(std::string("[NVENC] session creation failed: ") + e.what());
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
@@ -355,8 +359,13 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
     encoder_->CreateEncoder(&nv_initialize_params_);
   } catch (const NVENCException& e) {
     std::cout << "[NVENC] CreateEncoder FAILED: " << e.what() << std::endl;
+    livekit_ffi::AppendCodecDebug(std::string("[NVENC] CreateEncoder failed: ") + e.what());
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
+
+  livekit_ffi::AppendCodecDebug("[NVENC] InitEncode OK " + std::to_string(codec_.width) +
+      "x" + std::to_string(codec_.height) + " fps=" + std::to_string(codec_.maxFramerate) +
+      " profile=" + format_.parameters.at("profile-level-id"));
 
   std::cout << "[NVENC] InitEncode OK: " << codec_.width << "x" << codec_.height
             << " @ " << codec_.maxFramerate << "fps"

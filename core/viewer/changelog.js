@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-11-06",
+    title: "Screen Sharing Recovery",
+    notes: [
+      "Windows app 0.6.40 improves recovery when NVIDIA screen-share encoding fails to start, including validation and recovery of cached graphics contexts.",
+      "A share that captures frames but produces no encoded video now reports a startup warning. Encoder startup errors are retained for troubleshooting.",
+      "Install the Windows desktop update to receive these native capture fixes."
+    ]
+  },
+  {
     version: "2026-10-18",
     title: "Jam Playback Startup Fix",
     notes: [

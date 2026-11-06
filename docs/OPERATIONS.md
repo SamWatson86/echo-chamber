@@ -170,6 +170,15 @@ The October 26 repair evidence and backup paths are recorded in
 
 ## Screen-share privacy
 
+For a black native share, compare WGC/frame-push counters with outbound
+`frames_encoded` and `bytes_sent` in the local `capture-debug.log`. Advancing
+capture callbacks with zero encoded frames localize the failure before video
+transport; successful track publication alone does not prove video is flowing.
+Preserve that log before relaunching Echo, since startup resets it. Native codec
+startup diagnostics are retained in `encoder-factory-debug.log` under the local
+Echo directory. See [native black-share recovery](eli5/native-black-share-recovery.md)
+for the November 5 evidence, limitations, and isolated recovery tests.
+
 A Windows native screen share is a separate LiveKit participant named
 `<owner identity>$screen`. An offline owner in the control dashboard is not proof
 that this publisher stopped. Check the authoritative SFU room roster and whether

@@ -15,12 +15,10 @@
  */
 
 #include "livekit/video_encoder_factory.h"
+#include "livekit/codec_debug_log.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <fstream>
 #include <iostream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include "api/environment/environment_factory.h"
@@ -66,23 +64,7 @@ std::string FormatVideoFormat(const webrtc::SdpVideoFormat& format) {
 }
 
 void AppendEncoderFactoryDebug(const std::string& line) {
-#if defined(WIN32)
-  static std::mutex debug_mutex;
-  std::lock_guard<std::mutex> lock(debug_mutex);
-  const char* local_appdata = std::getenv("LOCALAPPDATA");
-  if (!local_appdata || !*local_appdata) {
-    return;
-  }
-  std::ofstream out(
-      std::string(local_appdata) + "\\Echo Chamber\\encoder-factory-debug.log",
-      std::ios::app);
-  if (!out.is_open()) {
-    return;
-  }
-  out << line << std::endl;
-#else
-  (void)line;
-#endif
+  AppendCodecDebug(line);
 }
 
 int H264PacketizationPreference(const webrtc::SdpVideoFormat& format) {

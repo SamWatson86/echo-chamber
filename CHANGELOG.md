@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.40
+
+- Screen Sharing: Native NVIDIA capture now validates cached CUDA contexts before starting an encoder, reuses healthy contexts, and recreates invalid contexts when sharing is retried.
+- Reliability: CUDA failures are reported correctly instead of being treated as successful initialization. A capture session that produces no encoded video now reports an actionable startup warning.
+- Diagnostics: Native encoder startup errors are retained in timestamped logs so black-share failures can be investigated after a normal app launch.
+- Verification: The tested local build restored screen sharing on both ends, and Sam confirmed everyone could share during the subsequent session. Automated coverage includes 146 client tests, both H.264 profiles with actual NVIDIA encode/decode, and invalid-context recovery.
+- Release: Install the Windows desktop update to receive the native capture fixes. Control package metadata is aligned at 0.6.40; this desktop release does not require a running-server restart.
+
 ## 0.6.39
 
 - Screen Privacy: Disconnect now confirms native capture shutdown before leaving the room; unexpected room disconnects also cancel capture and delayed starts.

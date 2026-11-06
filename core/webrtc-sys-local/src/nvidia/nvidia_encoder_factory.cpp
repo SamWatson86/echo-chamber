@@ -7,6 +7,7 @@
 #include "h264_encoder_impl.h"
 #include "h265_encoder_impl.h"
 #include "rtc_base/logging.h"
+#include "livekit/codec_debug_log.h"
 
 namespace webrtc {
 
@@ -86,25 +87,30 @@ std::unique_ptr<VideoEncoder> NvidiaVideoEncoderFactory::Create(
       }
       std::cout << std::endl;
 
-      if (!cu_context_) {
-        cu_context_ = livekit_ffi::CudaContext::GetInstance();
-        if (!cu_context_->Initialize()) {
-          std::cout << "[NVENC-factory] ERROR: Failed to initialize CUDA context" << std::endl;
-          return nullptr;
-        }
+      cu_context_ = livekit_ffi::CudaContext::GetInstance();
+      if (!cu_context_->Initialize()) {
+        std::cout << "[NVENC-factory] ERROR: Failed to initialize CUDA context" << std::endl;
+        livekit_ffi::AppendCodecDebug("[NVENC-factory] CUDA initialization failed");
+        return nullptr;
+      }
+      const CUcontext context = cu_context_->GetContext();
+      if (!context) {
+        RTC_LOG(LS_ERROR) << "Failed to make CUDA context current for encoder";
+        livekit_ffi::AppendCodecDebug("[NVENC-factory] CUDA context unavailable after initialization");
+        return nullptr;
       }
 
       if (format.name == "H264") {
         std::cout << "[NVENC-factory] >>> CREATING NVENC H264 ENCODER <<<" << std::endl;
         return std::make_unique<NvidiaH264EncoderImpl>(
-            env, cu_context_->GetContext(), CU_MEMORYTYPE_DEVICE,
+            env, context, CU_MEMORYTYPE_DEVICE,
             NV_ENC_BUFFER_FORMAT_IYUV, format);
       }
 
       if (format.name == "H265" || format.name == "HEVC") {
         std::cout << "[NVENC-factory] >>> CREATING NVENC H265 ENCODER <<<" << std::endl;
         return std::make_unique<NvidiaH265EncoderImpl>(
-            env, cu_context_->GetContext(), CU_MEMORYTYPE_DEVICE,
+            env, context, CU_MEMORYTYPE_DEVICE,
             NV_ENC_BUFFER_FORMAT_IYUV, format);
       }
     }
