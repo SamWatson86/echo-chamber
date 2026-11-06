@@ -418,6 +418,18 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
     // as either consecutive_timeouts climbing or fps being well below
     // target steady-state — both are caught by the OTHER signals.
     let in_cold_start = snap.seconds_since_capture_started < COLD_START_GRACE.as_secs();
+    // Capture callbacks are not proof that the video encoder started. In the
+    // black-share incident WGC stayed at 30 fps while outbound RTP had no
+    // encoder and zero encoded frames. A static, already-running encoder can
+    // legitimately report zero fps, so require the missing implementation too.
+    if !in_cold_start
+        && snap.current_fps > 0
+        && snap.sender_fps == Some(0.0)
+        && snap.sender_encoder.is_none()
+    {
+        level = level.max(HealthLevel::Red);
+        reasons.push("Video encoder did not start. Stop sharing and try again.".to_string());
+    }
     let fps_check_applies =
         snap.capture_mode == "DXGI-DD" || (snap.capture_mode == "WGC" && snap.target_fps >= 60);
     if !in_cold_start && fps_check_applies && snap.target_fps > 0 {
@@ -475,6 +487,29 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_frames_do_not_hide_an_encoder_that_never_started() {
+        let mut snap = nominal();
+        snap.capture_mode = "WGC".into();
+        snap.target_fps = 30;
+        snap.current_fps = 30;
+        snap.sender_fps = Some(0.0);
+        assert_eq!(classify(&snap).0, HealthLevel::Red);
+        assert!(classify(&snap)
+            .1
+            .iter()
+            .any(|reason| reason.contains("encoder did not start")));
+
+        snap.seconds_since_capture_started = 3;
+        assert_eq!(classify(&snap).0, HealthLevel::Green);
+        snap.seconds_since_capture_started = 30;
+        snap.sender_encoder = Some("NVIDIA H264 Encoder".into());
+        assert_eq!(classify(&snap).0, HealthLevel::Green);
+        snap.sender_encoder = None;
+        snap.sender_fps = None;
+        assert_eq!(classify(&snap).0, HealthLevel::Green);
+    }
 
     fn nominal() -> CaptureHealthSnapshot {
         CaptureHealthSnapshot {

@@ -2,6 +2,7 @@
 
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
+#include "livekit/codec_debug_log.h"
 
 #include <fstream>
 
@@ -208,12 +209,14 @@ bool IsSoftwareEncoderForced() {
     const char* szErrName = NULL;                           \
     cuGetErrorName(err__, &szErrName);                      \
     RTC_LOG(LS_ERROR) << "CudaContext error " << szErrName; \
+    AppendCodecDebug(std::string("[cuda-context] ") + #call + " failed code=" + \
+                     std::to_string(static_cast<int>(err__))); \
     return ret;                                             \
   }
 
 #define CUCTX_CUDA_CALL_ERROR(call) \
   do {                              \
-    __CUCTX_CUDA_CALL(call, err__); \
+    __CUCTX_CUDA_CALL(call, false); \
   } while (0)
 
 static void* s_module_ptr = nullptr;
@@ -290,12 +293,29 @@ bool CudaContext::IsAvailable() {
 }
 
 bool CudaContext::Initialize() {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (IsSoftwareEncoderForced()) {
     RTC_LOG(LS_INFO) << "ECHO_FORCE_SOFTWARE_ENCODER=1 — skipping CUDA context initialization";
     return false;
   }
 
-  // Initialize CUDA context
+  // Factories outlive individual shares. Reuse a healthy context, but never
+  // trust a cached handle after the driver has invalidated it. A retry must
+  // be able to recover without restarting the entire desktop app.
+  if (cu_context_) {
+    unsigned int api_version = 0;
+    const CUresult result = cuCtxGetApiVersion(cu_context_, &api_version);
+    if (result == CUDA_SUCCESS) {
+      CUCTX_CUDA_CALL_ERROR(cuCtxSetCurrent(cu_context_));
+      return true;
+    }
+    RTC_LOG(LS_WARNING) << "Recreating stale CUDA context, cuCtxGetApiVersion="
+                        << static_cast<int>(result);
+    AppendCodecDebug("[cuda-context] recreating stale context code=" +
+                     std::to_string(static_cast<int>(result)));
+    cuCtxDestroy(cu_context_);
+    cu_context_ = nullptr;
+  }
 
   bool success = load_cuda_modules();
   if (!success) {
@@ -318,17 +338,8 @@ bool CudaContext::Initialize() {
     return false;
   }
 
-  CUresult result = cuInit(0);
-  if (result != CUDA_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "Failed to initialize CUDA.";
-    return false;
-  }
-
-  result = cuDeviceGetCount(&num_devices);
-  if (result != CUDA_SUCCESS) {
-    RTC_LOG(LS_ERROR) << "Failed to get CUDA device count.";
-    return false;
-  }
+  CUCTX_CUDA_CALL_ERROR(cuInit(0));
+  CUCTX_CUDA_CALL_ERROR(cuDeviceGetCount(&num_devices));
 
   if (num_devices == 0) {
     RTC_LOG(LS_ERROR) << "No CUDA devices found.";
@@ -354,27 +365,30 @@ bool CudaContext::Initialize() {
 
   cu_device_ = cu_device;
   cu_context_ = context;
+  AppendCodecDebug("[cuda-context] initialized");
 
   return true;
 }
 
 CUcontext CudaContext::GetContext() const {
-  RTC_DCHECK(cu_context_ != nullptr);
-  // Ensure the context is current
-  CUcontext current;
-  if (cuCtxGetCurrent(&current) != CUDA_SUCCESS) {
-    throw;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!cu_context_) {
+    return nullptr;
   }
-  if (cu_context_ == current) {
-    return cu_context_;
+  // CUDA can still report a destroyed context as current, and setting it
+  // current alone does not reliably validate its lifetime.
+  unsigned int api_version = 0;
+  if (cuCtxGetApiVersion(cu_context_, &api_version) != CUDA_SUCCESS) {
+    return nullptr;
   }
   if (cuCtxSetCurrent(cu_context_) != CUDA_SUCCESS) {
-    throw;
+    return nullptr;
   }
   return cu_context_;
 }
 
 void CudaContext::Shutdown() {
+  std::lock_guard<std::mutex> lock(mutex_);
   // Shutdown CUDA context
   if (cu_context_) {
     cuCtxDestroy(cu_context_);

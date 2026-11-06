@@ -328,6 +328,28 @@ With all profiles registered, 4K@60fps SDP succeeds for all decoder variants in 
 
 ---
 
+### Patch 9 — CUDA Context Reuse and Recovery
+
+**Files:** `src/nvidia/cuda_context.{h,cpp}`,
+`src/nvidia/nvidia_encoder_factory.cpp`, `include/livekit/codec_debug_log.h`
+
+CUDA initialization is serialized and idempotent. Before reusing a cached
+context, query `cuCtxGetApiVersion`; a destroyed context can still appear
+current, and `cuCtxSetCurrent` alone did not reject it in the Windows hardware
+test. Recreate invalid contexts and revalidate on every encoder creation.
+Keep CUDA errors as `false`, rather than converting nonzero error codes to
+boolean success. Invalid context access returns null, which the encoder
+factory handles without constructing a codec.
+
+Keep the timestamped native codec diagnostics when updating the SDK: GUI
+launches normally discard stdout/stderr, including the NVENC startup error.
+
+Verification is in `test/cuda_context_recovery_test.cpp` and
+`test/test-cuda-context-recovery.ps1`. The client also has an explicitly ignored
+hardware test covering synthetic Baseline and High H.264 encode/decode. See
+`docs/eli5/native-black-share-recovery.md` at the repository root for incident
+evidence and the remaining uncertainty about the initial failure.
+
 ## Patch Interaction Map
 
 The patches form a cooperative system. Removing any one degrades the whole pipeline:

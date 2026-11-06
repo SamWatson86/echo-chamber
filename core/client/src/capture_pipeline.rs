@@ -853,6 +853,147 @@ impl CapturePublisher {
 mod tests {
     use super::*;
 
+    // Synthetic frames and local peer connections only; never captures the
+    // desktop or joins a production room. Run explicitly on an NVIDIA PC.
+    #[tokio::test]
+    #[ignore = "requires Windows NVIDIA hardware; exercises native H264 profiles"]
+    async fn native_h264_profiles_encode_synthetic_frames() {
+        use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
+
+        let factory = PeerConnectionFactory::default();
+        for profile in ["42e01f", "640033"] {
+            let sender = factory
+                .create_peer_connection(RtcConfiguration::default())
+                .unwrap();
+            let receiver = factory
+                .create_peer_connection(RtcConfiguration::default())
+                .unwrap();
+            let (sender_ice_tx, mut sender_ice_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (receiver_ice_tx, mut receiver_ice_rx) = tokio::sync::mpsc::unbounded_channel();
+            sender.on_ice_candidate(Some(Box::new(move |candidate| {
+                let _ = sender_ice_tx.send(candidate);
+            })));
+            receiver.on_ice_candidate(Some(Box::new(move |candidate| {
+                let _ = receiver_ice_tx.send(candidate);
+            })));
+            let source = NativeVideoSource::new(
+                VideoResolution {
+                    width: 1920,
+                    height: 804,
+                },
+                false,
+            );
+            let track = factory.create_video_track("synthetic-h264-smoke", source.clone());
+            let transceiver = sender
+                .add_transceiver(
+                    MediaStreamTrack::Video(track),
+                    RtpTransceiverInit {
+                        direction: RtpTransceiverDirection::SendOnly,
+                        stream_ids: vec!["synthetic".into()],
+                        send_encodings: vec![RtpEncodingParameters {
+                            max_bitrate: Some(20_000_000),
+                            min_bitrate: Some(8_000_000),
+                            max_framerate: Some(30.0),
+                            ..Default::default()
+                        }],
+                    },
+                )
+                .unwrap();
+            let codecs: Vec<_> = factory
+                .get_rtp_sender_capabilities(MediaType::Video)
+                .codecs
+                .into_iter()
+                .filter(|codec| {
+                    codec.mime_type.eq_ignore_ascii_case("video/h264")
+                        && codec
+                            .sdp_fmtp_line
+                            .as_deref()
+                            .unwrap_or("")
+                            .contains(&format!("profile-level-id={profile}"))
+                })
+                .collect();
+            assert!(!codecs.is_empty(), "profile {profile} unavailable");
+            transceiver.set_codec_preferences(codecs).unwrap();
+            let offer = sender.create_offer(OfferOptions::default()).await.unwrap();
+            sender.set_local_description(offer.clone()).await.unwrap();
+            receiver.set_remote_description(offer).await.unwrap();
+            let answer = receiver
+                .create_answer(AnswerOptions::default())
+                .await
+                .unwrap();
+            receiver
+                .set_local_description(answer.clone())
+                .await
+                .unwrap();
+            sender.set_remote_description(answer).await.unwrap();
+            let receiver_clone = receiver.clone();
+            let sender_ice_task = tokio::spawn(async move {
+                while let Some(candidate) = sender_ice_rx.recv().await {
+                    let _ = receiver_clone.add_ice_candidate(candidate).await;
+                }
+            });
+            let sender_clone = sender.clone();
+            let receiver_ice_task = tokio::spawn(async move {
+                while let Some(candidate) = receiver_ice_rx.recv().await {
+                    let _ = sender_clone.add_ice_candidate(candidate).await;
+                }
+            });
+            let started = Instant::now();
+            for frame_index in 0..150u8 {
+                let mut buffer = I420Buffer::new(1920, 804);
+                let (y, u, v) = buffer.data_mut();
+                y.fill(32 + frame_index);
+                u.fill(96);
+                v.fill(160);
+                source.capture_frame(&VideoFrame {
+                    rotation: VideoRotation::VideoRotation0,
+                    buffer,
+                    timestamp_us: started.elapsed().as_micros() as i64,
+                });
+                tokio::time::sleep(Duration::from_millis(34)).await;
+            }
+            let stats = transceiver.sender().get_stats().await.unwrap();
+            let encoded = stats
+                .iter()
+                .find_map(|stat| match stat {
+                    RtcStats::OutboundRtp(outbound) if outbound.stream.kind == "video" => {
+                        eprintln!(
+                            "H264 profile {profile}: encoded={} encoder={}",
+                            outbound.outbound.frames_encoded,
+                            outbound.outbound.encoder_implementation
+                        );
+                        Some(outbound.outbound.frames_encoded)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let decoded = receiver
+                .get_stats()
+                .await
+                .unwrap()
+                .iter()
+                .find_map(|stat| match stat {
+                    RtcStats::InboundRtp(inbound) if inbound.stream.kind == "video" => {
+                        Some(inbound.inbound.frames_decoded)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+            sender.close();
+            receiver.close();
+            sender_ice_task.abort();
+            receiver_ice_task.abort();
+            assert!(
+                encoded > 0,
+                "H264 profile {profile} produced no encoded frames"
+            );
+            assert!(
+                decoded > 0,
+                "H264 profile {profile} produced no decoded frames"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn publisher_disconnect_stops_capture_without_waiting_for_event_stream_close() {
         let running = Arc::new(AtomicBool::new(true));
