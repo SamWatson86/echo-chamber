@@ -78,7 +78,9 @@ through static hosting or configure public CDN caching for `/api/files`.
 ## API contract
 
 All routes are under `/api/files`. Mutations require `X-Echo-Files: 1` and a
-matching Host/Origin when the browser supplies Origin. Cookie auth is scoped to
+matching request authority/Origin when the browser supplies Origin. HTTP/2 uses
+its native URI `:authority`; HTTP/1 uses Host. Conflicting authority/Host values
+and HTTP/2 scheme mismatches are rejected. Cookie auth is scoped to
 this API. Credentials/tokens are never passed in download URLs.
 
 | Method/path | Role | Request/result |
@@ -147,3 +149,11 @@ byte-identical download with its original filename, byte-range responses, and a
 reader's denied delete request. Chromium trusts loopback for this isolated test;
 normal remote users still require HTTPS. Screenshot: the ignored viewer-test
 `test-results/real-files-browser-smoke.png` output.
+
+For the production TLS/HTTP2 transport, set `ECHO_FILES_TEST_TLS=1` before starting
+the Rust fixture and use `https://127.0.0.1:4197/viewer/files.html`. This mode
+uses an in-memory self-signed test certificate and ALPN HTTP/2; test browsers
+must explicitly allow that fixture certificate. Test passwords are
+`owner-password-for-files` and `reader-password-for-files`. It still uses only
+temporary storage and exits after 45 seconds. Real production browser tests
+must retain certificate validation.
