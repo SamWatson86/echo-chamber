@@ -6,6 +6,7 @@ mod diagnostics;
 mod diagnostics_api;
 mod diagnostics_auth;
 pub mod file_serving;
+mod files;
 mod jam_bot;
 mod jam_history;
 mod jam_library;
@@ -798,6 +799,9 @@ async fn main() {
             require_diagnostics_owner,
         ));
 
+    let file_store = files::FileStore::from_env(
+        config.chat_dir.parent().unwrap_or(std::path::Path::new(".")).join("files"),
+    );
     let app = Router::new()
         .route("/", get(root_route))
         .nest_service(
@@ -937,6 +941,7 @@ async fn main() {
                 .allow_headers(Any),
         )
         .with_state(state)
+        .nest("/api/files", files::router(file_store))
         .layer(DefaultBodyLimit::max(max_body));
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)

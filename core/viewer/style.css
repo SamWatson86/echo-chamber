@@ -6138,3 +6138,11 @@ body.admin-mode .room-top {
   cursor: pointer;
   font-size: 11px;
 }
+
+/* File library: independent credentials and a persistent streaming frame. */
+.portal-files-link { display: inline-block; color: var(--accent, #a8e5ca); margin: 12px 0; }
+.files-module { position: fixed; inset: 5vh 5vw; z-index: 100; background: #10191c; border: 1px solid #436057; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+.files-module-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #304341; }
+.files-module-header h3 { margin: 0; }
+.files-module iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+:root[data-ui-shell="v2"] .stage-module-host > .files-module.clubhouse-stage-module { position: static; inset: auto; width: 100%; height: 100%; display: flex; flex-direction: column; padding: 0; }

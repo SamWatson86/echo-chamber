@@ -11,6 +11,7 @@
     "preview:themes": "node ./scripts/serve-theme-preview.mjs",
     "test": "playwright test",
     "test:all": "playwright test",
+    "test:files:smoke": "node ./scripts/files-browser-smoke.mjs",
     "test:headed": "playwright test --headed"
   },
   "devDependencies": {

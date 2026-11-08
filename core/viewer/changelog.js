@@ -8,6 +8,15 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-11-07",
+    title: "The File Room",
+    notes: [
+      "Share files in Echo's private file room. Friends sign in with a download password; the owner can upload and manage the library.",
+      "Uploads use resumable chunks with progress and pause controls. Downloads stream straight to disk, with no application file size cap.",
+      "Requires server setup and deployment. No Windows installer update is needed."
+    ]
+  },
+  {
     version: "2026-11-06",
     title: "Screen Sharing Recovery",
     notes: [

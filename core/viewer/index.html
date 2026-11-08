@@ -6,7 +6,7 @@
     <title>Echo Chamber</title>
     <script src="layout-policy.js?v=0.6.34.1786210901"></script>
     <script src="ui-shell.js?v=0.6.34.1786210901"></script>
-    <script src="phone-presentation.js?v=0.6.37.phone.2"></script>
+    <script src="phone-presentation.js?v=2026-11-07.files.1"></script>
     <script src="theme-runtime.js?v=0.6.11.1777930912"></script>
     <script>
       (function () {
@@ -39,12 +39,12 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="style.css?v=0.6.34.1786210901" />
+    <link rel="stylesheet" href="style.css?v=2026-11-07.files.1" />
     <link rel="stylesheet" href="jam.css?v=0.6.34.1785384000" />
     <link rel="stylesheet" href="capture-picker.css?v=0.6.11.1777930912" />
-    <link rel="stylesheet" href="clubhouse-shell.css?v=0.6.37.phone.2" />
+    <link rel="stylesheet" href="clubhouse-shell.css?v=2026-11-07.files.1" />
     <link rel="stylesheet" href="themes.css?v=0.6.11.1777930912" />
-    <link rel="stylesheet" href="phone-presentation.css?v=0.6.37.phone.2" />
+    <link rel="stylesheet" href="phone-presentation.css?v=2026-11-07.files.1" />
   </head>
   <body>
     <main id="ui-root" class="app">
@@ -136,6 +136,8 @@
           </div>
         </div>
 
+        <a href="files.html" class="portal-files-link">Open the file room &rarr;</a>
+
         <!-- Device selection (visible on portal) -->
         <div class="portal-devices">
           <div class="actions device-actions">
@@ -193,6 +195,7 @@
               <button id="open-bug-report" type="button" class="bug-report-btn" disabled>Feedback</button>
               <button id="open-updates" type="button">Updates</button>
               <button id="debug-toggle" type="button">Debug</button>
+              <button id="open-files" type="button" aria-controls="stage-module-host" aria-expanded="false">Files</button>
             </div>
             <button id="disconnect-top" type="button" disabled>Disconnect</button>
             <button id="shell-toggle-utility" type="button" class="shell-v2-only" aria-controls="utility-host" aria-expanded="true" aria-label="Hide active users">Users</button>
@@ -294,6 +297,10 @@
           <p class="settings-hint">Reduces encoding load for older hardware. Auto-detected based on GPU. Changes take effect on next join.</p>
         </div>
       </div>
+      <section id="files-panel" class="files-module hidden" data-stage-module-panel="files" role="dialog" aria-label="Files">
+        <div class="files-module-header"><h3>Files</h3><button id="close-files" type="button">Back to Stage</button></div>
+        <iframe id="files-frame" title="Echo file library" data-src="files.html"></iframe>
+      </section>
       <!-- Soundboard Compact (Quick Play) -->
       <div id="soundboard-compact" class="soundboard-compact hidden" data-stage-module-panel="soundboard" role="dialog" aria-label="Soundboard Quick Play">
         <div class="soundboard-compact-header">
@@ -794,7 +801,7 @@
     <script src="room-switch-state.js?v=0.6.11.1777930912"></script>
     <script src="jam-session-state.js?v=0.6.11.1777930912"></script>
     <script src="publish-state-reconcile.js?v=0.6.11.1777930912"></script>
-    <script src="state.js?v=0.6.37.phone.2"></script>
+    <script src="state.js?v=2026-11-07.files.1"></script>
     <script src="debug.js?v=0.6.11.1777930912"></script>
     <script src="urls.js?v=0.6.11.1777930912"></script>
     <script src="settings.js?v=0.6.11.1777930912"></script>
@@ -805,31 +812,31 @@
     <script src="rnnoise.js?v=0.6.34.1786386773"></script>
     <script src="chimes.js?v=0.6.11.1777930912"></script>
     <script src="room-status.js?v=0.6.11.1777930912"></script>
-    <script src="auth.js?v=0.6.37.phone.2"></script>
+    <script src="auth.js?v=2026-11-07.files.1"></script>
     <script src="admin-panel.js?v=0.6.2.1775659895"></script>
     <script src="theme-effects.js?v=0.6.11.1777930912"></script>
     <script src="theme.js?v=0.6.11.1777930912"></script>
     <script src="chat.js?v=0.6.11.1777930912"></script>
-    <script src="soundboard.js?v=0.6.37.phone.2"></script>
+    <script src="soundboard.js?v=2026-11-07.files.1"></script>
     <script src="screen-share-state.js?v=0.6.11.1777930912"></script>
     <script src="screen-share-config.js?v=0.6.11.1777930912"></script>
     <script src="screen-share-quality.js?v=0.6.11.1777930912"></script>
     <script src="screen-share-adaptive.js?v=0.6.11.1777930912"></script>
     <script src="screen-share-native.js?v=0.6.11.1777930912"></script>
-    <script src="participants-grid.js?v=0.6.37.phone.2"></script>
-    <script src="stage-tile-order.js?v=0.6.37.phone.2"></script>
-    <script src="grid-layout.js?v=0.6.37.phone.2"></script>
+    <script src="participants-grid.js?v=2026-11-07.files.1"></script>
+    <script src="stage-tile-order.js?v=2026-11-07.files.1"></script>
+    <script src="grid-layout.js?v=2026-11-07.files.1"></script>
     <script src="camera-lobby-layout.js?v=0.6.11.1777930912"></script>
-    <script src="participants-avatar.js?v=0.6.37.phone.2"></script>
-    <script src="participants-fullscreen.js?v=0.6.37.phone.2"></script>
-    <script src="participants.js?v=0.6.37.phone.2"></script>
-    <script src="audio-routing.js?v=0.6.37.phone.2"></script>
-    <script src="media-controls.js?v=0.6.37.phone.2"></script>
+    <script src="participants-avatar.js?v=2026-11-07.files.1"></script>
+    <script src="participants-fullscreen.js?v=2026-11-07.files.1"></script>
+    <script src="participants.js?v=2026-11-07.files.1"></script>
+    <script src="audio-routing.js?v=2026-11-07.files.1"></script>
+    <script src="media-controls.js?v=2026-11-07.files.1"></script>
     <script src="admin-history.js?v=0.6.34.1785470400"></script>
     <script src="admin.js?v=0.6.34.1785470400"></script>
-    <script src="connect.js?v=0.6.37.phone.2"></script>
-    <script src="android-firefox-presentation-recovery-loader.js?v=0.6.37.phone.2"></script>
-    <script src="app.js?v=0.6.37.phone.2"></script>
+    <script src="connect.js?v=2026-11-07.files.1"></script>
+    <script src="android-firefox-presentation-recovery-loader.js?v=2026-11-07.files.1"></script>
+    <script src="app.js?v=2026-11-07.files.1"></script>
     <script src="capture-picker.js?v=0.6.11.1777930912"></script>
     <script src="jam-visualizer.js?v=0.6.34.1785384000"></script>
     <script src="jam.js?v=0.6.34.1785384000"></script>
