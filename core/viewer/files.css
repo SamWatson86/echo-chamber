@@ -1,0 +1,279 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: #10191c;
+  color: #e9efed;
+  --muted: #a3b4b1;
+  --line: #304341;
+  --mint: #a8e5ca;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: radial-gradient(ellipse at 90% 0, #25433d66, transparent 55%);
+  min-height: 100vh;
+}
+main {
+  max-width: 1000px;
+  margin: auto;
+  padding: 40px 30px 24px;
+}
+.masthead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+.eyebrow {
+  color: var(--mint);
+  letter-spacing: 0.18em;
+  font-size: 11px;
+  font-weight: 700;
+}
+h1 {
+  margin: 12px 0;
+  font-size: clamp(30px, 5vw, 48px);
+  letter-spacing: -0.045em;
+  font-weight: 650;
+}
+h1 span {
+  color: var(--mint);
+}
+h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+p {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 6px 0 16px;
+}
+.private-badge {
+  white-space: nowrap;
+  border: 1px solid #436057;
+  border-radius: 30px;
+  color: var(--mint);
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.card {
+  padding: 24px;
+  background: #192629;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  margin: 22px 0;
+}
+#files-login {
+  max-width: 480px;
+}
+form {
+  display: grid;
+  gap: 10px;
+}
+label {
+  font-size: 13px;
+  color: #c4d5d0;
+}
+input,
+select,
+button,
+.download {
+  font: inherit;
+  border-radius: 8px;
+}
+input,
+select {
+  width: 100%;
+  padding: 12px;
+  color: inherit;
+  border: 1px solid #4a615c;
+  background: #101c1f;
+}
+button,
+.download {
+  background: var(--mint);
+  color: #122b22;
+  padding: 10px 16px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-weight: 650;
+  text-decoration: none;
+  text-align: center;
+  white-space: nowrap;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+button:hover:not(:disabled),
+.download:hover {
+  filter: brightness(1.1);
+}
+.secondary {
+  color: #d1e1dd;
+  background: transparent;
+  border-color: #48605b;
+}
+.danger {
+  color: #ffb5af;
+  background: transparent;
+  border-color: #694a49;
+}
+:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 3px;
+}
+#files-status {
+  min-height: 24px;
+  margin: 16px 0;
+  color: var(--mint);
+  overflow-wrap: anywhere;
+}
+#files-status.error {
+  color: #ffb5af;
+}
+.toolbar,
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.toolbar {
+  justify-content: space-between;
+  margin: 18px 0;
+}
+#files-count {
+  font-size: 20px;
+  font-weight: 650;
+}
+small {
+  color: var(--muted);
+  display: block;
+  margin-top: 5px;
+}
+.file-picker {
+  display: block;
+  font-weight: 600;
+}
+.file-picker input {
+  margin-top: 10px;
+}
+.hint {
+  font-size: 12px;
+  margin-top: 10px;
+}
+progress {
+  width: 100%;
+  height: 12px;
+  accent-color: var(--mint);
+  margin-bottom: 12px;
+}
+.search-label {
+  display: block;
+  margin: 24px 0 14px;
+}
+.search-label input {
+  margin-top: 8px;
+}
+.file-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 20px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.file-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 48px;
+  border: 1px solid #436057;
+  border-radius: 8px;
+  color: var(--mint);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.file-info {
+  min-width: 0;
+  flex: 1;
+}
+.file-name {
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.empty {
+  border: 1px dashed #436057;
+  border-radius: 12px;
+  padding: 32px;
+  text-align: center;
+}
+.pending-row {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.pending-row span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  color: var(--muted);
+}
+footer {
+  color: #829b94;
+  font-size: 12px;
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+footer span {
+  padding: 0 10px;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 560px) {
+  main {
+    padding: 24px 16px;
+  }
+  .masthead {
+    display: block;
+  }
+  .private-badge {
+    display: inline-block;
+    margin-top: 6px;
+  }
+  .card {
+    padding: 18px;
+  }
+  .toolbar {
+    align-items: flex-start;
+  }
+  .file-row {
+    flex-wrap: wrap;
+  }
+  .file-row .actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  button,
+  .download {
+    min-height: 42px;
+  }
+}
+
+.back-link {
+  display: inline-block;
+  color: var(--muted);
+  margin-bottom: 20px;
+  font-size: 13px;
+  text-decoration: none;
+}

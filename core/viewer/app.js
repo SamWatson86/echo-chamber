@@ -132,6 +132,7 @@ var settingsReturnFocus = null;
 var settingsModalActive = false;
 var activeStageModule = null;
 var stageModuleOpeners = {
+  files: document.getElementById("open-files"),
   chat: openChatButton,
   jam: shellOpenJamButton,
   camera: openCameraLobbyButton,
@@ -139,6 +140,7 @@ var stageModuleOpeners = {
 };
 var stageModuleReturnFocus = Object.assign({}, stageModuleOpeners);
 var legacyStageModuleControlIds = {
+  files: "files-panel",
   chat: "chat-panel",
   jam: "jam-panel",
   camera: "camera-lobby",
@@ -239,12 +241,13 @@ function setSettingsPanelOpen(open, returnFocusTarget) {
 }
 
 function normalizeStageModule(module) {
-  return module === "chat" || module === "jam" || module === "camera" || module === "soundboard"
+  return module === "files" || module === "chat" || module === "jam" || module === "camera" || module === "soundboard"
     ? module
     : null;
 }
 
 function stageModuleNodes(module) {
+  if (module === "files") return [document.getElementById("files-panel")].filter(Boolean);
   if (module === "chat") return chatPanel ? [chatPanel] : [];
   if (module === "jam") return shellJamPanel ? [shellJamPanel] : [];
   if (module === "camera") return shellCameraLobbyPanel ? [shellCameraLobbyPanel] : [];
@@ -255,7 +258,7 @@ function stageModuleNodes(module) {
 }
 
 function allStageModuleNodes() {
-  return ["chat", "jam", "camera", "soundboard"].flatMap(stageModuleNodes);
+  return ["chat", "jam", "camera", "soundboard", "files"].flatMap(stageModuleNodes);
 }
 
 function stageModuleOpenerNodes(module) {
@@ -351,7 +354,7 @@ function moveStageModulePanels(useStageHost) {
 }
 
 function inferVisibleStageModule() {
-  return ["chat", "jam", "camera", "soundboard"].find(function(module) {
+  return ["chat", "jam", "camera", "soundboard", "files"].find(function(module) {
     return stageModuleNodes(module).some(function(panel) {
       return !panel.classList.contains("hidden");
     });
@@ -365,7 +368,9 @@ function focusReturnTarget(preferred, module) {
 }
 
 function focusActiveStageModule(module) {
-  var target = module === "chat"
+  var target = module === "files"
+    ? document.getElementById("close-files")
+    : module === "chat"
     ? chatInput
     : module === "jam"
       ? shellCloseJamButton
@@ -385,7 +390,7 @@ function scheduleStageGridRecalc() {
 }
 
 function syncStageModulePanels() {
-  ["chat", "jam", "camera", "soundboard"].forEach(function(module) {
+  ["chat", "jam", "camera", "soundboard", "files"].forEach(function(module) {
     var isActive = activeStageModule === module;
     var nodes = stageModuleNodes(module);
     if (isActive && module !== "soundboard") {
@@ -946,3 +951,15 @@ if (document.readyState === "loading") {
   setupAdminLoginUi();
   bootAdminFromStorage();
 }
+
+// Keep the library frame alive across stage switches so uploads can continue.
+document.getElementById("open-files")?.addEventListener("click", function() {
+  var frame = document.getElementById("files-frame");
+  if (frame && !frame.getAttribute("src")) frame.setAttribute("src", frame.dataset.src);
+  if (window.EchoStageModules?.open("files", this)) return;
+  document.getElementById("files-panel")?.classList.remove("hidden");
+});
+document.getElementById("close-files")?.addEventListener("click", function() {
+  if (window.EchoStageModules?.close("files")) return;
+  document.getElementById("files-panel")?.classList.add("hidden");
+});

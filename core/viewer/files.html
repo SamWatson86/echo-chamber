@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Files · Echo Chamber</title>
+    <link rel="stylesheet" href="files.css?v=2026-11-07" />
+    <script defer src="files-transfer.js?v=2026-11-07"></script>
+    <script defer src="files.js?v=2026-11-07"></script>
+  </head>
+  <body>
+    <main>
+      <a id="files-back" class="back-link" href="./" hidden
+        >&larr; Back to Echo</a
+      >
+      <header class="masthead">
+        <div>
+          <span class="eyebrow">ECHO CHAMBER</span>
+          <h1>The file room<span aria-hidden="true">.</span></h1>
+          <p>
+            Your clubhouse’s shared shelf. Pick a file and take it with you.
+          </p>
+        </div>
+        <span class="private-badge">Private library</span>
+      </header>
+      <p id="files-status" role="status" aria-live="polite"></p>
+      <section id="files-login" class="card">
+        <h2>Come on in</h2>
+        <p>Use the Files password Sam shared with you.</p>
+        <form id="files-login-form">
+          <label for="files-role">Access</label
+          ><select id="files-role">
+            <option value="reader">Download files</option>
+            <option value="owner">Owner · upload and manage</option>
+          </select>
+          <label for="files-password">Files password</label
+          ><input
+            id="files-password"
+            type="password"
+            autocomplete="current-password"
+            required
+            maxlength="1024"
+          />
+          <button type="submit" id="files-sign-in">Unlock library</button>
+        </form>
+      </section>
+      <section id="files-library" hidden>
+        <div class="toolbar">
+          <div>
+            <span id="files-count">Shared files</span
+            ><small id="files-access"></small>
+          </div>
+          <div class="actions">
+            <button id="files-refresh" class="secondary">Refresh</button
+            ><button id="files-sign-out" class="secondary">Sign out</button>
+          </div>
+        </div>
+        <section id="files-owner" class="card" hidden>
+          <h2>Add to the shelf</h2>
+          <p>No application file size cap. Files are stored on Sam’s server.</p>
+          <label class="file-picker" for="files-input"
+            >Choose files to upload<input id="files-input" type="file" multiple
+          /></label>
+          <p class="hint">
+            To resume after a pause or reconnect, choose the same file again.
+            Keep the original file unchanged.
+          </p>
+          <div id="files-transfer" hidden>
+            <p id="files-progress-label"></p>
+            <progress
+              id="files-progress"
+              max="100"
+              value="0"
+              aria-label="Upload progress"
+            ></progress
+            ><button id="files-pause" class="secondary">Pause upload</button>
+          </div>
+          <div id="files-pending"></div>
+        </section>
+        <label class="search-label" for="files-search"
+          >Find a file<input
+            id="files-search"
+            type="search"
+            placeholder="Search the shelf…"
+        /></label>
+        <div id="files-list" class="file-list"></div>
+      </section>
+      <footer>
+        Echo Chamber <span aria-hidden="true">/</span> Files stay here until the
+        owner removes them.
+      </footer>
+    </main>
+  </body>
+</html>
