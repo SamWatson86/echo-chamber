@@ -187,10 +187,11 @@ async fn private_response(request: Request, next: Next) -> Response {
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
-    let origin_bad = request.headers().get("origin").map(|origin| {
-        let uri = origin.to_str().ok().and_then(|s| s.parse::<axum::http::Uri>().ok());
-        !matches!(uri, Some(uri) if matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().map(|a| a.as_str()) == request.headers().get("host").and_then(|h| h.to_str().ok()))
-    }).unwrap_or(false);
+    let origin_bad = request
+        .headers()
+        .get("origin")
+        .map(|origin| !origin_matches_request(&request, origin))
+        .unwrap_or(false);
     if origin_bad
         || (mutation
             && request
@@ -214,6 +215,40 @@ async fn private_response(request: Request, next: Next) -> Response {
         .headers_mut()
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     response
+}
+
+// HTTP/2 carries :authority in the URI and may omit the HTTP/1 Host header.
+// Use that native authority without trusting client-supplied forwarding headers.
+fn origin_matches_request(request: &Request, origin: &HeaderValue) -> bool {
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|s| s.parse::<axum::http::Uri>().ok())
+    else {
+        return false;
+    };
+    if !matches!(origin.scheme_str(), Some("http" | "https")) {
+        return false;
+    }
+    let authority = request.uri().authority().map(|value| value.as_str());
+    let host = request
+        .headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok());
+    if let (Some(authority), Some(host)) = (authority, host) {
+        if !authority.eq_ignore_ascii_case(host) {
+            return false;
+        }
+    }
+    if let Some(scheme) = request.uri().scheme_str() {
+        if origin.scheme_str() != Some(scheme) {
+            return false;
+        }
+    }
+    match (origin.authority(), authority.or(host)) {
+        (Some(origin), Some(target)) => origin.as_str().eq_ignore_ascii_case(target),
+        _ => false,
+    }
 }
 
 async fn login(
@@ -1129,6 +1164,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn http2_native_authority_accepts_same_origin_and_rejects_ambiguous_origins() {
+        for (origin, host, expected) in [
+            ("https://echo.test:9443", None, StatusCode::OK),
+            ("https://ECHO.test:9443", None, StatusCode::OK),
+            ("https://evil.test:9443", None, StatusCode::FORBIDDEN),
+            (
+                "https://echo.test:9443",
+                Some("evil.test:9443"),
+                StatusCode::FORBIDDEN,
+            ),
+            ("http://echo.test:9443", None, StatusCode::FORBIDDEN),
+            ("null", None, StatusCode::FORBIDDEN),
+        ] {
+            let f = Fixture::new();
+            let mut request = HttpRequest::builder()
+                .method("POST")
+                .version(axum::http::Version::HTTP_2)
+                .uri("https://echo.test:9443/api/files/session")
+                .header("origin", origin)
+                .header("x-echo-files", "1")
+                .header("content-type", "application/json");
+            if let Some(host) = host {
+                request = request.header("host", host);
+            }
+            let response = f
+                .app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(
+                            r#"{"role":"owner","password":"owner-password-for-files"}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "origin={origin} host={host:?}");
+        }
+    }
+
     /// Isolated real HTTP fixture for manually exercising browser cookie/download
     /// behavior. Never starts Echo services or reads the production environment.
     #[tokio::test]
@@ -1147,13 +1223,30 @@ mod tests {
         let app = Router::new()
             .nest("/api/files", router(fixture.store.clone()))
             .nest_service("/viewer", tower_http::services::ServeDir::new(viewer));
-        println!("Files test fixture ready at http://127.0.0.1:{port}/viewer/files.html");
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async { tokio::time::sleep(Duration::from_secs(45)).await })
-        .await
-        .unwrap();
+        if std::env::var("ECHO_FILES_TEST_TLS").as_deref() == Ok("1") {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let tls = crate::config::generate_self_signed().await;
+            let handle = axum_server::Handle::new();
+            let stop = handle.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(45)).await;
+                stop.graceful_shutdown(Some(Duration::from_secs(5)));
+            });
+            println!("Files TLS/HTTP2 fixture ready at https://127.0.0.1:{port}/viewer/files.html");
+            axum_server::from_tcp_rustls(listener.into_std().unwrap(), tls)
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
+        } else {
+            println!("Files test fixture ready at http://127.0.0.1:{port}/viewer/files.html");
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async { tokio::time::sleep(Duration::from_secs(45)).await })
+            .await
+            .unwrap();
+        }
     }
 }
