@@ -228,11 +228,14 @@ the same track moves to 720p30. At 720p it requires two healthy capture
 windows and a fresh hardware sender report before attempting 60 fps.
 720p60 needs Level 3.2 for NVENC and Level 4.0 for the Media Foundation path.
 The Level 3.1 compatibility path stays within 720p30. When pressure caused
-the resolution drop, a hardware sender can return to 1080p30 on the same
-track after 15 seconds of sustained headroom. Recovery requires confirmed
-1080p codec support, a healthy sender and capture queue, and either recovered
-game cadence or recent GPU headroom for a slower source. Echo tries this
-once per share and stays at 720p if pressure forces resolution down again.
+the resolution drop, Echo prioritizes returning to 1080p30 on the same track
+while both capture and the sender show headroom. Recovery requires 10 seconds
+of continuous capture headroom and 3 continuous seconds of an active hardware
+sender with confirmed 1080p codec support and no CPU or bandwidth limitation.
+The capture and sender checks can run in parallel. Capture headroom requires a
+healthy capture queue and either recovered game cadence or recent GPU headroom
+for a slower source. Echo tries this once per share and stays at 720p if
+pressure forces resolution down again.
 
 The governor checks capture conversion time, frame queue drops, and sender
 limitations. An OpenH264 fallback caps capture at 20 fps when detected.

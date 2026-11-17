@@ -19,7 +19,8 @@ const GAME_BASELINE_MIN_FPS: f64 = 55.0;
 const GAME_SLOWDOWN_RATIO: f64 = 0.75;
 const GAME_PRESSURE_MAX_FPS: f64 = 80.0;
 const GAME_PRESSURE_AT_30_FPS: f64 = 35.0;
-const RECOVERY_HOLD: Duration = Duration::from_secs(15);
+const RECOVERY_CAPTURE_HOLD: Duration = Duration::from_secs(10);
+const RECOVERY_SENDER_HOLD: Duration = Duration::from_secs(3);
 const RECOVERY_CAPTURE_FRESHNESS: Duration = Duration::from_millis(1250);
 const RECOVERY_CONVERSION_BUDGET: Duration = Duration::from_millis(8);
 const RECOVERY_MIN_SOURCE_FPS: f64 = 45.0;
@@ -156,8 +157,9 @@ impl GameCadence {
 
 struct ResolutionRecovery {
     min_source_fps: f64,
+    capture_healthy_since: Option<Instant>,
     capture_healthy_at: Option<Instant>,
-    healthy_since: Option<Instant>,
+    sender_healthy_since: Option<Instant>,
     last_healthy_sender_at: Option<Instant>,
 }
 
@@ -169,31 +171,49 @@ impl ResolutionRecovery {
         }
         Self {
             min_source_fps,
+            capture_healthy_since: None,
             capture_healthy_at: None,
-            healthy_since: None,
+            sender_healthy_since: None,
             last_healthy_sender_at: None,
         }
     }
 
-    fn reset_streak(&mut self) {
-        self.healthy_since = None;
+    fn reset_sender_streak(&mut self) {
+        self.sender_healthy_since = None;
         self.last_healthy_sender_at = None;
     }
 
-    fn observe_sender(&mut self, now: Instant, healthy: bool) -> bool {
+    fn observe_capture(&mut self, now: Instant, healthy: bool) {
+        if healthy {
+            self.capture_healthy_since.get_or_insert(now);
+            self.capture_healthy_at = Some(now);
+        } else {
+            self.capture_healthy_since = None;
+            self.capture_healthy_at = None;
+            self.reset_sender_streak();
+        }
+    }
+
+    fn observe_sender(&mut self, now: Instant, healthy: bool) {
         let fresh_capture = self
             .capture_healthy_at
             .is_some_and(|at| now.duration_since(at) < RECOVERY_CAPTURE_FRESHNESS);
         if !healthy || !fresh_capture {
-            self.reset_streak();
-            return false;
+            self.reset_sender_streak();
+            return;
         }
         let previous = self.last_healthy_sender_at.replace(now);
         if previous.is_none_or(|at| now.duration_since(at) >= 2 * SAMPLE_INTERVAL) {
-            self.healthy_since = Some(now);
+            self.sender_healthy_since = Some(now);
         }
-        self.healthy_since
-            .is_some_and(|since| now.duration_since(since) >= RECOVERY_HOLD)
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.capture_healthy_since
+            .is_some_and(|since| now.duration_since(since) >= RECOVERY_CAPTURE_HOLD)
+            && self
+                .sender_healthy_since
+                .is_some_and(|since| now.duration_since(since) >= RECOVERY_SENDER_HOLD)
     }
 }
 
@@ -287,8 +307,7 @@ impl AdaptiveCapturePacer {
         self.active_capture_at = None;
         self.game_cadence.slow_samples = 0;
         if let Some(recovery) = &mut self.recovery {
-            recovery.capture_healthy_at = None;
-            recovery.reset_streak();
+            recovery.observe_capture(now, false);
         }
         Some(RateChange {
             from,
@@ -410,10 +429,7 @@ impl AdaptiveCapturePacer {
                 && converted_fps >= min_sender_fps
                 && self.dropped_frames == 0
                 && self.conversion_time <= RECOVERY_CONVERSION_BUDGET * self.converted_frames;
-            recovery.capture_healthy_at = healthy.then_some(now);
-            if !healthy {
-                recovery.reset_streak();
-            }
+            recovery.observe_capture(now, healthy);
         }
         self.reset_capture_window(now);
 
@@ -451,7 +467,7 @@ impl AdaptiveCapturePacer {
         let Some(sample) = sample else {
             self.overloaded_sender_samples = 0;
             if let Some(recovery) = &mut self.recovery {
-                recovery.reset_streak();
+                recovery.reset_sender_streak();
             }
             if self.mode == Mode::HighMotion {
                 self.missing_sender_samples += 1;
@@ -483,30 +499,12 @@ impl AdaptiveCapturePacer {
         // while WebRTC reinitializes the encoder on the same track.
         if sample.resolution != self.resolution {
             if let Some(recovery) = &mut self.recovery {
-                recovery.reset_streak();
+                recovery.reset_sender_streak();
             }
             return None;
         }
         if self.mode == Mode::HighMotion && !sample.supports_high_motion {
             return self.reduce_load(now, "encoder-or-codec-limit");
-        }
-        if self.mode == Mode::WarmingUp
-            && sample.active
-            && sample.supports_high_motion
-            && sample.fps >= 25.0
-            && !sample.cpu_limited
-            && !sample.bandwidth_limited
-            && self
-                .healthy_capture_at
-                .is_some_and(|healthy_at| now.duration_since(healthy_at) < SAMPLE_INTERVAL)
-            && (self.resolution == CaptureResolution::FullHd || self.healthy_capture_windows >= 2)
-        {
-            return self.change_mode(
-                now,
-                Mode::HighMotion,
-                self.resolution,
-                "capture-and-encoder-ready",
-            );
         }
         let slow_sender = sample.active
             && (if self.mode == Mode::HighMotion {
@@ -544,7 +542,8 @@ impl AdaptiveCapturePacer {
                 && sample.fps >= min_sender_fps
                 && !sample.cpu_limited
                 && !sample.bandwidth_limited;
-            if recovery.observe_sender(now, healthy) {
+            recovery.observe_sender(now, healthy);
+            if recovery.ready(now) {
                 self.recovery = None;
                 self.recovery_attempted = true;
                 return self.change_mode(
@@ -554,6 +553,28 @@ impl AdaptiveCapturePacer {
                     "sustained-recovery-headroom",
                 );
             }
+            // Prefer recovering image quality while both paths show headroom.
+            if recovery.sender_healthy_since.is_some() {
+                return None;
+            }
+        }
+        if self.mode == Mode::WarmingUp
+            && sample.active
+            && sample.supports_high_motion
+            && sample.fps >= 25.0
+            && !sample.cpu_limited
+            && !sample.bandwidth_limited
+            && self
+                .healthy_capture_at
+                .is_some_and(|healthy_at| now.duration_since(healthy_at) < SAMPLE_INTERVAL)
+            && (self.resolution == CaptureResolution::FullHd || self.healthy_capture_windows >= 2)
+        {
+            return self.change_mode(
+                now,
+                Mode::HighMotion,
+                self.resolution,
+                "capture-and-encoder-ready",
+            );
         }
         None
     }
@@ -853,11 +874,11 @@ mod tests {
             resolution: CaptureResolution::Hd,
             ..hardware_sample()
         };
-        simulate_second(&mut pacer, now, 120, 2, false);
+        simulate_second(&mut pacer, now, 120, 10, false);
         now += SAMPLE_INTERVAL;
         pacer.admit(now);
         assert!(pacer.observe_sender(now, Some(hd())).is_none());
-        simulate_second(&mut pacer, now, 120, 2, false);
+        simulate_second(&mut pacer, now, 120, 10, false);
         now += SAMPLE_INTERVAL;
         pacer.admit(now);
         assert!(pacer.observe_sender(now, Some(hardware_sample())).is_none());
@@ -904,7 +925,7 @@ mod tests {
         pacer.reduce_load(now, "capture-overload").unwrap();
 
         for source_fps in [60, 75] {
-            for _ in 0..15 {
+            for _ in 0..RECOVERY_CAPTURE_HOLD.as_secs() {
                 simulate_second(&mut pacer, now, source_fps, 2, false);
                 now += SAMPLE_INTERVAL;
                 pacer.admit(now);
@@ -916,7 +937,7 @@ mod tests {
         pacer.admit(now);
         assert!(pacer.observe_sender(now, Some(hd_at_30())).is_none());
 
-        for _ in 0..15 {
+        for _ in 0..RECOVERY_CAPTURE_HOLD.as_secs() {
             simulate_second(&mut pacer, now, 75, 2, false);
             now += SAMPLE_INTERVAL;
             pacer.admit(now);
@@ -944,25 +965,63 @@ mod tests {
     }
 
     #[test]
+    fn recovery_uses_capture_headroom_accumulated_while_sender_is_bandwidth_limited() {
+        let mut now = Instant::now();
+        let mut pacer = AdaptiveCapturePacer::new(now, CaptureResolution::FullHd);
+        pacer.reduce_load(now, "capture-overload").unwrap();
+        let clear_after = 19;
+        let interrupted_at = clear_after + 2;
+        let restored_at = interrupted_at + 1 + RECOVERY_SENDER_HOLD.as_secs();
+
+        for second in 1..=restored_at {
+            simulate_second(&mut pacer, now, 75, 2, false);
+            now += SAMPLE_INTERVAL;
+            pacer.admit(now);
+            let change = pacer.observe_sender(
+                now,
+                Some(SenderSample {
+                    supports_high_motion: true,
+                    bandwidth_limited: second < clear_after || second == interrupted_at,
+                    ..hd_at_30()
+                }),
+            );
+            if second < restored_at {
+                assert!(change.is_none());
+                assert_eq!(
+                    (pacer.resolution(), pacer.fps()),
+                    (CaptureResolution::Hd, 30)
+                );
+            } else {
+                let change = change.unwrap();
+                assert_eq!(change.reason, "sustained-recovery-headroom");
+                assert_eq!(
+                    (change.to_resolution, change.to),
+                    (CaptureResolution::FullHd, 30)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn recovery_needs_confirmed_1080p_capability_and_can_use_gpu_headroom_at_30() {
         let mut now = Instant::now();
         let mut pacer = AdaptiveCapturePacer::new(now, CaptureResolution::FullHd);
         pacer.reduce_load(now, "capture-overload").unwrap();
-        for has_codec in [false, true] {
-            for second in 0..=15 {
-                pacer.observe_game_load(now, Some(75));
-                simulate_second(&mut pacer, now, 30, 2, false);
-                now += SAMPLE_INTERVAL;
-                pacer.admit(now);
-                let change = pacer.observe_sender(
-                    now,
-                    Some(SenderSample {
-                        supports_full_hd: has_codec.then_some(true),
-                        ..hd_at_30()
-                    }),
-                );
-                assert_eq!(change.is_some(), has_codec && second == 15);
-            }
+        let codec_available_at = RECOVERY_CAPTURE_HOLD.as_secs() + 2;
+        let restored_at = codec_available_at + RECOVERY_SENDER_HOLD.as_secs();
+        for second in 1..=restored_at {
+            pacer.observe_game_load(now, Some(75));
+            simulate_second(&mut pacer, now, 30, 2, false);
+            now += SAMPLE_INTERVAL;
+            pacer.admit(now);
+            let change = pacer.observe_sender(
+                now,
+                Some(SenderSample {
+                    supports_full_hd: (second >= codec_available_at).then_some(true),
+                    ..hd_at_30()
+                }),
+            );
+            assert_eq!(change.is_some(), second == restored_at);
         }
         assert_eq!(pacer.resolution(), CaptureResolution::FullHd);
         assert_eq!(pacer.fps(), 30);

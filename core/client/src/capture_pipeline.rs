@@ -1098,6 +1098,20 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires isolated localhost LiveKit and an opted-in NVIDIA or Media Foundation encoder"]
+    async fn adaptive_fps_recovers_1080p_before_increasing_720p_fps() {
+        use CaptureResolution::{FullHd, Hd};
+        verify_adaptive_livekit(&[
+            (FullHd, 30),
+            (FullHd, 60),
+            (FullHd, 30),
+            (Hd, 30),
+            (FullHd, 30),
+        ])
+        .await;
+    }
+
     async fn verify_adaptive_livekit(expected: &[(CaptureResolution, u32)]) {
         let url = std::env::var("ECHO_TEST_LIVEKIT_URL").expect("localhost development server");
         assert!(url.starts_with("ws://127.0.0.1:"));
@@ -1169,6 +1183,14 @@ mod tests {
                 let conversion_ms = match (unstable, tier.1) {
                     (true, 60) => 14,
                     (true, _) => 27,
+                    // Enough for healthy motion at 720p, below the headroom
+                    // required to raise resolution on this pass.
+                    (false, _)
+                        if tier == (CaptureResolution::Hd, 30)
+                            && expected.get(stage + 1) == Some(&(CaptureResolution::Hd, 60)) =>
+                    {
+                        10
+                    }
                     (false, _) => 2,
                 };
                 pacer
