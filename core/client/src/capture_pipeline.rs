@@ -114,6 +114,7 @@ pub struct CapturePublisher {
     frame_count: u64,
     next_push_at: Option<Instant>,
     hardware_min_frame_interval: Duration,
+    hardware_encoder: AtomicBool,
     running: Arc<AtomicBool>,
     publisher_stopped: Arc<AtomicBool>,
 }
@@ -299,6 +300,7 @@ impl CapturePublisher {
         let publish_options = TrackPublishOptions {
             source: track_source,
             video_codec: VideoCodec::H264,
+            prefer_h264_level_4: true,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
                 // Desktop stays multi-publisher-friendly while giving text and
@@ -353,6 +355,7 @@ impl CapturePublisher {
             frame_count: 0,
             next_push_at: None,
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
+            hardware_encoder: AtomicBool::new(HAS_NVCUDA.load(Ordering::Relaxed)),
             running,
             publisher_stopped,
         })
@@ -424,6 +427,7 @@ impl CapturePublisher {
         let publish_options = TrackPublishOptions {
             source: track_source,
             video_codec: VideoCodec::H264,
+            prefer_h264_level_4: true,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
                 // Desktop stays multi-publisher-friendly while giving text and
@@ -477,6 +481,7 @@ impl CapturePublisher {
             frame_count: 0,
             next_push_at: None,
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
+            hardware_encoder: AtomicBool::new(HAS_NVCUDA.load(Ordering::Relaxed)),
             running,
             publisher_stopped,
         })
@@ -501,13 +506,9 @@ impl CapturePublisher {
         if !self.running.load(Ordering::SeqCst) {
             return false;
         }
-        // Frame rate limiter — choose the interval based on whether we have
-        // hardware (NVENC) or software (OpenH264) encoding. NVENC can handle
-        // 240fps input because it's a dedicated ASIC. OpenH264 runs on CPU
-        // and pins ~90-100% at 60+ fps 1080p — which crashed Jeff's AMD
-        // machine after ~54 min of sustained load. Cap software encode at
-        // 20fps to keep CPU at a sustainable ~30%.
-        let min_interval = if HAS_NVCUDA.load(Ordering::Relaxed) {
+        // Keep the software safety cap until the sender reports a hardware
+        // encoder and reapply it if the stream falls back to OpenH264.
+        let min_interval = if self.hardware_encoder.load(Ordering::Relaxed) {
             self.hardware_min_frame_interval
         } else {
             MIN_FRAME_INTERVAL_SOFTWARE
@@ -635,6 +636,14 @@ impl CapturePublisher {
                 });
                 let mut sender_diagnostics: Option<CaptureSenderDiagnostics> = None;
                 if let Some(outbound) = outbound {
+                    let implementation = &outbound.outbound.encoder_implementation;
+                    if !implementation.is_empty() && outbound.outbound.frames_encoded > 0 {
+                        self.hardware_encoder
+                            .store(outbound.outbound.power_efficient_encoder, Ordering::Relaxed);
+                        if let Some(health) = health {
+                            health.set_encoder_type_from_string(implementation);
+                        }
+                    }
                     let codec = codec_by_id.get(outbound.stream.codec_id.as_str()).copied();
                     let remote_inbound = if outbound.outbound.remote_id.is_empty() {
                         None
@@ -858,10 +867,99 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Windows NVIDIA hardware; exercises native H264 profiles"]
     async fn native_h264_profiles_encode_synthetic_frames() {
+        verify_h264_peers(&[
+            ("42e01f", 804, 30.0, "NVIDIA H264"),
+            ("640033", 804, 30.0, "NVIDIA H264"),
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a Windows Media Foundation hardware encoder"]
+    async fn media_foundation_h264_encodes_and_falls_back() {
+        verify_h264_peers(&[
+            ("42e028", 1080, 30.0, "AMD Media Foundation H264"),
+            ("42e028", 1080, 60.0, "OpenH264"),
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated localhost LiveKit server and hardware encoder"]
+    async fn media_foundation_h264_publishes_through_livekit() {
+        let url = std::env::var("ECHO_TEST_LIVEKIT_URL").expect("localhost development server");
+        assert!(url.starts_with("ws://127.0.0.1:"));
+        let publisher_token = std::env::var("ECHO_TEST_LIVEKIT_PUBLISH_TOKEN").unwrap();
+        let subscriber_token = std::env::var("ECHO_TEST_LIVEKIT_SUBSCRIBE_TOKEN").unwrap();
+        let (subscriber, mut events) =
+            Room::connect(&url, &subscriber_token, RoomOptions::default()).await.unwrap();
+        let publisher = CapturePublisher::connect_and_publish(
+            &url,
+            &publisher_token,
+            1920,
+            1080,
+            PublishProfile::Game,
+            "mf-livekit-test",
+            TrackSource::Screenshare,
+            false,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let started = Instant::now();
+        let mut video = None;
+        for index in 0..150u8 {
+            let mut buffer = I420Buffer::new(1920, 1080);
+            let (y, u, v) = buffer.data_mut();
+            y.fill(32 + index);
+            u.fill(96);
+            v.fill(160);
+            publisher.source.capture_frame(&VideoFrame {
+                rotation: VideoRotation::VideoRotation0,
+                buffer,
+                timestamp_us: started.elapsed().as_micros() as i64,
+            });
+            while let Ok(event) = events.try_recv() {
+                if let RoomEvent::TrackSubscribed { track, .. } = event {
+                    video = Some(track);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(34)).await;
+        }
+        let stats = publisher.track.get_stats().await.unwrap();
+        let sender = stats.iter().find_map(|stat| match stat {
+            RtcStats::OutboundRtp(rtp) if rtp.stream.kind == "video" => Some(rtp),
+            _ => None,
+        }).expect("outbound video stats");
+        let codec = stats.iter().find_map(|stat| match stat {
+            RtcStats::Codec(codec) if codec.rtc.id == sender.stream.codec_id => Some(codec),
+            _ => None,
+        }).expect("negotiated H264 codec");
+        eprintln!("LiveKit encoder={} frames_encoded={} fmtp={}",
+            sender.outbound.encoder_implementation,
+            sender.outbound.frames_encoded,
+            codec.codec.sdp_fmtp_line,
+        );
+        let decoded = video.expect("LiveKit subscriber saw the track").get_stats().await.unwrap()
+            .into_iter().find_map(|stat| match stat {
+                RtcStats::InboundRtp(rtp) if rtp.stream.kind == "video" => Some(rtp.inbound.frames_decoded),
+                _ => None,
+            }).unwrap_or(0);
+        publisher.shutdown().await.unwrap();
+        subscriber.close().await.unwrap();
+        assert_eq!(sender.outbound.encoder_implementation, "AMD Media Foundation H264");
+        assert!(sender.outbound.power_efficient_encoder);
+        assert_eq!((sender.outbound.frame_width, sender.outbound.frame_height), (1920, 1080));
+        assert!(codec.codec.sdp_fmtp_line.contains("profile-level-id=42e028"));
+        assert!(sender.outbound.frames_encoded > 0 && decoded > 0);
+    }
+
+    async fn verify_h264_peers(cases: &[(&str, u32, f64, &str)]) {
         use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 
         let factory = PeerConnectionFactory::default();
-        for profile in ["42e01f", "640033"] {
+        for &(profile, height, max_framerate, expected_encoder) in cases {
             let sender = factory
                 .create_peer_connection(RtcConfiguration::default())
                 .unwrap();
@@ -879,7 +977,7 @@ mod tests {
             let source = NativeVideoSource::new(
                 VideoResolution {
                     width: 1920,
-                    height: 804,
+                    height,
                 },
                 false,
             );
@@ -893,7 +991,7 @@ mod tests {
                         send_encodings: vec![RtpEncodingParameters {
                             max_bitrate: Some(20_000_000),
                             min_bitrate: Some(8_000_000),
-                            max_framerate: Some(30.0),
+                            max_framerate: Some(max_framerate),
                             ..Default::default()
                         }],
                     },
@@ -940,7 +1038,7 @@ mod tests {
             });
             let started = Instant::now();
             for frame_index in 0..150u8 {
-                let mut buffer = I420Buffer::new(1920, 804);
+                let mut buffer = I420Buffer::new(1920, height);
                 let (y, u, v) = buffer.data_mut();
                 y.fill(32 + frame_index);
                 u.fill(96);
@@ -959,8 +1057,16 @@ mod tests {
                     RtcStats::OutboundRtp(outbound) if outbound.stream.kind == "video" => {
                         eprintln!(
                             "H264 profile {profile}: encoded={} encoder={}",
-                            outbound.outbound.frames_encoded,
+                            outbound.outbound.frames_encoded, outbound.outbound.encoder_implementation
+                        );
+                        assert!(
+                            outbound.outbound.encoder_implementation.starts_with(expected_encoder),
+                            "expected {expected_encoder}, got {}",
                             outbound.outbound.encoder_implementation
+                        );
+                        assert_eq!(
+                            outbound.outbound.power_efficient_encoder,
+                            expected_encoder != "OpenH264",
                         );
                         Some(outbound.outbound.frames_encoded)
                     }

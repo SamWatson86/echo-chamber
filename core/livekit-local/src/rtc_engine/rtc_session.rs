@@ -61,7 +61,7 @@ use crate::{
         peer_transport::PeerTransport,
         rtc_events::{RtcEvent, RtcEvents},
     },
-    track::LocalTrack,
+    track::{LocalTrack, TrackSource},
     DataPacketKind,
 };
 
@@ -1614,6 +1614,7 @@ impl SessionInner {
             );
 
             let mut matched = Vec::new();
+            let mut level_4 = Vec::new();
             let mut partial_matched = Vec::new();
             let mut unmatched = Vec::new();
 
@@ -1621,8 +1622,14 @@ impl SessionInner {
                 let mime_type = codec.mime_type.to_lowercase();
                 if mime_type == format!("video/{}", options.video_codec.as_str()) {
                     if let Some(sdp_fmtp_line) = codec.sdp_fmtp_line.as_ref() {
-                        // for h264 codecs that have sdpFmtpLine available, use only if the
-                        // profile-level-id is 42e01f for cross-browser compatibility
+                        // Prefer Level 4 when the Windows hardware factory offers
+                        // it for 1080p30. Retain the existing Level 3.1 option.
+                        if sdp_fmtp_line.contains("profile-level-id=42e028")
+                            && sdp_fmtp_line.contains("packetization-mode=1")
+                        {
+                            level_4.push(codec);
+                            continue;
+                        }
                         if sdp_fmtp_line.contains("profile-level-id=42e01f") {
                             matched.push(codec);
                             continue;
@@ -1636,7 +1643,12 @@ impl SessionInner {
 
             matched.append(&mut partial_matched);
 
-            transceiver.set_codec_preferences(matched)?;
+            let offer_level_4 =
+                options.prefer_h264_level_4 && options.source == TrackSource::Screenshare
+                    && !options.simulcast && !level_4.is_empty();
+            level_4.append(&mut matched);
+            transceiver.set_codec_preferences(level_4)?;
+            self.publisher_pc.set_offer_h264_level_4(offer_level_4).await;
         }
 
         Ok(transceiver)

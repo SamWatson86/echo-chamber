@@ -76,6 +76,7 @@ pub enum EncoderType {
     #[default]
     None,
     Nvenc,
+    AmdMediaFoundation,
     OpenH264,
 }
 
@@ -251,17 +252,14 @@ impl CaptureHealthState {
         }
     }
 
-    /// Update the encoder type at runtime when the viewer detects what
-    /// libwebrtc actually selected for encoderImplementation. The viewer
-    /// reads this from getStats() which is the canonical source — Rust
-    /// side has no easy way to know which encoder libwebrtc chose at
-    /// publish time. We default-assume Nvenc in set_active() and let the
-    /// viewer correct us if WebRTC picked OpenH264 or anything else.
+    /// Report the backend selected by libwebrtc from sender stats.
     pub fn set_encoder_type_from_string(&self, raw: &str) {
         let lower = raw.to_lowercase();
         let new_type =
             if lower.contains("openh264") || lower == "open h264" || lower.contains("software") {
                 EncoderType::OpenH264
+            } else if lower.contains("amd media foundation") {
+                EncoderType::AmdMediaFoundation
             } else if lower.contains("nvenc")
                 || lower.contains("nvidia")
                 || lower.contains("nvcodec")
@@ -319,6 +317,7 @@ impl CaptureHealthState {
             encoder_type: match encoder {
                 EncoderType::None => "None".into(),
                 EncoderType::Nvenc => "NVENC".into(),
+                EncoderType::AmdMediaFoundation => "AMD Media Foundation".into(),
                 EncoderType::OpenH264 => "OpenH264".into(),
             },
             current_fps: self.last_capture_fps.load(Ordering::Relaxed),

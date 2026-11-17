@@ -4,9 +4,9 @@
 #include <cuda.h>
 #include <mutex>
 
-namespace livekit_ffi {
+#include "livekit/software_encoder_override.h"
 
-bool IsSoftwareEncoderForced();
+namespace livekit_ffi {
 
 class CudaContext {
  public:

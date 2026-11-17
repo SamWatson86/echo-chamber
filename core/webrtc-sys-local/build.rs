@@ -126,6 +126,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=webrtc");
     match target_os.as_str() {
         "windows" => {
+            println!("cargo:rerun-if-env-changed=CUDA_HOME");
             println!("cargo:rustc-link-lib=dylib=msdmo");
             println!("cargo:rustc-link-lib=dylib=wmcodecdspuuid");
             println!("cargo:rustc-link-lib=dylib=dmoguids");
@@ -141,6 +142,10 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=dxgi");
             println!("cargo:rustc-link-lib=dylib=dwmapi");
             println!("cargo:rustc-link-lib=dylib=shcore");
+            println!("cargo:rustc-link-lib=dylib=mfuuid");
+            println!("cargo:rerun-if-changed=src/windows/amd_mf_encoder.cpp");
+            println!("cargo:rerun-if-changed=src/windows/amd_mf_encoder.h");
+            builder.file("src/windows/amd_mf_encoder.cpp");
 
             //let path = env::current_dir().unwrap();
             //println!("cargo:rustc-link-search=native={}/vaapi-windows/x64/lib", path.display());
