@@ -179,6 +179,16 @@ startup diagnostics are retained in `encoder-factory-debug.log` under the local
 Echo directory. See [native black-share recovery](eli5/native-black-share-recovery.md)
 for the November 5 evidence, limitations, and isolated recovery tests.
 
+The Windows desktop AMD Media Foundation backend uses Constrained Baseline
+H.264 with packetization mode 1. It can send up to 1080p30 at Level 4.0 and
+scales to fit 720p30 when the SFU answers with Level 3.1. For an AMD test
+share, check for `AMD Media Foundation H264`, a rising encoded frame count, and
+receiver video. Use the `[AMD-MF]` messages in the codec log to identify
+initialization and fallback stages. Echo keeps the OpenH264 software fallback
+when the hardware or H.264 level is unavailable and returns to the 20 fps
+capture cap once sender stats report software encoding. The existing
+`force_software_encoder` client setting can force OpenH264 for comparison.
+
 A Windows native screen share is a separate LiveKit participant named
 `<owner identity>$screen`. An offline owner in the control dashboard is not proof
 that this publisher stopped. Check the authoritative SFU room roster and whether

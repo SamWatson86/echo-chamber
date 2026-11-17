@@ -16,6 +16,7 @@
 
 #include "livekit/video_encoder_factory.h"
 #include "livekit/codec_debug_log.h"
+#include "livekit/software_encoder_override.h"
 
 #include <algorithm>
 #include <iostream>
@@ -25,6 +26,10 @@
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/video_encoder_factory_template.h"
+#if defined(WEBRTC_WIN)
+#include "api/video_codecs/video_encoder_software_fallback_wrapper.h"
+#include "windows/amd_mf_encoder.h"
+#endif
 #include "livekit/objc_video_factory.h"
 #include "media/base/media_constants.h"
 #include "media/engine/simulcast_encoder_adapter.h"
@@ -148,8 +153,22 @@ VideoEncoderFactory::InternalFactory::InternalFactory() {
   }
 #endif
 
+#if defined(WEBRTC_WIN)
+  if (!livekit_ffi::IsSoftwareEncoderForced() &&
+#if !defined(ECHO_MF_TEST_ADAPTERS)
+      factories_.empty() &&
+#endif
+      HasAmdMediaFoundationEncoder()) {
+    amd_media_foundation_ = true;
+    AppendEncoderFactoryDebug("[encoder-factory] registered AMD Media Foundation H264");
+  }
+#endif
+
   std::ostringstream line;
   line << "[encoder-factory] ctor hw_factories=" << factories_.size();
+#if defined(WEBRTC_WIN)
+  line << " amd_mf=" << (amd_media_foundation_ ? "1" : "0");
+#endif
   line << " force_software="
        << (livekit_ffi::IsSoftwareEncoderForced() ? "1" : "0");
   AppendEncoderFactoryDebug(line.str());
@@ -158,6 +177,9 @@ VideoEncoderFactory::InternalFactory::InternalFactory() {
 std::vector<webrtc::SdpVideoFormat>
 VideoEncoderFactory::InternalFactory::GetSupportedFormats() const {
   std::vector<webrtc::SdpVideoFormat> formats;
+#if defined(WEBRTC_WIN)
+  if (amd_media_foundation_) formats.push_back(AmdMediaFoundationFormat());
+#endif
   for (const auto& factory : factories_) {
     AppendPreferredFormats(&formats, factory->GetSupportedFormats());
   }
@@ -169,6 +191,12 @@ VideoEncoderFactory::CodecSupport
 VideoEncoderFactory::InternalFactory::QueryCodecSupport(
     const webrtc::SdpVideoFormat& format,
     std::optional<std::string> scalability_mode) const {
+#if defined(WEBRTC_WIN)
+  if (amd_media_foundation_ && MatchesAmdMediaFoundationFormat(format) &&
+      (!scalability_mode || *scalability_mode == "L1T1")) {
+    return {.is_supported = true, .is_power_efficient = true};
+  }
+#endif
   for (const auto& factory : factories_) {
     auto codec_support =
         factory->QueryCodecSupport(format, scalability_mode);
@@ -198,6 +226,22 @@ VideoEncoderFactory::InternalFactory::Create(
   AppendEncoderFactoryDebug(
       "[encoder-factory] internal-create request=" + FormatVideoFormat(format) +
       " hw_factories=" + std::to_string(factories_.size()));
+
+#if defined(WEBRTC_WIN)
+  if (amd_media_foundation_ && MatchesAmdMediaFoundationFormat(format)) {
+    const auto software_format = webrtc::FuzzyMatchSdpVideoFormat(
+        GetSoftwareSupportedFormats(), NormalizeSoftwareH264Format(format));
+    if (software_format) {
+      auto software_encoder = Factory().Create(env, *software_format);
+      if (software_encoder) {
+        return webrtc::CreateVideoEncoderSoftwareFallbackWrapper(
+            env, std::move(software_encoder), CreateAmdMediaFoundationEncoder(format),
+            /*prefer_temporal_support=*/false);
+      }
+    }
+    AppendEncoderFactoryDebug("[AMD-MF] software fallback unavailable for requested format");
+  }
+#endif
 
   for (const auto& factory : factories_) {
     for (const auto& supported_format : factory->GetSupportedFormats()) {

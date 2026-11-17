@@ -36,6 +36,9 @@ class VideoEncoderFactory : public webrtc::VideoEncoderFactory {
 
    private:
     std::vector<std::unique_ptr<webrtc::VideoEncoderFactory>> factories_;
+#if defined(WEBRTC_WIN)
+    bool amd_media_foundation_ = false;
+#endif
   };
 
  public:
