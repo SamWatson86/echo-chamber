@@ -217,13 +217,16 @@ SFU roster and receiver counters. Do not use a full-room reload as the first ste
 
 The Windows desktop build reads `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` from its
 launch environment for the native NVIDIA and AMD WGC Game profiles. The normal
-profile stays at 1080p30 with the existing encoder fallback. A trial share
-uses 720p and starts at 30 fps. It can reach 60 fps once the source and sender
-are keeping up. The NVENC sender needs H.264 Level 3.2 or higher in
-packetization mode 1. The AMD Media Foundation sender needs Level 4.0 and a
-driver that accepts the 60 fps media type. A rejected 60 fps setup retries
-AMD hardware at 30 fps. Look for `AMD Media Foundation H264 (60 FPS)` in
-sender stats when the faster configuration is active.
+profile stays at 1080p30 with the existing encoder fallback. The NVIDIA
+trial fits within 720p and the AMD trial fits within 1080p. Both start at
+30 fps and can reach 60 fps once the source and sender are keeping up.
+The NVENC sender needs H.264 Level 3.2 or higher in packetization mode 1.
+The AMD Media Foundation sender needs Level 4.2 and a driver that accepts
+the 1080p60 media type. An answer at Level 4.0 or a rejected 60 fps setup
+keeps AMD hardware at 1080p30 when available. The existing Level 3.1
+compatibility path fits within 720p30. Look for
+`AMD Media Foundation H264 (60 FPS)` in sender stats when the faster
+configuration is active.
 
 Two consecutive samples of local overload bring the trial back to 30 fps
 for that share. The governor checks capture conversion time, frame queue

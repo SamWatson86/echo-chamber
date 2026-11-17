@@ -892,7 +892,7 @@ async fn share_loop(
         Vec::new()
     };
     let adaptive_fps = nvidia || !amd_adapters.is_empty();
-    let (enc_w, enc_h) = if adaptive_fps { (1280, 720) } else { (1920, 1080) };
+    let (enc_w, enc_h) = if nvidia { (1280, 720) } else { (1920, 1080) };
     let mut publisher = CapturePublisher::connect_and_publish(
         sfu_url,
         token,

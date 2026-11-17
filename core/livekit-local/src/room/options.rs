@@ -85,7 +85,8 @@ pub struct TrackPublishOptions {
     pub video_encoding: Option<VideoEncoding>,
     pub audio_encoding: Option<AudioEncoding>,
     pub video_codec: VideoCodec,
-    /// Request Level 4.0 for native H.264 screen publishing when supported.
+    /// Request Level 4.0 for native H.264 screenshares, or Level 4.2 when the
+    /// hardware advertises it and the requested frame rate exceeds 30 fps.
     pub prefer_h264_level_4: bool,
     pub dtx: bool,
     pub red: bool,

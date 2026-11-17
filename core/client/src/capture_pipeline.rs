@@ -161,7 +161,8 @@ pub(crate) fn log_adaptive_rate(change: RateChange) {
 
 fn supports_adaptive_fps(implementation: &str, codec_name: &str, codec_fmtp: &str) -> bool {
     let mut parameters = codec_fmtp.split(';').map(str::trim);
-    // 720p60 needs 216,000 macroblocks/s, which fits Level 3.2 and up.
+    // NVIDIA's 720p trial fits Level 3.2. The AMD implementation name
+    // confirms the MFT accepted the rate for the negotiated resolution.
     let level = parameters
         .clone()
         .find_map(|param| param.strip_prefix("profile-level-id=42e0"));
@@ -966,7 +967,7 @@ mod tests {
         // The pinned libwebrtc normalizes the advertised Level 4.0 to 3.1
         // when creating a direct peer offer. Echo's SFU path can restore it.
         verify_h264_peers(
-            &[("42e028", 1280, 720, 60.0, "AMD Media Foundation H264")],
+            &[("42e02a", 1280, 720, 60.0, "AMD Media Foundation H264")],
             Some("42e01f"),
         )
         .await;
@@ -1047,6 +1048,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an isolated localhost LiveKit server and hardware encoder"]
     async fn adaptive_fps_steps_down_on_the_same_livekit_track() {
+        verify_adaptive_livekit(1280, 720).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated localhost LiveKit server and opted-in Media Foundation hardware"]
+    async fn adaptive_fps_keeps_1080p_during_step_down() {
+        verify_adaptive_livekit(1920, 1080).await;
+    }
+
+    async fn verify_adaptive_livekit(width: u32, height: u32) {
         let url = std::env::var("ECHO_TEST_LIVEKIT_URL").expect("localhost development server");
         assert!(url.starts_with("ws://127.0.0.1:"));
         let publisher_token = std::env::var("ECHO_TEST_LIVEKIT_PUBLISH_TOKEN").unwrap();
@@ -1058,8 +1069,8 @@ mod tests {
         let mut publisher = CapturePublisher::connect_and_publish(
             &url,
             &publisher_token,
-            1280,
-            720,
+            width,
+            height,
             PublishProfile::Game,
             true,
             "adaptive-fps-test",
@@ -1074,7 +1085,8 @@ mod tests {
         let pacer = publisher.adaptive_pacer().unwrap();
         let mut tick = tokio::time::interval(Duration::from_millis(8));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut bgra = vec![0; 1280 * 720 * 4];
+        let row_bytes = width as usize * 4;
+        let mut bgra = vec![0; row_bytes * height as usize];
         let started = Instant::now();
         let mut last_poll = started;
         let mut high_started = None;
@@ -1095,9 +1107,9 @@ mod tests {
             if admitted {
                 let count = publisher.frame_count();
                 // Move one line to keep the encoded content changing.
-                let line = 1280 * 4 * (count as usize % 720);
-                bgra[line..line + 1280 * 4].fill(32 + count as u8 % 200);
-                assert!(publisher.push_frame(&bgra, 1280, 720));
+                let line = row_bytes * (count as usize % height as usize);
+                bgra[line..line + row_bytes].fill(32 + count as u8 % 200);
+                assert!(publisher.push_frame(&bgra, width, height));
                 let injected =
                     high_started.is_some_and(|start| now - start >= Duration::from_secs(2));
                 pacer
@@ -1130,12 +1142,13 @@ mod tests {
                         inbound.frame_width, inbound.frame_height,
                     );
                     if inbound.frames_per_second >= 50.0 {
+                        assert_eq!((inbound.frame_width, inbound.frame_height), (width, height));
                         high_decoded = inbound.frames_decoded;
                     }
                     if limited_started.is_some_and(|start| now - start >= Duration::from_secs(2))
                         && (25.0..=35.0).contains(&inbound.frames_per_second)
                     {
-                        assert_eq!((inbound.frame_width, inbound.frame_height), (1280, 720));
+                        assert_eq!((inbound.frame_width, inbound.frame_height), (width, height));
                         low_decoded = inbound.frames_decoded;
                         break;
                     }
