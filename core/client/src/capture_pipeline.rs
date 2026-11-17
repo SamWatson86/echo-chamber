@@ -162,15 +162,17 @@ pub(crate) fn log_adaptive_rate(change: RateChange) {
 fn supports_adaptive_fps(implementation: &str, codec_name: &str, codec_fmtp: &str) -> bool {
     let mut parameters = codec_fmtp.split(';').map(str::trim);
     // 720p60 needs 216,000 macroblocks/s, which fits Level 3.2 and up.
-    let supports_cadence = parameters.clone().any(|param| {
-        matches!(
-            param.strip_prefix("profile-level-id=42e0"),
-            Some("20" | "28" | "29" | "2a" | "32" | "33" | "34")
-        )
-    });
-    implementation == "NVIDIA H264 Encoder"
+    let level = parameters
+        .clone()
+        .find_map(|param| param.strip_prefix("profile-level-id=42e0"));
+    let level_4_or_higher = matches!(level, Some("28" | "29" | "2a" | "32" | "33" | "34"));
+    let encoder_ready = match implementation {
+        "NVIDIA H264 Encoder" => level == Some("20") || level_4_or_higher,
+        "AMD Media Foundation H264 (60 FPS)" => level_4_or_higher,
+        _ => false,
+    };
+    encoder_ready
         && codec_name.eq_ignore_ascii_case("video/H264")
-        && supports_cadence
         && parameters.any(|param| param == "packetization-mode=1")
 }
 
@@ -938,9 +940,9 @@ mod tests {
     #[ignore = "requires Windows NVIDIA hardware; exercises native H264 profiles"]
     async fn native_h264_profiles_encode_synthetic_frames() {
         verify_h264_peers(&[
-            ("42e01f", 804, 30.0, "NVIDIA H264"),
-            ("640033", 804, 30.0, "NVIDIA H264"),
-        ])
+            ("42e01f", 1920, 804, 30.0, "NVIDIA H264 Encoder"),
+            ("640033", 1920, 804, 30.0, "NVIDIA H264 Encoder"),
+        ], None)
         .await;
     }
 
@@ -948,9 +950,25 @@ mod tests {
     #[ignore = "requires a Windows Media Foundation hardware encoder"]
     async fn media_foundation_h264_encodes_and_falls_back() {
         verify_h264_peers(&[
-            ("42e028", 1080, 30.0, "AMD Media Foundation H264"),
-            ("42e028", 1080, 60.0, "OpenH264"),
-        ])
+            ("42e028", 1920, 1080, 30.0, "AMD Media Foundation H264"),
+            ("42e028", 1920, 1080, 60.0, "OpenH264"),
+        ], None)
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an opted-in Windows Media Foundation hardware encoder"]
+    async fn media_foundation_level_3_1_keeps_30_fps_hardware() {
+        assert_eq!(
+            std::env::var("ECHO_EXPERIMENTAL_ADAPTIVE_FPS").as_deref(),
+            Ok("1")
+        );
+        // The pinned libwebrtc normalizes the advertised Level 4.0 to 3.1
+        // when creating a direct peer offer. Echo's SFU path can restore it.
+        verify_h264_peers(
+            &[("42e028", 1280, 720, 60.0, "AMD Media Foundation H264")],
+            Some("42e01f"),
+        )
         .await;
     }
 
@@ -1027,7 +1045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires an isolated localhost LiveKit server and NVIDIA hardware"]
+    #[ignore = "requires an isolated localhost LiveKit server and hardware encoder"]
     async fn adaptive_fps_steps_down_on_the_same_livekit_track() {
         let url = std::env::var("ECHO_TEST_LIVEKIT_URL").expect("localhost development server");
         assert!(url.starts_with("ws://127.0.0.1:"));
@@ -1129,7 +1147,7 @@ mod tests {
         subscriber.close().await.unwrap();
         assert!(
             high_started.is_some(),
-            "NVENC and negotiated H.264 level never qualified"
+            "the hardware encoder and negotiated H.264 level never qualified"
         );
         assert!(limited_started.is_some(), "capture never stepped down");
         assert!(
@@ -1138,11 +1156,14 @@ mod tests {
         );
     }
 
-    async fn verify_h264_peers(cases: &[(&str, u32, f64, &str)]) {
+    async fn verify_h264_peers(
+        cases: &[(&str, u32, u32, f64, &str)],
+        expected_level: Option<&str>,
+    ) {
         use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 
         let factory = PeerConnectionFactory::default();
-        for &(profile, height, max_framerate, expected_encoder) in cases {
+        for &(profile, width, height, max_framerate, expected_encoder) in cases {
             let sender = factory
                 .create_peer_connection(RtcConfiguration::default())
                 .unwrap();
@@ -1158,10 +1179,7 @@ mod tests {
                 let _ = receiver_ice_tx.send(candidate);
             })));
             let source = NativeVideoSource::new(
-                VideoResolution {
-                    width: 1920,
-                    height,
-                },
+                VideoResolution { width, height },
                 false,
             );
             let track = factory.create_video_track("synthetic-h264-smoke", source.clone());
@@ -1221,7 +1239,7 @@ mod tests {
             });
             let started = Instant::now();
             for frame_index in 0..150u8 {
-                let mut buffer = I420Buffer::new(1920, height);
+                let mut buffer = I420Buffer::new(width, height);
                 let (y, u, v) = buffer.data_mut();
                 y.fill(32 + frame_index);
                 u.fill(96);
@@ -1238,14 +1256,21 @@ mod tests {
                 .iter()
                 .find_map(|stat| match stat {
                     RtcStats::OutboundRtp(outbound) if outbound.stream.kind == "video" => {
+                        if let Some(level) = expected_level {
+                            assert!(stats.iter().any(|stat| matches!(
+                                stat,
+                                RtcStats::Codec(codec)
+                                    if codec.rtc.id == outbound.stream.codec_id
+                                        && codec.codec.sdp_fmtp_line.contains(&format!("profile-level-id={level}"))
+                            )), "expected H264 profile-level-id={level}");
+                        }
                         eprintln!(
                             "H264 profile {profile}: encoded={} encoder={}",
                             outbound.outbound.frames_encoded, outbound.outbound.encoder_implementation
                         );
-                        assert!(
-                            outbound.outbound.encoder_implementation.starts_with(expected_encoder),
-                            "expected {expected_encoder}, got {}",
-                            outbound.outbound.encoder_implementation
+                        assert_eq!(
+                            outbound.outbound.encoder_implementation.as_str(),
+                            expected_encoder,
                         );
                         assert_eq!(
                             outbound.outbound.power_efficient_encoder,
@@ -1369,6 +1394,21 @@ mod tests {
         let encoder = "NVIDIA H264 Encoder";
         let level_4 = "packetization-mode=1;profile-level-id=42e028";
         assert!(supports_adaptive_fps(encoder, "video/H264", level_4));
+        assert!(supports_adaptive_fps(
+            "AMD Media Foundation H264 (60 FPS)",
+            "video/H264",
+            level_4,
+        ));
+        assert!(!supports_adaptive_fps(
+            "AMD Media Foundation H264",
+            "video/H264",
+            level_4,
+        ));
+        assert!(!supports_adaptive_fps(
+            "AMD Media Foundation H264 (60 FPS)",
+            "video/H264",
+            "packetization-mode=1;profile-level-id=42e01f",
+        ));
         assert!(supports_adaptive_fps(
             encoder,
             "video/H264",

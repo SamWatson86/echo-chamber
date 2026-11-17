@@ -216,24 +216,28 @@ SFU roster and receiver counters. Do not use a full-room reload as the first ste
 ### Experimental adaptive game-share FPS
 
 The Windows desktop build reads `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` from its
-launch environment for the native NVIDIA WGC Game profile. The normal
+launch environment for the native NVIDIA and AMD WGC Game profiles. The normal
 profile stays at 1080p30 with the existing encoder fallback. A trial share
 uses 720p and starts at 30 fps. It can reach 60 fps once the source and sender
-are keeping up and the actual NVENC sender reports H.264 Level 3.2 or higher in
-packetization mode 1.
+are keeping up. The NVENC sender needs H.264 Level 3.2 or higher in
+packetization mode 1. The AMD Media Foundation sender needs Level 4.0 and a
+driver that accepts the 60 fps media type. A rejected 60 fps setup retries
+AMD hardware at 30 fps. Look for `AMD Media Foundation H264 (60 FPS)` in
+sender stats when the faster configuration is active.
 
 Two consecutive samples of local overload bring the trial back to 30 fps
 for that share. The governor checks capture conversion time, frame queue
 drops, and the sender's CPU limitation. An OpenH264 fallback caps capture at
 20 fps when detected. The WGC callback skips excess frames before GPU
 readback, while static content continues to use the existing heartbeat.
-For a foreground game on a single NVIDIA GPU, the trial also samples driver
-utilization and incoming WGC cadence. After establishing an active baseline,
-two samples at or above 95% GPU utilization with the source at 20–80 fps
-and at least 25% below that baseline bring it back to 30 fps. The transition
-log includes utilization and both source rates. This signal uses capture
-callbacks as an estimate of game cadence and is optional if driver telemetry
-is unavailable.
+For a foreground game, the trial also samples incoming WGC cadence and GPU
+utilization. The NVIDIA path uses NVML on single-NVIDIA-GPU systems. The AMD
+path uses Windows GPU Engine counters for the AMD adapter with rendering
+activity from the shared game. After establishing an active baseline, two
+samples at or above 95% GPU utilization with the source at 20–80 fps and at
+least 25% below that baseline bring it back to 30 fps. The transition log
+includes utilization and both source rates. This signal uses capture callbacks
+as an estimate of game cadence and is optional if telemetry is unavailable.
 Look for `[wgc-adaptive-fps]` in `capture-debug.log` to see the rate changes
 and reasons, and compare the sender and receiver FPS during active motion.
 Starting a new share resets the governor. Launching without the environment

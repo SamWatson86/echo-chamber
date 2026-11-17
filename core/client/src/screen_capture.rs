@@ -864,8 +864,8 @@ fn wgc_monitor_publish_settings() -> WgcPublishSettings {
     }
 }
 
-fn use_adaptive_fps(profile: PublishProfile, nvidia_driver: bool, opted_in: bool) -> bool {
-    profile == PublishProfile::Game && nvidia_driver && opted_in
+fn allow_adaptive_fps(profile: PublishProfile, opted_in: bool, software_forced: bool) -> bool {
+    profile == PublishProfile::Game && opted_in && !software_forced
 }
 
 async fn share_loop(
@@ -880,11 +880,18 @@ async fn share_loop(
     let running = &session.running;
     // 1. Connect to SFU and publish track via shared pipeline
     let publish_settings = wgc_publish_settings(publish_profile);
-    let adaptive_fps = use_adaptive_fps(
+    let eligible = allow_adaptive_fps(
         publish_profile,
-        HAS_NVCUDA.load(Ordering::Relaxed),
         std::env::var_os("ECHO_EXPERIMENTAL_ADAPTIVE_FPS").as_deref() == Some("1".as_ref()),
+        std::env::var_os("ECHO_FORCE_SOFTWARE_ENCODER").as_deref() == Some("1".as_ref()),
     );
+    let nvidia = eligible && HAS_NVCUDA.load(Ordering::Relaxed);
+    let amd_adapters = if eligible && !nvidia {
+        crate::windows_gpu_load::amd_adapter_luids()
+    } else {
+        Vec::new()
+    };
+    let adaptive_fps = nvidia || !amd_adapters.is_empty();
     let (enc_w, enc_h) = if adaptive_fps { (1280, 720) } else { (1920, 1080) };
     let mut publisher = CapturePublisher::connect_and_publish(
         sfu_url,
@@ -944,18 +951,34 @@ async fn share_loop(
                 GetForegroundWindow, GetWindowThreadProcessId,
             };
 
-            let Some(gpu) = crate::nvidia_gpu_load::NvidiaGpuLoad::open() else {
+            let nvidia_gpu = nvidia.then(crate::nvidia_gpu_load::NvidiaGpuLoad::open).flatten();
+            let mut amd_gpu = if !amd_adapters.is_empty() {
+                crate::windows_gpu_load::WindowsGpuLoad::open(target_pid, amd_adapters)
+            } else {
+                None
+            };
+            let provider = if nvidia_gpu.is_some() {
+                "NVIDIA NVML"
+            } else if amd_gpu.is_some() {
+                "Windows GPU Engine"
+            } else {
                 file_debug_log::append("[wgc-adaptive-fps] game GPU telemetry unavailable");
                 return;
             };
-            file_debug_log::append("[wgc-adaptive-fps] game GPU telemetry available");
+            file_debug_log::append(&format!(
+                "[wgc-adaptive-fps] game GPU telemetry available provider={provider}",
+            ));
             while monitor_running.load(Ordering::SeqCst) && pacer.lock().needs_game_load_monitor() {
                 let mut foreground_pid = 0;
                 unsafe {
                     GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut foreground_pid));
                 }
                 let busy = if foreground_pid != 0 && foreground_pid == target_pid {
-                    gpu.busy_percent()
+                    if let Some(gpu) = &nvidia_gpu {
+                        gpu.busy_percent()
+                    } else {
+                        amd_gpu.as_mut().and_then(|gpu| gpu.busy_percent())
+                    }
                 } else {
                     None
                 };
@@ -1818,11 +1841,11 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_fps_requires_an_opted_in_nvidia_game_share() {
-        assert!(use_adaptive_fps(PublishProfile::Game, true, true));
-        assert!(!use_adaptive_fps(PublishProfile::Game, true, false));
-        assert!(!use_adaptive_fps(PublishProfile::Game, false, true));
-        assert!(!use_adaptive_fps(PublishProfile::Desktop, true, true));
+    fn adaptive_fps_requires_an_opted_in_game_share_with_hardware_allowed() {
+        assert!(allow_adaptive_fps(PublishProfile::Game, true, false));
+        assert!(!allow_adaptive_fps(PublishProfile::Game, false, false));
+        assert!(!allow_adaptive_fps(PublishProfile::Game, true, true));
+        assert!(!allow_adaptive_fps(PublishProfile::Desktop, true, false));
     }
 
     #[test]
