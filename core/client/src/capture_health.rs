@@ -429,8 +429,7 @@ pub fn classify(snap: &CaptureHealthSnapshot) -> (HealthLevel, Vec<String>) {
         level = level.max(HealthLevel::Red);
         reasons.push("Video encoder did not start. Stop sharing and try again.".to_string());
     }
-    let fps_check_applies =
-        snap.capture_mode == "DXGI-DD" || (snap.capture_mode == "WGC" && snap.target_fps >= 60);
+    let fps_check_applies = snap.capture_mode == "DXGI-DD";
     if !in_cold_start && fps_check_applies && snap.target_fps > 0 {
         let frac = snap.current_fps as f32 / snap.target_fps as f32;
         if frac < RED_FPS_FRACTION {
@@ -662,18 +661,14 @@ mod tests {
     }
 
     #[test]
-    fn wgc_high_motion_low_fps_is_red() {
+    fn wgc_high_motion_can_go_idle_after_promotion() {
         let mut s = nominal();
         s.capture_mode = "WGC".into();
         s.current_fps = 23;
         s.target_fps = 60;
         let (lvl, reasons) = classify(&s);
-        assert_eq!(lvl, HealthLevel::Red);
-        assert!(
-            reasons.iter().any(|r| r.contains("capture fps 23/60")),
-            "expected WGC game fps reason, got {:?}",
-            reasons
-        );
+        assert_eq!(lvl, HealthLevel::Green);
+        assert!(reasons.is_empty());
     }
 
     #[test]

@@ -20,6 +20,8 @@ mod spotify_link;
 mod spotify_output_route;
 
 #[cfg(target_os = "windows")]
+mod adaptive_capture;
+#[cfg(target_os = "windows")]
 mod audio_output;
 #[cfg(not(target_os = "windows"))]
 mod audio_output_stub;

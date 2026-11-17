@@ -9,17 +9,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::adaptive_capture::{AdaptiveCapturePacer, RateChange, SenderSample};
 use crate::capture_health::{CaptureHealthState, CaptureSenderDiagnostics};
 use crate::file_debug_log;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::prelude::*;
-use livekit::webrtc::stats::RtcStats;
+use livekit::webrtc::stats::{QualityLimitationReason, RtcStats};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 
 // ── Stats ──
@@ -115,11 +117,12 @@ pub struct CapturePublisher {
     next_push_at: Option<Instant>,
     hardware_min_frame_interval: Duration,
     hardware_encoder: AtomicBool,
+    adaptive_pacer: Option<Arc<Mutex<AdaptiveCapturePacer>>>,
     running: Arc<AtomicBool>,
     publisher_stopped: Arc<AtomicBool>,
 }
 
-fn should_push_frame_at_deadline(
+pub(crate) fn should_push_frame_at_deadline(
     now: Instant,
     next_push_at: &mut Option<Instant>,
     min_interval: Duration,
@@ -137,6 +140,30 @@ fn should_push_frame_at_deadline(
         *next += min_interval;
     }
     true
+}
+
+pub(crate) fn log_adaptive_rate(change: RateChange) {
+    let line = format!(
+        "[wgc-adaptive-fps] {} -> {} fps reason={}",
+        change.from, change.to, change.reason
+    );
+    eprintln!("{line}");
+    file_debug_log::append(&line);
+}
+
+fn supports_adaptive_fps(implementation: &str, codec_name: &str, codec_fmtp: &str) -> bool {
+    let mut parameters = codec_fmtp.split(';').map(str::trim);
+    // 720p60 needs 216,000 macroblocks/s, which fits Level 3.2 and up.
+    let supports_cadence = parameters.clone().any(|param| {
+        matches!(
+            param.strip_prefix("profile-level-id=42e0"),
+            Some("20" | "28" | "29" | "2a" | "32" | "33" | "34")
+        )
+    });
+    implementation == "NVIDIA H264 Encoder"
+        && codec_name.eq_ignore_ascii_case("video/H264")
+        && supports_cadence
+        && parameters.any(|param| param == "packetization-mode=1")
 }
 
 pub(crate) struct StaticFrameHeartbeat {
@@ -243,12 +270,18 @@ impl CapturePublisher {
         enc_w: u32,
         enc_h: u32,
         publish_profile: PublishProfile,
+        adaptive_fps: bool,
         log_prefix: &str,
         track_source: TrackSource,
         is_screencast: bool,
         running: Arc<AtomicBool>,
         publisher_stopped: Arc<AtomicBool>,
     ) -> Result<Self, String> {
+        let max_fps = if adaptive_fps {
+            crate::adaptive_capture::MAX_FPS
+        } else {
+            publish_profile.target_fps()
+        };
         eprintln!("[{}] connecting to SFU: {}", log_prefix, sfu_url);
         file_debug_log::append(&format!(
             "[{}] connect_and_publish start sfu_url={} enc={}x{} profile={:?} target_fps={} max_bitrate={} min_bitrate={} track_source={:?} is_screencast={}",
@@ -257,7 +290,7 @@ impl CapturePublisher {
             enc_w,
             enc_h,
             publish_profile,
-            publish_profile.target_fps(),
+            max_fps,
             publish_profile.max_bitrate(),
             publish_profile.min_bitrate(),
             track_source,
@@ -307,12 +340,9 @@ impl CapturePublisher {
                 // motion more bits than the old 4 Mbps cap. Game shares opt
                 // into a higher-motion bitrate budget.
                 max_bitrate: publish_profile.max_bitrate(),
-                // Profile-selected hard floor. Game needs enough room for
-                // 1080p60 motion; desktop stays conservative for text sharing.
+                // Profile-selected hard floor for detail during motion.
                 min_bitrate: publish_profile.min_bitrate(),
-                // Profile-selected wire target: desktop stays conservative;
-                // game/window capture gets the high-motion 60fps path.
-                max_framerate: publish_profile.target_fps() as f64,
+                max_framerate: f64::from(max_fps),
             }),
             ..Default::default()
         };
@@ -356,6 +386,8 @@ impl CapturePublisher {
             next_push_at: None,
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
             hardware_encoder: AtomicBool::new(HAS_NVCUDA.load(Ordering::Relaxed)),
+            adaptive_pacer: adaptive_fps
+                .then(|| Arc::new(Mutex::new(AdaptiveCapturePacer::new(Instant::now())))),
             running,
             publisher_stopped,
         })
@@ -434,11 +466,8 @@ impl CapturePublisher {
                 // motion more bits than the old 4 Mbps cap. Game shares opt
                 // into a higher-motion bitrate budget.
                 max_bitrate: publish_profile.max_bitrate(),
-                // Profile-selected hard floor. Game needs enough room for
-                // 1080p60 motion; desktop stays conservative for text sharing.
+                // Profile-selected hard floor for detail during motion.
                 min_bitrate: publish_profile.min_bitrate(),
-                // Profile-selected wire target: desktop stays conservative;
-                // game/window capture gets the high-motion 60fps path.
                 max_framerate: publish_profile.target_fps() as f64,
             }),
             ..Default::default()
@@ -482,6 +511,7 @@ impl CapturePublisher {
             next_push_at: None,
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
             hardware_encoder: AtomicBool::new(HAS_NVCUDA.load(Ordering::Relaxed)),
+            adaptive_pacer: None,
             running,
             publisher_stopped,
         })
@@ -493,6 +523,10 @@ impl CapturePublisher {
     /// use `push_frame_strided`.
     pub fn push_frame(&mut self, bgra: &[u8], width: u32, height: u32) -> bool {
         self.push_frame_strided(bgra, width * 4, width, height)
+    }
+
+    pub(crate) fn adaptive_pacer(&self) -> Option<Arc<Mutex<AdaptiveCapturePacer>>> {
+        self.adaptive_pacer.clone()
     }
 
     /// Convert a BGRA frame with explicit stride to I420 and push to the video source.
@@ -513,8 +547,12 @@ impl CapturePublisher {
         } else {
             MIN_FRAME_INTERVAL_SOFTWARE
         };
-        if !should_push_frame_at_deadline(Instant::now(), &mut self.next_push_at, min_interval) {
-            return false; // drop this frame
+        // The experimental WGC path admits fresh frames before readback and
+        // uses a separate 200 ms heartbeat. Pacing both stages would alias.
+        if self.adaptive_pacer.is_none()
+            && !should_push_frame_at_deadline(Instant::now(), &mut self.next_push_at, min_interval)
+        {
+            return false;
         }
 
         let mut i420 = I420Buffer::new(width, height);
@@ -592,6 +630,7 @@ impl CapturePublisher {
     }
 
     pub async fn log_sender_stats(&self, log_prefix: &str, health: Option<&CaptureHealthState>) {
+        let mut adaptive_sample = None;
         match self.track.get_stats().await {
             Ok(stats) => {
                 let transport = stats.iter().find_map(|stat| match stat {
@@ -665,6 +704,23 @@ impl CapturePublisher {
                         .map(|codec| codec.codec.sdp_fmtp_line.as_str())
                         .filter(|fmtp| !fmtp.is_empty())
                         .unwrap_or("<none>");
+                    if self.adaptive_pacer.is_some()
+                        && !implementation.is_empty()
+                        && outbound.outbound.frames_encoded > 0
+                    {
+                        let reason = outbound.outbound.quality_limitation_reason;
+                        adaptive_sample = Some(SenderSample {
+                            hardware: outbound.outbound.power_efficient_encoder,
+                            supports_high_motion: supports_adaptive_fps(
+                                implementation,
+                                codec_name,
+                                codec_fmtp,
+                            ),
+                            fps: outbound.outbound.frames_per_second,
+                            cpu_limited: reason == QualityLimitationReason::Cpu,
+                            bandwidth_limited: reason == QualityLimitationReason::Bandwidth,
+                        });
+                    }
                     let remote_fraction_lost = remote_inbound
                         .map(|remote| format!("{:.3}", remote.remote_inbound.fraction_lost))
                         .unwrap_or_else(|| "<none>".to_string());
@@ -831,6 +887,12 @@ impl CapturePublisher {
                 file_debug_log::append(&format!("[{}] sender-stats error: {}", log_prefix, e));
             }
         }
+        if let Some(pacer) = &self.adaptive_pacer {
+            let change = pacer.lock().observe_sender(Instant::now(), adaptive_sample);
+            if let Some(change) = change {
+                log_adaptive_rate(change);
+            }
+        }
     }
 
     pub fn log_sender_stats_blocking(
@@ -899,6 +961,7 @@ mod tests {
             1920,
             1080,
             PublishProfile::Game,
+            false,
             "mf-livekit-test",
             TrackSource::Screenshare,
             false,
@@ -953,6 +1016,118 @@ mod tests {
         assert_eq!((sender.outbound.frame_width, sender.outbound.frame_height), (1920, 1080));
         assert!(codec.codec.sdp_fmtp_line.contains("profile-level-id=42e028"));
         assert!(sender.outbound.frames_encoded > 0 && decoded > 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated localhost LiveKit server and NVIDIA hardware"]
+    async fn adaptive_fps_steps_down_on_the_same_livekit_track() {
+        let url = std::env::var("ECHO_TEST_LIVEKIT_URL").expect("localhost development server");
+        assert!(url.starts_with("ws://127.0.0.1:"));
+        let publisher_token = std::env::var("ECHO_TEST_LIVEKIT_PUBLISH_TOKEN").unwrap();
+        let subscriber_token = std::env::var("ECHO_TEST_LIVEKIT_SUBSCRIBE_TOKEN").unwrap();
+        let (subscriber, mut events) =
+            Room::connect(&url, &subscriber_token, RoomOptions::default())
+                .await
+                .unwrap();
+        let mut publisher = CapturePublisher::connect_and_publish(
+            &url,
+            &publisher_token,
+            1280,
+            720,
+            PublishProfile::Game,
+            true,
+            "adaptive-fps-test",
+            TrackSource::Screenshare,
+            false,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let track_sid = publisher.track.sid();
+        let pacer = publisher.adaptive_pacer().unwrap();
+        let mut tick = tokio::time::interval(Duration::from_millis(8));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut bgra = vec![0; 1280 * 720 * 4];
+        let started = Instant::now();
+        let mut last_poll = started;
+        let mut high_started = None;
+        let mut limited_started = None;
+        let mut video = None;
+        let mut high_decoded = 0;
+        let mut low_decoded = 0;
+
+        while started.elapsed() < Duration::from_secs(15) {
+            tick.tick().await;
+            let now = Instant::now();
+            let (admitted, change) = pacer.lock().admit(now);
+            if let Some(change) = change {
+                assert_eq!(change.reason, "capture-overload");
+                limited_started = Some(now);
+                log_adaptive_rate(change);
+            }
+            if admitted {
+                let count = publisher.frame_count();
+                // Move one line to keep the encoded content changing.
+                let line = 1280 * 4 * (count as usize % 720);
+                bgra[line..line + 1280 * 4].fill(32 + count as u8 % 200);
+                assert!(publisher.push_frame(&bgra, 1280, 720));
+                let injected =
+                    high_started.is_some_and(|start| now - start >= Duration::from_secs(2));
+                pacer
+                    .lock()
+                    .record_conversion(Duration::from_millis(if injected { 14 } else { 2 }), false);
+            }
+            while let Ok(event) = events.try_recv() {
+                if let RoomEvent::TrackSubscribed { track, .. } = event {
+                    video = Some(track);
+                }
+            }
+            if now.duration_since(last_poll) < Duration::from_secs(1) {
+                continue;
+            }
+            last_poll = now;
+            publisher.log_sender_stats("adaptive-fps-test", None).await;
+            if pacer.lock().fps() == crate::adaptive_capture::MAX_FPS {
+                high_started.get_or_insert(now);
+            }
+            if let Some(track) = &video {
+                let inbound =
+                    track.get_stats().await.unwrap().into_iter().find_map(|stat| match stat {
+                        RtcStats::InboundRtp(rtp) if rtp.stream.kind == "video" => Some(rtp.inbound),
+                        _ => None,
+                    });
+                if let Some(inbound) = inbound {
+                    eprintln!(
+                        "Adaptive receiver fps={:.1} decoded={} size={}x{}",
+                        inbound.frames_per_second, inbound.frames_decoded,
+                        inbound.frame_width, inbound.frame_height,
+                    );
+                    if inbound.frames_per_second >= 50.0 {
+                        high_decoded = inbound.frames_decoded;
+                    }
+                    if limited_started.is_some_and(|start| now - start >= Duration::from_secs(2))
+                        && (25.0..=35.0).contains(&inbound.frames_per_second)
+                    {
+                        assert_eq!((inbound.frame_width, inbound.frame_height), (1280, 720));
+                        low_decoded = inbound.frames_decoded;
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(publisher.track.sid(), track_sid);
+        publisher.shutdown().await.unwrap();
+        subscriber.close().await.unwrap();
+        assert!(
+            high_started.is_some(),
+            "NVENC and negotiated H.264 level never qualified"
+        );
+        assert!(limited_started.is_some(), "capture never stepped down");
+        assert!(
+            high_decoded > 0 && low_decoded > high_decoded,
+            "decoded {high_decoded} at high rate and {low_decoded} after step-down"
+        );
     }
 
     async fn verify_h264_peers(cases: &[(&str, u32, f64, &str)]) {
@@ -1179,6 +1354,30 @@ mod tests {
         assert_eq!(profile.target_fps(), 30);
         assert_eq!(profile.max_bitrate(), 20_000_000);
         assert_eq!(profile.min_bitrate(), 8_000_000);
+    }
+
+    #[test]
+    fn adaptive_fps_checks_negotiated_codec_and_actual_encoder() {
+        let encoder = "NVIDIA H264 Encoder";
+        let level_4 = "packetization-mode=1;profile-level-id=42e028";
+        assert!(supports_adaptive_fps(encoder, "video/H264", level_4));
+        assert!(supports_adaptive_fps(
+            encoder,
+            "video/H264",
+            "implementation_name=NvCodec;packetization-mode=1;profile-level-id=42e033",
+        ));
+        assert!(!supports_adaptive_fps("OpenH264", "video/H264", level_4));
+        assert!(!supports_adaptive_fps(encoder, "video/VP8", level_4));
+        assert!(!supports_adaptive_fps(
+            encoder,
+            "video/H264",
+            "packetization-mode=1;profile-level-id=42e01f",
+        ));
+        assert!(!supports_adaptive_fps(
+            encoder,
+            "video/H264",
+            "packetization-mode=0;profile-level-id=42e028",
+        ));
     }
 
     fn pushed_frame_count(source_hz: u32, target_hz: u32, seconds: u32) -> usize {

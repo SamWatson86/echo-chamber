@@ -213,6 +213,25 @@ For a confirmed live orphan, an authorized operator can remove only its exact
 Require successful removal of that primary target, then verify the authoritative
 SFU roster and receiver counters. Do not use a full-room reload as the first step.
 
+### Experimental adaptive game-share FPS
+
+The Windows desktop build reads `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` from its
+launch environment for the native NVIDIA WGC Game profile. The normal
+profile stays at 1080p30 with the existing encoder fallback. A trial share
+uses 720p and starts at 30 fps. It can reach 60 fps once the source and sender
+are keeping up and the actual NVENC sender reports H.264 Level 3.2 or higher in
+packetization mode 1.
+
+Two consecutive samples of local overload bring the trial back to 30 fps
+for that share. The governor checks capture conversion time, frame queue
+drops, and the sender's CPU limitation. An OpenH264 fallback caps capture at
+20 fps when detected. The WGC callback skips excess frames before GPU
+readback, while static content continues to use the existing heartbeat.
+Look for `[wgc-adaptive-fps]` in `capture-debug.log` to see the rate changes
+and reasons, and compare the sender and receiver FPS during active motion.
+Starting a new share resets the governor. Launching without the environment
+variable restores the normal profile.
+
 ## Restart and disconnect incident triage
 
 Gather evidence before restarting Echo. Record the current `EchoCoreHost`,
