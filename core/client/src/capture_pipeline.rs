@@ -143,10 +143,18 @@ pub(crate) fn should_push_frame_at_deadline(
 }
 
 pub(crate) fn log_adaptive_rate(change: RateChange) {
-    let line = format!(
+    let mut line = format!(
         "[wgc-adaptive-fps] {} -> {} fps reason={}",
         change.from, change.to, change.reason
     );
+    if let Some(game) = change.game_pressure {
+        use std::fmt::Write;
+        let _ = write!(
+            line,
+            " source_fps={:.1} baseline_fps={:.1} gpu_busy={}%",
+            game.source_fps, game.baseline_fps, game.gpu_busy_percent,
+        );
+    }
     eprintln!("{line}");
     file_debug_log::append(&line);
 }

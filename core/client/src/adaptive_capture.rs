@@ -10,6 +10,12 @@ const BASE_FPS: u32 = 30;
 const SOFTWARE_FPS: u32 = 20;
 // Leave time in each 16.7 ms frame for the publisher and encoder.
 const CONVERSION_BUDGET: Duration = Duration::from_millis(12);
+const GPU_SATURATION_PERCENT: u32 = 95;
+const GAME_BASELINE_SAMPLES: u8 = 3;
+const GAME_ACTIVE_FPS: f64 = 20.0;
+const GAME_BASELINE_MIN_FPS: f64 = 55.0;
+const GAME_SLOWDOWN_RATIO: f64 = 0.75;
+const GAME_PRESSURE_MAX_FPS: f64 = 80.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -32,6 +38,75 @@ pub(crate) struct RateChange {
     pub from: u32,
     pub to: u32,
     pub reason: &'static str,
+    pub game_pressure: Option<GamePressure>,
+}
+
+#[derive(Debug)]
+pub(crate) struct GamePressure {
+    pub source_fps: f64,
+    pub baseline_fps: f64,
+    pub gpu_busy_percent: u32,
+}
+
+#[derive(Default)]
+struct GameCadence {
+    previous_sample: Option<(Instant, u64)>,
+    baseline_fps: f64,
+    baseline_samples: u8,
+    slow_samples: u8,
+}
+
+impl GameCadence {
+    fn observe(
+        &mut self,
+        now: Instant,
+        total_source_frames: u64,
+        foreground_gpu_busy: Option<u32>,
+    ) -> Option<GamePressure> {
+        let Some(gpu_busy_percent) = foreground_gpu_busy else {
+            *self = Self::default();
+            return None;
+        };
+        let (previous_at, previous_frames) =
+            self.previous_sample.replace((now, total_source_frames))?;
+        let elapsed = now.duration_since(previous_at);
+        if elapsed.is_zero() || elapsed >= 2 * SAMPLE_INTERVAL {
+            self.slow_samples = 0;
+            return None;
+        }
+        let source_fps = (total_source_frames - previous_frames) as f64 / elapsed.as_secs_f64();
+        if source_fps < GAME_ACTIVE_FPS {
+            self.baseline_samples = 0;
+            self.slow_samples = 0;
+            return None;
+        }
+        let slow = self.baseline_samples >= GAME_BASELINE_SAMPLES
+            && source_fps <= GAME_PRESSURE_MAX_FPS
+            && source_fps <= self.baseline_fps * GAME_SLOWDOWN_RATIO
+            && gpu_busy_percent >= GPU_SATURATION_PERCENT;
+        if slow {
+            self.slow_samples += 1;
+            return (self.slow_samples >= 2).then_some(GamePressure {
+                source_fps,
+                baseline_fps: self.baseline_fps,
+                gpu_busy_percent,
+            });
+        }
+
+        self.slow_samples = 0;
+        if source_fps >= GAME_BASELINE_MIN_FPS
+            && (self.baseline_samples < GAME_BASELINE_SAMPLES
+                || source_fps > self.baseline_fps * GAME_SLOWDOWN_RATIO)
+        {
+            if self.baseline_samples == 0 {
+                self.baseline_fps = source_fps;
+            } else {
+                self.baseline_fps += (source_fps - self.baseline_fps) * 0.25;
+            }
+            self.baseline_samples = (self.baseline_samples + 1).min(GAME_BASELINE_SAMPLES);
+        }
+        None
+    }
 }
 
 pub(crate) struct AdaptiveCapturePacer {
@@ -40,6 +115,7 @@ pub(crate) struct AdaptiveCapturePacer {
     last_frame_at: Option<Instant>,
     window_started: Instant,
     source_frames: u32,
+    total_source_frames: u64,
     converted_frames: u32,
     dropped_frames: u32,
     conversion_time: Duration,
@@ -47,6 +123,7 @@ pub(crate) struct AdaptiveCapturePacer {
     overloaded_capture_windows: u8,
     overloaded_sender_samples: u8,
     missing_sender_samples: u8,
+    game_cadence: GameCadence,
 }
 
 impl AdaptiveCapturePacer {
@@ -57,6 +134,7 @@ impl AdaptiveCapturePacer {
             last_frame_at: None,
             window_started: now,
             source_frames: 0,
+            total_source_frames: 0,
             converted_frames: 0,
             dropped_frames: 0,
             conversion_time: Duration::ZERO,
@@ -64,6 +142,7 @@ impl AdaptiveCapturePacer {
             overloaded_capture_windows: 0,
             overloaded_sender_samples: 0,
             missing_sender_samples: 0,
+            game_cadence: GameCadence::default(),
         }
     }
 
@@ -89,19 +168,45 @@ impl AdaptiveCapturePacer {
         self.next_frame_at = self.last_frame_at.map(|last| last + self.interval());
         self.overloaded_capture_windows = 0;
         self.overloaded_sender_samples = 0;
-        Some(RateChange { from, to, reason })
+        Some(RateChange {
+            from,
+            to,
+            reason,
+            game_pressure: None,
+        })
     }
 
     /// Call for fresh callbacks only. Heartbeats use their own 200 ms cadence.
     pub(crate) fn admit(&mut self, now: Instant) -> (bool, Option<RateChange>) {
         let change = self.finish_capture_window(now);
         self.source_frames += 1;
+        self.total_source_frames += 1;
         let interval = self.interval();
         let admit = should_push_frame_at_deadline(now, &mut self.next_frame_at, interval);
         if admit {
             self.last_frame_at = Some(now);
         }
         (admit, change)
+    }
+
+    pub(crate) fn observe_game_load(
+        &mut self,
+        now: Instant,
+        foreground_gpu_busy: Option<u32>,
+    ) -> Option<RateChange> {
+        if self.mode != Mode::HighMotion {
+            return None;
+        }
+        let game_pressure =
+            self.game_cadence
+                .observe(now, self.total_source_frames, foreground_gpu_busy)?;
+        let mut change = self.change_mode(Mode::Limited, "game-gpu-pressure")?;
+        change.game_pressure = Some(game_pressure);
+        Some(change)
+    }
+
+    pub(crate) fn needs_game_load_monitor(&self) -> bool {
+        matches!(self.mode, Mode::WarmingUp | Mode::HighMotion)
     }
 
     pub(crate) fn record_conversion(&mut self, elapsed: Duration, channel_full: bool) {
@@ -284,6 +389,80 @@ mod tests {
         simulate_second(&mut pacer, start + 2 * SAMPLE_INTERVAL, 120, 2, true);
         let (_, change) = pacer.admit(start + 3 * SAMPLE_INTERVAL);
         assert_eq!(change.unwrap().to, 30);
+    }
+
+    #[test]
+    fn sustained_game_slowdown_reduces_conversion_before_the_source_hits_30() {
+        let start = Instant::now();
+        let mut pacer = warmed_up(start);
+        let mut now = start + SAMPLE_INTERVAL;
+        assert!(pacer.observe_game_load(now, Some(98)).is_none());
+        for _ in 0..3 {
+            simulate_second(&mut pacer, now, 120, 2, false);
+            now += SAMPLE_INTERVAL;
+            assert!(pacer.observe_game_load(now, Some(98)).is_none());
+        }
+        let frames_at_60 = simulate_second(&mut pacer, now, 72, 2, false);
+        now += SAMPLE_INTERVAL;
+        assert!(pacer.observe_game_load(now, Some(99)).is_none());
+        simulate_second(&mut pacer, now, 72, 2, false);
+        now += SAMPLE_INTERVAL;
+        let change = pacer.observe_game_load(now, Some(99)).unwrap();
+        assert_eq!(
+            (change.from, change.to, change.reason),
+            (60, 30, "game-gpu-pressure")
+        );
+        let load = change.game_pressure.unwrap();
+        assert_eq!(load.source_fps, 72.0);
+        assert!(load.baseline_fps > 110.0);
+        assert!(frames_at_60 >= 58);
+        assert!((29..=30).contains(&simulate_second(&mut pacer, now, 72, 2, false)));
+        assert!(!pacer.needs_game_load_monitor());
+    }
+
+    #[test]
+    fn game_cadence_ignores_lower_fps_without_pressure_or_foreground_motion() {
+        let start = Instant::now();
+        let mut game = GameCadence::default();
+        let mut frames = 0;
+        let mut observe = |second, new_frames, gpu| {
+            frames += new_frames;
+            game.observe(start + SAMPLE_INTERVAL * second, frames, gpu)
+        };
+        for second in 0..4 {
+            assert!(observe(second, 120, Some(99)).is_none());
+        }
+        assert!(observe(4, 95, Some(99)).is_none());
+        assert!(observe(5, 72, Some(60)).is_none());
+        assert!(observe(6, 72, Some(99)).is_none());
+        assert!(observe(7, 30, None).is_none());
+        assert!(observe(8, 30, Some(99)).is_none());
+        assert!(observe(9, 30, Some(99)).is_none());
+        assert!(observe(10, 30, Some(99)).is_none());
+    }
+
+    #[test]
+    fn static_game_window_clears_the_previous_active_baseline() {
+        let start = Instant::now();
+        let mut game = GameCadence::default();
+        for second in 0..4 {
+            assert!(game
+                .observe(
+                    start + SAMPLE_INTERVAL * second,
+                    u64::from(second) * 120,
+                    Some(99)
+                )
+                .is_none());
+        }
+        assert!(game
+            .observe(start + SAMPLE_INTERVAL * 4, 360, Some(99))
+            .is_none());
+        assert!(game
+            .observe(start + SAMPLE_INTERVAL * 5, 390, Some(99))
+            .is_none());
+        assert!(game
+            .observe(start + SAMPLE_INTERVAL * 6, 420, Some(99))
+            .is_none());
     }
 
     #[test]

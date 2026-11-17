@@ -43,6 +43,8 @@ mod gpu_converter;
 mod gpu_preference;
 #[cfg(target_os = "windows")]
 mod native_presenter;
+#[cfg(target_os = "windows")]
+mod nvidia_gpu_load;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
 

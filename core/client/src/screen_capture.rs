@@ -935,6 +935,42 @@ async fn share_loop(
     let capture_stopped = session.capture_stopped.clone();
     let adaptive_pacer = publisher.adaptive_pacer();
     let capture_pacer = adaptive_pacer.clone();
+    if let Some(pacer) = adaptive_pacer.clone() {
+        let monitor_running = running.clone();
+        // Keep driver polls out of both the capture callback and the stop
+        // path. This worker holds no capture device, room or window handle.
+        tokio::task::spawn_blocking(move || {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowThreadProcessId,
+            };
+
+            let Some(gpu) = crate::nvidia_gpu_load::NvidiaGpuLoad::open() else {
+                file_debug_log::append("[wgc-adaptive-fps] game GPU telemetry unavailable");
+                return;
+            };
+            file_debug_log::append("[wgc-adaptive-fps] game GPU telemetry available");
+            while monitor_running.load(Ordering::SeqCst) && pacer.lock().needs_game_load_monitor() {
+                let mut foreground_pid = 0;
+                unsafe {
+                    GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut foreground_pid));
+                }
+                let busy = if foreground_pid != 0 && foreground_pid == target_pid {
+                    gpu.busy_percent()
+                } else {
+                    None
+                };
+                let change = {
+                    let mut pacer = pacer.lock();
+                    pacer.observe_game_load(Instant::now(), busy)
+                };
+                if let Some(change) = change {
+                    log_adaptive_rate(change);
+                    break;
+                }
+                std::thread::sleep(SAMPLE_INTERVAL);
+            }
+        });
+    }
 
     let capture_task = tokio::task::spawn_blocking(move || {
         use crate::gpu_converter::GpuConverter;

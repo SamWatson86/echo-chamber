@@ -227,6 +227,13 @@ for that share. The governor checks capture conversion time, frame queue
 drops, and the sender's CPU limitation. An OpenH264 fallback caps capture at
 20 fps when detected. The WGC callback skips excess frames before GPU
 readback, while static content continues to use the existing heartbeat.
+For a foreground game on a single NVIDIA GPU, the trial also samples driver
+utilization and incoming WGC cadence. After establishing an active baseline,
+two samples at or above 95% GPU utilization with the source at 20–80 fps
+and at least 25% below that baseline bring it back to 30 fps. The transition
+log includes utilization and both source rates. This signal uses capture
+callbacks as an estimate of game cadence and is optional if driver telemetry
+is unavailable.
 Look for `[wgc-adaptive-fps]` in `capture-debug.log` to see the rate changes
 and reasons, and compare the sender and receiver FPS during active motion.
 Starting a new share resets the governor. Launching without the environment
