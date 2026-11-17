@@ -743,7 +743,7 @@ impl CapturePublisher {
                         adaptive_sample = Some(SenderSample {
                             hardware: outbound.outbound.power_efficient_encoder,
                             active: outbound.outbound.active,
-                            supports_full_hd: level.is_none_or(|level| level >= 40),
+                            supports_full_hd: level.map(|level| level >= 40),
                             resolution,
                             supports_high_motion: supports_adaptive_fps(
                                 implementation,
@@ -1093,6 +1093,7 @@ mod tests {
             (Hd, 30),
             (Hd, 60),
             (Hd, 30),
+            (FullHd, 30),
         ])
         .await;
     }
@@ -1134,7 +1135,7 @@ mod tests {
         let mut decoded = vec![0; expected.len()];
         let mut bgra = Vec::new();
 
-        while started.elapsed() < Duration::from_secs(34) {
+        while started.elapsed() < Duration::from_secs(60) {
             tick.tick().await;
             let now = Instant::now();
             let (admitted, change, tier) = {

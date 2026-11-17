@@ -19,6 +19,12 @@ const GAME_BASELINE_MIN_FPS: f64 = 55.0;
 const GAME_SLOWDOWN_RATIO: f64 = 0.75;
 const GAME_PRESSURE_MAX_FPS: f64 = 80.0;
 const GAME_PRESSURE_AT_30_FPS: f64 = 35.0;
+const RECOVERY_HOLD: Duration = Duration::from_secs(15);
+const RECOVERY_CAPTURE_FRESHNESS: Duration = Duration::from_millis(1250);
+const RECOVERY_CONVERSION_BUDGET: Duration = Duration::from_millis(8);
+const RECOVERY_MIN_SOURCE_FPS: f64 = 45.0;
+const RECOVERY_BASELINE_RATIO: f64 = 0.9;
+const RECOVERY_GPU_HEADROOM_PERCENT: u32 = 85;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CaptureResolution {
@@ -61,7 +67,7 @@ enum Mode {
 pub(crate) struct SenderSample {
     pub hardware: bool,
     pub active: bool,
-    pub supports_full_hd: bool,
+    pub supports_full_hd: Option<bool>,
     pub resolution: CaptureResolution,
     pub supports_high_motion: bool,
     pub fps: f64,
@@ -148,6 +154,49 @@ impl GameCadence {
     }
 }
 
+struct ResolutionRecovery {
+    min_source_fps: f64,
+    capture_healthy_at: Option<Instant>,
+    healthy_since: Option<Instant>,
+    last_healthy_sender_at: Option<Instant>,
+}
+
+impl ResolutionRecovery {
+    fn new(game: &GameCadence) -> Self {
+        let mut min_source_fps = RECOVERY_MIN_SOURCE_FPS;
+        if game.baseline_samples >= GAME_BASELINE_SAMPLES {
+            min_source_fps = min_source_fps.max(game.baseline_fps * RECOVERY_BASELINE_RATIO);
+        }
+        Self {
+            min_source_fps,
+            capture_healthy_at: None,
+            healthy_since: None,
+            last_healthy_sender_at: None,
+        }
+    }
+
+    fn reset_streak(&mut self) {
+        self.healthy_since = None;
+        self.last_healthy_sender_at = None;
+    }
+
+    fn observe_sender(&mut self, now: Instant, healthy: bool) -> bool {
+        let fresh_capture = self
+            .capture_healthy_at
+            .is_some_and(|at| now.duration_since(at) < RECOVERY_CAPTURE_FRESHNESS);
+        if !healthy || !fresh_capture {
+            self.reset_streak();
+            return false;
+        }
+        let previous = self.last_healthy_sender_at.replace(now);
+        if previous.is_none_or(|at| now.duration_since(at) >= 2 * SAMPLE_INTERVAL) {
+            self.healthy_since = Some(now);
+        }
+        self.healthy_since
+            .is_some_and(|since| now.duration_since(since) >= RECOVERY_HOLD)
+    }
+}
+
 pub(crate) struct AdaptiveCapturePacer {
     mode: Mode,
     resolution: CaptureResolution,
@@ -166,6 +215,9 @@ pub(crate) struct AdaptiveCapturePacer {
     overloaded_sender_samples: u8,
     missing_sender_samples: u8,
     game_cadence: GameCadence,
+    gpu_busy_sample: Option<(Instant, u32)>,
+    recovery: Option<ResolutionRecovery>,
+    recovery_attempted: bool,
 }
 
 impl AdaptiveCapturePacer {
@@ -188,6 +240,9 @@ impl AdaptiveCapturePacer {
             overloaded_sender_samples: 0,
             missing_sender_samples: 0,
             game_cadence: GameCadence::default(),
+            gpu_busy_sample: None,
+            recovery: None,
+            recovery_attempted: false,
         }
     }
 
@@ -231,6 +286,10 @@ impl AdaptiveCapturePacer {
         self.healthy_capture_windows = 0;
         self.active_capture_at = None;
         self.game_cadence.slow_samples = 0;
+        if let Some(recovery) = &mut self.recovery {
+            recovery.capture_healthy_at = None;
+            recovery.reset_streak();
+        }
         Some(RateChange {
             from,
             to,
@@ -246,6 +305,9 @@ impl AdaptiveCapturePacer {
             self.change_mode(now, Mode::Limited, self.resolution, reason)
         } else if self.resolution == CaptureResolution::FullHd && self.mode != Mode::Software {
             // Start at 720p30 and measure again before attempting 720p60.
+            if !self.recovery_attempted {
+                self.recovery = Some(ResolutionRecovery::new(&self.game_cadence));
+            }
             self.change_mode(now, Mode::WarmingUp, CaptureResolution::Hd, reason)
         } else {
             None
@@ -273,6 +335,7 @@ impl AdaptiveCapturePacer {
         if !self.needs_game_load_monitor() {
             return None;
         }
+        self.gpu_busy_sample = foreground_gpu_busy.map(|busy| (now, busy));
         let pressure_max_fps = if self.mode == Mode::HighMotion {
             GAME_PRESSURE_MAX_FPS
         } else {
@@ -292,6 +355,7 @@ impl AdaptiveCapturePacer {
     pub(crate) fn needs_game_load_monitor(&self) -> bool {
         self.mode != Mode::Software
             && (self.resolution == CaptureResolution::FullHd
+                || self.recovery.is_some()
                 || matches!(self.mode, Mode::WarmingUp | Mode::HighMotion))
     }
 
@@ -319,9 +383,10 @@ impl AdaptiveCapturePacer {
             && self.converted_frames >= 5
             && (self.conversion_time > conversion_budget * self.converted_frames
                 || self.dropped_frames >= self.converted_frames.div_ceil(10));
+        let source_fps = f64::from(self.source_frames) / elapsed.as_secs_f64();
         let converted_fps = f64::from(self.converted_frames) / elapsed.as_secs_f64();
         let healthy = !overloaded
-            && f64::from(self.source_frames) / elapsed.as_secs_f64() >= 50.0
+            && source_fps >= 50.0
             && converted_fps >= 25.0
             && self.conversion_time <= HIGH_FPS_CONVERSION_BUDGET * self.converted_frames;
         self.active_capture_at = (converted_fps >= 25.0).then_some(now);
@@ -331,6 +396,25 @@ impl AdaptiveCapturePacer {
         } else {
             0
         };
+        let min_sender_fps = f64::from(self.fps()) * 5.0 / 6.0;
+        if let Some(recovery) = &mut self.recovery {
+            // A game capped at 30 fps can still show headroom through recent
+            // GPU telemetry even though its source cadence cannot rise.
+            let clear_gpu_headroom = self.gpu_busy_sample.is_some_and(|(at, busy)| {
+                now.duration_since(at) < 2 * SAMPLE_INTERVAL
+                    && busy <= RECOVERY_GPU_HEADROOM_PERCENT
+                    && source_fps >= 28.0
+            });
+            let healthy = elapsed < 2 * SAMPLE_INTERVAL
+                && (source_fps >= recovery.min_source_fps || clear_gpu_headroom)
+                && converted_fps >= min_sender_fps
+                && self.dropped_frames == 0
+                && self.conversion_time <= RECOVERY_CONVERSION_BUDGET * self.converted_frames;
+            recovery.capture_healthy_at = healthy.then_some(now);
+            if !healthy {
+                recovery.reset_streak();
+            }
+        }
         self.reset_capture_window(now);
 
         if self.mode == Mode::HighMotion
@@ -366,6 +450,9 @@ impl AdaptiveCapturePacer {
         }
         let Some(sample) = sample else {
             self.overloaded_sender_samples = 0;
+            if let Some(recovery) = &mut self.recovery {
+                recovery.reset_streak();
+            }
             if self.mode == Mode::HighMotion {
                 self.missing_sender_samples += 1;
                 if self.missing_sender_samples >= 2 {
@@ -376,14 +463,15 @@ impl AdaptiveCapturePacer {
         };
         self.missing_sender_samples = 0;
         if !sample.hardware {
-            let resolution = if sample.supports_full_hd {
+            let resolution = if sample.supports_full_hd.unwrap_or(true) {
                 self.resolution
             } else {
                 CaptureResolution::Hd
             };
+            self.recovery = None;
             return self.change_mode(now, Mode::Software, resolution, "software-encoder");
         }
-        if self.resolution == CaptureResolution::FullHd && !sample.supports_full_hd {
+        if self.resolution == CaptureResolution::FullHd && sample.supports_full_hd == Some(false) {
             return self.change_mode(
                 now,
                 Mode::WarmingUp,
@@ -394,6 +482,9 @@ impl AdaptiveCapturePacer {
         // An outbound report can still describe the previous resolution
         // while WebRTC reinitializes the encoder on the same track.
         if sample.resolution != self.resolution {
+            if let Some(recovery) = &mut self.recovery {
+                recovery.reset_streak();
+            }
             return None;
         }
         if self.mode == Mode::HighMotion && !sample.supports_high_motion {
@@ -446,6 +537,24 @@ impl AdaptiveCapturePacer {
             };
             return self.reduce_load(now, reason);
         }
+        let min_sender_fps = f64::from(self.fps()) * 5.0 / 6.0;
+        if let Some(recovery) = &mut self.recovery {
+            let healthy = sample.active
+                && sample.supports_full_hd == Some(true)
+                && sample.fps >= min_sender_fps
+                && !sample.cpu_limited
+                && !sample.bandwidth_limited;
+            if recovery.observe_sender(now, healthy) {
+                self.recovery = None;
+                self.recovery_attempted = true;
+                return self.change_mode(
+                    now,
+                    Mode::Limited,
+                    CaptureResolution::FullHd,
+                    "sustained-recovery-headroom",
+                );
+            }
+        }
         None
     }
 }
@@ -458,7 +567,7 @@ mod tests {
         SenderSample {
             hardware: true,
             active: true,
-            supports_full_hd: true,
+            supports_full_hd: Some(true),
             resolution: CaptureResolution::FullHd,
             supports_high_motion: true,
             fps: 29.0,
@@ -767,7 +876,7 @@ mod tests {
         let mut pacer = AdaptiveCapturePacer::new(now, CaptureResolution::FullHd);
         let limited = SenderSample {
             resolution: CaptureResolution::Hd,
-            supports_full_hd: false,
+            supports_full_hd: Some(false),
             supports_high_motion: false,
             ..hardware_sample()
         };
@@ -776,5 +885,86 @@ mod tests {
             (change.to_resolution, change.to),
             (CaptureResolution::Hd, 30)
         );
+    }
+
+    fn hd_at_30() -> SenderSample {
+        SenderSample {
+            resolution: CaptureResolution::Hd,
+            supports_high_motion: false,
+            ..hardware_sample()
+        }
+    }
+
+    #[test]
+    fn recovery_requires_sustained_headroom_and_gets_one_attempt() {
+        let mut now = Instant::now();
+        let mut pacer = AdaptiveCapturePacer::new(now, CaptureResolution::FullHd);
+        pacer.game_cadence.baseline_fps = 75.0;
+        pacer.game_cadence.baseline_samples = GAME_BASELINE_SAMPLES;
+        pacer.reduce_load(now, "capture-overload").unwrap();
+
+        for source_fps in [60, 75] {
+            for _ in 0..15 {
+                simulate_second(&mut pacer, now, source_fps, 2, false);
+                now += SAMPLE_INTERVAL;
+                pacer.admit(now);
+                assert!(pacer.observe_sender(now, Some(hd_at_30())).is_none());
+            }
+        }
+        simulate_second(&mut pacer, now, 75, 2, true);
+        now += SAMPLE_INTERVAL;
+        pacer.admit(now);
+        assert!(pacer.observe_sender(now, Some(hd_at_30())).is_none());
+
+        for _ in 0..15 {
+            simulate_second(&mut pacer, now, 75, 2, false);
+            now += SAMPLE_INTERVAL;
+            pacer.admit(now);
+            assert!(pacer.observe_sender(now, Some(hd_at_30())).is_none());
+        }
+        simulate_second(&mut pacer, now, 75, 2, false);
+        now += SAMPLE_INTERVAL;
+        pacer.admit(now);
+        let restored = pacer.observe_sender(now, Some(hd_at_30())).unwrap();
+        assert_eq!(restored.reason, "sustained-recovery-headroom");
+        assert_eq!(
+            (restored.to_resolution, restored.to),
+            (CaptureResolution::FullHd, 30)
+        );
+        assert!(pacer.mode == Mode::Limited);
+
+        pacer.reduce_load(now, "capture-overload").unwrap();
+        for _ in 0..20 {
+            simulate_second(&mut pacer, now, 75, 2, false);
+            now += SAMPLE_INTERVAL;
+            pacer.admit(now);
+            assert!(pacer.observe_sender(now, Some(hd_at_30())).is_none());
+        }
+        assert_eq!(pacer.resolution(), CaptureResolution::Hd);
+    }
+
+    #[test]
+    fn recovery_needs_confirmed_1080p_capability_and_can_use_gpu_headroom_at_30() {
+        let mut now = Instant::now();
+        let mut pacer = AdaptiveCapturePacer::new(now, CaptureResolution::FullHd);
+        pacer.reduce_load(now, "capture-overload").unwrap();
+        for has_codec in [false, true] {
+            for second in 0..=15 {
+                pacer.observe_game_load(now, Some(75));
+                simulate_second(&mut pacer, now, 30, 2, false);
+                now += SAMPLE_INTERVAL;
+                pacer.admit(now);
+                let change = pacer.observe_sender(
+                    now,
+                    Some(SenderSample {
+                        supports_full_hd: has_codec.then_some(true),
+                        ..hd_at_30()
+                    }),
+                );
+                assert_eq!(change.is_some(), has_codec && second == 15);
+            }
+        }
+        assert_eq!(pacer.resolution(), CaptureResolution::FullHd);
+        assert_eq!(pacer.fps(), 30);
     }
 }

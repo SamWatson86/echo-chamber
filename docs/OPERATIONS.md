@@ -227,8 +227,12 @@ at the same resolution. If 1080p30 still cannot keep up after that change,
 the same track moves to 720p30. At 720p it requires two healthy capture
 windows and a fresh hardware sender report before attempting 60 fps.
 720p60 needs Level 3.2 for NVENC and Level 4.0 for the Media Foundation path.
-The Level 3.1 compatibility path stays within 720p30. The final hardware
-tier is 720p30. Resolution does not increase again until a new share.
+The Level 3.1 compatibility path stays within 720p30. When pressure caused
+the resolution drop, a hardware sender can return to 1080p30 on the same
+track after 15 seconds of sustained headroom. Recovery requires confirmed
+1080p codec support, a healthy sender and capture queue, and either recovered
+game cadence or recent GPU headroom for a slower source. Echo tries this
+once per share and stays at 720p if pressure forces resolution down again.
 
 The governor checks capture conversion time, frame queue drops, and sender
 limitations. An OpenH264 fallback caps capture at 20 fps when detected.
