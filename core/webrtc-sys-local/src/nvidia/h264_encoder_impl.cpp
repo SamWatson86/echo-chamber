@@ -21,6 +21,7 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/time_utils.h"
+#include "livekit/adaptive_screen_share.h"
 #include "livekit/codec_debug_log.h"
 #include "system_wrappers/include/metrics.h"
 #include "third_party/libyuv/include/libyuv/convert.h"
@@ -167,6 +168,18 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
     return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
   }
 
+  const bool adaptive = livekit_ffi::AdaptiveScreenShareEnabled() &&
+                        profile_ == H264Profile::kProfileConstrainedBaseline &&
+                        inst->maxFramerate > 30 && inst->maxFramerate <= 60 &&
+                        inst->width <= 1920 && inst->height <= 1080 &&
+                        inst->numberOfSimulcastStreams <= 1;
+  return InitEncodeWithRate(inst, settings, adaptive);
+}
+
+int32_t NvidiaH264EncoderImpl::InitEncodeWithRate(
+    const VideoCodec* inst,
+    const VideoEncoder::Settings& settings,
+    bool adaptive) {
   int32_t release_ret = Release();
   if (release_ret != WEBRTC_VIDEO_CODEC_OK) {
     ReportError();
@@ -174,6 +187,31 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   }
 
   codec_ = *inst;
+  adaptive_rate_limited_ = false;
+  if (adaptive) {
+    if (level_ < H264Level::kLevel3_1) {
+      return WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE;
+    }
+    if (level_ < H264Level::kLevel4 && (codec_.width > 1280 || codec_.height > 720)) {
+      codec_.width = std::min(1280, inst->width * 720 / inst->height) & ~1;
+      codec_.height = std::min(720, inst->height * 1280 / inst->width) & ~1;
+      if (codec_.width < 2 || codec_.height < 2) {
+        return WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE;
+      }
+      adaptive_scaled_input_ = I420Buffer::Create(codec_.width, codec_.height);
+    }
+    const auto high_level = codec_.width <= 1280 && codec_.height <= 720
+                                ? H264Level::kLevel3_2
+                                : H264Level::kLevel4_2;
+    if (level_ < high_level) {
+      codec_.maxFramerate = 30;
+      adaptive_rate_limited_ = true;
+    }
+    if (level_ < H264Level::kLevel4) {
+      codec_.startBitrate = std::min<uint32_t>(codec_.startBitrate, 14'000);
+      codec_.maxBitrate = std::min<uint32_t>(codec_.maxBitrate, 14'000);
+    }
+  }
 
   // Code expects simulcastStream resolutions to be correct, make sure they are
   // filled even when there are no simulcast layers.
@@ -360,6 +398,18 @@ int32_t NvidiaH264EncoderImpl::InitEncode(
   } catch (const NVENCException& e) {
     std::cout << "[NVENC] CreateEncoder FAILED: " << e.what() << std::endl;
     livekit_ffi::AppendCodecDebug(std::string("[NVENC] CreateEncoder failed: ") + e.what());
+    if (adaptive && codec_.maxFramerate > 30 &&
+        (e.getErrorCode() == NV_ENC_ERR_INVALID_PARAM ||
+         e.getErrorCode() == NV_ENC_ERR_UNSUPPORTED_PARAM)) {
+      // Preserve any level-required scaling in the opt-in path. The
+      // retry exits after the lower frame rate is used once.
+      auto retry = *inst;
+      retry.maxFramerate = 30;
+      livekit_ffi::AppendCodecDebug("[NVENC] retrying hardware at 30 fps");
+      const auto result = InitEncodeWithRate(&retry, settings, adaptive);
+      adaptive_rate_limited_ = result == WEBRTC_VIDEO_CODEC_OK;
+      return result;
+    }
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
@@ -392,6 +442,7 @@ int32_t NvidiaH264EncoderImpl::RegisterEncodeCompleteCallback(
 }
 
 int32_t NvidiaH264EncoderImpl::Release() {
+  adaptive_scaled_input_ = nullptr;
   if (encoder_) {
     encoder_->DestroyEncoder();
     encoder_ = nullptr;
@@ -431,6 +482,10 @@ int32_t NvidiaH264EncoderImpl::Encode(
     return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
   }
   RTC_CHECK(frame_buffer->type() == VideoFrameBuffer::Type::kI420);
+  if (adaptive_scaled_input_) {
+    adaptive_scaled_input_->ScaleFrom(*frame_buffer);
+    frame_buffer = adaptive_scaled_input_;
+  }
 
   bool is_keyframe_needed = false;
   if (configuration_.key_frame_request && configuration_.sending) {
@@ -468,7 +523,7 @@ int32_t NvidiaH264EncoderImpl::Encode(
       NvEncoderCuda::CopyToDeviceFrame(
           cu_context_, (void*)frame_buffer->DataY(), frame_buffer->StrideY(),
           reinterpret_cast<CUdeviceptr>(nv_enc_input_frame->inputPtr),
-          nv_enc_input_frame->pitch, input_frame.width(), input_frame.height(),
+          nv_enc_input_frame->pitch, frame_buffer->width(), frame_buffer->height(),
           CU_MEMORYTYPE_HOST, nv_enc_input_frame->bufferFormat,
           nv_enc_input_frame->chromaOffsets, nv_enc_input_frame->numChromaPlanes);
     }
@@ -563,7 +618,8 @@ int32_t NvidiaH264EncoderImpl::ProcessEncodedFrame(
 VideoEncoder::EncoderInfo NvidiaH264EncoderImpl::GetEncoderInfo() const {
   EncoderInfo info;
   info.supports_native_handle = false;
-  info.implementation_name = "NVIDIA H264 Encoder";
+  info.implementation_name = adaptive_rate_limited_ ? "NVIDIA H264 Encoder (30 FPS)"
+                                                   : "NVIDIA H264 Encoder";
   info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
   info.is_hardware_accelerated = true;
   info.supports_simulcast = false;

@@ -217,30 +217,33 @@ SFU roster and receiver counters. Do not use a full-room reload as the first ste
 
 The Windows desktop build reads `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` from its
 launch environment for the native NVIDIA and AMD WGC Game profiles. The normal
-profile stays at 1080p30 with the existing encoder fallback. The NVIDIA
-trial fits within 720p and the AMD trial fits within 1080p. Both start at
-30 fps and can reach 60 fps once the source and sender are keeping up.
-The NVENC sender needs H.264 Level 3.2 or higher in packetization mode 1.
-The AMD Media Foundation sender needs Level 4.2 and a driver that accepts
-the 1080p60 media type. An answer at Level 4.0 or a rejected 60 fps setup
-keeps AMD hardware at 1080p30 when available. The existing Level 3.1
-compatibility path fits within 720p30. Look for
-`AMD Media Foundation H264 (60 FPS)` in sender stats when the faster
-configuration is active.
+profile stays at 1080p30 with the existing encoder fallback. Both vendors'
+trial shares start within 1920×1080 at 30 fps and can reach 60 fps once the
+source and sender are keeping up. 1080p60 needs H.264 Level 4.2 and a driver
+that accepts the high-rate configuration. A Level 4.0 answer keeps 1080p30.
 
-Two consecutive samples of local overload bring the trial back to 30 fps
-for that share. The governor checks capture conversion time, frame queue
-drops, and the sender's CPU limitation. An OpenH264 fallback caps capture at
-20 fps when detected. The WGC callback skips excess frames before GPU
-readback, while static content continues to use the existing heartbeat.
+Two consecutive samples of overload at 60 fps bring the trial back to 30
+at the same resolution. If 1080p30 still cannot keep up after that change,
+the same track moves to 720p30. At 720p it requires two healthy capture
+windows and a fresh hardware sender report before attempting 60 fps.
+720p60 needs Level 3.2 for NVENC and Level 4.0 for the Media Foundation path.
+The Level 3.1 compatibility path stays within 720p30. The final hardware
+tier is 720p30. Resolution does not increase again until a new share.
+
+The governor checks capture conversion time, frame queue drops, and sender
+limitations. An OpenH264 fallback caps capture at 20 fps when detected.
+The WGC callback skips excess frames before GPU readback, while static
+content continues to use the existing heartbeat.
 For a foreground game, the trial also samples incoming WGC cadence and GPU
 utilization. The NVIDIA path uses NVML on single-NVIDIA-GPU systems. The AMD
 path uses Windows GPU Engine counters for the AMD adapter with rendering
 activity from the shared game. After establishing an active baseline, two
 samples at or above 95% GPU utilization with the source at 20–80 fps and at
-least 25% below that baseline bring it back to 30 fps. The transition log
-includes utilization and both source rates. This signal uses capture callbacks
-as an estimate of game cadence and is optional if telemetry is unavailable.
+least 25% below that baseline bring it back to 30 fps. To lower resolution
+at 30 fps, that signal also requires source cadence to fall to 35 fps or
+less. The transition log includes utilization and both source rates. This
+signal estimates game cadence from capture callbacks and is optional if
+telemetry is unavailable.
 Look for `[wgc-adaptive-fps]` in `capture-debug.log` to see the rate changes
 and reasons, and compare the sender and receiver FPS during active motion.
 Starting a new share resets the governor. Launching without the environment

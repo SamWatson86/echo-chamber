@@ -22,6 +22,7 @@
 #include "api/video_codecs/h264_profile_level_id.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "common_video/h264/h264_common.h"
+#include "livekit/adaptive_screen_share.h"
 #include "livekit/codec_debug_log.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -153,12 +154,6 @@ void LogFailure(const MfError& error) {
   AppendCodecDebug(std::string("[AMD-MF] fallback stage=") + error.operation + " hr=" + code);
 }
 
-bool AdaptiveFpsEnabled() {
-  wchar_t value[2]{};
-  return GetEnvironmentVariableW(L"ECHO_EXPERIMENTAL_ADAPTIVE_FPS", value, 2) == 1 &&
-         value[0] == L'1';
-}
-
 class AmdMfEncoder final : public webrtc::VideoEncoder {
  public:
   explicit AmdMfEncoder(webrtc::H264Level negotiated_level)
@@ -172,7 +167,7 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
         settings->width % 2 || settings->height % 2 ||
         settings->maxFramerate == 0 ||
         (settings->maxFramerate > 30 &&
-         (!AdaptiveFpsEnabled() || settings->maxFramerate > 60 ||
+         (!AdaptiveScreenShareEnabled() || settings->maxFramerate > 60 ||
           settings->height > 1080)) ||
         settings->numberOfSimulcastStreams > 1) {
       LogFailure({"unsupported dimensions, frame rate or simulcast", E_INVALIDARG});
@@ -621,7 +616,7 @@ bool HasAmdMediaFoundationEncoder() {
 }
 
 webrtc::SdpVideoFormat AmdMediaFoundationFormat() {
-  return webrtc::SdpVideoFormat("H264", {{"profile-level-id", AdaptiveFpsEnabled() ? "42e02a" : "42e028"},
+  return webrtc::SdpVideoFormat("H264", {{"profile-level-id", AdaptiveScreenShareEnabled() ? "42e02a" : "42e028"},
                                         {"level-asymmetry-allowed", "1"},
                                         {"packetization-mode", "1"}});
 }

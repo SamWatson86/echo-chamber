@@ -892,7 +892,7 @@ async fn share_loop(
         Vec::new()
     };
     let adaptive_fps = nvidia || !amd_adapters.is_empty();
-    let (enc_w, enc_h) = if nvidia { (1280, 720) } else { (1920, 1080) };
+    let (enc_w, enc_h) = (1920, 1080);
     let mut publisher = CapturePublisher::connect_and_publish(
         sfu_url,
         token,
@@ -988,7 +988,6 @@ async fn share_loop(
                 };
                 if let Some(change) = change {
                     log_adaptive_rate(change);
-                    break;
                 }
                 std::thread::sleep(SAMPLE_INTERVAL);
             }
@@ -1070,10 +1069,11 @@ async fn share_loop(
                     );
                 }
 
-                let conversion_started = if let Some(pacer) = &self.pacer {
-                    let (admitted, change) = {
+                let (output_size, conversion_started) = if let Some(pacer) = &self.pacer {
+                    let (admitted, change, resolution) = {
                         let mut pacer = pacer.lock();
-                        pacer.admit(Instant::now())
+                        let (admitted, change) = pacer.admit(Instant::now());
+                        (admitted, change, pacer.resolution())
                     };
                     if let Some(change) = change {
                         log_adaptive_rate(change);
@@ -1081,9 +1081,9 @@ async fn share_loop(
                     if !admitted {
                         return Ok(());
                     }
-                    Some(Instant::now())
+                    (resolution.bounds(), Some(Instant::now()))
                 } else {
-                    None
+                    (self.output_size, None)
                 };
 
                 // Get the GPU texture directly (no CPU copy!)
@@ -1094,8 +1094,8 @@ async fn share_loop(
                     unsafe { std::mem::transmute(frame.as_raw_texture()) };
 
                 // Lazily initialize GPU pipeline on WGC's own device
-                if self.gpu.is_none() {
-                    let (out_w, out_h) = self.output_size;
+                if self.gpu.is_none() || output_size != self.output_size {
+                    let (out_w, out_h) = output_size;
                     unsafe {
                         let device: ID3D11Device = frame_texture
                             .GetDevice()
@@ -1117,6 +1117,7 @@ async fn share_loop(
                             w, h, out_w, out_h
                         );
                         self.gpu = Some((device, context, converter));
+                        self.output_size = output_size;
                     }
                 }
 

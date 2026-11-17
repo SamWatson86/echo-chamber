@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::adaptive_capture::{AdaptiveCapturePacer, RateChange, SenderSample};
+use crate::adaptive_capture::{AdaptiveCapturePacer, CaptureResolution, RateChange, SenderSample};
 use crate::capture_health::{CaptureHealthState, CaptureSenderDiagnostics};
 use crate::file_debug_log;
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
@@ -144,8 +144,8 @@ pub(crate) fn should_push_frame_at_deadline(
 
 pub(crate) fn log_adaptive_rate(change: RateChange) {
     let mut line = format!(
-        "[wgc-adaptive-fps] {} -> {} fps reason={}",
-        change.from, change.to, change.reason
+        "[wgc-adaptive-fps] {} -> {} fps reason={} resolution={}->{}",
+        change.from, change.to, change.reason, change.from_resolution, change.to_resolution,
     );
     if let Some(game) = change.game_pressure {
         use std::fmt::Write;
@@ -159,22 +159,34 @@ pub(crate) fn log_adaptive_rate(change: RateChange) {
     file_debug_log::append(&line);
 }
 
-fn supports_adaptive_fps(implementation: &str, codec_name: &str, codec_fmtp: &str) -> bool {
+fn h264_level(codec_name: &str, codec_fmtp: &str) -> Option<u8> {
+    if !codec_name.eq_ignore_ascii_case("video/H264") {
+        return None;
+    }
     let mut parameters = codec_fmtp.split(';').map(str::trim);
-    // NVIDIA's 720p trial fits Level 3.2. The AMD implementation name
-    // confirms the MFT accepted the rate for the negotiated resolution.
     let level = parameters
         .clone()
-        .find_map(|param| param.strip_prefix("profile-level-id=42e0"));
-    let level_4_or_higher = matches!(level, Some("28" | "29" | "2a" | "32" | "33" | "34"));
-    let encoder_ready = match implementation {
-        "NVIDIA H264 Encoder" => level == Some("20") || level_4_or_higher,
-        "AMD Media Foundation H264 (60 FPS)" => level_4_or_higher,
-        _ => false,
+        .find_map(|param| param.strip_prefix("profile-level-id=42e0"))?;
+    if !parameters.any(|param| param == "packetization-mode=1") {
+        return None;
+    }
+    u8::from_str_radix(level, 16).ok()
+}
+
+fn supports_adaptive_fps(
+    implementation: &str,
+    level: Option<u8>,
+    resolution: CaptureResolution,
+) -> bool {
+    let Some(level) = level else {
+        return false;
     };
-    encoder_ready
-        && codec_name.eq_ignore_ascii_case("video/H264")
-        && parameters.any(|param| param == "packetization-mode=1")
+    match (implementation, resolution) {
+        ("NVIDIA H264 Encoder" | "AMD Media Foundation H264 (60 FPS)", CaptureResolution::FullHd) => level >= 42,
+        ("NVIDIA H264 Encoder", CaptureResolution::Hd) => level >= 32,
+        ("AMD Media Foundation H264 (60 FPS)", CaptureResolution::Hd) => level >= 40,
+        _ => false,
+    }
 }
 
 pub(crate) struct StaticFrameHeartbeat {
@@ -398,7 +410,10 @@ impl CapturePublisher {
             hardware_min_frame_interval: publish_profile.hardware_min_frame_interval(),
             hardware_encoder: AtomicBool::new(HAS_NVCUDA.load(Ordering::Relaxed)),
             adaptive_pacer: adaptive_fps
-                .then(|| Arc::new(Mutex::new(AdaptiveCapturePacer::new(Instant::now())))),
+                .then(|| Arc::new(Mutex::new(AdaptiveCapturePacer::new(
+                    Instant::now(),
+                    CaptureResolution::from_dimensions(enc_w, enc_h),
+                )))),
             running,
             publisher_stopped,
         })
@@ -720,12 +735,20 @@ impl CapturePublisher {
                         && outbound.outbound.frames_encoded > 0
                     {
                         let reason = outbound.outbound.quality_limitation_reason;
+                        let resolution = CaptureResolution::from_dimensions(
+                            outbound.outbound.frame_width,
+                            outbound.outbound.frame_height,
+                        );
+                        let level = h264_level(codec_name, codec_fmtp);
                         adaptive_sample = Some(SenderSample {
                             hardware: outbound.outbound.power_efficient_encoder,
+                            active: outbound.outbound.active,
+                            supports_full_hd: level.is_none_or(|level| level >= 40),
+                            resolution,
                             supports_high_motion: supports_adaptive_fps(
                                 implementation,
-                                codec_name,
-                                codec_fmtp,
+                                level,
+                                resolution,
                             ),
                             fps: outbound.outbound.frames_per_second,
                             cpu_limited: reason == QualityLimitationReason::Cpu,
@@ -1048,16 +1071,33 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires an isolated localhost LiveKit server and hardware encoder"]
     async fn adaptive_fps_steps_down_on_the_same_livekit_track() {
-        verify_adaptive_livekit(1280, 720).await;
+        use CaptureResolution::Hd;
+        verify_adaptive_livekit(&[(Hd, 30), (Hd, 60), (Hd, 30)]).await;
     }
 
     #[tokio::test]
     #[ignore = "requires an isolated localhost LiveKit server and opted-in Media Foundation hardware"]
     async fn adaptive_fps_keeps_1080p_during_step_down() {
-        verify_adaptive_livekit(1920, 1080).await;
+        use CaptureResolution::FullHd;
+        verify_adaptive_livekit(&[(FullHd, 30), (FullHd, 60), (FullHd, 30)]).await;
     }
 
-    async fn verify_adaptive_livekit(width: u32, height: u32) {
+    #[tokio::test]
+    #[ignore = "requires isolated localhost LiveKit and an opted-in NVIDIA or Media Foundation encoder"]
+    async fn adaptive_fps_uses_all_quality_tiers_on_one_track() {
+        use CaptureResolution::{FullHd, Hd};
+        verify_adaptive_livekit(&[
+            (FullHd, 30),
+            (FullHd, 60),
+            (FullHd, 30),
+            (Hd, 30),
+            (Hd, 60),
+            (Hd, 30),
+        ])
+        .await;
+    }
+
+    async fn verify_adaptive_livekit(expected: &[(CaptureResolution, u32)]) {
         let url = std::env::var("ECHO_TEST_LIVEKIT_URL").expect("localhost development server");
         assert!(url.starts_with("ws://127.0.0.1:"));
         let publisher_token = std::env::var("ECHO_TEST_LIVEKIT_PUBLISH_TOKEN").unwrap();
@@ -1066,6 +1106,7 @@ mod tests {
             Room::connect(&url, &subscriber_token, RoomOptions::default())
                 .await
                 .unwrap();
+        let (width, height) = expected[0].0.bounds();
         let mut publisher = CapturePublisher::connect_and_publish(
             &url,
             &publisher_token,
@@ -1085,36 +1126,53 @@ mod tests {
         let pacer = publisher.adaptive_pacer().unwrap();
         let mut tick = tokio::time::interval(Duration::from_millis(8));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let row_bytes = width as usize * 4;
-        let mut bgra = vec![0; row_bytes * height as usize];
         let started = Instant::now();
         let mut last_poll = started;
-        let mut high_started = None;
-        let mut limited_started = None;
+        let mut stage_started = started;
+        let mut stage = 0;
         let mut video = None;
-        let mut high_decoded = 0;
-        let mut low_decoded = 0;
+        let mut decoded = vec![0; expected.len()];
+        let mut bgra = Vec::new();
 
-        while started.elapsed() < Duration::from_secs(15) {
+        while started.elapsed() < Duration::from_secs(34) {
             tick.tick().await;
             let now = Instant::now();
-            let (admitted, change) = pacer.lock().admit(now);
+            let (admitted, change, tier) = {
+                let mut pacer = pacer.lock();
+                let (admitted, change) = pacer.admit(now);
+                (admitted, change, (pacer.resolution(), pacer.fps()))
+            };
             if let Some(change) = change {
                 assert_eq!(change.reason, "capture-overload");
-                limited_started = Some(now);
                 log_adaptive_rate(change);
             }
+            if tier != expected[stage] {
+                stage += 1;
+                assert_eq!(Some(&tier), expected.get(stage), "unexpected tier {stage}");
+                stage_started = now;
+            }
+
             if admitted {
+                let (width, height) = tier.0.bounds();
+                let row_bytes = width as usize * 4;
+                bgra.resize(row_bytes * height as usize, 0);
                 let count = publisher.frame_count();
                 // Move one line to keep the encoded content changing.
                 let line = row_bytes * (count as usize % height as usize);
                 bgra[line..line + row_bytes].fill(32 + count as u8 % 200);
                 assert!(publisher.push_frame(&bgra, width, height));
-                let injected =
-                    high_started.is_some_and(|start| now - start >= Duration::from_secs(2));
+                let unstable = stage + 1 < expected.len()
+                    && decoded[stage] > 0
+                    && (tier.1 == 60 || (stage > 0 && tier.0 == CaptureResolution::FullHd))
+                    && now.duration_since(stage_started) >= Duration::from_secs(2);
+                let conversion_ms = match (unstable, tier.1) {
+                    (true, 60) => 14,
+                    (true, _) => 27,
+                    (false, _) => 2,
+                };
                 pacer
                     .lock()
-                    .record_conversion(Duration::from_millis(if injected { 14 } else { 2 }), false);
+                    .record_conversion(Duration::from_millis(conversion_ms), false);
             }
             while let Ok(event) = events.try_recv() {
                 if let RoomEvent::TrackSubscribed { track, .. } = event {
@@ -1126,9 +1184,6 @@ mod tests {
             }
             last_poll = now;
             publisher.log_sender_stats("adaptive-fps-test", None).await;
-            if pacer.lock().fps() == crate::adaptive_capture::MAX_FPS {
-                high_started.get_or_insert(now);
-            }
             if let Some(track) = &video {
                 let inbound =
                     track.get_stats().await.unwrap().into_iter().find_map(|stat| match stat {
@@ -1141,16 +1196,16 @@ mod tests {
                         inbound.frames_per_second, inbound.frames_decoded,
                         inbound.frame_width, inbound.frame_height,
                     );
-                    if inbound.frames_per_second >= 50.0 {
-                        assert_eq!((inbound.frame_width, inbound.frame_height), (width, height));
-                        high_decoded = inbound.frames_decoded;
-                    }
-                    if limited_started.is_some_and(|start| now - start >= Duration::from_secs(2))
-                        && (25.0..=35.0).contains(&inbound.frames_per_second)
+                    let fps = inbound.frames_per_second;
+                    if tier.0.bounds() == (inbound.frame_width, inbound.frame_height)
+                        && if tier.1 == 60 { fps >= 50.0 } else { (25.0..=35.0).contains(&fps) }
                     {
-                        assert_eq!((inbound.frame_width, inbound.frame_height), (width, height));
-                        low_decoded = inbound.frames_decoded;
-                        break;
+                        decoded[stage] = inbound.frames_decoded;
+                        if stage + 1 == expected.len()
+                            && now.duration_since(stage_started) >= Duration::from_secs(2)
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -1158,14 +1213,11 @@ mod tests {
         assert_eq!(publisher.track.sid(), track_sid);
         publisher.shutdown().await.unwrap();
         subscriber.close().await.unwrap();
+        assert_eq!(stage + 1, expected.len(), "receiver progress: {decoded:?}");
         assert!(
-            high_started.is_some(),
-            "the hardware encoder and negotiated H.264 level never qualified"
-        );
-        assert!(limited_started.is_some(), "capture never stepped down");
-        assert!(
-            high_decoded > 0 && low_decoded > high_decoded,
-            "decoded {high_decoded} at high rate and {low_decoded} after step-down"
+            decoded.iter().all(|&count| count > 0)
+                && decoded.windows(2).all(|stages| stages[0] < stages[1]),
+            "receiver did not decode every tier: {decoded:?}"
         );
     }
 
@@ -1404,41 +1456,24 @@ mod tests {
 
     #[test]
     fn adaptive_fps_checks_negotiated_codec_and_actual_encoder() {
-        let encoder = "NVIDIA H264 Encoder";
-        let level_4 = "packetization-mode=1;profile-level-id=42e028";
-        assert!(supports_adaptive_fps(encoder, "video/H264", level_4));
-        assert!(supports_adaptive_fps(
-            "AMD Media Foundation H264 (60 FPS)",
-            "video/H264",
-            level_4,
-        ));
-        assert!(!supports_adaptive_fps(
-            "AMD Media Foundation H264",
-            "video/H264",
-            level_4,
-        ));
-        assert!(!supports_adaptive_fps(
-            "AMD Media Foundation H264 (60 FPS)",
-            "video/H264",
-            "packetization-mode=1;profile-level-id=42e01f",
-        ));
-        assert!(supports_adaptive_fps(
-            encoder,
-            "video/H264",
-            "implementation_name=NvCodec;packetization-mode=1;profile-level-id=42e033",
-        ));
-        assert!(!supports_adaptive_fps("OpenH264", "video/H264", level_4));
-        assert!(!supports_adaptive_fps(encoder, "video/VP8", level_4));
-        assert!(!supports_adaptive_fps(
-            encoder,
-            "video/H264",
-            "packetization-mode=1;profile-level-id=42e01f",
-        ));
-        assert!(!supports_adaptive_fps(
-            encoder,
-            "video/H264",
-            "packetization-mode=0;profile-level-id=42e028",
-        ));
+        use CaptureResolution::{FullHd, Hd};
+        let nvidia = "NVIDIA H264 Encoder";
+        let amd = "AMD Media Foundation H264 (60 FPS)";
+        for encoder in [nvidia, amd] {
+            assert!(supports_adaptive_fps(encoder, Some(42), FullHd));
+            assert!(!supports_adaptive_fps(encoder, Some(40), FullHd));
+            assert!(supports_adaptive_fps(encoder, Some(40), Hd));
+            assert!(!supports_adaptive_fps(encoder, Some(31), Hd));
+        }
+        assert!(supports_adaptive_fps(nvidia, Some(32), Hd));
+        assert!(!supports_adaptive_fps(amd, Some(32), Hd));
+        assert!(!supports_adaptive_fps("OpenH264", Some(42), FullHd));
+        assert!(!supports_adaptive_fps("NVIDIA H264 Encoder (30 FPS)", Some(42), FullHd));
+        assert!(!supports_adaptive_fps("AMD Media Foundation H264", Some(42), FullHd));
+        let fmtp = "implementation_name=NvCodec;packetization-mode=1;profile-level-id=42e033";
+        assert_eq!(h264_level("video/H264", fmtp), Some(51));
+        assert_eq!(h264_level("video/VP8", fmtp), None);
+        assert_eq!(h264_level("video/H264", &fmtp.replace("mode=1", "mode=0")), None);
     }
 
     fn pushed_frame_count(source_hz: u32, target_hz: u32, seconds: u32) -> usize {

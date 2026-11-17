@@ -1,5 +1,6 @@
 //! Frame admission for the experimental high-motion WGC window share.
 
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::capture_pipeline::should_push_frame_at_deadline;
@@ -8,14 +9,46 @@ pub(crate) const MAX_FPS: u32 = 60;
 pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const BASE_FPS: u32 = 30;
 const SOFTWARE_FPS: u32 = 20;
-// Leave time in each 16.7 ms frame for the publisher and encoder.
-const CONVERSION_BUDGET: Duration = Duration::from_millis(12);
+// Leave time in each frame for the publisher and encoder.
+const HIGH_FPS_CONVERSION_BUDGET: Duration = Duration::from_millis(12);
+const BASE_FPS_CONVERSION_BUDGET: Duration = Duration::from_millis(24);
 const GPU_SATURATION_PERCENT: u32 = 95;
 const GAME_BASELINE_SAMPLES: u8 = 3;
 const GAME_ACTIVE_FPS: f64 = 20.0;
 const GAME_BASELINE_MIN_FPS: f64 = 55.0;
 const GAME_SLOWDOWN_RATIO: f64 = 0.75;
 const GAME_PRESSURE_MAX_FPS: f64 = 80.0;
+const GAME_PRESSURE_AT_30_FPS: f64 = 35.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaptureResolution {
+    FullHd,
+    Hd,
+}
+
+impl CaptureResolution {
+    pub(crate) fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::FullHd => (1920, 1080),
+            Self::Hd => (1280, 720),
+        }
+    }
+
+    pub(crate) fn from_dimensions(width: u32, height: u32) -> Self {
+        if width > 1280 || height > 720 {
+            Self::FullHd
+        } else {
+            Self::Hd
+        }
+    }
+}
+
+impl fmt::Display for CaptureResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (_, height) = self.bounds();
+        write!(f, "{height}p")
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -27,6 +60,9 @@ enum Mode {
 
 pub(crate) struct SenderSample {
     pub hardware: bool,
+    pub active: bool,
+    pub supports_full_hd: bool,
+    pub resolution: CaptureResolution,
     pub supports_high_motion: bool,
     pub fps: f64,
     pub cpu_limited: bool,
@@ -37,6 +73,8 @@ pub(crate) struct SenderSample {
 pub(crate) struct RateChange {
     pub from: u32,
     pub to: u32,
+    pub from_resolution: CaptureResolution,
+    pub to_resolution: CaptureResolution,
     pub reason: &'static str,
     pub game_pressure: Option<GamePressure>,
 }
@@ -62,6 +100,7 @@ impl GameCadence {
         now: Instant,
         total_source_frames: u64,
         foreground_gpu_busy: Option<u32>,
+        pressure_max_fps: f64,
     ) -> Option<GamePressure> {
         let Some(gpu_busy_percent) = foreground_gpu_busy else {
             *self = Self::default();
@@ -81,11 +120,11 @@ impl GameCadence {
             return None;
         }
         let slow = self.baseline_samples >= GAME_BASELINE_SAMPLES
-            && source_fps <= GAME_PRESSURE_MAX_FPS
+            && source_fps <= pressure_max_fps
             && source_fps <= self.baseline_fps * GAME_SLOWDOWN_RATIO
             && gpu_busy_percent >= GPU_SATURATION_PERCENT;
         if slow {
-            self.slow_samples += 1;
+            self.slow_samples = self.slow_samples.saturating_add(1);
             return (self.slow_samples >= 2).then_some(GamePressure {
                 source_fps,
                 baseline_fps: self.baseline_fps,
@@ -111,6 +150,7 @@ impl GameCadence {
 
 pub(crate) struct AdaptiveCapturePacer {
     mode: Mode,
+    resolution: CaptureResolution,
     next_frame_at: Option<Instant>,
     last_frame_at: Option<Instant>,
     window_started: Instant,
@@ -120,6 +160,8 @@ pub(crate) struct AdaptiveCapturePacer {
     dropped_frames: u32,
     conversion_time: Duration,
     healthy_capture_at: Option<Instant>,
+    healthy_capture_windows: u8,
+    active_capture_at: Option<Instant>,
     overloaded_capture_windows: u8,
     overloaded_sender_samples: u8,
     missing_sender_samples: u8,
@@ -127,9 +169,10 @@ pub(crate) struct AdaptiveCapturePacer {
 }
 
 impl AdaptiveCapturePacer {
-    pub(crate) fn new(now: Instant) -> Self {
+    pub(crate) fn new(now: Instant, resolution: CaptureResolution) -> Self {
         Self {
             mode: Mode::WarmingUp,
+            resolution,
             next_frame_at: None,
             last_frame_at: None,
             window_started: now,
@@ -139,6 +182,8 @@ impl AdaptiveCapturePacer {
             dropped_frames: 0,
             conversion_time: Duration::ZERO,
             healthy_capture_at: None,
+            healthy_capture_windows: 0,
+            active_capture_at: None,
             overloaded_capture_windows: 0,
             overloaded_sender_samples: 0,
             missing_sender_samples: 0,
@@ -154,26 +199,57 @@ impl AdaptiveCapturePacer {
         }
     }
 
+    pub(crate) fn resolution(&self) -> CaptureResolution {
+        self.resolution
+    }
+
     fn interval(&self) -> Duration {
         Duration::from_nanos(1_000_000_000 / u64::from(self.fps()))
     }
 
-    fn change_mode(&mut self, mode: Mode, reason: &'static str) -> Option<RateChange> {
+    fn change_mode(
+        &mut self,
+        now: Instant,
+        mode: Mode,
+        resolution: CaptureResolution,
+        reason: &'static str,
+    ) -> Option<RateChange> {
         let from = self.fps();
+        let from_resolution = self.resolution;
         self.mode = mode;
+        self.resolution = resolution;
         let to = self.fps();
-        if from == to {
+        if from == to && from_resolution == resolution {
             return None;
         }
         self.next_frame_at = self.last_frame_at.map(|last| last + self.interval());
+        self.reset_capture_window(now);
         self.overloaded_capture_windows = 0;
         self.overloaded_sender_samples = 0;
+        self.missing_sender_samples = 0;
+        self.healthy_capture_at = None;
+        self.healthy_capture_windows = 0;
+        self.active_capture_at = None;
+        self.game_cadence.slow_samples = 0;
         Some(RateChange {
             from,
             to,
+            from_resolution,
+            to_resolution: resolution,
             reason,
             game_pressure: None,
         })
+    }
+
+    fn reduce_load(&mut self, now: Instant, reason: &'static str) -> Option<RateChange> {
+        if self.mode == Mode::HighMotion {
+            self.change_mode(now, Mode::Limited, self.resolution, reason)
+        } else if self.resolution == CaptureResolution::FullHd && self.mode != Mode::Software {
+            // Start at 720p30 and measure again before attempting 720p60.
+            self.change_mode(now, Mode::WarmingUp, CaptureResolution::Hd, reason)
+        } else {
+            None
+        }
     }
 
     /// Call for fresh callbacks only. Heartbeats use their own 200 ms cadence.
@@ -194,19 +270,29 @@ impl AdaptiveCapturePacer {
         now: Instant,
         foreground_gpu_busy: Option<u32>,
     ) -> Option<RateChange> {
-        if self.mode != Mode::HighMotion {
+        if !self.needs_game_load_monitor() {
             return None;
         }
-        let game_pressure =
-            self.game_cadence
-                .observe(now, self.total_source_frames, foreground_gpu_busy)?;
-        let mut change = self.change_mode(Mode::Limited, "game-gpu-pressure")?;
+        let pressure_max_fps = if self.mode == Mode::HighMotion {
+            GAME_PRESSURE_MAX_FPS
+        } else {
+            GAME_PRESSURE_AT_30_FPS
+        };
+        let game_pressure = self.game_cadence.observe(
+            now,
+            self.total_source_frames,
+            foreground_gpu_busy,
+            pressure_max_fps,
+        )?;
+        let mut change = self.reduce_load(now, "game-gpu-pressure")?;
         change.game_pressure = Some(game_pressure);
         Some(change)
     }
 
     pub(crate) fn needs_game_load_monitor(&self) -> bool {
-        matches!(self.mode, Mode::WarmingUp | Mode::HighMotion)
+        self.mode != Mode::Software
+            && (self.resolution == CaptureResolution::FullHd
+                || matches!(self.mode, Mode::WarmingUp | Mode::HighMotion))
     }
 
     pub(crate) fn record_conversion(&mut self, elapsed: Duration, channel_full: bool) {
@@ -224,31 +310,50 @@ impl AdaptiveCapturePacer {
         if elapsed < SAMPLE_INTERVAL {
             return None;
         }
+        let conversion_budget = if self.mode == Mode::HighMotion {
+            HIGH_FPS_CONVERSION_BUDGET
+        } else {
+            BASE_FPS_CONVERSION_BUDGET
+        };
         let overloaded = elapsed < 2 * SAMPLE_INTERVAL
             && self.converted_frames >= 5
-            && (self.conversion_time > CONVERSION_BUDGET * self.converted_frames
+            && (self.conversion_time > conversion_budget * self.converted_frames
                 || self.dropped_frames >= self.converted_frames.div_ceil(10));
+        let converted_fps = f64::from(self.converted_frames) / elapsed.as_secs_f64();
         let healthy = !overloaded
             && f64::from(self.source_frames) / elapsed.as_secs_f64() >= 50.0
-            && f64::from(self.converted_frames) / elapsed.as_secs_f64() >= 25.0;
-        self.window_started = now;
-        self.source_frames = 0;
-        self.converted_frames = 0;
-        self.dropped_frames = 0;
-        self.conversion_time = Duration::ZERO;
+            && converted_fps >= 25.0
+            && self.conversion_time <= HIGH_FPS_CONVERSION_BUDGET * self.converted_frames;
+        self.active_capture_at = (converted_fps >= 25.0).then_some(now);
         self.healthy_capture_at = healthy.then_some(now);
+        self.healthy_capture_windows = if healthy {
+            self.healthy_capture_windows.saturating_add(1)
+        } else {
+            0
+        };
+        self.reset_capture_window(now);
 
-        if self.mode == Mode::HighMotion {
+        if self.mode == Mode::HighMotion
+            || (self.resolution == CaptureResolution::FullHd && self.mode != Mode::Software)
+        {
             self.overloaded_capture_windows = if overloaded {
                 self.overloaded_capture_windows + 1
             } else {
                 0
             };
             if self.overloaded_capture_windows >= 2 {
-                return self.change_mode(Mode::Limited, "capture-overload");
+                return self.reduce_load(now, "capture-overload");
             }
         }
         None
+    }
+
+    fn reset_capture_window(&mut self, now: Instant) {
+        self.window_started = now;
+        self.source_frames = 0;
+        self.converted_frames = 0;
+        self.dropped_frames = 0;
+        self.conversion_time = Duration::ZERO;
     }
 
     pub(crate) fn observe_sender(
@@ -264,37 +369,82 @@ impl AdaptiveCapturePacer {
             if self.mode == Mode::HighMotion {
                 self.missing_sender_samples += 1;
                 if self.missing_sender_samples >= 2 {
-                    return self.change_mode(Mode::Limited, "sender-stats-unavailable");
+                    return self.reduce_load(now, "sender-stats-unavailable");
                 }
             }
             return None;
         };
         self.missing_sender_samples = 0;
         if !sample.hardware {
-            return self.change_mode(Mode::Software, "software-encoder");
+            let resolution = if sample.supports_full_hd {
+                self.resolution
+            } else {
+                CaptureResolution::Hd
+            };
+            return self.change_mode(now, Mode::Software, resolution, "software-encoder");
         }
-        if !sample.supports_high_motion {
-            return self.change_mode(Mode::Limited, "encoder-or-codec-limit");
+        if self.resolution == CaptureResolution::FullHd && !sample.supports_full_hd {
+            return self.change_mode(
+                now,
+                Mode::WarmingUp,
+                CaptureResolution::Hd,
+                "codec-resolution-limit",
+            );
+        }
+        // An outbound report can still describe the previous resolution
+        // while WebRTC reinitializes the encoder on the same track.
+        if sample.resolution != self.resolution {
+            return None;
+        }
+        if self.mode == Mode::HighMotion && !sample.supports_high_motion {
+            return self.reduce_load(now, "encoder-or-codec-limit");
         }
         if self.mode == Mode::WarmingUp
+            && sample.active
+            && sample.supports_high_motion
             && sample.fps >= 25.0
             && !sample.cpu_limited
             && !sample.bandwidth_limited
             && self
                 .healthy_capture_at
                 .is_some_and(|healthy_at| now.duration_since(healthy_at) < SAMPLE_INTERVAL)
+            && (self.resolution == CaptureResolution::FullHd || self.healthy_capture_windows >= 2)
         {
-            return self.change_mode(Mode::HighMotion, "capture-and-encoder-ready");
+            return self.change_mode(
+                now,
+                Mode::HighMotion,
+                self.resolution,
+                "capture-and-encoder-ready",
+            );
         }
-        if self.mode == Mode::HighMotion {
-            self.overloaded_sender_samples = if sample.cpu_limited && sample.fps >= 10.0 {
-                self.overloaded_sender_samples + 1
+        let slow_sender = sample.active
+            && (if self.mode == Mode::HighMotion {
+                (sample.cpu_limited && sample.fps >= 10.0)
+                    || (sample.bandwidth_limited
+                        && sample.fps < 50.0
+                        && self.active_capture_at.is_some_and(|active_at| {
+                            now.duration_since(active_at) < SAMPLE_INTERVAL
+                        }))
             } else {
-                0
+                self.resolution == CaptureResolution::FullHd
+                    && sample.fps < 25.0
+                    && (sample.cpu_limited || sample.bandwidth_limited)
+                    && self
+                        .active_capture_at
+                        .is_some_and(|active_at| now.duration_since(active_at) < SAMPLE_INTERVAL)
+            });
+        self.overloaded_sender_samples = if slow_sender {
+            self.overloaded_sender_samples + 1
+        } else {
+            0
+        };
+        if self.overloaded_sender_samples >= 2 {
+            let reason = if sample.cpu_limited {
+                "sender-cpu-overload"
+            } else {
+                "sender-bandwidth-limit"
             };
-            if self.overloaded_sender_samples >= 2 {
-                return self.change_mode(Mode::Limited, "sender-cpu-overload");
-            }
+            return self.reduce_load(now, reason);
         }
         None
     }
@@ -307,6 +457,9 @@ mod tests {
     fn hardware_sample() -> SenderSample {
         SenderSample {
             hardware: true,
+            active: true,
+            supports_full_hd: true,
+            resolution: CaptureResolution::FullHd,
             supports_high_motion: true,
             fps: 29.0,
             cpu_limited: false,
@@ -333,7 +486,7 @@ mod tests {
     }
 
     fn warmed_up(start: Instant) -> AdaptiveCapturePacer {
-        let mut pacer = AdaptiveCapturePacer::new(start);
+        let mut pacer = AdaptiveCapturePacer::new(start, CaptureResolution::FullHd);
         assert_eq!(simulate_second(&mut pacer, start, 120, 2, false), 30);
         let now = start + SAMPLE_INTERVAL;
         pacer.admit(now);
@@ -350,7 +503,7 @@ mod tests {
     #[test]
     fn only_active_capture_with_verified_hardware_can_promote() {
         let start = Instant::now();
-        let mut pacer = AdaptiveCapturePacer::new(start);
+        let mut pacer = AdaptiveCapturePacer::new(start, CaptureResolution::FullHd);
         assert!(pacer
             .observe_sender(start, Some(hardware_sample()))
             .is_none());
@@ -417,7 +570,8 @@ mod tests {
         assert!(load.baseline_fps > 110.0);
         assert!(frames_at_60 >= 58);
         assert!((29..=30).contains(&simulate_second(&mut pacer, now, 72, 2, false)));
-        assert!(!pacer.needs_game_load_monitor());
+        assert!(pacer.needs_game_load_monitor());
+        assert_eq!(pacer.resolution(), CaptureResolution::FullHd);
     }
 
     #[test]
@@ -427,7 +581,12 @@ mod tests {
         let mut frames = 0;
         let mut observe = |second, new_frames, gpu| {
             frames += new_frames;
-            game.observe(start + SAMPLE_INTERVAL * second, frames, gpu)
+            game.observe(
+                start + SAMPLE_INTERVAL * second,
+                frames,
+                gpu,
+                GAME_PRESSURE_MAX_FPS,
+            )
         };
         for second in 0..4 {
             assert!(observe(second, 120, Some(99)).is_none());
@@ -450,18 +609,34 @@ mod tests {
                 .observe(
                     start + SAMPLE_INTERVAL * second,
                     u64::from(second) * 120,
-                    Some(99)
+                    Some(99),
+                    GAME_PRESSURE_MAX_FPS,
                 )
                 .is_none());
         }
         assert!(game
-            .observe(start + SAMPLE_INTERVAL * 4, 360, Some(99))
+            .observe(
+                start + SAMPLE_INTERVAL * 4,
+                360,
+                Some(99),
+                GAME_PRESSURE_MAX_FPS
+            )
             .is_none());
         assert!(game
-            .observe(start + SAMPLE_INTERVAL * 5, 390, Some(99))
+            .observe(
+                start + SAMPLE_INTERVAL * 5,
+                390,
+                Some(99),
+                GAME_PRESSURE_MAX_FPS
+            )
             .is_none());
         assert!(game
-            .observe(start + SAMPLE_INTERVAL * 6, 420, Some(99))
+            .observe(
+                start + SAMPLE_INTERVAL * 6,
+                420,
+                Some(99),
+                GAME_PRESSURE_MAX_FPS
+            )
             .is_none());
     }
 
@@ -480,6 +655,7 @@ mod tests {
             .is_none());
         let bandwidth = Some(SenderSample {
             bandwidth_limited: true,
+            fps: 58.0,
             ..hardware_sample()
         });
         assert!(pacer
@@ -547,5 +723,58 @@ mod tests {
             .observe_sender(now + SAMPLE_INTERVAL, Some(hardware_sample()))
             .is_none());
         assert_eq!(pacer.fps(), 20);
+    }
+
+    #[test]
+    fn sustained_1080p30_overload_moves_to_720p_and_requalifies_60() {
+        let start = Instant::now();
+        let mut pacer = warmed_up(start);
+        let mut now = start + SAMPLE_INTERVAL;
+        pacer.reduce_load(now, "capture-overload").unwrap();
+        assert_eq!(pacer.resolution(), CaptureResolution::FullHd);
+        for _ in 0..2 {
+            simulate_second(&mut pacer, now, 120, 27, false);
+            now += SAMPLE_INTERVAL;
+        }
+        let change = pacer.admit(now).1.unwrap();
+        assert_eq!(change.from_resolution, CaptureResolution::FullHd);
+        assert_eq!(change.to_resolution, CaptureResolution::Hd);
+        assert_eq!(change.to, 30);
+        let hd = || SenderSample {
+            resolution: CaptureResolution::Hd,
+            ..hardware_sample()
+        };
+        simulate_second(&mut pacer, now, 120, 2, false);
+        now += SAMPLE_INTERVAL;
+        pacer.admit(now);
+        assert!(pacer.observe_sender(now, Some(hd())).is_none());
+        simulate_second(&mut pacer, now, 120, 2, false);
+        now += SAMPLE_INTERVAL;
+        pacer.admit(now);
+        assert!(pacer.observe_sender(now, Some(hardware_sample())).is_none());
+        assert_eq!(pacer.observe_sender(now, Some(hd())).unwrap().to, 60);
+        let change = pacer.reduce_load(now, "capture-overload").unwrap();
+        assert_eq!(
+            (change.to_resolution, change.to),
+            (CaptureResolution::Hd, 30)
+        );
+        assert!(pacer.reduce_load(now, "capture-overload").is_none());
+    }
+
+    #[test]
+    fn level_3_1_keeps_the_hardware_share_at_720p30() {
+        let now = Instant::now();
+        let mut pacer = AdaptiveCapturePacer::new(now, CaptureResolution::FullHd);
+        let limited = SenderSample {
+            resolution: CaptureResolution::Hd,
+            supports_full_hd: false,
+            supports_high_motion: false,
+            ..hardware_sample()
+        };
+        let change = pacer.observe_sender(now, Some(limited)).unwrap();
+        assert_eq!(
+            (change.to_resolution, change.to),
+            (CaptureResolution::Hd, 30)
+        );
     }
 }
