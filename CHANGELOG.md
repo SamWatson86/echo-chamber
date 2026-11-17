@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.41
+
+- Native Windows Game and Monitor shares can use AMD Media Foundation hardware encoding on supported Radeon GPUs.
+- Echo can send H.264 at up to 1080p30 when the connection negotiates Level 4.0. The AMD hardware path fits within 720p30 at Level 3.1.
+- OpenH264 remains available when hardware encoding is unavailable or fails. The software capture cadence stays capped at 20 fps.
+
 ## 0.6.40
 
 - Screen Sharing: Native NVIDIA capture now validates cached CUDA contexts before starting an encoder, reuses healthy contexts, and recreates invalid contexts when sharing is retried.

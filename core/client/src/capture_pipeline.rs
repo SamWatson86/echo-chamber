@@ -300,6 +300,7 @@ impl CapturePublisher {
         let publish_options = TrackPublishOptions {
             source: track_source,
             video_codec: VideoCodec::H264,
+            prefer_h264_level_4: true,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
                 // Desktop stays multi-publisher-friendly while giving text and
@@ -426,6 +427,7 @@ impl CapturePublisher {
         let publish_options = TrackPublishOptions {
             source: track_source,
             video_codec: VideoCodec::H264,
+            prefer_h264_level_4: true,
             simulcast: false,
             video_encoding: Some(VideoEncoding {
                 // Desktop stays multi-publisher-friendly while giving text and
@@ -948,7 +950,8 @@ mod tests {
         subscriber.close().await.unwrap();
         assert_eq!(sender.outbound.encoder_implementation, "AMD Media Foundation H264");
         assert!(sender.outbound.power_efficient_encoder);
-        assert!(sender.outbound.frame_width <= 1280 && sender.outbound.frame_height <= 720);
+        assert_eq!((sender.outbound.frame_width, sender.outbound.frame_height), (1920, 1080));
+        assert!(codec.codec.sdp_fmtp_line.contains("profile-level-id=42e028"));
         assert!(sender.outbound.frames_encoded > 0 && decoded > 0);
     }
 

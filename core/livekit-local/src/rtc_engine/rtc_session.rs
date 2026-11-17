@@ -61,7 +61,7 @@ use crate::{
         peer_transport::PeerTransport,
         rtc_events::{RtcEvent, RtcEvents},
     },
-    track::LocalTrack,
+    track::{LocalTrack, TrackSource},
     DataPacketKind,
 };
 
@@ -1643,8 +1643,12 @@ impl SessionInner {
 
             matched.append(&mut partial_matched);
 
+            let offer_level_4 =
+                options.prefer_h264_level_4 && options.source == TrackSource::Screenshare
+                    && !options.simulcast && !level_4.is_empty();
             level_4.append(&mut matched);
             transceiver.set_codec_preferences(level_4)?;
+            self.publisher_pc.set_offer_h264_level_4(offer_level_4).await;
         }
 
         Ok(transceiver)

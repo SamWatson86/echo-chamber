@@ -34,6 +34,7 @@ struct TransportInner {
     // Publish-side bitrate bounds (bps) for offer munging.
     max_send_bitrate_bps: Option<u64>,
     min_send_bitrate_bps: Option<u64>,
+    offer_h264_level_4: bool,
 }
 
 pub struct PeerTransport {
@@ -66,6 +67,7 @@ impl PeerTransport {
                 single_pc_mode,
                 max_send_bitrate_bps: None,
                 min_send_bitrate_bps: None,
+                offer_h264_level_4: false,
             })),
         }
     }
@@ -142,6 +144,46 @@ impl PeerTransport {
         let mut inner = self.inner.lock().await;
         inner.max_send_bitrate_bps = max_bps;
         inner.min_send_bitrate_bps = min_bps;
+    }
+
+    pub async fn set_offer_h264_level_4(&self, enabled: bool) {
+        self.inner.lock().await.offer_h264_level_4 = enabled;
+    }
+
+    /// libwebrtc can normalize the requested Level 4.0 to its default Level
+    /// 3.1 when creating the offer. Restore it on the sole outgoing video
+    /// section of a native screen publisher that advertised Level 4.0.
+    fn offer_h264_level_4(sdp: &str) -> Option<String> {
+        let mut lines: Vec<&str> = sdp.split_inclusive('\n').collect();
+        let mut sections = lines.iter().enumerate()
+            .filter(|(_, line)| line.starts_with("m=video "));
+        let (start, _) = sections.next()?;
+        if sections.next().is_some() {
+            return None;
+        }
+        let end = lines[start + 1..].iter().position(|line| line.starts_with("m="))
+            .map_or(lines.len(), |offset| start + 1 + offset);
+        let video = &lines[start + 1..end];
+        if !video.iter().any(|line| line.trim_end() == "a=sendonly") {
+            return None;
+        }
+        let fmtp_line = video.iter().position(|line| {
+            let Some((payload, params)) = line.trim_end().strip_prefix("a=fmtp:")
+                .and_then(|fmtp| fmtp.split_once(' ')) else {
+                return false;
+            };
+            let mut parameters = params.split(';').map(str::trim);
+            parameters.clone().any(|param| param == "profile-level-id=42e01f")
+                && parameters.any(|param| param == "packetization-mode=1")
+                && video.iter().any(|rtp| {
+                    rtp.trim_end().strip_prefix("a=rtpmap:")
+                        .and_then(|rtp| rtp.split_once(' '))
+                        == Some((payload, "H264/90000"))
+                })
+        })? + start + 1;
+        let upgraded = lines[fmtp_line].replacen("profile-level-id=42e01f", "profile-level-id=42e028", 1);
+        lines[fmtp_line] = &upgraded;
+        Some(lines.concat())
     }
 
     fn compute_start_bitrate_kbps(ultimate_bps: Option<u64>) -> Option<u32> {
@@ -529,6 +571,15 @@ impl PeerTransport {
             }
         }
 
+        if inner.offer_h264_level_4 {
+            if let Some(upgraded) = Self::offer_h264_level_4(&offer.to_string()) {
+                match SessionDescription::parse(&upgraded, offer.sdp_type()) {
+                    Ok(parsed) => offer = parsed,
+                    Err(error) => log::warn!("Could not offer H264 Level 4.0: {error}"),
+                }
+            }
+        }
+
         self.peer_connection.set_local_description(offer.clone()).await?;
 
         if let Some(handler) = self.on_offer_handler.lock().as_mut() {
@@ -542,6 +593,33 @@ impl PeerTransport {
 #[cfg(test)]
 mod tests {
     use super::PeerTransport;
+
+    #[test]
+    fn level_4_offer_only_changes_constrained_baseline_mode_1() {
+        let offer = concat!(
+            "v=0\r\n",
+            "m=audio 9 UDP/TLS/RTP/SAVPF 109\r\n",
+            "a=fmtp:109 profile-level-id=42e01f;packetization-mode=1\r\n",
+            "m=video 9 UDP/TLS/RTP/SAVPF 109 110 117\r\n",
+            "a=sendonly\r\n",
+            "a=rtpmap:109 H264/90000\r\n",
+            "a=fmtp:109 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n",
+            "a=rtpmap:110 H264/90000\r\n",
+            "a=fmtp:110 packetization-mode=0;profile-level-id=42e01f\r\n",
+            "a=rtpmap:117 H264/90000\r\n",
+            "a=fmtp:117 packetization-mode=1;profile-level-id=4d001f\r\n",
+        );
+        let expected = offer.replace(
+            "packetization-mode=1;profile-level-id=42e01f",
+            "packetization-mode=1;profile-level-id=42e028",
+        );
+        assert_eq!(PeerTransport::offer_h264_level_4(offer).as_deref(), Some(expected.as_str()));
+        assert!(PeerTransport::offer_h264_level_4(&offer.replace("a=sendonly", "a=recvonly")).is_none());
+        assert!(PeerTransport::offer_h264_level_4(
+            &format!("{offer}m=video 9 UDP/TLS/RTP/SAVPF 120\r\n")
+        ).is_none());
+        assert!(PeerTransport::offer_h264_level_4(&expected).is_none());
+    }
 
     #[test]
     fn no_vp9_or_av1_is_noop() {

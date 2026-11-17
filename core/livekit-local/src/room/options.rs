@@ -85,6 +85,8 @@ pub struct TrackPublishOptions {
     pub video_encoding: Option<VideoEncoding>,
     pub audio_encoding: Option<AudioEncoding>,
     pub video_codec: VideoCodec,
+    /// Request Level 4.0 for native H.264 screen publishing when supported.
+    pub prefer_h264_level_4: bool,
     pub dtx: bool,
     pub red: bool,
     pub simulcast: bool,
@@ -100,6 +102,7 @@ impl Default for TrackPublishOptions {
             video_encoding: None,
             audio_encoding: None,
             video_codec: VideoCodec::VP8,
+            prefer_h264_level_4: false,
             dtx: true,
             red: true,
             simulcast: true,
