@@ -13,6 +13,7 @@
 //!           → RTP → SFU
 
 use livekit::track::TrackSource;
+use std::ffi::OsStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -864,8 +865,12 @@ fn wgc_monitor_publish_settings() -> WgcPublishSettings {
     }
 }
 
-fn allow_adaptive_fps(profile: PublishProfile, opted_in: bool, software_forced: bool) -> bool {
-    profile == PublishProfile::Game && opted_in && !software_forced
+fn allow_adaptive_fps(
+    profile: PublishProfile,
+    override_value: Option<&OsStr>,
+    software_forced: bool,
+) -> bool {
+    profile == PublishProfile::Game && override_value != Some(OsStr::new("0")) && !software_forced
 }
 
 async fn share_loop(
@@ -882,7 +887,7 @@ async fn share_loop(
     let publish_settings = wgc_publish_settings(publish_profile);
     let eligible = allow_adaptive_fps(
         publish_profile,
-        std::env::var_os("ECHO_EXPERIMENTAL_ADAPTIVE_FPS").as_deref() == Some("1".as_ref()),
+        std::env::var_os("ECHO_EXPERIMENTAL_ADAPTIVE_FPS").as_deref(),
         std::env::var_os("ECHO_FORCE_SOFTWARE_ENCODER").as_deref() == Some("1".as_ref()),
     );
     let nvidia = eligible && HAS_NVCUDA.load(Ordering::Relaxed);
@@ -1842,11 +1847,20 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_fps_requires_an_opted_in_game_share_with_hardware_allowed() {
-        assert!(allow_adaptive_fps(PublishProfile::Game, true, false));
-        assert!(!allow_adaptive_fps(PublishProfile::Game, false, false));
-        assert!(!allow_adaptive_fps(PublishProfile::Game, true, true));
-        assert!(!allow_adaptive_fps(PublishProfile::Desktop, true, false));
+    fn adaptive_fps_defaults_to_game_shares_with_hardware_allowed() {
+        assert!(allow_adaptive_fps(PublishProfile::Game, None, false));
+        assert!(allow_adaptive_fps(
+            PublishProfile::Game,
+            Some(OsStr::new("1")),
+            false,
+        ));
+        assert!(!allow_adaptive_fps(
+            PublishProfile::Game,
+            Some(OsStr::new("0")),
+            false,
+        ));
+        assert!(!allow_adaptive_fps(PublishProfile::Game, None, true));
+        assert!(!allow_adaptive_fps(PublishProfile::Desktop, None, false));
     }
 
     #[test]

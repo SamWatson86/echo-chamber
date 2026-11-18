@@ -213,16 +213,16 @@ For a confirmed live orphan, an authorized operator can remove only its exact
 Require successful removal of that primary target, then verify the authoritative
 SFU roster and receiver counters. Do not use a full-room reload as the first step.
 
-### Experimental adaptive game-share FPS
+### Adaptive game-share FPS
 
-The Windows desktop build reads `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` from its
-launch environment for the native NVIDIA and AMD WGC Game profiles. The normal
-profile stays at 1080p30 with the existing encoder fallback. Both vendors'
-trial shares start within 1920×1080 at 30 fps and can reach 60 fps once the
+Starting with Windows desktop 0.6.43, NVIDIA and AMD hardware Game shares use
+adaptive frame rate and resolution by default. Set `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=0`
+in the launch environment to use the fixed-rate profile for troubleshooting.
+Adaptive shares start within 1920×1080 at 30 fps and can reach 60 fps once the
 source and sender are keeping up. 1080p60 needs H.264 Level 4.2 and a driver
 that accepts the high-rate configuration. A Level 4.0 answer keeps 1080p30.
 
-Two consecutive samples of overload at 60 fps bring the trial back to 30
+Two consecutive samples of overload at 60 fps bring the share back to 30
 at the same resolution. If 1080p30 still cannot keep up after that change,
 the same track moves to 720p30. At 720p it requires two healthy capture
 windows and a fresh hardware sender report before attempting 60 fps.
@@ -241,7 +241,7 @@ The governor checks capture conversion time, frame queue drops, and sender
 limitations. An OpenH264 fallback caps capture at 20 fps when detected.
 The WGC callback skips excess frames before GPU readback, while static
 content continues to use the existing heartbeat.
-For a foreground game, the trial also samples incoming WGC cadence and GPU
+For a foreground game, the governor also samples incoming WGC cadence and GPU
 utilization. The NVIDIA path uses NVML on single-NVIDIA-GPU systems. The AMD
 path uses Windows GPU Engine counters for the AMD adapter with rendering
 activity from the shared game. After establishing an active baseline, two

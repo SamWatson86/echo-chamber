@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.43
+
+- Adaptive frame rate and resolution are on by default for Windows Game shares on supported NVIDIA and AMD hardware. Start Echo normally and select Game when sharing.
+- Shares start at 1080p30 and can reach 1080p60 when there is headroom. Echo can lower frame rate and resolution under load and recover to 1080p30 on the same track.
+- OpenH264 remains available as the software fallback. Set `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=0` at launch to use the fixed-rate profile for troubleshooting.
+
 ## 0.6.42
 
 - Windows Game shares on supported NVIDIA and AMD hardware can opt into adaptive frame rate and resolution with `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` in the desktop launch environment.
