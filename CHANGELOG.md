@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.42
+
+- Windows Game shares on supported NVIDIA and AMD hardware can opt into adaptive frame rate and resolution with `ECHO_EXPERIMENTAL_ADAPTIVE_FPS=1` in the desktop launch environment.
+- The trial starts at 1080p30, can reach 1080p60 with headroom, and prioritizes keeping 1080p under pressure. If the share drops to 720p, it can recover to 1080p30 once on the same track when capture and sender conditions stabilize.
+- OpenH264 remains available as the software fallback. This release updates the Windows desktop app.
+
 ## 0.6.41
 
 - Native Windows Game and Monitor shares can use AMD Media Foundation hardware encoding on supported Radeon GPUs.
