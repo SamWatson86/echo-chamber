@@ -58,7 +58,7 @@ use crate::{
     room::{e2ee::manager::E2eeManager, DisconnectReason},
     rtc_engine::{
         lk_runtime::LkRuntime,
-        peer_transport::PeerTransport,
+        peer_transport::{H264ScreenShareLevel, PeerTransport},
         rtc_events::{RtcEvent, RtcEvents},
     },
     track::{LocalTrack, TrackSource},
@@ -1614,7 +1614,8 @@ impl SessionInner {
             );
 
             let mut matched = Vec::new();
-            let mut level_4 = Vec::new();
+            let mut hardware_level = Vec::new();
+            let mut supports_level_4_2 = false;
             let mut partial_matched = Vec::new();
             let mut unmatched = Vec::new();
 
@@ -1622,12 +1623,14 @@ impl SessionInner {
                 let mime_type = codec.mime_type.to_lowercase();
                 if mime_type == format!("video/{}", options.video_codec.as_str()) {
                     if let Some(sdp_fmtp_line) = codec.sdp_fmtp_line.as_ref() {
-                        // Prefer Level 4 when the Windows hardware factory offers
-                        // it for 1080p30. Retain the existing Level 3.1 option.
-                        if sdp_fmtp_line.contains("profile-level-id=42e028")
+                        // Keep the AMD hardware capability first, followed by
+                        // the existing constrained-baseline fallback.
+                        let is_level_4_2 = sdp_fmtp_line.contains("profile-level-id=42e02a");
+                        if (sdp_fmtp_line.contains("profile-level-id=42e028") || is_level_4_2)
                             && sdp_fmtp_line.contains("packetization-mode=1")
                         {
-                            level_4.push(codec);
+                            supports_level_4_2 |= is_level_4_2;
+                            hardware_level.push(codec);
                             continue;
                         }
                         if sdp_fmtp_line.contains("profile-level-id=42e01f") {
@@ -1643,12 +1646,24 @@ impl SessionInner {
 
             matched.append(&mut partial_matched);
 
-            let offer_level_4 =
-                options.prefer_h264_level_4 && options.source == TrackSource::Screenshare
-                    && !options.simulcast && !level_4.is_empty();
-            level_4.append(&mut matched);
-            transceiver.set_codec_preferences(level_4)?;
-            self.publisher_pc.set_offer_h264_level_4(offer_level_4).await;
+            let screen_share_level = if options.prefer_h264_level_4
+                && options.source == TrackSource::Screenshare
+                && !options.simulcast
+                && !hardware_level.is_empty()
+            {
+                let high_fps = options.video_encoding.as_ref()
+                    .is_some_and(|encoding| encoding.max_framerate > 30.0);
+                Some(if supports_level_4_2 && high_fps {
+                    H264ScreenShareLevel::Level4_2
+                } else {
+                    H264ScreenShareLevel::Level4
+                })
+            } else {
+                None
+            };
+            hardware_level.append(&mut matched);
+            transceiver.set_codec_preferences(hardware_level)?;
+            self.publisher_pc.set_h264_screen_share_level(screen_share_level).await;
         }
 
         Ok(transceiver)

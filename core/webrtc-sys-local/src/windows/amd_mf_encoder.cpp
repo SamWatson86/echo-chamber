@@ -22,6 +22,7 @@
 #include "api/video_codecs/h264_profile_level_id.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "common_video/h264/h264_common.h"
+#include "livekit/adaptive_screen_share.h"
 #include "livekit/codec_debug_log.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -155,7 +156,8 @@ void LogFailure(const MfError& error) {
 
 class AmdMfEncoder final : public webrtc::VideoEncoder {
  public:
-  explicit AmdMfEncoder(bool allow_level_4) : allow_level_4_(allow_level_4) {}
+  explicit AmdMfEncoder(webrtc::H264Level negotiated_level)
+      : negotiated_level_(negotiated_level) {}
   ~AmdMfEncoder() override { Release(); }
 
   int32_t InitEncode(const webrtc::VideoCodec* settings, const Settings&) override {
@@ -163,7 +165,10 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     if (!settings || settings->width == 0 || settings->height == 0 ||
         settings->width > 1920 || settings->height > 1088 ||
         settings->width % 2 || settings->height % 2 ||
-        settings->maxFramerate == 0 || settings->maxFramerate > 30 ||
+        settings->maxFramerate == 0 ||
+        (settings->maxFramerate > 30 &&
+         (!AdaptiveScreenShareEnabled() || settings->maxFramerate > 60 ||
+          settings->height > 1080)) ||
         settings->numberOfSimulcastStreams > 1) {
       LogFailure({"unsupported dimensions, frame rate or simulcast", E_INVALIDARG});
       return WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE;
@@ -172,8 +177,14 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     input_height_ = settings->height;
     width_ = input_width_;
     height_ = input_height_;
-    fps_ = settings->maxFramerate;
-    if (!allow_level_4_ && (width_ > 1280 || height_ > 720)) {
+    const auto high_level = width_ <= 1280 && height_ <= 720
+                                ? webrtc::H264Level::kLevel4
+                                : webrtc::H264Level::kLevel4_2;
+    const auto standard_level = std::min(negotiated_level_, webrtc::H264Level::kLevel4);
+    const bool high_fps = settings->maxFramerate > 30 && negotiated_level_ >= high_level;
+    fps_ = high_fps ? settings->maxFramerate : std::min<uint32_t>(settings->maxFramerate, 30);
+    configured_level_ = high_fps ? high_level : standard_level;
+    if (configured_level_ < webrtc::H264Level::kLevel4 && (width_ > 1280 || height_ > 720)) {
       // The SFU can answer with Level 3.1. Keep the hardware path usable at
       // its advertised level by scaling the input before encoding it.
       width_ = std::min(1280, input_width_ * 720 / input_height_) & ~1;
@@ -188,7 +199,19 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     session_ = std::make_unique<MfSession>();
     const auto hr = session_->Start();
     if (FAILED(hr)) return Fallback({"MFStartup", hr});
-    if (!VisitTransforms([&](IMFActivate* activate, LUID luid) {
+    if (OpenAdapter()) return WEBRTC_VIDEO_CODEC_OK;
+    if (fps_ > 30) {
+      AppendCodecDebug("[AMD-MF] high FPS setup rejected, retrying AMD hardware at 30 fps");
+      fps_ = 30;
+      configured_level_ = standard_level;
+      if (OpenAdapter()) return WEBRTC_VIDEO_CODEC_OK;
+    }
+    return Fallback({"no usable adapter-scoped H264 transform", MF_E_TOPO_CODEC_NOT_FOUND});
+  }
+
+ private:
+  bool OpenAdapter() {
+    return VisitTransforms([&](IMFActivate* activate, LUID luid) {
           activate_ = activate;
           try {
             Open();
@@ -198,7 +221,7 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
             AppendCodecDebug(std::string("[AMD-MF] initialized adapter=") + adapter +
                              " size=" + std::to_string(width_) + "x" + std::to_string(height_) +
                              " input=" + std::to_string(input_width_) + "x" + std::to_string(input_height_) +
-                             " max_level=" + (allow_level_4_ ? "4.0" : "3.1") +
+                             " level_idc=" + std::to_string(static_cast<int>(configured_level_)) +
                              " fps=" + std::to_string(fps_) + " bitrate=" + std::to_string(bitrate_));
             return true;
           } catch (const MfError& error) {
@@ -206,12 +229,10 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
             CloseTransform();
             return false;
           }
-        })) {
-      return Fallback({"no usable adapter-scoped H264 transform", MF_E_TOPO_CODEC_NOT_FOUND});
-    }
-    return WEBRTC_VIDEO_CODEC_OK;
+        });
   }
 
+ public:
   int32_t Release() override {
     CloseTransform();
     session_.reset();
@@ -219,6 +240,7 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     scaled_ = nullptr;
     credits_ = 0;
     next_pts_ = 0;
+    last_input_time_us_.reset();
     key_requested_ = true;
     paused_ = false;
     rate_error_ = S_OK;
@@ -264,16 +286,28 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
         return WEBRTC_VIDEO_CODEC_OK;
       }
       waiting_for_credit_.reset();
-      auto sample = Input(frame);
+      const LONGLONG nominal_duration = 10'000'000 / fps_;
+      LONGLONG pts = next_pts_;
+      LONGLONG duration = nominal_duration;
+      if (fps_ > 30 && last_input_time_us_) {
+        // The MFT stays configured for 60 fps. Preserve the time between
+        // admitted frames when the publisher steps down or sends a heartbeat.
+        const auto delta_us = std::clamp<int64_t>(
+            frame.timestamp_us() - *last_input_time_us_, 1, 1'000'000);
+        duration = delta_us * 10;
+        pts += duration - nominal_duration;
+      }
+      auto sample = Input(frame, pts, duration);
       if (key_requested_ && next_pts_ != 0) {
         Require(SetCodecValue(codec_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1), "request keyframe");
       }
       Require(encoder_->ProcessInput(input_id_, sample.Get(), 0), "submit NV12 frame");
       --credits_;
       key_requested_ = false;
-      pending_.push_back({next_pts_, frame.rtp_timestamp(), frame.ntp_time_ms(),
+      pending_.push_back({pts, frame.rtp_timestamp(), frame.ntp_time_ms(),
                           frame.render_time_ms(), frame.rotation(), frame.color_space(), Clock::now()});
-      next_pts_ += 10'000'000 / fps_;
+      next_pts_ = pts + nominal_duration;
+      if (fps_ > 30) last_input_time_us_ = frame.timestamp_us();
       Pump();
       return WEBRTC_VIDEO_CODEC_OK;
     } catch (const MfError& error) {
@@ -299,7 +333,8 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
 
   EncoderInfo GetEncoderInfo() const override {
     EncoderInfo info;
-    info.implementation_name = "AMD Media Foundation H264";
+    info.implementation_name = fps_ > 30 ? "AMD Media Foundation H264 (60 FPS)"
+                                         : "AMD Media Foundation H264";
     info.is_hardware_accelerated = true;
     info.requested_resolution_alignment = 2;
     info.preferred_pixel_formats = {webrtc::VideoFrameBuffer::Type::kI420};
@@ -308,7 +343,7 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
 
  private:
   uint32_t MaxBitrate() const {
-    return allow_level_4_ ? 20'000'000 : 14'000'000;
+    return configured_level_ >= webrtc::H264Level::kLevel4 ? 20'000'000 : 14'000'000;
   }
 
   struct PendingFrame {
@@ -361,6 +396,10 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     SetCodecValue(codec_.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
     auto output = Type(MFVideoFormat_H264);
     Require(output->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_ConstrainedBase), "set Constrained Baseline");
+    if (fps_ > 30) {
+      Require(output->SetUINT32(MF_MT_MPEG2_LEVEL, static_cast<UINT32>(configured_level_)),
+              "set negotiated H264 level");
+    }
     Require(output->SetUINT32(MF_MT_AVG_BITRATE, bitrate_), "set initial bitrate");
     Require(encoder_->SetOutputType(output_id_, output.Get(), 0), "set H264 type");
     auto input = Type(MFVideoFormat_NV12);
@@ -385,7 +424,8 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     activate_.Reset();
   }
 
-  ComPtr<IMFSample> Input(const webrtc::VideoFrame& frame) const {
+  ComPtr<IMFSample> Input(const webrtc::VideoFrame& frame, LONGLONG pts,
+                          LONGLONG duration) const {
     auto i420 = frame.video_frame_buffer()->ToI420();
     Require(i420 ? S_OK : E_FAIL, "convert input to I420");
     if (scaled_) {
@@ -413,8 +453,8 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
     ComPtr<IMFSample> sample;
     Require(Api().create_sample(&sample), "create input sample");
     Require(sample->AddBuffer(buffer.Get()), "attach NV12 buffer");
-    Require(sample->SetSampleTime(next_pts_), "set input sample time");
-    Require(sample->SetSampleDuration(10'000'000 / fps_), "set input sample duration");
+    Require(sample->SetSampleTime(pts), "set input sample time");
+    Require(sample->SetSampleDuration(duration), "set input sample duration");
     return sample;
   }
 
@@ -498,10 +538,13 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
         char profile[7];
         std::snprintf(profile, sizeof(profile), "%02x%02x%02x", payload[1], payload[2], payload[3]);
         auto parsed = webrtc::ParseH264ProfileLevelId(profile);
-        const auto max_level = allow_level_4_ ? webrtc::H264Level::kLevel4
-                                              : webrtc::H264Level::kLevel3_1;
+        const auto min_level = configured_level_ == webrtc::H264Level::kLevel4_2
+                                   ? webrtc::H264Level::kLevel4_2
+                                   : webrtc::H264Level::kLevel3_2;
         Require(parsed && parsed->profile == webrtc::H264Profile::kProfileConstrainedBaseline &&
-                        parsed->level <= max_level ? S_OK : E_FAIL,
+                        parsed->level <= configured_level_ &&
+                        (fps_ <= 30 || parsed->level >= min_level)
+                    ? S_OK : E_FAIL,
                 "verify SPS is Constrained Baseline within negotiated level");
         sps_.assign(data + nal.start_offset, payload + nal.payload_size);
         has_sps = true;
@@ -535,7 +578,8 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
   }
 
   std::unique_ptr<MfSession> session_;
-  const bool allow_level_4_;
+  const webrtc::H264Level negotiated_level_;
+  webrtc::H264Level configured_level_ = webrtc::H264Level::kLevel3_1;
   ComPtr<IMFActivate> activate_;
   ComPtr<IMFTransform> encoder_;
   ComPtr<IMFMediaEventGenerator> events_;
@@ -556,6 +600,7 @@ class AmdMfEncoder final : public webrtc::VideoEncoder {
   DWORD output_id_ = 0;
   size_t credits_ = 0;
   LONGLONG next_pts_ = 0;
+  std::optional<int64_t> last_input_time_us_;
   HRESULT rate_error_ = S_OK;
   bool streaming_ = false;
   bool key_requested_ = true;
@@ -571,7 +616,7 @@ bool HasAmdMediaFoundationEncoder() {
 }
 
 webrtc::SdpVideoFormat AmdMediaFoundationFormat() {
-  return webrtc::SdpVideoFormat("H264", {{"profile-level-id", "42e028"},
+  return webrtc::SdpVideoFormat("H264", {{"profile-level-id", AdaptiveScreenShareEnabled() ? "42e02a" : "42e028"},
                                         {"level-asymmetry-allowed", "1"},
                                         {"packetization-mode", "1"}});
 }
@@ -585,7 +630,7 @@ bool MatchesAmdMediaFoundationFormat(const webrtc::SdpVideoFormat& format) {
 std::unique_ptr<webrtc::VideoEncoder> CreateAmdMediaFoundationEncoder(
     const webrtc::SdpVideoFormat& format) {
   const auto parsed = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
-  return std::make_unique<AmdMfEncoder>(parsed && parsed->level >= webrtc::H264Level::kLevel4);
+  return std::make_unique<AmdMfEncoder>(parsed ? parsed->level : webrtc::H264Level::kLevel3_1);
 }
 
 }  // namespace livekit_ffi

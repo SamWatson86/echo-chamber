@@ -64,6 +64,9 @@ class NvidiaH264EncoderImpl : public VideoEncoder {
   EncoderInfo GetEncoderInfo() const override;
 
  private:
+  int32_t InitEncodeWithRate(const VideoCodec* codec_settings,
+                            const Settings& settings,
+                            bool adaptive);
   int32_t ProcessEncodedFrame(std::vector<uint8_t>& packet,
                               const ::webrtc::VideoFrame& inputFrame);
  private:
@@ -81,6 +84,8 @@ class NvidiaH264EncoderImpl : public VideoEncoder {
   NV_ENC_LEVEL nv_enc_level_;
 
   LayerConfig configuration_;
+  bool adaptive_rate_limited_ = false;
+  webrtc::scoped_refptr<webrtc::I420Buffer> adaptive_scaled_input_;
   EncodedImage encoded_image_;
   H264PacketizationMode packetization_mode_;
   VideoCodec codec_;

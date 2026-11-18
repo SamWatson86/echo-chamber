@@ -7,6 +7,7 @@
 #include "h264_encoder_impl.h"
 #include "h265_encoder_impl.h"
 #include "rtc_base/logging.h"
+#include "livekit/adaptive_screen_share.h"
 #include "livekit/codec_debug_log.h"
 
 namespace webrtc {
@@ -14,7 +15,7 @@ namespace webrtc {
 NvidiaVideoEncoderFactory::NvidiaVideoEncoderFactory() {
   // Constrained Baseline (42e0) - broadest compatibility
   std::map<std::string, std::string> baselineParameters = {
-      {"profile-level-id", "42e01f"},
+      {"profile-level-id", livekit_ffi::AdaptiveScreenShareEnabled() ? "42e02a" : "42e01f"},
       {"level-asymmetry-allowed", "1"},
       {"packetization-mode", "1"},
   };

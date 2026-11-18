@@ -20,6 +20,8 @@ mod spotify_link;
 mod spotify_output_route;
 
 #[cfg(target_os = "windows")]
+mod adaptive_capture;
+#[cfg(target_os = "windows")]
 mod audio_output;
 #[cfg(not(target_os = "windows"))]
 mod audio_output_stub;
@@ -41,6 +43,10 @@ mod gpu_converter;
 mod gpu_preference;
 #[cfg(target_os = "windows")]
 mod native_presenter;
+#[cfg(target_os = "windows")]
+mod nvidia_gpu_load;
+#[cfg(target_os = "windows")]
+mod windows_gpu_load;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
 

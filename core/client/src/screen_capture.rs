@@ -15,11 +15,14 @@
 use livekit::track::TrackSource;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+use crate::adaptive_capture::{AdaptiveCapturePacer, MAX_FPS, SAMPLE_INTERVAL};
 use crate::capture_health::{CaptureHealthState, CaptureMode, EncoderType};
 use crate::capture_pipeline::{
-    CapturePublisher, PublishProfile, StaticFrameHeartbeat, STATIC_FRAME_HEARTBEAT_INTERVAL,
+    log_adaptive_rate, CapturePublisher, PublishProfile, StaticFrameHeartbeat, HAS_NVCUDA,
+    STATIC_FRAME_HEARTBEAT_INTERVAL,
 };
 use crate::capture_session::{CaptureSession, CaptureSessions};
 use crate::file_debug_log;
@@ -861,6 +864,10 @@ fn wgc_monitor_publish_settings() -> WgcPublishSettings {
     }
 }
 
+fn allow_adaptive_fps(profile: PublishProfile, opted_in: bool, software_forced: bool) -> bool {
+    profile == PublishProfile::Game && opted_in && !software_forced
+}
+
 async fn share_loop(
     source_id: u64,
     sfu_url: &str,
@@ -873,12 +880,26 @@ async fn share_loop(
     let running = &session.running;
     // 1. Connect to SFU and publish track via shared pipeline
     let publish_settings = wgc_publish_settings(publish_profile);
+    let eligible = allow_adaptive_fps(
+        publish_profile,
+        std::env::var_os("ECHO_EXPERIMENTAL_ADAPTIVE_FPS").as_deref() == Some("1".as_ref()),
+        std::env::var_os("ECHO_FORCE_SOFTWARE_ENCODER").as_deref() == Some("1".as_ref()),
+    );
+    let nvidia = eligible && HAS_NVCUDA.load(Ordering::Relaxed);
+    let amd_adapters = if eligible && !nvidia {
+        crate::windows_gpu_load::amd_adapter_luids()
+    } else {
+        Vec::new()
+    };
+    let adaptive_fps = nvidia || !amd_adapters.is_empty();
+    let (enc_w, enc_h) = (1920, 1080);
     let mut publisher = CapturePublisher::connect_and_publish(
         sfu_url,
         token,
-        1920,
-        1080,
+        enc_w,
+        enc_h,
         publish_profile,
+        adaptive_fps,
         "screen-capture",
         publish_settings.track_source,
         publish_settings.is_screencast,
@@ -907,7 +928,11 @@ async fn share_loop(
         true,
         CaptureMode::Wgc,
         EncoderType::Nvenc,
-        publish_profile.target_fps(),
+        if adaptive_fps {
+            MAX_FPS
+        } else {
+            publish_profile.target_fps()
+        },
     );
 
     // 2. Start WGC capture -- callback sends BGRA frames via channel
@@ -915,6 +940,59 @@ async fn share_loop(
     let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<(Vec<u8>, u32, u32)>(4);
     let capture_running = running.clone();
     let capture_stopped = session.capture_stopped.clone();
+    let adaptive_pacer = publisher.adaptive_pacer();
+    let capture_pacer = adaptive_pacer.clone();
+    if let Some(pacer) = adaptive_pacer.clone() {
+        let monitor_running = running.clone();
+        // Keep driver polls out of both the capture callback and the stop
+        // path. This worker holds no capture device, room or window handle.
+        tokio::task::spawn_blocking(move || {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowThreadProcessId,
+            };
+
+            let nvidia_gpu = nvidia.then(crate::nvidia_gpu_load::NvidiaGpuLoad::open).flatten();
+            let mut amd_gpu = if !amd_adapters.is_empty() {
+                crate::windows_gpu_load::WindowsGpuLoad::open(target_pid, amd_adapters)
+            } else {
+                None
+            };
+            let provider = if nvidia_gpu.is_some() {
+                "NVIDIA NVML"
+            } else if amd_gpu.is_some() {
+                "Windows GPU Engine"
+            } else {
+                file_debug_log::append("[wgc-adaptive-fps] game GPU telemetry unavailable");
+                return;
+            };
+            file_debug_log::append(&format!(
+                "[wgc-adaptive-fps] game GPU telemetry available provider={provider}",
+            ));
+            while monitor_running.load(Ordering::SeqCst) && pacer.lock().needs_game_load_monitor() {
+                let mut foreground_pid = 0;
+                unsafe {
+                    GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut foreground_pid));
+                }
+                let busy = if foreground_pid != 0 && foreground_pid == target_pid {
+                    if let Some(gpu) = &nvidia_gpu {
+                        gpu.busy_percent()
+                    } else {
+                        amd_gpu.as_mut().and_then(|gpu| gpu.busy_percent())
+                    }
+                } else {
+                    None
+                };
+                let change = {
+                    let mut pacer = pacer.lock();
+                    pacer.observe_game_load(Instant::now(), busy)
+                };
+                if let Some(change) = change {
+                    log_adaptive_rate(change);
+                }
+                std::thread::sleep(SAMPLE_INTERVAL);
+            }
+        });
+    }
 
     let capture_task = tokio::task::spawn_blocking(move || {
         use crate::gpu_converter::GpuConverter;
@@ -924,9 +1002,6 @@ async fn share_loop(
         use windows_capture::settings::*;
         use windows_capture::window::Window;
 
-        const ENC_W: u32 = 1920;
-        const ENC_H: u32 = 1080;
-
         struct Handler {
             tx: std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>,
             running: Arc<AtomicBool>,
@@ -935,6 +1010,8 @@ async fn share_loop(
             last_wgc_log_at: std::time::Instant,
             last_wgc_log_count: u64,
             channel_drop_count: u64,
+            output_size: (u32, u32),
+            pacer: Option<Arc<parking_lot::Mutex<AdaptiveCapturePacer>>>,
             /// GPU pipeline: (device, context, converter) -- lazily created on first frame
             gpu: Option<(ID3D11Device, ID3D11DeviceContext, GpuConverter)>,
         }
@@ -943,11 +1020,13 @@ async fn share_loop(
             type Flags = (
                 std::sync::mpsc::SyncSender<(Vec<u8>, u32, u32)>,
                 Arc<AtomicBool>,
+                (u32, u32),
+                Option<Arc<parking_lot::Mutex<AdaptiveCapturePacer>>>,
             );
             type Error = Box<dyn std::error::Error + Send + Sync>;
 
             fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-                let (tx, running) = ctx.flags;
+                let (tx, running, output_size, pacer) = ctx.flags;
                 Ok(Self {
                     tx,
                     running,
@@ -956,6 +1035,8 @@ async fn share_loop(
                     last_wgc_log_at: std::time::Instant::now(),
                     last_wgc_log_count: 0,
                     channel_drop_count: 0,
+                    output_size,
+                    pacer,
                     gpu: None,
                 })
             }
@@ -988,6 +1069,23 @@ async fn share_loop(
                     );
                 }
 
+                let (output_size, conversion_started) = if let Some(pacer) = &self.pacer {
+                    let (admitted, change, resolution) = {
+                        let mut pacer = pacer.lock();
+                        let (admitted, change) = pacer.admit(Instant::now());
+                        (admitted, change, pacer.resolution())
+                    };
+                    if let Some(change) = change {
+                        log_adaptive_rate(change);
+                    }
+                    if !admitted {
+                        return Ok(());
+                    }
+                    (resolution.bounds(), Some(Instant::now()))
+                } else {
+                    (self.output_size, None)
+                };
+
                 // Get the GPU texture directly (no CPU copy!)
                 // windows-capture uses windows v0.61, we use v0.58.
                 // Both are #[repr(transparent)] COM wrappers for the same interface.
@@ -996,7 +1094,8 @@ async fn share_loop(
                     unsafe { std::mem::transmute(frame.as_raw_texture()) };
 
                 // Lazily initialize GPU pipeline on WGC's own device
-                if self.gpu.is_none() {
+                if self.gpu.is_none() || output_size != self.output_size {
+                    let (out_w, out_h) = output_size;
                     unsafe {
                         let device: ID3D11Device = frame_texture
                             .GetDevice()
@@ -1009,15 +1108,16 @@ async fn share_loop(
                             w,
                             h,
                             DXGI_FORMAT_B8G8R8A8_UNORM,
-                            ENC_W,
-                            ENC_H,
+                            out_w,
+                            out_h,
                         )
                         .map_err(|e| format!("GpuConverter: {e}"))?;
                         eprintln!(
                             "[wgc-gpu] pipeline initialized on WGC device: {}x{} -> {}x{}",
-                            w, h, ENC_W, ENC_H
+                            w, h, out_w, out_h
                         );
                         self.gpu = Some((device, context, converter));
+                        self.output_size = output_size;
                     }
                 }
 
@@ -1042,8 +1142,14 @@ async fn share_loop(
                     converter.unmap(context);
 
                     // Non-blocking: drop frame if receiver is behind
-                    if self.tx.try_send((bgra, out_w, out_h)).is_err() {
+                    let result = self.tx.try_send((bgra, out_w, out_h));
+                    if result.is_err() {
                         self.channel_drop_count += 1;
+                    }
+                    if let (Some(pacer), Some(started)) = (&self.pacer, conversion_started) {
+                        let elapsed = started.elapsed();
+                        let full = matches!(result, Err(std::sync::mpsc::TrySendError::Full(_)));
+                        pacer.lock().record_conversion(elapsed, full);
                     }
                 }
 
@@ -1082,7 +1188,7 @@ async fn share_loop(
             MinimumUpdateIntervalSettings::Custom(std::time::Duration::from_millis(1)),
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
-            (frame_tx, capture_running.clone()),
+            (frame_tx, capture_running.clone(), (enc_w, enc_h), capture_pacer),
         );
 
         eprintln!("[screen-capture] WGC starting for HWND {}", source_id);
@@ -1110,6 +1216,11 @@ async fn share_loop(
     let mut last_publish_attempt_count: u64 = 0;
     let mut last_publish_frame_count: u64 = 0;
     let mut last_sender_stats_at = std::time::Instant::now();
+    let sender_stats_interval = if adaptive_fps {
+        SAMPLE_INTERVAL
+    } else {
+        Duration::from_secs(5)
+    };
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
     let mut heartbeat = StaticFrameHeartbeat::new(STATIC_FRAME_HEARTBEAT_INTERVAL);
     let mut heartbeat_attempt_count: u64 = 0;
@@ -1124,9 +1235,16 @@ async fn share_loop(
             Ok(frame) => {
                 // Skip to newest frame if channel has backed up
                 let mut latest = frame;
+                let mut stale_frames = 0;
                 while let Ok(newer) = frame_rx.try_recv() {
-                    drop_count += 1;
+                    stale_frames += 1;
                     latest = newer;
+                }
+                drop_count += u64::from(stale_frames);
+                if stale_frames > 0 {
+                    if let Some(pacer) = &adaptive_pacer {
+                        pacer.lock().record_dropped_frames(stale_frames);
+                    }
                 }
                 heartbeat.record_fresh_frame(std::time::Instant::now());
                 last_frame = Some(latest);
@@ -1146,7 +1264,7 @@ async fn share_loop(
             continue;
         };
 
-        // Data arrives already downscaled to 1080p by GPU shader
+        // Data arrives already scaled to the publish size by the GPU shader.
         let t0 = std::time::Instant::now();
         publish_attempt_count += 1;
         if from_heartbeat {
@@ -1189,7 +1307,7 @@ async fn share_loop(
             heartbeat_pushed_count = 0;
         }
 
-        if now.duration_since(last_sender_stats_at) >= std::time::Duration::from_secs(5) {
+        if now.duration_since(last_sender_stats_at) >= sender_stats_interval {
             publisher
                 .log_sender_stats("screen-capture", Some(health.as_ref()))
                 .await;
@@ -1290,6 +1408,7 @@ async fn share_loop_monitor(
         1920,
         1080,
         PublishProfile::Desktop,
+        false,
         "screen-capture-monitor",
         publish_settings.track_source,
         publish_settings.is_screencast,
@@ -1720,6 +1839,14 @@ mod tests {
         };
 
         assert_eq!(window_overlap_ratio(source, cover), 0.5);
+    }
+
+    #[test]
+    fn adaptive_fps_requires_an_opted_in_game_share_with_hardware_allowed() {
+        assert!(allow_adaptive_fps(PublishProfile::Game, true, false));
+        assert!(!allow_adaptive_fps(PublishProfile::Game, false, false));
+        assert!(!allow_adaptive_fps(PublishProfile::Game, true, true));
+        assert!(!allow_adaptive_fps(PublishProfile::Desktop, true, false));
     }
 
     #[test]
