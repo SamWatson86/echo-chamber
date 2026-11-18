@@ -981,12 +981,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires an opted-in Windows Media Foundation hardware encoder"]
+    #[ignore = "requires a Windows Media Foundation hardware encoder"]
     async fn media_foundation_level_3_1_keeps_30_fps_hardware() {
-        assert_eq!(
-            std::env::var("ECHO_EXPERIMENTAL_ADAPTIVE_FPS").as_deref(),
-            Ok("1")
-        );
         // The pinned libwebrtc normalizes the advertised Level 4.0 to 3.1
         // when creating a direct peer offer. Echo's SFU path can restore it.
         verify_h264_peers(
@@ -1076,14 +1072,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires an isolated localhost LiveKit server and opted-in Media Foundation hardware"]
+    #[ignore = "requires an isolated localhost LiveKit server and Media Foundation hardware"]
     async fn adaptive_fps_keeps_1080p_during_step_down() {
         use CaptureResolution::FullHd;
         verify_adaptive_livekit(&[(FullHd, 30), (FullHd, 60), (FullHd, 30)]).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated localhost LiveKit and an opted-in NVIDIA or Media Foundation encoder"]
+    #[ignore = "requires isolated localhost LiveKit and an NVIDIA or Media Foundation encoder"]
     async fn adaptive_fps_uses_all_quality_tiers_on_one_track() {
         use CaptureResolution::{FullHd, Hd};
         verify_adaptive_livekit(&[
@@ -1099,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires isolated localhost LiveKit and an opted-in NVIDIA or Media Foundation encoder"]
+    #[ignore = "requires isolated localhost LiveKit and an NVIDIA or Media Foundation encoder"]
     async fn adaptive_fps_recovers_1080p_before_increasing_720p_fps() {
         use CaptureResolution::{FullHd, Hd};
         verify_adaptive_livekit(&[
