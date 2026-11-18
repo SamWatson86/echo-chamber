@@ -961,7 +961,7 @@ mod tests {
     // Synthetic frames and local peer connections only; never captures the
     // desktop or joins a production room. Run explicitly on an NVIDIA PC.
     #[tokio::test]
-    #[ignore = "requires Windows NVIDIA hardware; exercises native H264 profiles"]
+    #[ignore = "requires Windows NVIDIA hardware with ECHO_EXPERIMENTAL_ADAPTIVE_FPS=0"]
     async fn native_h264_profiles_encode_synthetic_frames() {
         verify_h264_peers(&[
             ("42e01f", 1920, 804, 30.0, "NVIDIA H264 Encoder"),
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a Windows Media Foundation hardware encoder"]
+    #[ignore = "requires Media Foundation hardware with ECHO_EXPERIMENTAL_ADAPTIVE_FPS=0"]
     async fn media_foundation_h264_encodes_and_falls_back() {
         verify_h264_peers(&[
             ("42e028", 1920, 1080, 30.0, "AMD Media Foundation H264"),
