@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.44
+
+- Windows can show silent “signed on” and “signed off” notifications while Echo is minimized, including on the connect screen.
+- The desktop app waits for a confirmed departure and groups simultaneous changes. Turn the notifications off in Echo Settings or in Windows notification settings.
+- The viewer uses softer built-in join and leave chimes. Sounds for activity in other rooms have their own setting.
+
 ## 0.6.43
 
 - Adaptive frame rate and resolution are on by default for Windows Game shares on supported NVIDIA and AMD hardware. Start Echo normally and select Game when sharing.
