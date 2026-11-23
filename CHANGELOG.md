@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.45
+
+- Windows sign-on and sign-off notifications now play Echo’s own chimes while the app is minimized. A rising two-note chime signals a sign-on, and a falling chime signals a sign-off. Both have a short reverb tail.
+
 ## 0.6.44
 
 - Windows can show silent “signed on” and “signed off” notifications while Echo is minimized, including on the connect screen.

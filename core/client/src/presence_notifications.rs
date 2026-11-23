@@ -4,13 +4,44 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use windows::core::HSTRING;
+use windows::core::{w, HSTRING, PCSTR, PCWSTR};
 use windows::Data::Xml::Dom::XmlDocument;
+use windows::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, HMODULE,
+};
+use windows::Win32::Media::Audio::{PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT, SND_SYSTEM};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
-use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_ACCEPTS_NOTIFICATIONS};
+use windows::UI::Notifications::{
+    NotificationSetting, ToastNotification, ToastNotificationManager, ToastNotificationMode,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_BASELINE_AGE: Duration = Duration::from_secs(15);
+const NOTIFICATION_SETTINGS: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings";
+
+#[derive(Debug, PartialEq, Eq)]
+enum Cue {
+    SignOn,
+    SignOff,
+}
+
+impl Cue {
+    fn wave(&self) -> &'static [u8] {
+        match self {
+            Self::SignOn => include_bytes!("../sounds/sign-on.wav"),
+            Self::SignOff => include_bytes!("../sounds/sign-off.wav"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Notice {
+    message: String,
+    cue: Cue,
+}
 
 #[derive(Default, Deserialize, PartialEq, Eq)]
 struct Preferences {
@@ -61,7 +92,7 @@ fn observe(
     users: Vec<OnlineUser>,
     own_name: Option<&str>,
     now: Instant,
-) -> String {
+) -> Option<Notice> {
     let own_key = own_name.map(|name| name.trim().to_lowercase());
     let mut members = BTreeMap::new();
     for user in users {
@@ -85,7 +116,7 @@ fn observe(
     let Some(previous) =
         previous.filter(|roster| now.duration_since(roster.sampled_at) <= MAX_BASELINE_AGE)
     else {
-        return String::new();
+        return None;
     };
 
     let current = &mut baseline.as_mut().expect("sample was just stored").members;
@@ -107,11 +138,24 @@ fn observe(
             current.insert(key, member);
         }
     }
-    [change_line(&joined, "on"), change_line(&left, "off")]
-        .into_iter()
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let on = change_line(&joined, "on");
+    let off = change_line(&left, "off");
+    match (on.is_empty(), off.is_empty()) {
+        (true, true) => None,
+        (true, false) => Some(Notice {
+            message: off,
+            cue: Cue::SignOff,
+        }),
+        (false, true) => Some(Notice {
+            message: on,
+            cue: Cue::SignOn,
+        }),
+        // A batched banner plays just one cue.
+        (false, false) => Some(Notice {
+            message: format!("{on}\n{off}"),
+            cue: Cue::SignOn,
+        }),
+    }
 }
 
 fn toast_xml(message: &str) -> windows::core::Result<XmlDocument> {
@@ -127,14 +171,76 @@ fn toast_xml(message: &str) -> windows::core::Result<XmlDocument> {
     Ok(xml)
 }
 
-fn show_toast(app_id: &str, message: &str) -> windows::core::Result<()> {
+fn sound_setting_enabled(path: &str, name: PCWSTR) -> bool {
+    let mut value = 0u32;
+    let mut size = std::mem::size_of_val(&value) as u32;
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(path),
+            name,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    match result {
+        ERROR_SUCCESS => value != 0,
+        // Windows defaults to allowing sounds when no override is set.
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => true,
+        _ => false,
+    }
+}
+
+fn play_cue(app_id: &str, cue: &Cue) {
+    if !matches!(
+        unsafe { SHQueryUserNotificationState() },
+        Ok(QUNS_ACCEPTS_NOTIFICATIONS)
+    ) || !sound_setting_enabled(
+        NOTIFICATION_SETTINGS,
+        w!("NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND"),
+    ) || !sound_setting_enabled(
+        &format!(r"{NOTIFICATION_SETTINGS}\{app_id}"),
+        w!("AllowSound"),
+    ) {
+        return;
+    }
+    // Older Windows builds lack NotificationMode and use the shell state above.
+    if let Ok(mode) =
+        ToastNotificationManager::GetDefault().and_then(|user| user.NotificationMode())
+    {
+        if mode != ToastNotificationMode::Unrestricted {
+            return;
+        }
+    }
+    // SND_MEMORY reads a WAV byte buffer. The embedded bytes stay alive for
+    // asynchronous playback, and SND_SYSTEM uses the System Sounds mixer.
+    let played = unsafe {
+        PlaySoundA(
+            PCSTR(cue.wave().as_ptr()),
+            HMODULE::default(),
+            SND_MEMORY | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM,
+        )
+    };
+    if !played.as_bool() {
+        eprintln!("[presence] Windows notification sound could not be played");
+    }
+}
+
+fn show_toast(app_id: &str, notice: &Notice) -> windows::core::Result<()> {
     // This runs on a blocking worker rather than the window or network thread.
     unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
     let result = (|| {
         let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))?;
         notifier.Show(&ToastNotification::CreateToastNotification(&toast_xml(
-            message,
-        )?)?)
+            &notice.message,
+        )?)?)?;
+        // Echo supplies the audio for this toast.
+        if matches!(notifier.Setting(), Ok(NotificationSetting::Enabled)) {
+            play_cue(app_id, &notice.cue);
+        }
+        Ok(())
     })();
     unsafe { RoUninitialize() };
     result
@@ -197,16 +303,15 @@ pub(crate) fn start(app: &tauri::AppHandle, window: &tauri::WebviewWindow, serve
                 baseline = None;
                 continue;
             }
-            let message = observe(
+            if let Some(notice) = observe(
                 &mut baseline,
                 users,
                 prefs.own_name.as_deref(),
                 Instant::now(),
-            );
-            if !message.is_empty() {
+            ) {
                 let app_id = app_id.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    if let Err(error) = show_toast(&app_id, &message) {
+                    if let Err(error) = show_toast(&app_id, &notice) {
                         eprintln!("[presence] Windows notification could not be sent: {error}");
                     }
                 })
@@ -241,29 +346,47 @@ mod tests {
                 start + Duration::from_secs(second),
             )
         };
-        assert_eq!(sample(&["sam", "Jeff"], 0), "");
-        assert_eq!(sample(&["Sam", "David"], 5), "David signed on");
-        assert_eq!(sample(&["Jeff", "David"], 10), "");
-        assert_eq!(sample(&["Jeff"], 15), "");
-        assert_eq!(sample(&["Jeff"], 20), "David signed off");
-        assert_eq!(sample(&["Brad"], 40), "");
+        assert_eq!(sample(&["sam", "Jeff"], 0), None);
+        assert_eq!(
+            sample(&["Sam", "David"], 5),
+            Some(Notice {
+                message: "David signed on".into(),
+                cue: Cue::SignOn,
+            })
+        );
+        assert_eq!(sample(&["Jeff", "David"], 10), None);
+        assert_eq!(sample(&["Jeff"], 15), None);
+        assert_eq!(
+            sample(&["Jeff"], 20),
+            Some(Notice {
+                message: "David signed off".into(),
+                cue: Cue::SignOff,
+            })
+        );
+        assert_eq!(sample(&["Brad"], 40), None);
     }
 
     #[test]
     fn batches_changes_and_escapes_display_names_in_silent_windows_payload() {
         let mut roster = None;
         let now = Instant::now();
-        observe(&mut roster, users(&[]), None, now);
+        observe(&mut roster, users(&["David"]), None, now);
+        observe(&mut roster, users(&[]), None, now + POLL_INTERVAL);
         let notice = observe(
             &mut roster,
             users(&["Jeff", "Alex & <co>", "Brad"]),
             None,
-            now + POLL_INTERVAL,
+            now + POLL_INTERVAL * 2,
+        )
+        .unwrap();
+        assert_eq!(
+            notice.message,
+            "Alex & <co>, Brad and 1 other signed on\nDavid signed off"
         );
-        assert_eq!(notice, "Alex & <co>, Brad and 1 other signed on");
+        assert_eq!(notice.cue, Cue::SignOn);
         unsafe { RoInitialize(RO_INIT_MULTITHREADED).unwrap() };
         {
-            let xml = toast_xml(&notice).unwrap();
+            let xml = toast_xml(&notice.message).unwrap();
             assert!(ToastNotification::CreateToastNotification(&xml).is_ok());
             let xml = xml.GetXml().unwrap().to_string_lossy();
             assert!(xml.contains("Alex &amp; &lt;co&gt;"));

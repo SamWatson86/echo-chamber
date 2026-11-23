@@ -641,9 +641,13 @@ saved per client. Current-room custom sounds continue to use LiveKit events.
 Windows sign-on and sign-off notifications run in the desktop shell while
 Echo is minimized, including on the connect screen. The notifier uses the
 configured server's existing online roster. It seeds silently and waits for
-two successful snapshots before announcing a departure. Windows notification
-settings apply. The NSIS installer assigns the native Start menu shortcut an
-AppUserModelID separate from the legacy Electron shortcut.
+two successful snapshots before announcing a departure. The desktop client
+plays a short rising or falling cue through the Windows System Sounds mixer
+when notification sounds are enabled and Windows accepts notifications. On
+Windows builds that expose the current notification mode, restricted modes
+such as Do Not Disturb suppress the sound. The NSIS installer assigns the
+native Start menu shortcut an AppUserModelID separate from the legacy Electron
+shortcut.
 
 ## Durable Dashboard History
 
