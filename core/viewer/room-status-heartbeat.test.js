@@ -112,8 +112,6 @@ function createHarness(options = {}) {
     roomListEl: null,
     FIXED_ROOMS: [],
     ROOM_DISPLAY_NAMES: {},
-    previousDetectedRoom: null,
-    previousRoomParticipants: {},
     _lastTokenPrefetch: 0,
     debugLog() {},
     setTimeout() { return 1; },
@@ -167,6 +165,77 @@ function createHarness(options = {}) {
     },
   };
 }
+
+function presenceHarness(options = {}) {
+  const h = createHarness(options);
+  const chimes = [];
+  Object.assign(h.context, {
+    room: { localParticipant: { identity: "sam" } },
+    roomListEl: { innerHTML: "", appendChild() {} },
+    _isRoomSwitch: false,
+    _isReconnecting: false,
+    echoGet: () => null,
+    playPresenceChime: (kind) => chimes.push(kind),
+  });
+  let now = 1000;
+  const sample = (status) => h.context.updateRoomPresenceChimes(status, "sam", "main", now += 5000);
+  const refresh = () => h.context.refreshRoomList("https://echo.test", "admin", "main");
+  return { ...h, chimes, sample, refresh };
+}
+
+function roster(main = ["sam"], lobby = []) {
+  const entry = (room_id, identities) => ({ room_id, participants: identities.map(identity => ({identity})) });
+  return [entry("main", main), entry("lobby", lobby)];
+}
+
+test("presence alerts cover the other rooms and combine multiple changes of the same kind", () => {
+  const h = presenceHarness();
+  h.sample(roster(["sam"], ["already-online"]));
+  h.sample(roster(["sam", "same-room"], ["already-online", "jeff", "another", "sam$screen", "sam$native-presenter"]));
+  assert.deepEqual(h.chimes, ["enter"]);
+  h.sample(roster(["sam", "already-online"]));
+  assert.deepEqual(h.chimes, ["enter"]);
+  h.sample(roster(["sam", "already-online"]));
+  assert.deepEqual(h.chimes, ["enter", "exit"]);
+});
+
+test("presence alerts stay quiet across room changes, brief absences, reconnections, and opt-out", () => {
+  const h = presenceHarness();
+  h.sample(roster(["sam", "jeff"]));
+  h.sample(roster(["sam"], ["jeff"]));
+  h.sample(roster());
+  h.sample(roster(["sam"], ["jeff"]));
+  h.context._isReconnecting = true;
+  h.sample(roster());
+  h.context._isReconnecting = false;
+  h.sample(roster(["sam"], ["jeff", "again"]));
+  h.sample([]);
+  h.sample(roster(["sam"], ["jeff"]));
+  h.context.echoGet = () => "0";
+  h.sample(roster(["sam"], ["jeff", "muted"]));
+  h.context.echoGet = () => "1";
+  h.sample(roster(["sam"], ["jeff", "muted"]));
+  assert.deepEqual(h.chimes, []);
+});
+
+test("room list keeps the presence baseline through failed polls and discards stale replies", async () => {
+  let finish;
+  const h = presenceHarness({responses: [
+    response(200, roster()),
+    response(503, []),
+    response(200, {error: "bad payload"}),
+    () => new Promise(resolve => { finish = resolve; }),
+    response(200, roster(["sam"], ["jeff"])),
+  ]});
+  await h.refresh();
+  await h.refresh();
+  await h.refresh();
+  const older = h.refresh();
+  await h.refresh();
+  finish(response(200, roster(["sam"], ["stale"])));
+  await older;
+  assert.deepEqual(h.chimes, ["enter"]);
+});
 
 test("a current-token 401 refreshes once and retries heartbeat without reloading", async () => {
   let forced = 0;

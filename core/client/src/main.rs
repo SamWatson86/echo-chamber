@@ -46,6 +46,8 @@ mod native_presenter;
 #[cfg(target_os = "windows")]
 mod nvidia_gpu_load;
 #[cfg(target_os = "windows")]
+mod presence_notifications;
+#[cfg(target_os = "windows")]
 mod windows_gpu_load;
 #[cfg(not(target_os = "windows"))]
 use audio_output_stub as audio_output;
@@ -139,6 +141,7 @@ struct AppInfo {
     native: bool,
     platform: String,
     server: String,
+    windows_presence_notifications: bool,
 }
 
 fn is_local_test_build_version(version: &str) -> bool {
@@ -324,6 +327,7 @@ fn get_app_info(server: tauri::State<'_, String>) -> AppInfo {
         native: true,
         platform: std::env::consts::OS.to_string(),
         server: server.to_string(),
+        windows_presence_notifications: cfg!(target_os = "windows"),
     }
 }
 
@@ -1098,6 +1102,7 @@ fn main() {
             #[cfg(target_os = "windows")]
             {
                 let app_handle = app.handle().clone();
+                presence_notifications::start(&app_handle, &main_window, app.state::<String>().inner());
                 match display_placement::move_window_to_saved_preferred_display(
                     &app_handle,
                     &main_window,

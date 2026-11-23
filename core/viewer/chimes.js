@@ -22,50 +22,38 @@ function primeChimeAudio() {
   return ctx;
 }
 
-function playJoinChime(volume) {
+function playPresenceChime(kind, volume, delay = 0) {
   try {
-    var vol = (volume != null ? volume : 1);
-    if (roomAudioMuted) vol = 0;
-    if (vol <= 0) return;
+    const level = volume ?? 1;
+    if (roomAudioMuted || level <= 0) return;
     const ctx = getChimeCtx();
-    const now = ctx.currentTime;
-    // Cheerful ascending two-note chime
-    [[523.25, 0], [659.25, 0.12]].forEach(([freq, offset]) => {
+    // Never leave a notification queued until after autoplay permission changes.
+    if (ctx.state !== "running") return;
+    const peak = 0.045 * Math.min(level, 1);
+    const start = ctx.currentTime + delay;
+    const notes = kind === "enter" ? [523.25, 659.25] : [587.33, 440];
+    notes.forEach((frequency, index) => {
+      const at = start + index * 0.09;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.18 * vol, now + offset);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.35);
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(0, at);
+      gain.gain.linearRampToValueAtTime(peak, at + 0.015);
+      gain.gain.linearRampToValueAtTime(0, at + 0.16);
       osc.connect(gain).connect(ctx.destination);
-      osc.start(now + offset);
-      osc.stop(now + offset + 0.4);
+      osc.start(at);
+      osc.stop(at + 0.16);
     });
   } catch {}
 }
 
+function playJoinChime(volume) {
+  playPresenceChime("enter", volume);
+}
+
 function playLeaveChime(volume) {
-  try {
-    var vol = (volume != null ? volume : 1);
-    if (roomAudioMuted) vol = 0;
-    if (vol <= 0) return;
-    const ctx = getChimeCtx();
-    const now = ctx.currentTime;
-    // Comedic descending "womp womp"
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(380, now);
-    osc.frequency.exponentialRampToValueAtTime(200, now + 0.3);
-    osc.frequency.exponentialRampToValueAtTime(120, now + 0.55);
-    gain.gain.setValueAtTime(0.2 * vol, now);
-    gain.gain.setValueAtTime(0.05 * vol, now + 0.25);
-    gain.gain.setValueAtTime(0.18 * vol, now + 0.3);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 0.75);
-  } catch {}
+  playPresenceChime("exit", volume);
 }
 
 function playSwitchChime(volume) {
