@@ -30,6 +30,7 @@ var _SETTINGS_KEYS = [
   "echo-core-theme", "echo-core-theme-overrides", "echo-core-theme-motion",
   "echo-core-ui-opacity",
   "echo-core-soundboard-volume", "echo-core-soundboard-clip-volume",
+  "echo-room-presence-chimes",
   "echo-soundboard-favorites", "echo-soundboard-order",
   "echo-noise-cancel", "echo-nc-level",
   "echo-device-mic", "echo-device-cam", "echo-device-speaker",

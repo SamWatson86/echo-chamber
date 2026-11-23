@@ -271,6 +271,13 @@
           <button id="close-settings" type="button">Close</button>
         </div>
         <div id="settings-device-panel" class="settings-body">
+          <section class="chime-settings-section">
+            <label class="settings-toggle-row" for="room-presence-chimes-toggle">
+              <input id="room-presence-chimes-toggle" type="checkbox" aria-describedby="room-presence-chimes-hint" checked />
+              <span>Other rooms’ join and leave sounds</span>
+            </label>
+            <p id="room-presence-chimes-hint" class="settings-hint">Play a soft chime when someone comes online or goes offline in another room.</p>
+          </section>
           <section id="diagnostics-settings-section" class="chime-settings-section hidden" aria-labelledby="diagnostics-settings-title">
             <div id="diagnostics-settings-title" class="chime-settings-title">Private Web Diagnostics</div>
             <label class="settings-toggle-row diagnostics-toggle-row" for="diagnostics-enabled-toggle">

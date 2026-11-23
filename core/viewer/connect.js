@@ -1534,17 +1534,12 @@ async function connectToRoom({
       if (disconnectedScreenGeneration.removed || disconnectedScreenAudio.removed) {
         debugLog(`[disconnect] removed screen media for ${key} as ${disconnectedMediaIdentity}`);
       }
-      // Check if they moved to another room or fully left
-      // Skip ALL personal exit chimes for $screen companion disconnects —
-      // those are internal screen-share lifecycle events, not human leaves.
-      // The universal "stop share" chime is fired separately from
-      // TrackUnpublished. See sibling guard in ParticipantConnected handler.
-      if (key.endsWith('$screen')) {
-        // no chime — handled by TrackUnpublished -> playStopShareChime
-      } else if (!_isRoomSwitch) {
+      // Companion disconnects and the local client's room transition are silent.
+      if (!_isRoomSwitch && !_isReconnecting && !key.endsWith('$screen') && !isNativePresenterIdentity(key)) {
         (async function() {
           try {
             var statusList = await fetchRoomStatus(controlUrlInput.value.trim(), adminToken);
+            if (room !== newRoom || _isRoomSwitch || _isReconnecting || newRoom.remoteParticipants?.has(key)) return;
             var inAnotherRoom = false;
             if (Array.isArray(statusList)) {
               for (var i = 0; i < statusList.length; i++) {
@@ -1566,11 +1561,11 @@ async function connectToRoom({
           }
         } catch (e) {
           // Fallback: play leave chime if status check fails
-          playChimeForParticipant(key, "exit");
+          if (room === newRoom && !_isRoomSwitch && !_isReconnecting && !newRoom.remoteParticipants?.has(key)) {
+            playChimeForParticipant(key, "exit");
+          }
         }
       })();
-      } else {
-        playChimeForParticipant(key, "exit");
       }
     }, graceMs);
     _pendingDisconnects.set(key, timer);
@@ -2466,6 +2461,15 @@ disconnectTopBtn.addEventListener("click", () => {
 function buildChimeSettingsUI() {
   debugLog("[settings] buildChimeSettingsUI called, panel exists: " + !!settingsDevicePanel);
   if (!settingsDevicePanel) { debugLog("[settings] NO settingsDevicePanel - aborting"); return; }
+
+  var presenceToggle = document.getElementById("room-presence-chimes-toggle");
+  if (presenceToggle) {
+    presenceToggle.checked = echoGet("echo-room-presence-chimes") !== "0";
+    presenceToggle.onchange = function() {
+      echoSet("echo-room-presence-chimes", presenceToggle.checked ? "1" : "0");
+      if (presenceToggle.checked) primeChimeAudio();
+    };
+  }
 
   // --- Noise Cancellation toggle ---
   var existingNc = document.getElementById("nc-settings-section");

@@ -129,39 +129,66 @@ function stopOnlineUsersPolling() {
 }
 
 // ─── Room status polling ───
+var _roomStatusRequest = 0;
+var _roomPresence = null;
+
 async function fetchRoomStatus(baseUrl, adminToken) {
   try {
     const res = await fetch(`${baseUrl}/v1/room-status`, {
       headers: { Authorization: `Bearer ${adminToken}` },
+      signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return [];
-    return res.json();
+    if (!res.ok) return null;
+    const status = await res.json();
+    return Array.isArray(status) && status.every((entry) =>
+      typeof entry?.room_id === "string" && Array.isArray(entry.participants) &&
+      entry.participants.every((person) => typeof person?.identity === "string")) ? status : null;
   } catch {
-    return [];
+    return null;
   }
 }
 
-function detectRoomChanges(statusMap) {
-  // Track participant sets for room list UI (chimes are now handled by real-time LiveKit events)
-  const currentIds = {};
-  FIXED_ROOMS.forEach((roomId) => {
-    currentIds[roomId] = new Set((statusMap[roomId] || []).map((p) => p.identity));
-  });
-  const myRoom = currentRoomName;
-  if (previousDetectedRoom !== myRoom) {
-    previousDetectedRoom = myRoom;
+function updateRoomPresenceChimes(status, localIdentity, activeRoom, now) {
+  const members = new Map();
+  for (const entry of status) {
+    for (const {identity} of entry.participants) {
+      if (!identity || identity.endsWith("$screen") || identity.endsWith("$native-presenter")) continue;
+      members.set(identity, {roomId: entry.room_id, missed: false});
+    }
   }
-  previousRoomParticipants = currentIds;
+  // A missing self entry usually means login, server restart, or heartbeat loss.
+  // Seed a fresh roster after that gap without replaying everyone's arrival.
+  if (!members.delete(localIdentity) || _isRoomSwitch || _isReconnecting || _serverNoticeExpiresAt > now) {
+    _roomPresence = null;
+    return;
+  }
+  const previous = _roomPresence;
+  _roomPresence = {members, at: now};
+  if (!previous || now - previous.at > 15000) return;
+
+  let joined = false;
+  let left = false;
+  for (const [identity, member] of members) {
+    if (!previous.members.has(identity) && member.roomId !== activeRoom) joined = true;
+  }
+  for (const [identity, member] of previous.members) {
+    if (members.has(identity)) continue;
+    if (!member.missed) members.set(identity, {roomId: member.roomId, missed: true});
+    else if (member.roomId !== activeRoom) left = true;
+  }
+  if (echoGet("echo-room-presence-chimes") === "0") return;
+  if (joined) playPresenceChime("enter");
+  if (left) playPresenceChime("exit", 1, joined ? 0.28 : 0);
 }
 
 async function refreshRoomList(baseUrl, adminToken, activeRoom) {
   if (!roomListEl) return;
+  const request = ++_roomStatusRequest;
   const statusList = await fetchRoomStatus(baseUrl, adminToken);
-  const statusMap = {};
-  if (Array.isArray(statusList)) {
-    statusList.forEach((r) => { statusMap[r.room_id] = r.participants || []; });
-  }
-  detectRoomChanges(statusMap);
+  if (request !== _roomStatusRequest || !statusList) return;
+  const statusMap = Object.create(null);
+  statusList.forEach((r) => { statusMap[r.room_id] = r.participants; });
+  updateRoomPresenceChimes(statusList, room?.localParticipant?.identity, activeRoom, Date.now());
   roomListEl.innerHTML = "";
   FIXED_ROOMS.forEach((roomId) => {
     const participants = statusMap[roomId] || [];
@@ -216,6 +243,8 @@ function startRoomStatusPolling() {
 }
 
 function stopRoomStatusPolling() {
+  _roomStatusRequest += 1;
+  _roomPresence = null;
   if (roomStatusTimer) {
     clearInterval(roomStatusTimer);
     roomStatusTimer = null;

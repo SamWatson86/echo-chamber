@@ -631,6 +631,13 @@ Service-started production logs are written under `C:\ProgramData\Echo Chamber\l
 - `turn.out.log`
 - `turn.err.log`
 
+## Room Presence Sounds
+
+While connected, Echo uses the room roster for soft presence sounds in other
+rooms. The first successful roster is silent, and departures require two
+successful snapshots without the participant. The setting for other rooms is
+saved per client. Current-room custom sounds continue to use LiveKit events.
+
 ## Durable Dashboard History
 
 Dashboard session history is durable application data, not a release artifact.

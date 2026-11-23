@@ -11,6 +11,8 @@ function makeAudioContext() {
       this.destination = {};
       this.state = "suspended";
       this.resumeCalls = 0;
+      this.oscillators = [];
+      this.peaks = [];
     }
     createBufferSource() {
       return {
@@ -21,18 +23,19 @@ function makeAudioContext() {
       };
     }
     createGain() {
+      const peaks = this.peaks;
       return {
         gain: {
           value: 0,
           setValueAtTime() {},
-          linearRampToValueAtTime() {},
+          linearRampToValueAtTime(value) { peaks.push(value); },
           exponentialRampToValueAtTime() {},
         },
         connect() { return this; },
       };
     }
     createOscillator() {
-      return {
+      const osc = {
         type: "",
         frequency: {
           value: 0,
@@ -40,9 +43,11 @@ function makeAudioContext() {
           exponentialRampToValueAtTime() {},
         },
         connect() { return this; },
-        start() {},
-        stop() {},
+        start(time) { this.startedAt = time; },
+        stop(time) { this.stoppedAt = time; },
       };
+      this.oscillators.push(osc);
+      return osc;
     }
     async decodeAudioData() {
       return { decoded: true };
@@ -126,4 +131,22 @@ test("primeChimeAudio resumes the shared chime context", () => {
 
   assert.equal(ctx.state, "running");
   assert.equal(ctx.resumeCalls, 1);
+});
+
+test("gentle presence cues rise for entry, fall for exit and suppress muted or suspended audio", () => {
+  const { context } = loadChimesContext();
+  const ctx = context.getChimeCtx();
+  context.playJoinChime(1);
+  assert.equal(ctx.oscillators.length, 0);
+
+  context.primeChimeAudio();
+  context.playJoinChime(1);
+  context.playLeaveChime(0.5);
+  assert.deepEqual(ctx.oscillators.map(osc => osc.frequency.value), [523.25, 659.25, 587.33, 440]);
+  assert.ok(ctx.oscillators.every(osc => osc.type === "sine" && osc.stoppedAt <= 0.25));
+  assert.deepEqual(ctx.peaks, [0.045, 0, 0.045, 0, 0.0225, 0, 0.0225, 0]);
+
+  context.roomAudioMuted = true;
+  context.playPresenceChime("enter");
+  assert.equal(ctx.oscillators.length, 4);
 });
