@@ -29,10 +29,12 @@ windows-core = "0.58"
 version = "0.58"
 features = [
     "ApplicationModel",
+    "Data_Xml_Dom",
     "Foundation",
     "Foundation_Collections",
     "Management_Deployment",
     "Media_Control",
+    "UI_Notifications",
     "implement",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",

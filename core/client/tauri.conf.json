@@ -35,7 +35,8 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "startMenuFolder": "Echo Chamber"
+        "startMenuFolder": "Echo Chamber",
+        "installerHooks": "nsis-hooks.nsh"
       }
     }
   },

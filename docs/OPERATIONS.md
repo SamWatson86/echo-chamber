@@ -638,6 +638,13 @@ rooms. The first successful roster is silent, and departures require two
 successful snapshots without the participant. The setting for other rooms is
 saved per client. Current-room custom sounds continue to use LiveKit events.
 
+Windows sign-on and sign-off notifications run in the desktop shell while
+Echo is minimized, including on the connect screen. The notifier uses the
+configured server's existing online roster. It seeds silently and waits for
+two successful snapshots before announcing a departure. Windows notification
+settings apply. The NSIS installer assigns the native Start menu shortcut an
+AppUserModelID separate from the legacy Electron shortcut.
+
 ## Durable Dashboard History
 
 Dashboard session history is durable application data, not a release artifact.

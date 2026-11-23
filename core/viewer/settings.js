@@ -30,7 +30,7 @@ var _SETTINGS_KEYS = [
   "echo-core-theme", "echo-core-theme-overrides", "echo-core-theme-motion",
   "echo-core-ui-opacity",
   "echo-core-soundboard-volume", "echo-core-soundboard-clip-volume",
-  "echo-room-presence-chimes",
+  "echo-room-presence-chimes", "echo-windows-presence-notifications",
   "echo-soundboard-favorites", "echo-soundboard-order",
   "echo-noise-cancel", "echo-nc-level",
   "echo-device-mic", "echo-device-cam", "echo-device-speaker",
@@ -153,6 +153,21 @@ function _reapplySettingsAfterLoad() {
 
   // Performance Mode — auto-detect or restore saved preference
   _initPerformanceMode();
+  _initWindowsPresenceNotifications();
+}
+
+function _initWindowsPresenceNotifications() {
+  const section = document.getElementById("windows-presence-notifications");
+  const toggle = document.getElementById("windows-presence-notifications-toggle");
+  if (!section || !toggle || !window.__ECHO_NATIVE__ || !hasTauriIPC()) return;
+  tauriInvoke("get_app_info").then(function(info) {
+    if (!info?.windows_presence_notifications) return;
+    toggle.checked = echoGet("echo-windows-presence-notifications") !== "0";
+    toggle.onchange = function() {
+      echoSet("echo-windows-presence-notifications", toggle.checked ? "1" : "0");
+    };
+    section.classList.remove("hidden");
+  }).catch(function() {});
 }
 
 function _initPerformanceMode() {

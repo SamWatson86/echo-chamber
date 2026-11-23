@@ -9,10 +9,11 @@
 var ECHO_CHANGELOG = [
   {
     version: "2026-11-23",
-    title: "Soft Join and Leave Chimes",
+    title: "Sign-On and Sign-Off Alerts",
     notes: [
       "Echo plays short, quiet sounds when people join or leave. The built-in sounds rise for arrivals and fall for departures.",
-      "You can turn off activity sounds for other rooms in Settings. Custom sounds still apply in your current room."
+      "You can turn off activity sounds for other rooms in Settings. Custom sounds still apply in your current room.",
+      "The Windows desktop update can show a silent system notification when someone signs on or off while Echo is minimized."
     ]
   },
   {
