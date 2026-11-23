@@ -8,6 +8,14 @@
 
 var ECHO_CHANGELOG = [
   {
+    version: "2026-11-23",
+    title: "Longer Dashboard Activity History",
+    notes: [
+      "The admin dashboard can show room join counts by user for 30 days, 90 days, a year, or all available history.",
+      "Browse older days in the Activity Heatmap and select a user to see their joins. The dashboard uses existing saved session history."
+    ]
+  },
+  {
     version: "2026-11-07",
     title: "The File Room",
     notes: [

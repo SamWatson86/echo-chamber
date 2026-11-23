@@ -5680,6 +5680,25 @@ body.admin-mode .room-top {
   transition: opacity 0.15s;
 }
 .adm-leaderboard-bar:hover { opacity: 0.85; }
+.adm-activity-user {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-family: inherit;
+}
+.adm-activity-user .adm-leaderboard-name { flex: 0 0 70px; }
+.adm-activity-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.adm-activity-pager button:disabled { opacity: 0.45; cursor: default; }
 .adm-lb-selected { outline: 2px solid #f59e0b; outline-offset: 2px; border-radius: 4px; }
 .adm-leaderboard-name {
   width: 70px;
@@ -5727,10 +5746,13 @@ body.admin-mode .room-top {
 .adm-heatmap-cell {
   width: 100%;
   aspect-ratio: 1;
+  padding: 0;
+  border: 0;
   border-radius: 2px;
   min-width: 12px;
   min-height: 12px;
 }
+.adm-heatmap-cell:not(:disabled) { cursor: pointer; }
 .adm-timeline-row {
   display: flex;
   align-items: center;

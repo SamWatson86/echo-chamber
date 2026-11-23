@@ -34,13 +34,52 @@
     return RANGE_LABELS[range];
   }
 
-  function buildSessionsPath(range, cursor) {
+  function buildSessionsPath(range, cursor, limit = PAGE_LIMIT) {
     var path = "/admin/api/sessions?range=" + encodeURIComponent(normalizeRange(range)) +
-      "&limit=" + PAGE_LIMIT;
+      "&limit=" + limit;
     if (cursor !== null && cursor !== undefined && String(cursor) !== "") {
       path += "&cursor=" + encodeURIComponent(String(cursor));
     }
     return path;
+  }
+
+  async function loadJoins(fetchPage) {
+    var cursor = null;
+    var cursors = new Set();
+    var joins = new Map();
+    do {
+      var page = await fetchPage(cursor);
+      for (var event of page.events) {
+        if (event.event_type === "join") joins.set(eventKey(event), event);
+      }
+      cursor = page.next_cursor || null;
+      if (cursor && cursors.has(cursor)) throw new Error("The history cursor did not advance.");
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    return Array.from(joins.values());
+  }
+
+  function summarizeJoins(joins) {
+    var totals = new Map();
+    var byDay = Object.create(null);
+    for (var join of joins) {
+      var date = new Date(join.timestamp * 1000);
+      if (!Number.isFinite(date.getTime())) continue;
+      var name = join.name || join.identity || "Unknown";
+      var day = date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") +
+        "-" + String(date.getDate()).padStart(2, "0");
+      var hour = date.getHours();
+      if (!byDay[day]) byDay[day] = {};
+      if (!byDay[day][hour]) byDay[day][hour] = Object.create(null);
+      var users = byDay[day][hour];
+      users[name] = (users[name] || 0) + 1;
+      totals.set(name, (totals.get(name) || 0) + 1);
+    }
+    return {
+      byDay: byDay,
+      users: Array.from(totals, function ([name, count]) { return {name: name, count: count}; })
+        .sort(function (a, b) { return b.count - a.count || a.name.localeCompare(b.name); }),
+    };
   }
 
   function normalizeAvailableYears(values, selectedRange) {
@@ -135,9 +174,11 @@
     eventKey: eventKey,
     formatDateSeparator: formatDateSeparator,
     formatStatus: formatStatus,
+    loadJoins: loadJoins,
     mergeEvents: mergeEvents,
     normalizeAvailableYears: normalizeAvailableYears,
     normalizeRange: normalizeRange,
     rangeLabel: rangeLabel,
+    summarizeJoins: summarizeJoins,
   };
 });

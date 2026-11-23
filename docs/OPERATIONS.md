@@ -649,6 +649,10 @@ The session files are UTC-day arrays named exactly
 `jam-library/` share the parent directory but are separate stores. Never merge
 those through the session-history tool.
 
+Echo keeps the daily session files with no age-based pruning. The admin
+dashboard can show 30 days, 90 days, a year, or all available history for
+room joins by display name. Reconnects that start a new session count as joins.
+
 Use the merge utility to preview and recover split session stores. Preview is
 the default and does not write anything:
 
