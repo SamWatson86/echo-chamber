@@ -253,6 +253,7 @@ function toggleAdminDash() {
     fetchAdminDashboard();
     fetchAdminHistory();
     fetchAdminDashboardMetrics();
+    if (_admActivity.range !== "month") _admLoadActivityRange(_admActivity.range);
     fetchAdminMetrics();
     fetchAdminBugs();
     _adminDashTimer = setInterval(function() {
@@ -265,6 +266,10 @@ function toggleAdminDash() {
       _admHistoryState.controller.abort();
       _admHistoryState.controller = null;
       _admHistoryState.requestId += 1;
+    }
+    if (_admActivity.controller) {
+      _admActivity.controller.abort();
+      _admActivity.controller = null;
     }
     if (_adminDashTimer) {
       clearInterval(_adminDashTimer);
@@ -573,10 +578,129 @@ var _admDashboardData = null;
 var _admBugData = null;
 var _admSelectedUser = null;
 var _admHeatmapUsers = {};
+var _admActivity = {range: "month", summary: null, controller: null, page: 0, error: false};
 
 function _admSelectUser(name) {
   _admSelectedUser = (_admSelectedUser === name) ? null : name;
-  renderAdminDashboard();
+  _admRenderActivity();
+}
+
+async function _admLoadActivityRange(range) {
+  if (_admActivity.controller) _admActivity.controller.abort();
+  var controller = range === "month" ? null : new AbortController();
+  _admActivity = {range: range, summary: null, controller: controller, page: 0, error: false};
+  _admSelectedUser = null;
+  _admRenderActivity();
+  if (!controller) return;
+
+  try {
+    var joins = await EchoAdminHistory.loadJoins(async function(cursor) {
+      var res = await fetch(apiUrl(EchoAdminHistory.buildSessionsPath(range, cursor, 1000)), {
+        headers: {"Authorization": "Bearer " + adminToken},
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error("Activity request failed (" + res.status + ")");
+      return res.json();
+    });
+    if (_admActivity.controller === controller) _admActivity.summary = EchoAdminHistory.summarizeJoins(joins);
+  } catch (e) {
+    if (_admActivity.controller === controller) _admActivity.error = true;
+  } finally {
+    if (_admActivity.controller === controller) {
+      _admActivity.controller = null;
+      _admRenderActivity();
+    }
+  }
+}
+
+function _admChangeHeatPage(delta) {
+  _admActivity.page += delta;
+  _admRenderActivity();
+}
+
+function _admActivityDate(day) {
+  return new Date(day + "T12:00:00").toLocaleDateString([], {month: "short", day: "numeric", year: "numeric"});
+}
+
+function _admRenderActivity() {
+  var results = document.getElementById("adm-activity-results");
+  if (!results) return;
+  var popup = document.getElementById("adm-heat-popup");
+  if (popup) popup.remove();
+  results.setAttribute("aria-busy", _admActivity.controller ? "true" : "false");
+  if (_admActivity.controller) {
+    results.innerHTML = '<div class="adm-empty" role="status">Loading room join history…</div>';
+    return;
+  }
+  if (_admActivity.error) {
+    results.innerHTML = '<div class="adm-empty" role="status">Room join history could not be loaded.</div>' +
+      '<button type="button" class="adm-show-all-btn" onclick="_admLoadActivityRange(_admActivity.range)">Retry</button>';
+    return;
+  }
+  var summary = _admActivity.summary || EchoAdminHistory.summarizeJoins(_admDashboardData.heatmap_joins || []);
+  _admHeatmapUsers = summary.byDay;
+  var days = Object.keys(summary.byDay).sort();
+  if (!days.length) {
+    results.innerHTML = '<div class="adm-empty">No room joins in this period.</div>';
+    return;
+  }
+
+  var html = '<div class="adm-history-status">Recorded activity · ' + escAdm(_admActivityDate(days[0])) +
+    ' – ' + escAdm(_admActivityDate(days[days.length - 1])) + '</div>';
+  html += '<div class="adm-section-title">Joins by user</div>';
+  summary.users.forEach(function(user) {
+    var name = user.name;
+    var nameAttr = escAdm(name).replace(/"/g, "&quot;");
+    var selected = _admSelectedUser === name;
+    var pct = 75 * user.count / summary.users[0].count;
+    html += '<button type="button" class="adm-leaderboard-bar adm-activity-user' + (selected ? ' adm-lb-selected' : '') +
+      '" aria-pressed="' + selected + '" data-user="' + nameAttr + '" onclick="_admSelectUser(this.dataset.user)">' +
+      '<span class="adm-leaderboard-name" title="' + nameAttr + '">' + escAdm(name) + '</span>' +
+      '<span class="adm-leaderboard-fill" style="width:' + pct + '%;background:' + _admUserColor(name) + '"></span>' +
+      '<span class="adm-leaderboard-count">' + user.count + '</span></button>';
+  });
+  html += '<div class="adm-section-title">Activity Heatmap</div>';
+  if (_admSelectedUser) {
+    html += '<button type="button" class="adm-show-all-btn" onclick="_admSelectUser(null)">Show all users</button>';
+  }
+  var pageSize = 30;
+  var maxPage = Math.ceil(days.length / pageSize) - 1;
+  _admActivity.page = Math.min(maxPage, Math.max(0, _admActivity.page));
+  var end = days.length - _admActivity.page * pageSize;
+  var pageDays = days.slice(Math.max(0, end - pageSize), end);
+  if (maxPage) {
+    html += '<div class="adm-activity-pager"><button type="button" class="adm-show-all-btn" onclick="_admChangeHeatPage(1)"' +
+      (_admActivity.page === maxPage ? ' disabled' : '') + '>Older days</button>' +
+      '<span>' + escAdm(_admActivityDate(pageDays[0])) + ' – ' + escAdm(_admActivityDate(pageDays[pageDays.length - 1])) + '</span>' +
+      '<button type="button" class="adm-show-all-btn" onclick="_admChangeHeatPage(-1)"' +
+      (!_admActivity.page ? ' disabled' : '') + '>Newer days</button></div>';
+  }
+
+  function cellCount(users) {
+    if (_admSelectedUser) return users[_admSelectedUser] || 0;
+    return Object.values(users).reduce(function(total, count) { return total + count; }, 0);
+  }
+  var heatMax = 1;
+  pageDays.forEach(function(day) {
+    Object.values(summary.byDay[day]).forEach(function(users) { heatMax = Math.max(heatMax, cellCount(users)); });
+  });
+  html += '<div class="adm-chart-wrap"><div class="adm-heatmap-wrap"><div class="adm-heatmap-grid"><div class="adm-heatmap-label"></div>';
+  for (var hour = 0; hour < 24; hour++) {
+    html += '<div class="adm-heatmap-hlabel">' + (hour % 3 === 0 ? hour : '') + '</div>';
+  }
+  pageDays.forEach(function(day) {
+    var label = new Date(day + "T12:00:00").toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"});
+    html += '<div class="adm-heatmap-label">' + escAdm(label) + '</div>';
+    for (var hour = 0; hour < 24; hour++) {
+      var users = summary.byDay[day][hour];
+      var count = users ? cellCount(users) : 0;
+      var bg = count ? 'rgba(232,146,47,' + (0.2 + count / heatMax * 0.8).toFixed(2) + ')' : 'rgba(255,255,255,0.03)';
+      var caption = label + ' ' + hour + ':00 · ' + count + ' joins';
+      html += '<button type="button" class="adm-heatmap-cell" aria-label="' + escAdm(caption) + '" title="' + escAdm(caption) +
+        '" style="background:' + bg + '"' + (count ? ' onclick="_admHeatCellClick(event,\'' + day + '\',' + hour + ')"' : ' disabled') + '></button>';
+    }
+  });
+  results.innerHTML = html + '</div></div></div>';
 }
 
 function _admHeatCellClick(e, dateKey, hour) {
@@ -584,6 +708,7 @@ function _admHeatCellClick(e, dateKey, hour) {
   if (old) old.remove();
   var users = (_admHeatmapUsers[dateKey] && _admHeatmapUsers[dateKey][hour]) || {};
   var names = Object.keys(users);
+  if (_admSelectedUser) names = names.filter(function(name) { return name === _admSelectedUser; });
   if (names.length === 0) return;
   names.sort(function(a, b) { return users[b] - users[a]; });
   var dt = new Date(dateKey + "T00:00:00");
@@ -641,77 +766,14 @@ function renderAdminDashboard() {
   html += '<div class="adm-card"><div class="adm-card-value">' + (s.avg_duration_mins || 0) + 'm</div><div class="adm-card-label">Avg Duration</div></div>';
   html += '</div>';
 
-  // ── User Leaderboard (clickable) ──
-  var users = d.per_user || [];
-  if (users.length > 0) {
-    var maxCount = users[0].session_count || 1;
-    html += '<div class="adm-section"><div class="adm-section-title">User Leaderboard (30d)</div>';
-    users.forEach(function(u) {
-      var uname = u.name || u.identity;
-      var pct = Math.max(2, (u.session_count / maxCount) * 100);
-      var col = _admUserColor(uname);
-      var selClass = _admSelectedUser === uname ? " adm-lb-selected" : "";
-      html += '<div class="adm-leaderboard-bar' + selClass + '" onclick="_admSelectUser(\'' + escAdm(uname).replace(/'/g, "\\'") + '\')"><span class="adm-leaderboard-name">' + escAdm(uname) + '</span><div class="adm-leaderboard-fill" style="width:' + pct + '%;background:' + col + '"></div><span class="adm-leaderboard-count">' + u.session_count + ' (' + u.total_hours + 'h)</span></div>';
-    });
-    html += '</div>';
-  }
-
-  // ── Activity Heatmap (client-side timezone, per-user tracking) ──
-  var heatJoins = d.heatmap_joins || [];
-  if (heatJoins.length > 0) {
-    var heatmap = {};
-    _admHeatmapUsers = {};
-    heatJoins.forEach(function(j) {
-      var dt = new Date(j.timestamp * 1000);
-      var dateKey = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
-      var hour = dt.getHours();
-      var name = j.name || "Unknown";
-      if (!_admHeatmapUsers[dateKey]) _admHeatmapUsers[dateKey] = {};
-      if (!_admHeatmapUsers[dateKey][hour]) _admHeatmapUsers[dateKey][hour] = {};
-      _admHeatmapUsers[dateKey][hour][name] = (_admHeatmapUsers[dateKey][hour][name] || 0) + 1;
-      if (!_admSelectedUser || name === _admSelectedUser) {
-        if (!heatmap[dateKey]) heatmap[dateKey] = {};
-        heatmap[dateKey][hour] = (heatmap[dateKey][hour] || 0) + 1;
-      }
-    });
-    var heatDays = Object.keys(_admHeatmapUsers).sort().slice(-30);
-    var heatMax = 1;
-    heatDays.forEach(function(dk) {
-      if (!heatmap[dk]) return;
-      Object.keys(heatmap[dk]).forEach(function(h) { if (heatmap[dk][h] > heatMax) heatMax = heatmap[dk][h]; });
-    });
-
-    html += '<div class="adm-section"><div class="adm-section-title">Activity Heatmap (30d)</div>';
-    if (_admSelectedUser) {
-      html += '<div style="margin-bottom:8px;"><button class="adm-show-all-btn" onclick="_admSelectUser(null)">Show All</button> Filtered: <strong>' + escAdm(_admSelectedUser) + '</strong></div>';
-    }
-    html += '<div class="adm-chart-wrap"><div class="adm-heatmap-wrap"><div class="adm-heatmap-grid">';
-    html += '<div class="adm-heatmap-label"></div>';
-    for (var h = 0; h < 24; h++) {
-      html += '<div class="adm-heatmap-hlabel">' + (h % 3 === 0 ? h + "" : "") + '</div>';
-    }
-    var selColor = _admSelectedUser ? _admUserColor(_admSelectedUser) : null;
-    heatDays.forEach(function(dk) {
-      var dayLabel = new Date(dk + "T12:00:00").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-      html += '<div class="adm-heatmap-label">' + dayLabel + '</div>';
-      for (var hr = 0; hr < 24; hr++) {
-        var count = (heatmap[dk] && heatmap[dk][hr]) || 0;
-        var intensity = count / heatMax;
-        var bg;
-        if (count === 0) {
-          bg = "rgba(255,255,255,0.03)";
-        } else if (selColor) {
-          // Use selected user's color
-          var r = parseInt(selColor.slice(1,3),16), g = parseInt(selColor.slice(3,5),16), b = parseInt(selColor.slice(5,7),16);
-          bg = "rgba(" + r + "," + g + "," + b + "," + (0.2 + intensity * 0.8).toFixed(2) + ")";
-        } else {
-          bg = "rgba(232,146,47," + (0.2 + intensity * 0.8).toFixed(2) + ")";
-        }
-        html += '<div class="adm-heatmap-cell" style="background:' + bg + ';cursor:pointer" title="' + dayLabel + ' ' + hr + ':00 — ' + count + ' joins" onclick="_admHeatCellClick(event,\'' + dk + '\',' + hr + ')"></div>';
-      }
-    });
-    html += '</div></div></div></div>';
-  }
+  html += '<div class="adm-section"><div class="adm-history-toolbar">' +
+    '<label for="adm-activity-range">Room join history</label>' +
+    '<select id="adm-activity-range" onchange="_admLoadActivityRange(this.value)">';
+  ["month", "quarter", "year", "all"].forEach(function(range) {
+    html += '<option value="' + range + '"' + (range === _admActivity.range ? ' selected' : '') +
+      '>' + escAdm(EchoAdminHistory.rangeLabel(range)) + '</option>';
+  });
+  html += '</select></div><div id="adm-activity-results"></div></div>';
 
   // ── Session Timeline (today, local timezone) ──
   var tlEvents = d.timeline_events || [];
@@ -808,6 +870,7 @@ function renderAdminDashboard() {
   // Quality stats rendered below by renderAdminQuality
   html += '<div id="admin-dash-metrics-quality"></div>';
   el.innerHTML = html;
+  _admRenderActivity();
 }
 
 var _admQualityData = null;

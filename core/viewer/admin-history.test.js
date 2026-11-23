@@ -8,10 +8,12 @@ const {
   emptyMessage,
   formatDateSeparator,
   formatStatus,
+  loadJoins,
   mergeEvents,
   normalizeAvailableYears,
   normalizeRange,
   rangeLabel,
+  summarizeJoins,
 } = require("./admin-history.js");
 
 test("normalizes rolling and calendar-year history ranges", () => {
@@ -38,6 +40,30 @@ test("builds the paged session-history request contract", () => {
     buildSessionsPath("invalid", ""),
     "/admin/api/sessions?range=month&limit=200",
   );
+  assert.equal(buildSessionsPath("all", "next", 1000), "/admin/api/sessions?range=all&limit=1000&cursor=next");
+});
+
+test("activity loads every page, counts reconnects and skips leaves and exact overlap", async () => {
+  const recent = {event_type: "join", identity: "a-2", name: "Alex", timestamp: 1773700000};
+  const earlier = {event_type: "join", identity: "a-1", name: "Alex", timestamp: 1750000000};
+  const cursors = [];
+  const joins = await loadJoins(async (cursor) => {
+    cursors.push(cursor);
+    return cursor === null
+      ? {events: [recent, {...recent, event_type: "leave"}], next_cursor: "older"}
+      : {events: [recent, earlier, {...earlier, name: "__proto__", identity: "other"}], next_cursor: null};
+  });
+  assert.deepEqual(cursors, [null, "older"]);
+  const activity = summarizeJoins(joins);
+  assert.deepEqual(activity.users, [{name: "Alex", count: 2}, {name: "__proto__", count: 1}]);
+  const date = new Date(earlier.timestamp * 1000);
+  const olderDay = Object.keys(activity.byDay).sort()[0];
+  assert.equal(activity.byDay[olderDay][date.getHours()].Alex, 1);
+  assert.equal(activity.byDay[olderDay][date.getHours()].__proto__, 1);
+});
+
+test("activity stops when a history page repeats its cursor", async () => {
+  await assert.rejects(loadJoins(async () => ({events: [], next_cursor: "same"})), /cursor did not advance/);
 });
 
 test("calendar-year options are unique, descending, and retain the selection", () => {
